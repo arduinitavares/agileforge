@@ -8,9 +8,12 @@ from typing import TYPE_CHECKING
 
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecRegistry
-from services.agent_workbench.authority_projection import _pending_authority_fingerprint
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.authority_review import (
+    REVIEW_TOKEN_SCHEMA,
     AuthorityReviewService,
+    build_authority_review_snapshot,
+    canonical_json_hash,
     coverage_summary_fingerprint,
     sha256_prefixed,
 )
@@ -164,7 +167,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     assert data["spec"]["resolved_path"] == str(spec_path.resolve())
     assert data["pending_authority"]["authority_id"] == authority_id
     assert data["pending_authority"]["authority_fingerprint"] == (
-        _pending_authority_fingerprint(
+        pending_authority_fingerprint(
             session.get(CompiledSpecAuthority, authority_id)
         )
     )
@@ -277,6 +280,77 @@ def test_review_missing_latest_spec_content_ref_does_not_fallback_to_product_pat
     assert result["errors"][0]["details"]["path"] is None
 
 
+def test_review_blocks_stale_registry_hash_without_leaking_source(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Hash mismatch returns AUTHORITY_SOURCE_CHANGED without source content."""
+    original = _base_spec()
+    project_id, _spec_version_id, _authority_id, spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=original,
+        )
+    )
+    changed = "# Submission Contract\n\nThis stale file must not be disclosed.\n"
+    spec_path.write_text(changed, encoding="utf-8")
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
+    assert result["errors"][0]["details"]["registry_spec_hash"] == (
+        sha256_prefixed(original.encode("utf-8"))
+    )
+    assert result["errors"][0]["details"]["disk_spec_hash"] == (
+        sha256_prefixed(changed.encode("utf-8"))
+    )
+    assert "source_content" not in result["errors"][0]["details"]
+
+
+def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Symlink paths report resolved targets and block mismatched content."""
+    original = _base_spec()
+    target_path = tmp_path / "target.md"
+    target_path.write_text(
+        "# Submission Contract\n\nThis symlink target must not leak.\n",
+        encoding="utf-8",
+    )
+    symlink_path = tmp_path / "linked.md"
+    symlink_path.symlink_to(target_path)
+    project_id, spec_version_id, authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=original,
+            spec_filename="registry.md",
+        )
+    )
+    spec = session.get(SpecRegistry, spec_version_id)
+    assert spec is not None
+    spec.content_ref = str(symlink_path)
+    session.add(spec)
+    session.commit()
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    assert authority_id
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_CHANGED"
+    assert result["errors"][0]["details"]["resolved_path"] == str(
+        target_path.resolve()
+    )
+
+
 def test_review_omits_large_source_and_marks_omission_incomplete(
     session: Session,
     tmp_path: Path,
@@ -310,12 +384,12 @@ def test_review_omits_large_source_and_marks_omission_incomplete(
     )
 
 
-def test_review_omits_large_covered_source_and_marks_omission_incomplete(
+def test_review_omits_large_covered_source_and_marks_omission_complete(
     session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Size-based source omission stays incomplete even when outline is covered."""
+    """Omitted source may be complete when outline coverage proves complete."""
     monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
     covered_requirement = (
         "The review output must include guard tokens, review tokens, source "
@@ -341,7 +415,7 @@ def test_review_omits_large_covered_source_and_marks_omission_incomplete(
     assert spec["content_included"] is False
     assert spec["content_truncated"] is True
     assert spec["coverage_summary"]["covered_sections"] == 1
-    assert spec["coverage_summary"]["omission_assessment"] == "incomplete"
+    assert spec["coverage_summary"]["omission_assessment"] == "complete"
 
 
 def test_review_token_changes_when_disk_hash_changes(
@@ -361,6 +435,11 @@ def test_review_token_changes_when_disk_hash_changes(
     first = service.review(project_id=project_id)["data"]["guard_tokens"]
     changed = _base_spec().replace("guard tokens", "fresh guard tokens")
     spec_path.write_text(changed, encoding="utf-8")
+    spec = session.get(SpecRegistry, _spec_version_id)
+    assert spec is not None
+    spec.spec_hash = sha256_prefixed(changed.encode("utf-8"))
+    session.add(spec)
+    session.commit()
     second = service.review(project_id=project_id)["data"]["guard_tokens"]
 
     assert first["review_token"] != second["review_token"]
@@ -368,6 +447,33 @@ def test_review_token_changes_when_disk_hash_changes(
     assert first["expected_authority_fingerprint"] == second[
         "expected_authority_fingerprint"
     ]
+
+
+def test_review_snapshot_recomputes_packet_review_token(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Snapshot payload independently recomputes the packet review token."""
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+
+    snapshot = build_authority_review_snapshot(
+        engine=session.get_bind(),
+        project_id=project_id,
+    )
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    expected_token = f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(snapshot.payload)}"
+    assert snapshot.review_token == expected_token
+    assert result["data"]["guard_tokens"]["review_token"] == expected_token
+    assert result["data"]["guard_tokens"] == snapshot.guard_tokens
 
 
 def test_coverage_fingerprint_sorts_nested_covered_by_and_source_refs() -> None:

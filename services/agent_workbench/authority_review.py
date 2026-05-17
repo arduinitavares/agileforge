@@ -70,6 +70,86 @@ class _SourceLoad:
 
 
 @dataclass(frozen=True)
+class AuthorityReviewSnapshot:
+    """Canonical authority review-token snapshot plus packet render inputs."""
+
+    schema: str
+    project_id: int
+    pending_authority_id: int | None
+    authority_fingerprint: str | None
+    source_spec_hash: str
+    disk_spec_hash: str
+    resolved_spec_path: str
+    compiler_version: str
+    prompt_hash: str
+    fsm_state: str
+    setup_status: str
+    content_included: bool
+    omission_assessment: str
+    coverage_summary_fingerprint: str
+    project_name: str
+    spec_version_id: int | None
+    content_ref: str | None
+    disk_status: str
+    size_bytes: int
+    review_source_limit_bytes: int
+    source_outline: list[JsonDict]
+    coverage_summary: JsonDict
+    coverage_diagnostics: list[JsonDict]
+    excerpt: str
+    content_truncated: bool
+    source_content: str | None
+    source_content_sha256: str | None
+    pending_spec_version_id: int
+    compiled_at: str | None
+    artifact: JsonDict
+
+    @property
+    def payload(self) -> JsonDict:
+        """Return the canonical payload used for review-token hashing."""
+        return {
+            "schema": self.schema,
+            "project_id": self.project_id,
+            "pending_authority_id": self.pending_authority_id,
+            "authority_fingerprint": self.authority_fingerprint,
+            "source_spec_hash": self.source_spec_hash,
+            "disk_spec_hash": self.disk_spec_hash,
+            "resolved_spec_path": self.resolved_spec_path,
+            "compiler_version": self.compiler_version,
+            "prompt_hash": self.prompt_hash,
+            "fsm_state": self.fsm_state,
+            "setup_status": self.setup_status,
+            "content_included": self.content_included,
+            "omission_assessment": self.omission_assessment,
+            "coverage_summary_fingerprint": self.coverage_summary_fingerprint,
+        }
+
+    @property
+    def review_token(self) -> str:
+        """Return the deterministic review token."""
+        return f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(self.payload)}"
+
+    @property
+    def guard_tokens(self) -> JsonDict:
+        """Return decision guard tokens derived from the canonical snapshot."""
+        return {
+            "review_token": self.review_token,
+            "pending_authority_id": self.pending_authority_id,
+            "expected_authority_fingerprint": self.authority_fingerprint,
+            "expected_source_spec_hash": self.source_spec_hash,
+            "expected_disk_spec_hash": self.disk_spec_hash,
+            "expected_resolved_spec_path": self.resolved_spec_path,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_pending_review",
+            "expected_content_included": self.content_included,
+            "expected_omission_assessment": self.omission_assessment,
+            "expected_coverage_summary_fingerprint": (
+                self.coverage_summary_fingerprint
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class _ContentBlock:
     """A parsed Markdown content block within a section."""
 
@@ -214,23 +294,18 @@ class AuthorityReviewService:
             if latest_spec is None or authority is None:
                 return _authority_not_pending_error(project_id)
 
-            loaded = _load_source_from_latest_spec(
-                latest_spec,
+            snapshot = build_authority_review_snapshot(
+                project_id=project_id,
+                product=product,
+                spec=latest_spec,
+                authority=authority,
+                include_spec=include_spec,
                 repo_root=self._repo_root,
             )
-            if isinstance(loaded, dict):
-                return loaded
+            if isinstance(snapshot, dict):
+                return snapshot
 
-            return _success(
-                _build_review_packet(
-                    project_id=project_id,
-                    product=product,
-                    spec=latest_spec,
-                    authority=authority,
-                    source=loaded,
-                    include_spec=include_spec,
-                )
-            )
+            return _success(_render_review_packet(snapshot))
 
 
 def _success(data: JsonDict) -> JsonDict:
@@ -257,6 +332,34 @@ def _authority_not_pending_error(project_id: int) -> JsonDict:
             message="No pending compiled authority exists for this project.",
             details={"project_id": project_id},
             remediation=["Compile a new pending authority before requesting review."],
+        ),
+    )
+
+
+def _authority_source_changed_error(
+    *,
+    raw_path: str | None,
+    resolved_path: Path,
+    registry_hash: str,
+    disk_hash: str,
+) -> JsonDict:
+    return error_envelope(
+        command=AUTHORITY_REVIEW_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_SOURCE_CHANGED,
+            message=(
+                "Stored specification path content does not match the latest "
+                "registry spec hash."
+            ),
+            details={
+                "path": raw_path,
+                "resolved_path": str(resolved_path),
+                "registry_spec_hash": registry_hash,
+                "disk_spec_hash": disk_hash,
+            },
+            remediation=[
+                "Re-register or recompile the specification before review."
+            ],
         ),
     )
 
@@ -307,15 +410,24 @@ def _load_source_from_latest_spec(
     raw_path = spec.content_ref
     if not raw_path or not raw_path.strip():
         return _spec_file_not_found_error(raw_path, None)
-    path = Path(raw_path)
+    path = Path(raw_path).expanduser()
     resolved_path = path if path.is_absolute() else (repo_root / path)
-    resolved_path = resolved_path.resolve()
+    resolved_path = resolved_path.expanduser().resolve(strict=False)
     if not resolved_path.is_file():
         return _spec_file_not_found_error(raw_path, resolved_path)
     try:
         raw_bytes = resolved_path.read_bytes()
     except OSError as exc:
         return _spec_file_invalid_error(raw_path, resolved_path, str(exc))
+    disk_hash = sha256_prefixed(raw_bytes)
+    registry_hash = _normalize_sha256_hash(spec.spec_hash)
+    if disk_hash != registry_hash:
+        return _authority_source_changed_error(
+            raw_path=raw_path,
+            resolved_path=resolved_path,
+            registry_hash=registry_hash,
+            disk_hash=disk_hash,
+        )
     try:
         text = raw_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -324,19 +436,55 @@ def _load_source_from_latest_spec(
         raw_bytes=raw_bytes,
         text=text,
         resolved_path=resolved_path,
-        disk_sha256=sha256_prefixed(raw_bytes),
+        disk_sha256=disk_hash,
     )
 
 
-def _build_review_packet(  # noqa: PLR0913
+def _normalize_sha256_hash(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("sha256:"):
+        return f"sha256:{stripped.removeprefix('sha256:').lower()}"
+    return f"sha256:{stripped.lower()}"
+
+
+def build_authority_review_snapshot(  # noqa: PLR0913
     *,
     project_id: int,
-    product: Product,
-    spec: SpecRegistry,
-    authority: CompiledSpecAuthority,
-    source: _SourceLoad,
-    include_spec: str,
-) -> JsonDict:
+    product: Product | None = None,
+    spec: SpecRegistry | None = None,
+    authority: CompiledSpecAuthority | None = None,
+    include_spec: str = "auto",
+    repo_root: Path | None = None,
+    engine: Engine | None = None,
+) -> AuthorityReviewSnapshot | JsonDict:
+    """Build the canonical review snapshot without rendering a packet."""
+    if product is None or spec is None or authority is None:
+        review_engine = engine or model_db.get_engine()
+        with Session(review_engine) as session:
+            product = session.get(Product, project_id)
+            if product is None:
+                return _project_not_found_error(AUTHORITY_REVIEW_COMMAND, project_id)
+            selection = _load_authority_selection(session, project_id=project_id)
+            spec = selection.latest_spec
+            authority = selection.pending_authority
+            if spec is None or authority is None:
+                return _authority_not_pending_error(project_id)
+            return build_authority_review_snapshot(
+                project_id=project_id,
+                product=product,
+                spec=spec,
+                authority=authority,
+                include_spec=include_spec,
+                repo_root=repo_root,
+            )
+
+    source = _load_source_from_latest_spec(
+        spec,
+        repo_root=repo_root or Path(__file__).resolve().parents[2],
+    )
+    if isinstance(source, dict):
+        return source
+
     source_limit = _review_source_limit()
     content_included = include_spec == "full" or (
         include_spec == "auto" and len(source.raw_bytes) <= source_limit
@@ -349,7 +497,6 @@ def _build_review_packet(  # noqa: PLR0913
         text=source.text,
         authority_evidence=authority_evidence,
         classification_evidence=classification_evidence,
-        content_included=content_included,
     )
     source_content_sha256 = (
         sha256_prefixed(source.text.encode("utf-8")) if content_included else None
@@ -367,72 +514,89 @@ def _build_review_packet(  # noqa: PLR0913
     coverage_fingerprint = coverage_summary_fingerprint(coverage_payload)
     authority_fingerprint = pending_authority_fingerprint(authority)
     pending_authority_id = authority.authority_id
-    source_spec_hash = spec.spec_hash
+    source_spec_hash = _normalize_sha256_hash(spec.spec_hash)
     fsm_state = "SETUP_REQUIRED"
     setup_status = "authority_pending_review"
     omission_assessment = coverage_summary["omission_assessment"]
 
-    review_token_payload = {
-        "schema": REVIEW_TOKEN_SCHEMA,
-        "project_id": project_id,
-        "pending_authority_id": pending_authority_id,
-        "authority_fingerprint": authority_fingerprint,
-        "source_spec_hash": source_spec_hash,
-        "disk_spec_hash": source.disk_sha256,
-        "resolved_spec_path": str(source.resolved_path),
-        "compiler_version": authority.compiler_version,
-        "prompt_hash": authority.prompt_hash,
-        "fsm_state": fsm_state,
-        "setup_status": setup_status,
-        "content_included": content_included,
-        "omission_assessment": omission_assessment,
-        "coverage_summary_fingerprint": coverage_fingerprint,
-    }
-    review_token = f"{REVIEW_TOKEN_SCHEMA}:{canonical_json_hash(review_token_payload)}"
+    return AuthorityReviewSnapshot(
+        schema=REVIEW_TOKEN_SCHEMA,
+        project_id=project_id,
+        pending_authority_id=pending_authority_id,
+        authority_fingerprint=authority_fingerprint,
+        source_spec_hash=source_spec_hash,
+        disk_spec_hash=source.disk_sha256,
+        resolved_spec_path=str(source.resolved_path),
+        compiler_version=authority.compiler_version,
+        prompt_hash=authority.prompt_hash,
+        fsm_state=fsm_state,
+        setup_status=setup_status,
+        content_included=content_included,
+        omission_assessment=omission_assessment,
+        coverage_summary_fingerprint=coverage_fingerprint,
+        project_name=product.name,
+        spec_version_id=spec.spec_version_id,
+        content_ref=spec.content_ref,
+        disk_status="readable",
+        size_bytes=len(source.raw_bytes),
+        review_source_limit_bytes=source_limit,
+        source_outline=outline,
+        coverage_summary=coverage_summary,
+        coverage_diagnostics=diagnostics,
+        excerpt=_bounded_excerpt(source.text),
+        content_truncated=content_truncated,
+        source_content=source.text if content_included else None,
+        source_content_sha256=source_content_sha256,
+        pending_spec_version_id=authority.spec_version_id,
+        compiled_at=_iso_z(authority.compiled_at),
+        artifact=artifact,
+    )
 
+
+def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
     spec_payload = {
-        "spec_version_id": spec.spec_version_id,
-        "content_ref": spec.content_ref,
-        "resolved_path": str(source.resolved_path),
-        "spec_hash": source_spec_hash,
-        "disk_status": "readable",
-        "disk_sha256": source.disk_sha256,
-        "size_bytes": len(source.raw_bytes),
-        "review_source_limit_bytes": source_limit,
-        "source_outline": outline,
-        "coverage_summary": coverage_summary,
-        "coverage_summary_fingerprint": coverage_fingerprint,
-        "coverage_diagnostics": diagnostics,
-        "excerpt": _bounded_excerpt(source.text),
-        "content_included": content_included,
-        "content_truncated": content_truncated,
-        "source_content": source.text if content_included else None,
-        "source_content_sha256": source_content_sha256,
+        "spec_version_id": snapshot.spec_version_id,
+        "content_ref": snapshot.content_ref,
+        "resolved_path": snapshot.resolved_spec_path,
+        "spec_hash": snapshot.source_spec_hash,
+        "disk_status": snapshot.disk_status,
+        "disk_sha256": snapshot.disk_spec_hash,
+        "size_bytes": snapshot.size_bytes,
+        "review_source_limit_bytes": snapshot.review_source_limit_bytes,
+        "source_outline": snapshot.source_outline,
+        "coverage_summary": snapshot.coverage_summary,
+        "coverage_summary_fingerprint": snapshot.coverage_summary_fingerprint,
+        "coverage_diagnostics": snapshot.coverage_diagnostics,
+        "excerpt": snapshot.excerpt,
+        "content_included": snapshot.content_included,
+        "content_truncated": snapshot.content_truncated,
+        "source_content": snapshot.source_content,
+        "source_content_sha256": snapshot.source_content_sha256,
     }
 
     return {
         "project": {
-            "project_id": project_id,
-            "name": product.name,
-            "fsm_state": fsm_state,
-            "setup_status": setup_status,
+            "project_id": snapshot.project_id,
+            "name": snapshot.project_name,
+            "fsm_state": snapshot.fsm_state,
+            "setup_status": snapshot.setup_status,
         },
         "spec": spec_payload,
         "pending_authority": {
-            "authority_id": pending_authority_id,
-            "spec_version_id": authority.spec_version_id,
-            "authority_fingerprint": authority_fingerprint,
-            "compiler_version": authority.compiler_version,
-            "prompt_hash": authority.prompt_hash,
-            "compiled_at": _iso_z(authority.compiled_at),
-            "artifact": artifact,
+            "authority_id": snapshot.pending_authority_id,
+            "spec_version_id": snapshot.pending_spec_version_id,
+            "authority_fingerprint": snapshot.authority_fingerprint,
+            "compiler_version": snapshot.compiler_version,
+            "prompt_hash": snapshot.prompt_hash,
+            "compiled_at": snapshot.compiled_at,
+            "artifact": snapshot.artifact,
         },
         "review_guidance": _review_guidance(),
         "next_actions": [
             {
                 "command": (
                     "agileforge authority accept --project-id "
-                    f"{project_id} --review-token {review_token}"
+                    f"{snapshot.project_id} --review-token {snapshot.review_token}"
                 ),
                 "mode": "human",
                 "reason": "Record the reviewed pending authority as canonical.",
@@ -440,25 +604,14 @@ def _build_review_packet(  # noqa: PLR0913
             {
                 "command": (
                     "agileforge authority reject --project-id "
-                    f'{project_id} --review-token {review_token} --reason "..."'
+                    f"{snapshot.project_id} --review-token "
+                    f'{snapshot.review_token} --reason "..."'
                 ),
                 "mode": "human",
                 "reason": "Record that the pending authority must not be used.",
             },
         ],
-        "guard_tokens": {
-            "review_token": review_token,
-            "pending_authority_id": pending_authority_id,
-            "expected_authority_fingerprint": authority_fingerprint,
-            "expected_source_spec_hash": source_spec_hash,
-            "expected_disk_spec_hash": source.disk_sha256,
-            "expected_resolved_spec_path": str(source.resolved_path),
-            "expected_state": fsm_state,
-            "expected_setup_status": setup_status,
-            "expected_content_included": content_included,
-            "expected_omission_assessment": omission_assessment,
-            "expected_coverage_summary_fingerprint": coverage_fingerprint,
-        },
+        "guard_tokens": snapshot.guard_tokens,
     }
 
 
@@ -641,7 +794,6 @@ def _coverage_payload(
     text: str,
     authority_evidence: list[_AuthorityEvidence],
     classification_evidence: list[_ClassificationEvidence],
-    content_included: bool,
 ) -> tuple[list[JsonDict], JsonDict, list[JsonDict]]:
     sections, diagnostics = _parse_markdown_sections(text)
     outline: list[JsonDict] = []
@@ -681,8 +833,6 @@ def _coverage_payload(
             for entry in outline
         )
     )
-    if not content_included:
-        complete = False
     coverage_summary = {
         **counts,
         "unclassified_content_blocks": unclassified_blocks,
