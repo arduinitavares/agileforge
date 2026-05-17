@@ -215,6 +215,10 @@ whitespace, UTF-8 encoding, and this namespaced payload:
 ```
 
 The `source_outline` array is ordered by `line_start`, then `section_id`.
+Every nested list in the fingerprint payload must be canonicalized before
+hashing. `covered_by`, `source_refs`, and classification id arrays are sorted
+lexicographically after converting ids to strings. Duplicate ids are removed.
+Diagnostics are sorted by `section_id`, then diagnostic code, then message.
 Completeness is true only when every parsed source section has
 `coverage_status` in `covered|intentionally_classified`, and the parser reports
 `unclassified_content_blocks=0`. If the outline parser cannot parse a section,
@@ -228,10 +232,19 @@ source decode policy.
 Section parsing uses Markdown heading boundaries. Content before the first
 heading is represented as a synthetic section with `section_id="ROOT"`.
 Tables, code blocks, paragraphs, and list blocks are content blocks inside their
-nearest section. A section is `covered` only when its mandatory content maps to
-at least one authority item. A section is `intentionally_classified` only when
-every non-covered block is represented by a gap, assumption, rejected feature,
+nearest section. A requirement-bearing block is any paragraph, list item, table
+row, or fenced code block line that contains normative language such as `must`,
+`required`, `shall`, `only`, `never`, `cannot`, `forbidden`, `accepted when`,
+`rejected when`, `input`, `output`, `schema`, `field`, or `constraint`, or that
+appears under a heading containing `requirements`, `invariants`, `rules`,
+`acceptance`, `security`, `scope`, `out of scope`, `schema`, or `contract`. A
+section is `covered` only when each requirement-bearing block has at least one
+`source_ref` from an authority item or an explicit non-authority classification.
+A section is `intentionally_classified` only when every non-covered
+requirement-bearing block is represented by a gap, assumption, rejected feature,
 or out-of-scope classification with a non-empty `classification_reason`.
+`classification_reason` must identify the authority item id or classifier
+result that explains why the block is not represented as an invariant or rule.
 `partial` and `uncovered` sections make omission assessment incomplete.
 
 ### Decision Record
@@ -296,6 +309,17 @@ service-enforced unique index and schema readiness must verify it. Existing
 databases must fail `schema check` until the provenance columns and terminal
 decision invariant exist.
 
+Migration must handle historical accepted rows created before this slice. If a
+historical accepted row can be joined to exactly one compiled authority for its
+`spec_version_id`, the migration backfills `pending_authority_id` with that
+compiled authority id and marks the provenance source as `legacy_backfill`. If
+the row cannot be joined unambiguously, schema migration must stop with a
+structured migration error and remediation that tells the operator to resolve or
+archive the ambiguous historical decision before authority decisions are
+enabled. Rejected historical rows without `pending_authority_id` are not
+expected before this slice; if present, they follow the same backfill-or-block
+rule. Non-terminal legacy rows are allowed to keep `pending_authority_id=null`.
+
 A future schema cleanup can rename the table to `SpecAuthorityDecision`, but
 that rename is not required to unblock this feature.
 
@@ -339,7 +363,21 @@ agileforge authority accept --project-id 4
 The first form is the non-interactive human command. The second form is allowed
 only when stdin is an interactive terminal; it displays the pending authority
 summary, fingerprint, and source spec hash, then requires an explicit typed
-confirmation before submitting the same guarded decision request internally.
+confirmation before submitting the same guarded decision request internally. The
+normal acceptance confirmation phrase is:
+
+```text
+ACCEPT AUTHORITY
+```
+
+If the review is incomplete and the interactive user chooses the explicit
+override path, the confirmation phrase is:
+
+```text
+ACCEPT INCOMPLETE AUTHORITY
+```
+
+Interactive override also requires a non-empty rationale before submission.
 
 Expert/agent mode:
 
@@ -350,12 +388,23 @@ agileforge authority accept \
   --expected-authority-fingerprint sha256:... \
   --expected-source-spec-hash sha256:... \
   --expected-disk-spec-hash sha256:... \
+  --expected-resolved-spec-path /absolute/path/to/spec.md \
   --expected-state SETUP_REQUIRED \
   --expected-setup-status authority_pending_review \
   --expected-content-included true \
   --expected-omission-assessment complete \
   --expected-coverage-summary-fingerprint sha256:... \
   --idempotency-key agent-unique-key
+```
+
+Incomplete-review override:
+
+```bash
+agileforge authority accept \
+  --project-id 4 \
+  --review-token agileforge.authority_review.v1:sha256:... \
+  --allow-incomplete-review \
+  --incomplete-review-rationale "Full source exceeded the review packet limit; reviewed the attached source file separately."
 ```
 
 In human mode, AgileForge resolves the current pending authority, verifies the
@@ -392,6 +441,7 @@ agileforge authority reject \
   --expected-authority-fingerprint sha256:... \
   --expected-source-spec-hash sha256:... \
   --expected-disk-spec-hash sha256:... \
+  --expected-resolved-spec-path /absolute/path/to/spec.md \
   --expected-state SETUP_REQUIRED \
   --expected-setup-status authority_pending_review \
   --expected-content-included true \
@@ -408,7 +458,7 @@ canonicalize authority. If an explicit reject request supplies
 `expected_content_included`, `expected_omission_assessment`, or
 `expected_coverage_summary_fingerprint`, each supplied value must match the
 service-computed review snapshot. Source, pending authority, and workflow guards
-remain required for explicit reject.
+remain required for explicit reject, including `expected_resolved_spec_path`.
 
 ## Review Packet Contract
 
@@ -537,6 +587,7 @@ remain required for explicit reject.
     "expected_authority_fingerprint": "sha256:...",
     "expected_source_spec_hash": "sha256:...",
     "expected_disk_spec_hash": "sha256:...",
+    "expected_resolved_spec_path": "/absolute/path/to/spec.md",
     "expected_state": "SETUP_REQUIRED",
     "expected_setup_status": "authority_pending_review",
     "expected_content_included": true,
@@ -580,6 +631,10 @@ facts from compiler interpretation.
 
 Accept and reject must go through one shared authority decision service or
 runner. The CLI, API, and dashboard must not duplicate decision logic.
+Token-mode and explicit-guard mode must both be normalized into one internal
+`ReviewedAuthoritySnapshot` value before validation. The rest of the decision
+service validates only that normalized value, so interactive CLI, noninteractive
+CLI, API, and dashboard paths cannot drift.
 
 Before recording either decision, the service must validate:
 
@@ -591,6 +646,8 @@ Before recording either decision, the service must validate:
   source spec hash in the review token or explicit guard
 - the current disk spec hash still matches the reviewed disk spec hash from the
   review token or explicit guard
+- the current canonical resolved spec path still matches the resolved spec path
+  from the review token or explicit guard
 - `fsm_state=="SETUP_REQUIRED"`
 - `setup_status=="authority_pending_review"`
 - explicit accept requests without a review token include
@@ -650,7 +707,8 @@ decision first, the losing command returns `AUTHORITY_ALREADY_DECIDED`.
 The canonical request hash for idempotency must include the command name,
 decision, project id, pending authority id, review token or explicit guard
 tuple, expected state, expected setup status, source hashes,
-`expected_content_included`, `expected_omission_assessment`,
+`expected_resolved_spec_path`, `expected_content_included`,
+`expected_omission_assessment`,
 `expected_coverage_summary_fingerprint`, decision policy, actor mode,
 incomplete-review override flag, incomplete-review rationale, and rejection
 rationale. It must exclude correlation id, generated timestamps, and other
@@ -803,10 +861,11 @@ successful setup checkpoint:
 - Show review evidence or a link/action to the authority review view.
 - Show Accept and Reject actions that submit the exact review token rendered on
   the page, or the complete explicit guard set: pending authority id, authority
-  fingerprint, source spec hash, disk spec hash, expected state, expected setup
-  status, expected content included flag, expected omission assessment, and
-  expected coverage summary fingerprint. Authority fingerprint alone is a display
-  value and is never a sufficient mutation guard.
+  fingerprint, source spec hash, disk spec hash, expected resolved spec path,
+  expected state, expected setup status, expected content included flag,
+  expected omission assessment, and expected coverage summary fingerprint.
+  Authority fingerprint alone is a display value and is never a sufficient
+  mutation guard.
 - Show a stale-review message requiring reload if the authority or source spec
   changed after the page was rendered.
 - Do not label this state as `Project Setup Required`.
@@ -836,10 +895,14 @@ Tests must prove:
   `content_included=true`; both are `null` when `content_included=false`.
 - Hash fields follow the documented semantics for raw disk bytes, returned
   UTF-8 source content, and persisted `SpecRegistry` hash.
+- Coverage summary fingerprints remain stable when `covered_by`, `source_refs`,
+  or diagnostics are emitted in different input orders.
 - Human non-interactive accept requires a review token but does not require
   manually typing `pending_authority_id`, fingerprint, or idempotency key.
 - Human interactive accept submits the same guarded decision request after typed
-  confirmation.
+  confirmation phrase as non-interactive accept.
+- Interactive incomplete-review override requires the
+  `ACCEPT INCOMPLETE AUTHORITY` phrase and a non-empty rationale.
 - Accept fails with `AUTHORITY_REVIEW_INCOMPLETE` when the reviewed packet has
   `omission_assessment="incomplete"` and no explicit override rationale is
   provided.
@@ -853,6 +916,7 @@ Tests must prove:
   same authority/source/workflow/review-completeness snapshot.
 - Explicit reject without review-completeness guards is allowed, while supplied
   reject completeness guards are match-validated.
+- Explicit reject detects resolved-path drift through `expected_resolved_spec_path`.
 - Incomplete-review accept override persists the override flag, rationale,
   actor mode, and decision policy.
 - Expert accept rejects stale pending authority fingerprints.
@@ -880,6 +944,9 @@ Tests must prove:
   invariant is missing.
 - Terminal decision rows with `pending_authority_id=NULL` fail schema or write
   validation, and duplicate null-key terminal rows cannot be inserted.
+- Legacy accepted rows are backfilled only when they join to exactly one
+  compiled authority; ambiguous historical rows block migration with structured
+  remediation.
 - `workflow next` advertises review while authority is pending and exposes
   accept/reject templates that require review tokens.
 - Dashboard copy distinguishes pending review from setup failure.
@@ -910,6 +977,9 @@ Tests must prove:
 - 2026-05-17: Required explicit completeness guards to match the recomputed
   review snapshot, added terminal non-null decision-key enforcement, clarified
   hash/decode semantics, and defined explicit-reject completeness behavior.
+- 2026-05-17: Defined requirement-bearing blocks, canonical nested-array
+  ordering, explicit resolved-path guards, interactive confirmation phrases,
+  incomplete-review override examples, and legacy decision migration behavior.
 
 ## Open Follow-Up
 
