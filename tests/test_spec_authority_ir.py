@@ -15,6 +15,8 @@ from utils.spec_authority_ir import (
     source_units_from_sections,
 )
 
+MAX_TEST_EXCERPT_BYTES = 2_000
+
 
 def test_parse_markdown_sections_preserves_blocks_and_diagnostics() -> None:
     """Markdown parsing keeps existing section/block behavior available."""
@@ -111,6 +113,19 @@ def test_positive_non_requirement_blocks_product_capability_text() -> None:
     assert len(candidates) == 1
     assert candidates[0].classification == "uncertain"
     assert units[0].disposition == SourceUnitDisposition.UNCERTAIN
+
+
+def test_source_unit_and_candidate_excerpts_are_bounded_by_utf8_bytes() -> None:
+    """Non-ASCII source excerpts are bounded by UTF-8 bytes, not characters."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Requirements\n\n"
+        f"{'Á' * 1_500} must be preserved.\n"
+    )
+    units = source_units_from_sections(sections)
+    candidates = extract_requirement_candidates(units)
+
+    assert len(units[0].text_excerpt.encode("utf-8")) <= MAX_TEST_EXCERPT_BYTES
+    assert len(candidates[0].source_quote.encode("utf-8")) <= MAX_TEST_EXCERPT_BYTES
 
 
 def test_candidate_level_coverage_blocks_partial_units() -> None:

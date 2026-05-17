@@ -811,7 +811,10 @@ def _normalize_text(text: str) -> str:
 
 
 def _bounded(text: str, limit: int = 2_000) -> str:
-    return text if len(text) <= limit else text[:limit]
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
 
 
 def _sha256_prefixed(data: bytes) -> str:
