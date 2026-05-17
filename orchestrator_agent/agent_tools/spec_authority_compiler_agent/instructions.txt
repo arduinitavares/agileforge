@@ -45,6 +45,10 @@ SUCCESS OBJECT:
   "prompt_hash": "<64 lowercase hex characters>"
 }
 
+Optional Authority IR hint fields MAY also be included:
+- "requirement_candidates": ["<IR hint objects>"]
+- "authority_mappings": ["<IR hint objects>"]
+
 FAILURE OBJECT (ONLY if you cannot comply):
 {
   "error": "SPEC_COMPILATION_FAILED",
@@ -82,6 +86,16 @@ STRICTNESS:
 NOTE:
 - Host-side normalization is the final authority for prompt_hash and invariant IDs.
 - You MUST still output a prompt_hash string that matches the required hex format.
+
+AUTHORITY IR HINTS:
+- Host code owns coverage truth and derives coverage truth, including blocking findings.
+- You may emit requirement_candidates and authority_mappings as hints.
+- Every requirement_candidate hint must include an exact source_quote and source_unit_id when known.
+- Every authority_mappings hint must use only schema fields: candidate_id, authority_item_id, authority_target_kind, mapping_status, mapping_rationale, source_quote_hash, and mapping_provenance.
+- Every authority_mappings hint must include mapping_rationale and source_quote_hash when a source quote is available.
+- Do not emit final review_findings or assert coverage completeness. Host code derives coverage and blocking findings.
+- If a requirement is unclear, mark it uncertain rather than ignoring it.
+- Do not leave a known omission only in prose; include it as a gap or uncertain candidate hint.
 
 NON-FATAL HASHING RULE (MANDATORY):
 - Hashing and deterministic IDs are enforced by the host normalizer. Do NOT fail if you cannot compute them.

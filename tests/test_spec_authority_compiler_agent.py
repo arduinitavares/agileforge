@@ -38,6 +38,35 @@ from utils.spec_schemas import (
 )
 
 
+def test_compiler_instructions_define_ir_hints_without_trusting_model_coverage() -> None:
+    """Verify compiler prompt keeps coverage truth host-owned while allowing IR hints."""
+    instructions = SPEC_AUTHORITY_COMPILER_INSTRUCTIONS.lower()
+
+    assert "host code owns" in instructions
+    assert "coverage truth" in instructions
+    assert "optional authority ir hint fields may also be included" in instructions
+    assert "requirement_candidates" in instructions
+    assert "authority_mappings" in instructions
+    assert "hints" in instructions
+    assert "exact source_quote" in instructions
+    assert "source_unit_id when known" in instructions
+    assert (
+        "authority_mappings hint must use only schema fields: candidate_id, "
+        "authority_item_id, authority_target_kind, mapping_status, "
+        "mapping_rationale, source_quote_hash, and mapping_provenance"
+    ) in instructions
+    assert "mapping_rationale" in instructions
+    assert "do not emit final review_findings" in instructions
+    assert "do not emit final review_findings or assert coverage completeness" in (
+        instructions
+    )
+    assert "uncertain" in instructions
+    assert "rather than ignoring" in instructions
+    assert "known omission" in instructions
+    assert "gap or uncertain candidate hint" in instructions
+    assert "source_quote or source_unit_id" not in instructions
+
+
 class TestSpecAuthorityCompilerInput:
     """Validate input schema rules (exactly one source field)."""
 
