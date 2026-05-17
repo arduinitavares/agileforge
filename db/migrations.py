@@ -318,7 +318,22 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
         return
 
     with engine.connect() as conn:
-        if "pending_authority_id" not in existing_columns:
+        if "pending_authority_id" in existing_columns:
+            legacy_rows = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT id, product_id, spec_version_id
+                        FROM spec_authority_acceptance
+                        WHERE status IN ('accepted', 'rejected')
+                          AND pending_authority_id IS NULL
+                        """
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        else:
             legacy_rows = (
                 conn.execute(
                     text(
@@ -332,31 +347,30 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
                 .mappings()
                 .all()
             )
-            if legacy_rows and "compiled_spec_authority" not in existing_tables:
+
+        if legacy_rows and "compiled_spec_authority" not in existing_tables:
+            message = (
+                "Legacy authority decisions cannot be backfilled because "
+                "compiled_spec_authority table is missing. Remediation: "
+                "restore or recreate compiled authority rows for legacy "
+                "accepted/rejected decisions before rerunning migrations."
+            )
+            raise RuntimeError(message)
+        if legacy_rows:
+            compiled_columns = _get_existing_columns(engine, "compiled_spec_authority")
+            required_join_columns = {"authority_id", "spec_version_id"}
+            if not required_join_columns.issubset(compiled_columns):
+                missing_columns = ", ".join(
+                    sorted(required_join_columns - compiled_columns)
+                )
                 message = (
                     "Legacy authority decisions cannot be backfilled because "
-                    "compiled_spec_authority table is missing. Remediation: "
-                    "restore or recreate compiled authority rows for legacy "
-                    "accepted/rejected decisions before rerunning migrations."
+                    "compiled_spec_authority is missing required join columns: "
+                    f"{missing_columns}. Remediation: restore a compiled "
+                    "authority table with authority_id and spec_version_id "
+                    "before rerunning migrations."
                 )
                 raise RuntimeError(message)
-            if legacy_rows:
-                compiled_columns = _get_existing_columns(
-                    engine, "compiled_spec_authority"
-                )
-                required_join_columns = {"authority_id", "spec_version_id"}
-                if not required_join_columns.issubset(compiled_columns):
-                    missing_columns = ", ".join(
-                        sorted(required_join_columns - compiled_columns)
-                    )
-                    message = (
-                        "Legacy authority decisions cannot be backfilled because "
-                        "compiled_spec_authority is missing required join columns: "
-                        f"{missing_columns}. Remediation: restore a compiled "
-                        "authority table with authority_id and spec_version_id "
-                        "before rerunning migrations."
-                    )
-                    raise RuntimeError(message)
             backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
             _raise_for_duplicate_generated_legacy_terminal_decision_keys(backfill_plan)
 

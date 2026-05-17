@@ -184,6 +184,18 @@ def _add_terminal_decision_key_column(engine: Engine) -> None:
         )
 
 
+def _add_pending_authority_id_column(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE spec_authority_acceptance
+                ADD COLUMN pending_authority_id INTEGER
+                """
+            )
+        )
+
+
 def _replace_terminal_index_with_malformed_index(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(text("DROP INDEX uq_spec_authority_terminal_decision_key"))
@@ -507,6 +519,80 @@ def test_authority_decision_migration_blocks_existing_duplicate_terminal_keys(
             text("PRAGMA index_list('spec_authority_acceptance')")
         )
     }
+    assert "uq_spec_authority_terminal_decision_key" not in indexes
+
+
+def test_authority_decision_migration_preflights_partial_schema_null_authority(
+    tmp_path: Path,
+) -> None:
+    """Validate null pending authority rows even when the column already exists."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
+        migrate_spec_authority_tables(engine)
+
+    columns = _acceptance_columns(engine)
+    assert "pending_authority_id" in columns
+    assert (NEW_AUTHORITY_DECISION_COLUMNS - {"pending_authority_id"}).isdisjoint(
+        columns
+    )
+    indexes = {
+        row._mapping["name"]
+        for row in engine.connect().execute(
+            text("PRAGMA index_list('spec_authority_acceptance')")
+        )
+    }
+    assert "ix_spec_authority_acceptance_pending_authority_id" not in indexes
+    assert "uq_spec_authority_terminal_decision_key" not in indexes
+
+
+def test_authority_decision_migration_preflights_partial_schema_multiple_authorities(
+    tmp_path: Path,
+) -> None:
+    """Validate multiple matches before completing a partial acceptance schema."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=17,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
+        migrate_spec_authority_tables(engine)
+
+    columns = _acceptance_columns(engine)
+    assert "pending_authority_id" in columns
+    assert (NEW_AUTHORITY_DECISION_COLUMNS - {"pending_authority_id"}).isdisjoint(
+        columns
+    )
+    indexes = {
+        row._mapping["name"]
+        for row in engine.connect().execute(
+            text("PRAGMA index_list('spec_authority_acceptance')")
+        )
+    }
+    assert "ix_spec_authority_acceptance_pending_authority_id" not in indexes
     assert "uq_spec_authority_terminal_decision_key" not in indexes
 
 
