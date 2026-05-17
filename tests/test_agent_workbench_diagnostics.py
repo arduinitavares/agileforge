@@ -163,7 +163,7 @@ def test_schema_check_reports_missing_mutation_ledger_columns(
 
     assert payload["business_db"]["ok"] is False
     assert payload["business_db"]["status"] == "blocked"
-    assert payload["business_db"]["required_version"] == "2"
+    assert payload["business_db"]["required_version"] == STORAGE_SCHEMA_VERSION
     assert payload["business_db"]["checks"] == {
         "schema_versions_table": True,
         "cli_mutation_ledger_table": True,

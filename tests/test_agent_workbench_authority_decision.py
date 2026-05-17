@@ -30,6 +30,7 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_review import (
+    AuthorityReviewSnapshot,
     build_authority_review_snapshot,
     sha256_prefixed,
 )
@@ -44,6 +45,8 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerOutput,
 )
+
+_ACCEPTANCE_STATUS: Any = SpecAuthorityAcceptance.status
 
 PROMPT_HASH: Final[str] = "a" * 64
 COMPILER_VERSION: Final[str] = "1.0.0"
@@ -246,15 +249,12 @@ def _runner(session: Session, workflow: FakeWorkflowPort) -> AuthorityDecisionRu
     return AuthorityDecisionRunner(engine=_engine(session), workflow=workflow)
 
 
-def _snapshot(
-    session: Session,
-    project_id: int,
-) -> Any:
+def _snapshot(session: Session, project_id: int) -> AuthorityReviewSnapshot:
     result = build_authority_review_snapshot(
         project_id=project_id,
         engine=_engine(session),
     )
-    assert not isinstance(result, dict)
+    assert isinstance(result, AuthorityReviewSnapshot)
     return result
 
 
@@ -270,7 +270,7 @@ def _accept_request(
         project_id=project_id,
         review_token=review_token,
         idempotency_key=idempotency_key,
-        **values,
+        **cast("Any", values),
     )
 
 
@@ -288,17 +288,17 @@ def _reject_request(
         idempotency_key=idempotency_key,
         changed_by="decision-test",
         reason=reason,
-        **kwargs,
+        **cast("Any", kwargs),
     )
 
 
 def _explicit_accept_request(
-    snapshot: Any,
+    snapshot: AuthorityReviewSnapshot,
     *,
     idempotency_key: str = "explicit-accept-key",
     **kwargs: Any,
 ) -> AuthorityAcceptRequest:
-    values = snapshot.guard_tokens | {
+    values: Any = snapshot.guard_tokens | {
         "project_id": snapshot.project_id,
         "idempotency_key": idempotency_key,
         "changed_by": "decision-test",
@@ -309,7 +309,7 @@ def _explicit_accept_request(
 
 
 def _explicit_reject_request(
-    snapshot: Any,
+    snapshot: AuthorityReviewSnapshot,
     *,
     idempotency_key: str = "explicit-reject-key",
     **kwargs: Any,
@@ -328,14 +328,14 @@ def _explicit_reject_request(
         "reason": "Spec needs revision.",
     }
     values.update(kwargs)
-    return AuthorityRejectRequest(**values)
+    return AuthorityRejectRequest(**cast("Any", values))
 
 
 def _terminal_rows(session: Session) -> list[SpecAuthorityAcceptance]:
     return list(
         session.exec(
             select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.status.in_(["accepted", "rejected"])
+                _ACCEPTANCE_STATUS.in_(["accepted", "rejected"])
             )
         ).all()
     )
@@ -776,7 +776,7 @@ def test_empty_idempotency_key_is_rejected() -> None:
     with pytest.raises(ValueError, match="idempotency_key must be 8-128 characters"):
         AuthorityAcceptRequest(
             project_id=1,
-            review_token="token",
+            review_token="token",  # nosec B106
             idempotency_key="",
         )
 
@@ -785,7 +785,7 @@ def test_malformed_idempotency_key_is_rejected() -> None:
     with pytest.raises(ValueError, match="idempotency_key must match"):
         AuthorityRejectRequest(
             project_id=1,
-            review_token="token",
+            review_token="token",  # nosec B106
             idempotency_key="bad key 1",
             reason="reject",
         )
@@ -1062,8 +1062,11 @@ def test_database_unique_index_blocks_duplicate_terminal_decision_key(
         assert len(rows) == 1
         assert rows[0].terminal_decision_key == terminal_decision_key(
             project_id=snapshot.project_id,
-            spec_version_id=snapshot.spec_version_id,
-            pending_authority_id=snapshot.pending_authority_id,
+            spec_version_id=require_id(snapshot.spec_version_id, "spec_version_id"),
+            pending_authority_id=require_id(
+                snapshot.pending_authority_id,
+                "pending_authority_id",
+            ),
         )
 
     retry = runner.accept(

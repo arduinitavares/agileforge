@@ -17,7 +17,7 @@ The installed CLI supports:
 - Project creation with a guarded mutation ledger.
 - Project setup retry for interrupted creation/setup recovery.
 - Workflow and status inspection.
-- Spec Authority status and invariant inspection.
+- Spec Authority status, review, accept, reject, and invariant inspection.
 - Story and sprint read projections.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
@@ -25,7 +25,6 @@ The installed CLI supports:
 
 The installed CLI does not yet support:
 
-- Accepting a pending Spec Authority from the CLI.
 - Generating or saving vision, backlog, roadmap, story, or sprint drafts.
 - Starting, logging, closing, deleting, or resetting workflow artifacts from the
   CLI.
@@ -57,8 +56,9 @@ after timeouts, crashes, interrupted setup, and stale reads.
 
 Manual checkpoints are a core policy. Generated or compiled artifacts do not
 automatically become accepted canonical authority unless an explicit installed
-command says so. At the current phase, `project create` compiles a pending
-authority artifact, but it does not accept it.
+command says so. `project create` compiles a pending authority artifact, and
+`authority accept` is the explicit command that makes that reviewed artifact
+canonical.
 
 ## Central Shim Usage
 
@@ -294,13 +294,17 @@ installed next commands.
 
 ```sh
 agileforge authority status --project-id 1
+agileforge authority review --project-id 1
+agileforge authority review --project-id 1 --include-spec full
+agileforge authority accept --project-id 1 --review-token <review_token>
+agileforge authority reject --project-id 1 --review-token <review_token> --reason "..."
 agileforge authority invariants --project-id 1
 agileforge authority invariants --project-id 1 --spec-version-id 3
 ```
 
-At the current phase, authority commands are read-only. A project created from
-the CLI should show `status: pending_acceptance`, `authority_id: null`, and a
-populated `pending_authority_id`.
+Use `authority review` before any decision. Normal human review-token mode hides
+machine guard fields; explicit agent mode supplies the full guard tuple and an
+idempotency key.
 
 ### Story Commands
 
@@ -576,36 +580,170 @@ Expected authority state immediately after successful project creation:
 Agent stop rule:
 
 - If authority is pending, stop and report the project id and pending authority
-  details.
-- Do not attempt `agileforge authority accept`; it is not installed yet.
+  details before moving to Vision or backlog work.
+- Do not treat pending authority as accepted. Retrieve the review packet, ask
+  for review, and record an explicit accept or reject decision.
 - Do not use direct SQLite edits or HTTP calls to accept authority.
 
-## Reading Pending Authority
+## Authority Review And Decision
 
-Use:
+Pending authority is a manual checkpoint. A project created from the CLI should
+initially show `status: pending_acceptance`, `authority_id: null`, and a
+populated `pending_authority_id`. It is usable for review, but it is not
+canonical until accepted.
+
+Detect pending review with all three projections:
 
 ```sh
+agileforge status --project-id "$PROJECT_ID"
 agileforge authority status --project-id "$PROJECT_ID"
+agileforge workflow next --project-id "$PROJECT_ID"
 ```
 
-Important fields:
+`workflow next` should advertise:
 
-- `status`: high-level authority status.
-- `latest_spec_version_id`: latest spec row for the project.
-- `accepted_spec_version_id`: accepted spec version if any.
-- `accepted_decision_id`: accepted decision if any.
-- `authority_id`: accepted/current authority id only.
-- `pending_authority_id`: compiled but unaccepted authority id.
-- `pending_compiled_spec_version_id`: spec version for pending authority.
-- `pending_compiled_at`: timestamp for pending compilation.
-- `pending_compiler_version`: compiler version.
-- `pending_prompt_hash`: prompt hash for pending compilation.
-- `pending_invariant_count`: parsed invariant count for pending authority.
-- `pending_authority_fingerprint`: review token for the pending authority.
-- `authority_fingerprint`: projection fingerprint for authority status.
+```text
+agileforge authority review --project-id <id>
+```
+
+Important `authority status` fields:
+
+- `status`: `pending_acceptance`, `current`, `stale`, or another high-level
+  authority state.
+- `authority_id`: accepted/current authority id only; it is `null` while review
+  is pending.
+- `pending_authority_id`: compiled authority awaiting review.
+- `accepted_decision_id`: accepted decision row if authority is current.
+- `pending_compiled_spec_version_id`: spec version used for pending authority.
+- `pending_authority_fingerprint`: fingerprint for the pending compiled
+  authority.
+- `authority_fingerprint`: projection fingerprint for the reported status.
 - `disk_spec`: resolved disk spec path and hash information.
 
-Read invariants:
+Retrieve the review packet:
+
+```sh
+agileforge authority review --project-id "$PROJECT_ID" > review.json
+python -m json.tool review.json >/dev/null
+```
+
+Extract the token and guard tuple:
+
+```sh
+review_token="$(
+  python -c 'import json; print(json.load(open("review.json"))["data"]["guard_tokens"]["review_token"])'
+)"
+
+python -c 'import json; g=json.load(open("review.json"))["data"]["guard_tokens"]; print({k: g[k] for k in sorted(g)})'
+```
+
+Ask an AI reviewer this exact question, using the review packet as evidence:
+
+```text
+Does this compiled interpretation correctly represent the spec?
+```
+
+The reviewer should compare source requirements, `pending_authority.artifact`,
+`spec.source_outline`, source-map evidence, gaps, assumptions, and rejected
+features. Stop on uncertainty; do not accept just because the packet exists.
+
+Accept after a positive review:
+
+```sh
+agileforge authority accept \
+  --project-id "$PROJECT_ID" \
+  --review-token "$review_token" > accept.json
+
+python -m json.tool accept.json >/dev/null
+```
+
+Reject when the compiled authority is wrong or unreviewable:
+
+```sh
+agileforge authority reject \
+  --project-id "$PROJECT_ID" \
+  --review-token "$review_token" \
+  --reason "Compiled authority omits the dashboard requirement." > reject.json
+
+python -m json.tool reject.json >/dev/null
+```
+
+Human review-token mode hides the idempotency key. The CLI generates an internal
+`human-token:<uuid>` retry key when `--review-token` is supplied without
+`--idempotency-key`. Non-interactive agent mutations should pass their own
+caller-generated idempotency key so an identical retry can replay the same
+ledger row after a timeout.
+
+Explicit agent mode is for automation that stores guard values from
+`guard_tokens`. Include the complete guard tuple and an idempotency key:
+
+```sh
+agileforge authority accept \
+  --project-id "$PROJECT_ID" \
+  --pending-authority-id "$pending_authority_id" \
+  --expected-authority-fingerprint "$expected_authority_fingerprint" \
+  --expected-source-spec-hash "$expected_source_spec_hash" \
+  --expected-disk-spec-hash "$expected_disk_spec_hash" \
+  --expected-resolved-spec-path "$expected_resolved_spec_path" \
+  --expected-state SETUP_REQUIRED \
+  --expected-setup-status authority_pending_review \
+  --expected-content-included true \
+  --expected-omission-assessment complete \
+  --expected-coverage-summary-fingerprint "$expected_coverage_summary_fingerprint" \
+  --idempotency-key "authority-accept-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  --changed-by codex
+```
+
+The complete explicit guard tuple is:
+
+- `pending_authority_id`
+- `expected_authority_fingerprint`
+- `expected_source_spec_hash`
+- `expected_disk_spec_hash`
+- `expected_resolved_spec_path`
+- `expected_state`
+- `expected_setup_status`
+- `expected_content_included`
+- `expected_omission_assessment`
+- `expected_coverage_summary_fingerprint`
+
+Reject explicit mode uses the same guards, plus `--reason`.
+
+If accept returns `AUTHORITY_REVIEW_INCOMPLETE`, do not force the same token
+through normal accept. First rerun review with full source:
+
+```sh
+agileforge authority review --project-id "$PROJECT_ID" --include-spec full > review.json
+python -m json.tool review.json >/dev/null
+```
+
+If a human reviewed omitted source out of band and still approves, use explicit
+override with rationale:
+
+```sh
+agileforge authority accept \
+  --project-id "$PROJECT_ID" \
+  --review-token "$review_token" \
+  --allow-incomplete-review \
+  --incomplete-review-rationale "Human reviewer inspected omitted source file directly." \
+  --idempotency-key "authority-accept-incomplete-$PROJECT_ID-$(date +%Y%m%d%H%M%S)"
+```
+
+Expected outcomes:
+
+- After accept, `authority status` returns `ok: true`, `status: current`,
+  non-null `authority_id`, and `pending_authority_id: null`. `workflow next`
+  should no longer advertise `agileforge authority review --project-id` for the
+  same project.
+- After reject, authority remains non-canonical. Vision remains locked and the
+  next action is to update or recompile the spec in a later workflow slice.
+
+Dashboard behavior mirrors the CLI service. Pending projects render as
+`Pending Authority Review`, fetch the same review packet, and submit decisions
+using the review token. The dashboard must not accept fingerprint-only
+mutations; stale pages should refresh after source or workflow guards change.
+
+Read invariants only after acceptance:
 
 ```sh
 agileforge authority invariants --project-id "$PROJECT_ID"
@@ -618,16 +756,23 @@ error. Agents should surface that status rather than forcing progress.
 
 Guard tokens prevent agents from mutating stale state.
 
-Current installed guard-bearing command:
+Installed guard-bearing mutation commands include:
 
 ```sh
 agileforge project setup retry
+agileforge authority accept
+agileforge authority reject
 ```
 
-Required guards:
+`project setup retry` required guards:
 
 - `--expected-state`
 - `--expected-context-fingerprint`
+
+Authority decision explicit mode requires the full `guard_tokens` tuple from
+`agileforge authority review --project-id "$PROJECT_ID"` plus
+`--idempotency-key`. Review-token mode supplies those guards through
+`--review-token`.
 
 Get current state:
 
@@ -804,8 +949,14 @@ Registered CLI error codes include:
 | `SPEC_FILE_NOT_FOUND` | Spec path cannot be found. | Fix caller-relative path. |
 | `SPEC_FILE_INVALID` | Spec path exists but is invalid. | Fix spec file content/path. |
 | `SPEC_COMPILE_FAILED` | Authority compilation failed. | Inspect error details, retry only when cause is fixed. |
+| `AUTHORITY_REVIEW_REQUIRED` | A non-interactive authority decision did not include review evidence. | Run `authority review` and pass `--review-token` or explicit guards. |
 | `AUTHORITY_NOT_ACCEPTED` | No accepted authority exists. | Stop or request manual authority review. |
 | `AUTHORITY_NOT_COMPILED` | Selected spec has no compiled authority. | Re-read authority status. |
+| `AUTHORITY_NOT_PENDING` | There is no pending authority decision for this project. | Re-read `authority status` and `workflow next`. |
+| `AUTHORITY_ALREADY_DECIDED` | The pending authority already has a terminal decision. | Replay the same idempotency key or refresh status. |
+| `AUTHORITY_SOURCE_CHANGED` | The source spec or authority snapshot changed after review. | Rerun `authority review` and decide from the new packet. |
+| `AUTHORITY_REVIEW_INCOMPLETE` | Review packet omitted or could not prove source coverage. | Rerun review with `--include-spec full`, or use explicit override with rationale after out-of-band review. |
+| `AUTHORITY_GUARD_INCOMPLETE` | Explicit authority decision mode omitted required guards. | Pass every field from `guard_tokens` and an idempotency key. |
 | `AUTHORITY_ACCEPTANCE_MISMATCH` | Accepted authority provenance drifted. | Stop and surface. |
 | `AUTHORITY_INVARIANTS_INVALID` | Stored invariant JSON is invalid. | Stop and surface storage issue. |
 | `STALE_STATE` | Expected workflow state mismatched. | Refresh state, review, use new key. |
@@ -872,6 +1023,30 @@ agileforge authority status --project-id "$PROJECT_ID"
 ```sh
 agileforge authority status --project-id "$PROJECT_ID" |
 python -c 'import json,sys; p=json.load(sys.stdin); d=p["data"]; print({"status": d["status"], "authority_id": d["authority_id"], "pending_authority_id": d["pending_authority_id"], "pending_spec": d["pending_compiled_spec_version_id"]})'
+
+agileforge workflow next --project-id "$PROJECT_ID" |
+python -c 'import json,sys; p=json.load(sys.stdin); print(p["data"].get("next_valid_commands") or p["data"].get("next_actions"))'
+```
+
+### Review And Accept Authority
+
+```sh
+agileforge authority review --project-id "$PROJECT_ID" > review.json
+python -m json.tool review.json >/dev/null
+
+review_token="$(
+  python -c 'import json; print(json.load(open("review.json"))["data"]["guard_tokens"]["review_token"])'
+)"
+
+# Ask: Does this compiled interpretation correctly represent the spec?
+
+agileforge authority accept \
+  --project-id "$PROJECT_ID" \
+  --review-token "$review_token" > accept.json
+python -m json.tool accept.json >/dev/null
+
+agileforge authority status --project-id "$PROJECT_ID" |
+python -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["status"] == "current"; assert d["authority_id"] is not None; assert d["pending_authority_id"] is None; print("authority current")'
 ```
 
 ### Recover Project Setup
@@ -951,9 +1126,13 @@ The skill must stop and surface state when:
 
 - command is not installed;
 - schema is not ready;
-- authority is pending and no CLI accept command exists;
+- authority is pending and the agent has not reviewed `authority review`;
+- an AI or human reviewer cannot confirm the compiled interpretation represents
+  the spec;
 - stale guard is returned;
 - idempotency key was reused with a different request;
+- `AUTHORITY_REVIEW_INCOMPLETE` is returned and no human has reviewed omitted
+  source out of band;
 - mutation recovery requires manual inspection;
 - direct DB/API/browser use would be needed to continue.
 
@@ -972,7 +1151,6 @@ The skill must stop and surface state when:
 
 The broader CLI roadmap includes commands such as:
 
-- `agileforge authority accept`
 - `agileforge vision generate`
 - `agileforge backlog generate`
 - `agileforge roadmap generate`

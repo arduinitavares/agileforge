@@ -8,6 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api as api_module
+from services.agent_workbench.authority_decision import (
+    AuthorityAcceptRequest,
+    AuthorityRejectRequest,
+)
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -246,8 +250,8 @@ class FakeAuthorityApplication:
     def __init__(self, workflow: DummyWorkflowService | None = None) -> None:
         """Initialize captured request state."""
         self.workflow = workflow
-        self.accept_requests: list[object] = []
-        self.reject_requests: list[object] = []
+        self.accept_requests: list[AuthorityAcceptRequest] = []
+        self.reject_requests: list[AuthorityRejectRequest] = []
 
     def authority_review(
         self,
@@ -265,14 +269,14 @@ class FakeAuthorityApplication:
                 "output_format": output_format,
                 "summary": {"omission_assessment": "complete"},
                 "guard_tokens": {
-                    "review_token": "agileforge.authority_review.v1:sha256:test"
+                    "review_token": "agileforge.authority_review.v1:sha256:test"  # nosec B105
                 },
             },
             "warnings": [],
             "errors": [],
         }
 
-    def authority_accept(self, request: object) -> dict[str, object]:
+    def authority_accept(self, request: AuthorityAcceptRequest) -> dict[str, object]:
         """Capture an authority accept request."""
         self.accept_requests.append(request)
         return {
@@ -286,7 +290,7 @@ class FakeAuthorityApplication:
             "errors": [],
         }
 
-    def authority_reject(self, request: object) -> dict[str, object]:
+    def authority_reject(self, request: AuthorityRejectRequest) -> dict[str, object]:
         """Capture an authority reject request and keep setup locked."""
         self.reject_requests.append(request)
         if self.workflow is not None:
@@ -614,7 +618,7 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",
+            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
             "reason": reason,
         },
     )
@@ -646,7 +650,7 @@ def test_dashboard_reject_empty_reason_returns_request_boundary_error(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",
+            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
             "reason": "",
         },
     )

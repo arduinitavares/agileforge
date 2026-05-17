@@ -8,7 +8,7 @@ import json
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
-from typing import NoReturn, Protocol, cast
+from typing import NoReturn, Protocol, TypedDict, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -51,6 +51,28 @@ type JsonObject = dict[str, object]
 type JsonList = list[object]
 CommandResult = tuple[str, JsonObject]
 CommandHandler = Callable[[argparse.Namespace, "_Application"], CommandResult]
+
+
+class _AuthorityRequestKwargs(TypedDict):
+    """Typed common kwargs for authority decision request models."""
+
+    project_id: int
+    review_token: str | None
+    pending_authority_id: int | None
+    expected_authority_fingerprint: str | None
+    expected_source_spec_hash: str | None
+    expected_disk_spec_hash: str | None
+    expected_resolved_spec_path: str | None
+    expected_state: str | None
+    expected_setup_status: str | None
+    expected_content_included: bool | None
+    expected_omission_assessment: str | None
+    expected_coverage_summary_fingerprint: str | None
+    idempotency_key: str | None
+    changed_by: str | None
+    actor_mode: str
+
+
 AUTHORITY_EXPLICIT_GUARD_FIELDS: tuple[str, ...] = (
     "pending_authority_id",
     "expected_authority_fingerprint",
@@ -896,21 +918,49 @@ def _decision_idempotency_key(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _authority_request_kwargs(args: argparse.Namespace) -> dict[str, object]:
+def _authority_request_kwargs(args: argparse.Namespace) -> _AuthorityRequestKwargs:
     """Return request keyword args common to accept/reject decisions."""
-    values: dict[str, object] = {
-        "project_id": args.project_id,
-        "review_token": args.review_token,
+    return {
+        "project_id": cast("int", args.project_id),
+        "review_token": cast("str | None", args.review_token),
+        "pending_authority_id": cast("int | None", args.pending_authority_id),
+        "expected_authority_fingerprint": cast(
+            "str | None",
+            args.expected_authority_fingerprint,
+        ),
+        "expected_source_spec_hash": cast(
+            "str | None",
+            args.expected_source_spec_hash,
+        ),
+        "expected_disk_spec_hash": cast(
+            "str | None",
+            args.expected_disk_spec_hash,
+        ),
+        "expected_resolved_spec_path": cast(
+            "str | None",
+            args.expected_resolved_spec_path,
+        ),
+        "expected_state": cast("str | None", args.expected_state),
+        "expected_setup_status": cast("str | None", args.expected_setup_status),
+        "expected_content_included": cast(
+            "bool | None",
+            args.expected_content_included,
+        ),
+        "expected_omission_assessment": cast(
+            "str | None",
+            args.expected_omission_assessment,
+        ),
+        "expected_coverage_summary_fingerprint": cast(
+            "str | None",
+            args.expected_coverage_summary_fingerprint,
+        ),
         "idempotency_key": _decision_idempotency_key(args),
-        "changed_by": args.changed_by,
+        "changed_by": cast("str | None", args.changed_by),
         "actor_mode": _authority_actor_mode(
-            args.changed_by,
-            token_mode=bool(args.review_token),
+            cast("str | None", args.changed_by),
+            token_mode=bool(cast("str | None", args.review_token)),
         ),
     }
-    for field_name in AUTHORITY_ALL_GUARD_FIELDS:
-        values[field_name] = getattr(args, field_name)
-    return values
 
 
 def _authority_validation_failure(
@@ -1138,6 +1188,7 @@ def _interactive_authority_accept(
     review_token = guards.get("review_token") if guards is not None else None
     if not isinstance(review_token, str):
         return _authority_review_required(command)
+    guards = cast("Mapping[object, object]", guards)
     _print_authority_review_summary(review)
     omission = guards.get("expected_omission_assessment")
     phrase = (

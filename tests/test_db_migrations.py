@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import create_engine, inspect, text
 
 from db.migrations import CLI_MUTATION_LEDGER_CREATE_SQL, ensure_schema_current
+from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,7 +138,7 @@ def test_migration_adds_project_setup_recovery_linkage_columns(
                 """
             )
         ).scalar_one()
-    assert version == "2"
+    assert version == STORAGE_SCHEMA_VERSION
 
 
 def test_raw_mutation_ledger_create_sql_includes_recovery_linkage_columns(

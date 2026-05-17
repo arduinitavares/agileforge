@@ -636,8 +636,10 @@ def _setup_workflow_next(
     }
 
 
-def _authority_spec_file_template(authority: dict[str, Any]) -> str:
+def _authority_spec_file_template(authority: dict[str, Any] | None) -> str:
     """Return a concrete disk spec path when available, else a template token."""
+    if authority is None:
+        return "<spec-file>"
     authority_data = _envelope_data(authority)
     disk_spec = authority_data.get("disk_spec")
     if isinstance(disk_spec, dict):

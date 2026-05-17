@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecRegistry
@@ -31,11 +31,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+    from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
 PROMPT_HASH = "a" * 64
 COMPILER_VERSION = "1.0.0"
 INVARIANT_ID = "INV-0123456789abcdef"
+
+
+def _engine(session: Session) -> Engine:
+    """Return the test session bind as an engine for review services."""
+    return cast("Engine", session.get_bind())
 
 
 def _compiled_success_json(
@@ -154,7 +160,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -234,7 +240,7 @@ def test_review_text_format_returns_ok_packet_with_human_text(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id,
         output_format="text",
     )
@@ -280,7 +286,7 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
     session.add(authority)
     session.commit()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -360,7 +366,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
     session.add(authority)
     session.commit()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -416,7 +422,7 @@ def test_review_includes_full_source_under_default_limit(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -450,7 +456,7 @@ def test_review_uses_latest_spec_content_ref_instead_of_product_path(
     session.add(product)
     session.commit()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -481,7 +487,7 @@ def test_review_missing_latest_spec_content_ref_does_not_fallback_to_product_pat
     session.commit()
     assert spec_path.is_file()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -506,7 +512,7 @@ def test_review_blocks_stale_registry_hash_without_leaking_source(
     changed = "# Submission Contract\n\nThis stale file must not be disclosed.\n"
     spec_path.write_text(changed, encoding="utf-8")
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -549,7 +555,7 @@ def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
     session.add(spec)
     session.commit()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -579,7 +585,7 @@ def test_review_omits_large_source_and_marks_omission_incomplete(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -617,7 +623,7 @@ def test_review_omits_large_covered_source_and_marks_omission_complete(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -640,7 +646,7 @@ def test_review_token_changes_when_disk_hash_changes(
             spec_content=_base_spec(),
         )
     )
-    service = AuthorityReviewService(engine=session.get_bind())
+    service = AuthorityReviewService(engine=_engine(session))
 
     first = service.review(project_id=project_id)["data"]["guard_tokens"]
     changed = _base_spec().replace("guard tokens", "fresh guard tokens")
@@ -673,10 +679,11 @@ def test_review_snapshot_recomputes_packet_review_token(
     )
 
     snapshot = build_authority_review_snapshot(
-        engine=session.get_bind(),
+        engine=_engine(session),
         project_id=project_id,
     )
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    assert not isinstance(snapshot, dict)
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -751,7 +758,7 @@ def test_malformed_markdown_emits_diagnostic_instead_of_failing(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -790,7 +797,7 @@ def test_review_ignores_markdown_headings_inside_fenced_code(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -819,7 +826,7 @@ def test_review_counts_fenced_code_as_one_content_block(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -852,7 +859,7 @@ def test_review_tilde_fenced_code_ignores_headings_and_counts_one_block(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -888,7 +895,7 @@ def test_review_tilde_fence_does_not_close_on_backticks(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -924,7 +931,7 @@ def test_review_backtick_fence_does_not_close_on_tildes(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -960,7 +967,7 @@ def test_review_long_backtick_fence_requires_matching_close_length(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -985,7 +992,7 @@ def test_missing_spec_file_returns_spec_file_not_found(
     )
     spec_path.unlink()
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 
@@ -1008,7 +1015,7 @@ def test_invalid_utf8_spec_file_returns_spec_file_invalid(
         )
     )
 
-    result = AuthorityReviewService(engine=session.get_bind()).review(
+    result = AuthorityReviewService(engine=_engine(session)).review(
         project_id=project_id
     )
 

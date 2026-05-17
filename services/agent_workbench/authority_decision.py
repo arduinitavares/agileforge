@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
@@ -57,6 +57,10 @@ _KEY_MIN_LENGTH = 8
 _KEY_MAX_LENGTH = 128
 _ENGINE_LOCKS: WeakKeyDictionary[Engine, RLock] = WeakKeyDictionary()
 _ENGINE_LOCKS_GUARD = RLock()
+_ACCEPTANCE_STATUS: Any = SpecAuthorityAcceptance.status
+_LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
+_LEDGER_STATUS: Any = CliMutationLedger.status
+_LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
 
 
 class AuthorityDecisionWorkflowPort(Protocol):
@@ -282,18 +286,19 @@ class AuthorityDecisionRunner:
             return replay_conflict
 
         snapshot_result = self._normalize_snapshot(request=request, command=command)
-        if isinstance(snapshot_result, dict):
+        if not isinstance(snapshot_result, ReviewedAuthoritySnapshot):
+            snapshot_error = cast("JsonDict", snapshot_result)
             if not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-                response=snapshot_result,
+                response=snapshot_error,
             ):
                 return _ledger_error(
                     command=command,
                     code=MUTATION_RESUME_CONFLICT,
                     mutation_event_id=mutation_event_id,
                 )
-            return snapshot_result
+            return snapshot_error
         snapshot = snapshot_result
 
         guard_error = self._validate_guards(
@@ -463,8 +468,8 @@ class AuthorityDecisionRunner:
             project_id=request.project_id,
             engine=self._engine,
         )
-        if isinstance(result, dict):
-            return _retarget_error(result, command=command)
+        if not isinstance(result, AuthorityReviewSnapshot):
+            return _retarget_error(cast("JsonDict", result), command=command)
         raw = _snapshot_from_review(result)
         if (
             request.review_token is not None
@@ -600,7 +605,7 @@ class AuthorityDecisionRunner:
         with Session(self._engine) as session:
             statement = select(SpecAuthorityAcceptance).where(
                 SpecAuthorityAcceptance.product_id == request.project_id,
-                SpecAuthorityAcceptance.status.in_(["accepted", "rejected"]),
+                _ACCEPTANCE_STATUS.in_(["accepted", "rejected"]),
             )
             if request.pending_authority_id is not None:
                 statement = statement.where(
@@ -679,7 +684,7 @@ class AuthorityDecisionRunner:
                 rationale=_rationale(decision=decision, request=request),
                 compiler_version=snapshot.compiler_version,
                 prompt_hash=snapshot.prompt_hash,
-                spec_hash=snapshot.source_spec_hash,
+                spec_hash=_stored_spec_hash(snapshot.source_spec_hash),
                 pending_authority_id=snapshot.pending_authority_id,
                 authority_fingerprint=snapshot.authority_fingerprint,
                 review_token=snapshot.review_token,
@@ -770,10 +775,10 @@ class AuthorityDecisionRunner:
                 rationale="Injected terminal conflict.",
                 compiler_version=snapshot.compiler_version,
                 prompt_hash=snapshot.prompt_hash,
-                spec_hash=snapshot.source_spec_hash,
+                spec_hash=_stored_spec_hash(snapshot.source_spec_hash),
                 pending_authority_id=snapshot.pending_authority_id,
                 authority_fingerprint=snapshot.authority_fingerprint,
-                review_token="injected-conflict",  # noqa: S106
+                review_token="injected-conflict",  # noqa: S106  # nosec B106
                 review_fingerprint=snapshot.coverage_summary_fingerprint,
                 disk_spec_hash=snapshot.disk_spec_hash,
                 resolved_spec_path=snapshot.resolved_spec_path,
@@ -941,7 +946,7 @@ class AuthorityDecisionRunner:
         with Session(self._engine) as session:
             statement = select(SpecAuthorityAcceptance).where(
                 SpecAuthorityAcceptance.product_id == request.project_id,
-                SpecAuthorityAcceptance.status.in_(["accepted", "rejected"]),
+                _ACCEPTANCE_STATUS.in_(["accepted", "rejected"]),
             )
             if request.pending_authority_id is not None:
                 statement = statement.where(
@@ -989,9 +994,9 @@ class AuthorityDecisionRunner:
         with Session(self._engine) as session:
             result = session.exec(
                 update(CliMutationLedger)
-                .where(CliMutationLedger.mutation_event_id == mutation_event_id)
-                .where(CliMutationLedger.status == MutationStatus.PENDING.value)
-                .where(CliMutationLedger.lease_owner == lease_owner)
+                .where(_LEDGER_MUTATION_EVENT_ID == mutation_event_id)  # noqa: SIM300
+                .where(_LEDGER_STATUS == MutationStatus.PENDING.value)  # noqa: SIM300
+                .where(_LEDGER_LEASE_OWNER == lease_owner)  # noqa: SIM300
                 .values(
                     status=MutationStatus.VALIDATION_FAILED.value,
                     current_step="validation_failed",
@@ -1018,6 +1023,11 @@ def terminal_decision_key(
 ) -> str:
     """Return the canonical terminal decision key."""
     return f"{project_id}:{spec_version_id}:{pending_authority_id}"
+
+
+def _stored_spec_hash(source_spec_hash: str) -> str:
+    """Return the legacy decision spec_hash value compatible with projections."""
+    return source_spec_hash.removeprefix("sha256:")
 
 
 def _decision_lock(engine: Engine) -> RLock:

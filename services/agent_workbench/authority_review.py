@@ -10,8 +10,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from json import JSONDecodeError
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
+from pydantic import ValidationError
 from sqlmodel import Session
 
 from models import db as model_db
@@ -27,7 +28,11 @@ from services.agent_workbench.authority_projection import (
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
-from services.specs.compiler_service import load_compiled_artifact
+from utils.spec_schemas import (
+    SpecAuthorityCompilationFailure,
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerOutput,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -207,7 +212,11 @@ def canonical_json_hash(payload: Mapping[str, Any]) -> str:
 
 def coverage_summary_fingerprint(payload: Mapping[str, Any]) -> str:
     """Return the canonical coverage summary fingerprint."""
-    return canonical_json_hash(_canonicalize_coverage_payload(payload))
+    canonical_payload = cast(
+        "Mapping[str, Any]",
+        _canonicalize_coverage_payload(payload),
+    )
+    return canonical_json_hash(canonical_payload)
 
 
 def _canonicalize_coverage_payload(value: object) -> object:
@@ -242,7 +251,7 @@ def _as_list(value: object) -> list[object]:
     if value is None:
         return []
     if isinstance(value, list):
-        return value
+        return cast("list[object]", value)
     if isinstance(value, tuple):
         return list(value)
     return [value]
@@ -307,8 +316,8 @@ class AuthorityReviewService:
                 include_spec=include_spec,
                 repo_root=self._repo_root,
             )
-            if isinstance(snapshot, dict):
-                return snapshot
+            if not isinstance(snapshot, AuthorityReviewSnapshot):
+                return cast("JsonDict", snapshot)
 
             packet = _render_review_packet(snapshot)
             if output_format == "text":
@@ -490,8 +499,8 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         spec,
         repo_root=repo_root or Path(__file__).resolve().parents[2],
     )
-    if isinstance(source, dict):
-        return source
+    if not isinstance(source, _SourceLoad):
+        return cast("JsonDict", source)
 
     source_limit = _review_source_limit()
     content_included = include_spec == "full" or (
@@ -680,7 +689,7 @@ def _mapping_value(mapping: Mapping[object, object] | None, key: str) -> object:
 
 def _mapping_or_none(value: object) -> Mapping[object, object] | None:
     if isinstance(value, Mapping):
-        return value
+        return cast("Mapping[object, object]", value)
     return None
 
 
@@ -701,10 +710,26 @@ def _bounded_excerpt(text: str, limit: int = 2_000) -> str:
     return text[:limit]
 
 
+def _load_compiled_artifact(
+    authority: CompiledSpecAuthority,
+) -> SpecAuthorityCompilationSuccess | None:
+    """Load normalized compiled artifact JSON if present and valid."""
+    artifact_json = getattr(authority, "compiled_artifact_json", None)
+    if not artifact_json:
+        return None
+    try:
+        parsed = SpecAuthorityCompilerOutput.model_validate_json(artifact_json)
+    except (ValidationError, ValueError):
+        return None
+    if isinstance(parsed.root, SpecAuthorityCompilationFailure):
+        return None
+    return parsed.root
+
+
 def _authority_artifact_payload(
     authority: CompiledSpecAuthority,
 ) -> tuple[JsonDict, list[_AuthorityEvidence], list[_ClassificationEvidence]]:
-    artifact = load_compiled_artifact(authority)
+    artifact = _load_compiled_artifact(authority)
     if artifact is None:
         return _fallback_authority_artifact(authority), [], []
 

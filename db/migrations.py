@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS spec_authority_acceptance (
 SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS: dict[str, str] = {
     "pending_authority_id": "INTEGER",
     "authority_fingerprint": "VARCHAR",
-    "review_token": "VARCHAR",
+    "review_token": "VARCHAR",  # nosec B105
     "review_fingerprint": "VARCHAR",
     "disk_spec_hash": "VARCHAR",
     "resolved_spec_path": "VARCHAR",
@@ -468,7 +468,7 @@ def _terminal_authority_decision_rows(
         FROM spec_authority_acceptance
         WHERE status IN ('accepted', 'rejected')
         """
-    return conn.execute(text(query)).mappings().all()
+    return list(conn.execute(text(query)).mappings().all())
 
 
 def _legacy_authority_decision_backfill_plan(

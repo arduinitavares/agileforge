@@ -22,6 +22,7 @@ class _AuthorityDecisionCliApplication:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.noisy_review_stdout = False
 
     def authority_review(
         self,
@@ -31,6 +32,8 @@ class _AuthorityDecisionCliApplication:
         output_format: str = "json",
     ) -> JsonObject:
         """Return a review packet with guard tokens."""
+        if self.noisy_review_stdout:
+            sys.stdout.write("LiteLLM completion() model=openai/example\n")
         self.calls.append(
             (
                 "authority_review",
@@ -444,22 +447,7 @@ def test_authority_review_keeps_stdout_json_clean_when_service_logs(
 ) -> None:
     """Verify authority review preserves one clean JSON stdout envelope."""
     app = _AuthorityDecisionCliApplication()
-    original_review = app.authority_review
-
-    def noisy_review(
-        *,
-        project_id: int,
-        include_spec: str = "auto",
-        output_format: str = "json",
-    ) -> JsonObject:
-        sys.stdout.write("LiteLLM completion() model=openai/example\n")
-        return original_review(
-            project_id=project_id,
-            include_spec=include_spec,
-            output_format=output_format,
-        )
-
-    app.authority_review = noisy_review  # type: ignore[method-assign]
+    app.noisy_review_stdout = True
 
     rc = main(
         ["authority", "review", "--project-id", str(PROJECT_ID)],

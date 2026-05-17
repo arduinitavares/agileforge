@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from sqlalchemy import create_engine, text
+from sqlmodel import select
 
 from models.core import Product
 from models.specs import (
@@ -118,17 +119,35 @@ def _accept_spec(
     decided_at: datetime | None = None,
 ) -> SpecAuthorityAcceptance:
     """Persist an accepted authority decision for a spec version."""
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    compiled_authority = session.exec(
+        select(CompiledSpecAuthority).where(
+            CompiledSpecAuthority.spec_version_id == spec_version_id
+        )
+    ).first()
+    pending_authority_id = (
+        require_id(compiled_authority.authority_id, "authority_id")
+        if compiled_authority is not None
+        else spec_version_id
+    )
     acceptance = SpecAuthorityAcceptance(
         product_id=product_id,
-        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        spec_version_id=spec_version_id,
         status="accepted",
-        policy="human",
+        policy="manual",
         decided_by="reviewer",
         decided_at=decided_at or datetime(2026, 5, 14, 13, tzinfo=UTC),
         rationale="Accepted for test",
         compiler_version="1.0.0",
         prompt_hash="a" * 64,
         spec_hash=spec.spec_hash,
+        pending_authority_id=pending_authority_id,
+        actor_mode="human_review_token",
+        review_completeness="complete",
+        terminal_decision_key=(
+            f"{product_id}:{spec_version_id}:{pending_authority_id}"
+        ),
+        provenance_source="test",
     )
     session.add(acceptance)
     session.commit()
