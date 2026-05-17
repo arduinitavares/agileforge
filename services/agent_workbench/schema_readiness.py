@@ -148,7 +148,12 @@ def check_schema_readiness(
 
 
 def check_authority_decision_readiness(engine: Engine) -> SchemaReadiness:
-    """Return readiness for authority decision write-path storage."""
+    """
+    Return readiness for authority decision write-path storage.
+
+    Authority decision write services must call this before using the guarded
+    decision contract introduced in storage schema v3.
+    """
     return check_schema_readiness(engine, AUTHORITY_DECISION_REQUIREMENTS)
 
 

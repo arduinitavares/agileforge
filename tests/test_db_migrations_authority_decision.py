@@ -76,6 +76,17 @@ def _create_minimal_compiled_authority_table(engine: Engine) -> None:
         conn.execute(text(MINIMAL_COMPILED_AUTHORITY_SQL))
 
 
+def _acceptance_columns(engine: Engine) -> set[str]:
+    return {
+        column["name"]
+        for column in inspect(engine).get_columns("spec_authority_acceptance")
+    }
+
+
+def _assert_no_authority_decision_columns_added(engine: Engine) -> None:
+    assert _acceptance_columns(engine).isdisjoint(NEW_AUTHORITY_DECISION_COLUMNS)
+
+
 def _insert_legacy_acceptance(
     engine: Engine,
     *,
@@ -285,6 +296,8 @@ def test_authority_decision_migration_blocks_ambiguous_legacy_acceptance(
     with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
         migrate_spec_authority_tables(engine)
 
+    _assert_no_authority_decision_columns_added(engine)
+
 
 def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
     tmp_path: Path,
@@ -301,6 +314,8 @@ def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
 
     with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
         migrate_spec_authority_tables(engine)
+
+    _assert_no_authority_decision_columns_added(engine)
 
 
 def test_authority_decision_migration_blocks_duplicate_legacy_terminal_keys(
@@ -334,27 +349,106 @@ def test_authority_decision_migration_blocks_duplicate_legacy_terminal_keys(
     ):
         migrate_spec_authority_tables(engine)
 
-    with engine.connect() as conn:
-        rows = (
-            conn.execute(
-                text(
-                    """
-                SELECT pending_authority_id,
-                       terminal_decision_key,
-                       provenance_source
-                FROM spec_authority_acceptance
-                ORDER BY id
+    _assert_no_authority_decision_columns_added(engine)
+
+
+def test_authority_decision_migration_blocks_duplicate_legacy_terminal_keys_before_ddl(
+    tmp_path: Path,
+) -> None:
+    """Reject duplicate generated terminal keys before adding new columns."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="accepted",
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="rejected",
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Duplicate legacy authority terminal decision",
+    ):
+        migrate_spec_authority_tables(engine)
+
+    _assert_no_authority_decision_columns_added(engine)
+
+
+def test_authority_decision_migration_blocks_existing_duplicate_terminal_keys(
+    tmp_path: Path,
+) -> None:
+    """Reject duplicate non-null terminal keys before creating the unique index."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="accepted",
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="rejected",
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
                 """
-                )
+                ALTER TABLE spec_authority_acceptance
+                ADD COLUMN pending_authority_id INTEGER
+                """
             )
-            .mappings()
-            .all()
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE spec_authority_acceptance
+                ADD COLUMN terminal_decision_key VARCHAR
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET pending_authority_id = :authority_id,
+                    terminal_decision_key = :terminal_decision_key
+                """
+            ),
+            {
+                "authority_id": LEGACY_AUTHORITY_ID,
+                "terminal_decision_key": "7:11:13",
+            },
         )
 
-    assert rows
-    assert all(row["pending_authority_id"] is None for row in rows)
-    assert all(row["terminal_decision_key"] is None for row in rows)
-    assert all(row["provenance_source"] != "legacy_backfill" for row in rows)
+    with pytest.raises(
+        RuntimeError,
+        match="Duplicate existing authority terminal decision key",
+    ):
+        migrate_spec_authority_tables(engine)
+
+    indexes = {
+        row._mapping["name"]
+        for row in engine.connect().execute(
+            text("PRAGMA index_list('spec_authority_acceptance')")
+        )
+    }
+    assert "uq_spec_authority_terminal_decision_key" not in indexes
 
 
 def test_terminal_decision_unique_key_blocks_duplicate_accept_reject_rows(
