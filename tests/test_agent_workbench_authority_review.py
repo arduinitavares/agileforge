@@ -214,6 +214,69 @@ def test_review_includes_full_source_under_default_limit(
     assert spec["source_content_sha256"] == sha256_prefixed(_base_spec().encode())
 
 
+def test_review_uses_latest_spec_content_ref_instead_of_product_path(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review reads and hashes the latest SpecRegistry content_ref path only."""
+    spec_a = _base_spec()
+    spec_b = "# Submission Contract\n\nThis product path must not be read.\n"
+    project_id, spec_version_id, _authority_id, spec_path_a = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_a,
+            spec_filename="spec-a.md",
+        )
+    )
+    spec_path_b = tmp_path / "spec-b.md"
+    spec_path_b.write_text(spec_b, encoding="utf-8")
+    product = session.get(Product, project_id)
+    assert product is not None
+    product.spec_file_path = str(spec_path_b)
+    session.add(product)
+    session.commit()
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    assert spec["spec_version_id"] == spec_version_id
+    assert spec["resolved_path"] == str(spec_path_a.resolve())
+    assert spec["source_content"] == spec_a
+    assert spec["disk_sha256"] == sha256_prefixed(spec_a.encode("utf-8"))
+    assert spec["disk_sha256"] != sha256_prefixed(spec_b.encode("utf-8"))
+
+
+def test_review_missing_latest_spec_content_ref_does_not_fallback_to_product_path(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review returns a source error when latest SpecRegistry has no content_ref."""
+    project_id, _spec_version_id, _authority_id, spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+    spec = session.get(SpecRegistry, _spec_version_id)
+    assert spec is not None
+    spec.content_ref = None
+    session.add(spec)
+    session.commit()
+    assert spec_path.is_file()
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SPEC_FILE_NOT_FOUND"
+    assert result["errors"][0]["details"]["path"] is None
+
+
 def test_review_omits_large_source_and_marks_omission_incomplete(
     session: Session,
     tmp_path: Path,
@@ -245,6 +308,40 @@ def test_review_omits_large_source_and_marks_omission_incomplete(
     assert result["data"]["guard_tokens"]["expected_omission_assessment"] == (
         "incomplete"
     )
+
+
+def test_review_omits_large_covered_source_and_marks_omission_incomplete(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Size-based source omission stays incomplete even when outline is covered."""
+    monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
+    covered_requirement = (
+        "The review output must include guard tokens, review tokens, source "
+        "evidence, compiled authority evidence, coverage summaries, and "
+        "deterministic guard fields for every pending authority packet."
+    )
+    spec_content = "# Submission Contract\n\n" + covered_requirement
+    artifact_json = _compiled_success_json(source_excerpt=covered_requirement)
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=artifact_json,
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    assert spec["content_included"] is False
+    assert spec["content_truncated"] is True
+    assert spec["coverage_summary"]["covered_sections"] == 1
+    assert spec["coverage_summary"]["omission_assessment"] == "incomplete"
 
 
 def test_review_token_changes_when_disk_hash_changes(
@@ -352,6 +449,67 @@ def test_malformed_markdown_emits_diagnostic_instead_of_failing(
             "message": "Fenced code block was not closed before end of file.",
         }
     ]
+
+
+def test_review_ignores_markdown_headings_inside_fenced_code(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Heading-looking fenced code lines stay inside the nearest section."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "```markdown\n"
+        "# Not A Heading\n"
+        "The fenced example must stay in this section.\n"
+        "```\n\n"
+        "## Background\n\n"
+        "Descriptive text.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    headings = [entry["heading"] for entry in result["data"]["spec"]["source_outline"]]
+    assert headings == ["Submission Contract", "Background"]
+
+
+def test_review_counts_fenced_code_as_one_content_block(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A fenced code block contributes one requirement-bearing content block."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "```json\n"
+        '{"field_a": "must exist"}\n'
+        '{"field_b": "must exist"}\n'
+        "```\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    summary = result["data"]["spec"]["coverage_summary"]
+    assert summary["uncovered_sections"] == 1
+    assert summary["unclassified_content_blocks"] == 1
 
 
 def test_missing_spec_file_returns_spec_file_not_found(

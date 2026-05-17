@@ -216,7 +216,6 @@ class AuthorityReviewService:
 
             loaded = _load_source_from_latest_spec(
                 latest_spec,
-                product=product,
                 repo_root=self._repo_root,
             )
             if isinstance(loaded, dict):
@@ -262,13 +261,19 @@ def _authority_not_pending_error(project_id: int) -> JsonDict:
     )
 
 
-def _spec_file_not_found_error(raw_path: str | None, resolved_path: Path) -> JsonDict:
+def _spec_file_not_found_error(
+    raw_path: str | None,
+    resolved_path: Path | None,
+) -> JsonDict:
     return error_envelope(
         command=AUTHORITY_REVIEW_COMMAND,
         error=workbench_error(
             ErrorCode.SPEC_FILE_NOT_FOUND,
             message="Stored specification path could not be found on disk.",
-            details={"path": raw_path, "resolved_path": str(resolved_path)},
+            details={
+                "path": raw_path,
+                "resolved_path": str(resolved_path) if resolved_path else None,
+            },
             remediation=["Restore the specification file or update the stored path."],
         ),
     )
@@ -297,11 +302,12 @@ def _spec_file_invalid_error(
 def _load_source_from_latest_spec(
     spec: SpecRegistry,
     *,
-    product: Product,
     repo_root: Path,
 ) -> _SourceLoad | JsonDict:
-    raw_path = spec.content_ref or product.spec_file_path
-    path = Path(raw_path or "")
+    raw_path = spec.content_ref
+    if not raw_path or not raw_path.strip():
+        return _spec_file_not_found_error(raw_path, None)
+    path = Path(raw_path)
     resolved_path = path if path.is_absolute() else (repo_root / path)
     resolved_path = resolved_path.resolve()
     if not resolved_path.is_file():
@@ -675,7 +681,7 @@ def _coverage_payload(
             for entry in outline
         )
     )
-    if not content_included and not complete:
+    if not content_included:
         complete = False
     coverage_summary = {
         **counts,
@@ -691,10 +697,20 @@ def _parse_markdown_sections(text: str) -> tuple[list[_Section], list[JsonDict]]
     current = _Section("ROOT", None, 1, max(len(lines), 1))
     content_before_heading = False
     section_number = 0
+    in_fence = False
     for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            content_before_heading = True
+            continue
+        if in_fence:
+            if stripped:
+                content_before_heading = True
+            continue
         match = _HEADING_RE.match(line)
         if match is None:
-            if line.strip():
+            if stripped:
                 content_before_heading = True
             continue
         if current.section_id != "ROOT" or content_before_heading:
@@ -730,6 +746,7 @@ def _parse_section_blocks(  # noqa: C901
     blocks: list[_ContentBlock] = []
     diagnostics: list[JsonDict] = []
     paragraph: list[tuple[int, str]] = []
+    fence_lines: list[tuple[int, str]] = []
     in_fence = False
     fence_start = 0
 
@@ -750,6 +767,17 @@ def _parse_section_blocks(  # noqa: C901
         if stripped.startswith("```"):
             flush_paragraph()
             if in_fence:
+                if fence_lines:
+                    block_text = "\n".join(line for _line_no, line in fence_lines)
+                    blocks.append(
+                        _content_block(
+                            block_text,
+                            fence_start,
+                            line_number,
+                            section.heading,
+                        )
+                    )
+                    fence_lines.clear()
                 in_fence = False
             else:
                 in_fence = True
@@ -757,9 +785,7 @@ def _parse_section_blocks(  # noqa: C901
             continue
         if in_fence:
             if stripped:
-                blocks.append(
-                    _content_block(stripped, line_number, line_number, section.heading)
-                )
+                fence_lines.append((line_number, line))
             continue
         if not stripped:
             flush_paragraph()
@@ -773,6 +799,16 @@ def _parse_section_blocks(  # noqa: C901
         paragraph.append((line_number, line))
     flush_paragraph()
     if in_fence:
+        if fence_lines:
+            block_text = "\n".join(line for _line_no, line in fence_lines)
+            blocks.append(
+                _content_block(
+                    block_text,
+                    fence_start,
+                    section.line_end,
+                    section.heading,
+                )
+            )
         diagnostics.append(
             {
                 "section_id": section.section_id,
@@ -780,8 +816,6 @@ def _parse_section_blocks(  # noqa: C901
                 "message": "Fenced code block was not closed before end of file.",
             }
         )
-        if fence_start and not any(block.line_start == fence_start for block in blocks):
-            pass
     return blocks, diagnostics
 
 
