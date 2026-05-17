@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from sqlalchemy import create_engine, text
 from sqlmodel import SQLModel
@@ -13,6 +13,10 @@ import services.agent_workbench.application as application_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
 from services.agent_workbench.application import AgentWorkbenchApplication
+from services.agent_workbench.authority_decision import (
+    AuthorityAcceptRequest,
+    AuthorityRejectRequest,
+)
 from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
@@ -39,6 +43,7 @@ WORKFLOW_FINGERPRINT = "sha256:" + "1" * 64
 CANDIDATES_FINGERPRINT = "sha256:" + "2" * 64
 AUTHORITY_FINGERPRINT = "sha256:" + "3" * 64
 PROJECT_FINGERPRINT = "sha256:" + "4" * 64
+REVIEW_TOKEN_FIXTURE = "review-token-123"  # noqa: S105
 
 CLI_MUTATION_LEDGER_CREATE_SQL_PHASE_2A = """
 CREATE TABLE IF NOT EXISTS cli_mutation_ledger (
@@ -159,6 +164,45 @@ class _SprintReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _AuthorityPendingReviewReadProjection(_FakeReadProjection):
+    """Fake read projection for setup blocked on authority review."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return pending authority review workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_pending_review",
+        }
+        return result
+
+
+class _AuthorityRejectedReadProjection(_FakeReadProjection):
+    """Fake read projection for setup blocked on rejected authority."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return rejected authority workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        }
+        return result
+
+
+class _SetupFailedReadProjection(_FakeReadProjection):
+    """Fake read projection for failed setup."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return failed setup workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "failed",
+        }
+        return result
+
+
 class _ChangedProjectReadProjection(_FakeReadProjection):
     """Fake read projection with a changed project fingerprint."""
 
@@ -268,6 +312,62 @@ class _FakeProjectSetupRunner:
         }
 
 
+class _FakeAuthorityReview:
+    """Fake authority review service used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        """Return a review payload and record call arguments."""
+        self.calls.append(
+            {
+                "project_id": project_id,
+                "include_spec": include_spec,
+                "output_format": output_format,
+            }
+        )
+        return {
+            "ok": True,
+            "data": {"review_token": REVIEW_TOKEN_FIXTURE},
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _FakeAuthorityDecisionRunner:
+    """Fake authority decision runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def accept(self, request: AuthorityAcceptRequest) -> dict[str, Any]:
+        """Record an accept request."""
+        self.calls.append(("accept", request))
+        return {
+            "ok": True,
+            "data": {"decision": "accepted", "project_id": request.project_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
+        """Record a reject request."""
+        self.calls.append(("reject", request))
+        return {
+            "ok": True,
+            "data": {"decision": "rejected", "project_id": request.project_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
     app = AgentWorkbenchApplication(
@@ -358,6 +458,60 @@ def test_application_routes_project_setup_retry_to_setup_runner() -> None:
     assert request.dry_run_id is None
     assert request.correlation_id == "corr-1"
     assert request.changed_by == "test-agent"
+
+
+def test_application_authority_review_delegates_to_review_service() -> None:
+    """Verify authority review facade delegates to the review service."""
+    review = _FakeAuthorityReview()
+    app = AgentWorkbenchApplication(authority_review=review)
+
+    result = app.authority_review(
+        project_id=PROJECT_ID,
+        include_spec="summary",
+        output_format="json",
+    )
+
+    assert result["data"]["review_token"] == REVIEW_TOKEN_FIXTURE
+    assert review.calls == [
+        {
+            "project_id": PROJECT_ID,
+            "include_spec": "summary",
+            "output_format": "json",
+        }
+    ]
+
+
+def test_application_authority_accept_delegates_to_decision_runner() -> None:
+    """Verify authority accept facade delegates with the request model."""
+    runner = _FakeAuthorityDecisionRunner()
+    app = AgentWorkbenchApplication(authority_decision_runner=runner)
+    request = AuthorityAcceptRequest(
+        project_id=PROJECT_ID,
+        review_token=REVIEW_TOKEN_FIXTURE,
+        idempotency_key="authority-accept-key",
+    )
+
+    result = app.authority_accept(request)
+
+    assert result["data"] == {"decision": "accepted", "project_id": PROJECT_ID}
+    assert runner.calls == [("accept", request)]
+
+
+def test_application_authority_reject_delegates_to_decision_runner() -> None:
+    """Verify authority reject facade delegates with the request model."""
+    runner = _FakeAuthorityDecisionRunner()
+    app = AgentWorkbenchApplication(authority_decision_runner=runner)
+    request = AuthorityRejectRequest(
+        project_id=PROJECT_ID,
+        review_token=REVIEW_TOKEN_FIXTURE,
+        idempotency_key="authority-reject-key",
+        reason="Source requirements are incomplete.",
+    )
+
+    result = app.authority_reject(request)
+
+    assert result["data"] == {"decision": "rejected", "project_id": PROJECT_ID}
+    assert runner.calls == [("reject", request)]
 
 
 def test_application_keeps_falsey_injected_dependencies() -> None:
@@ -474,6 +628,131 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
         "errors": [],
     }
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> None:  # noqa: E501
+    """Route setup pending review to authority review before decision commands."""
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityPendingReviewReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7"
+    ]
+    assert result["data"]["decision_commands_after_review"] == [
+        (
+            "agileforge authority accept --project-id 7 "
+            "--review-token <review_token>"
+        ),
+        (
+            "agileforge authority reject --project-id 7 "
+            "--review-token <review_token> --reason <reason>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_routes_rejected_authority_to_recompile_unavailable_action() -> None:  # noqa: E501
+    """Route rejected authority to unavailable spec update/recompile action."""
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityRejectedReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["next_actions"] == [
+        {
+            "command": (
+                "agileforge project spec update --project-id 7 "
+                "--spec-file <updated-spec-file>"
+            ),
+            "installed": False,
+            "reason": "Spec update/recompile is required after authority rejection.",
+        }
+    ]
+
+
+def test_workflow_next_no_longer_calls_sprint_context_pack_when_setup_pending_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep authority review setup routing independent from sprint context packs."""
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityPendingReviewReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    def forbidden_context_pack(
+        *,
+        project_id: int,
+        phase: str = "overview",
+    ) -> NoReturn:
+        del project_id, phase
+        message = "workflow_next must not call context_pack"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(app, "context_pack", forbidden_context_pack)
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7"
+    ]
+
+
+def test_workflow_next_routes_failed_setup_to_retry_action() -> None:
+    """Route failed setup to setup retry instead of sprint planning."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SetupFailedReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge project setup retry --project-id 7 "
+            "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+            "--expected-context-fingerprint <expected_context_fingerprint>"
+        )
+    ]
+
+
+def test_workflow_next_failed_setup_does_not_require_authority_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep failed setup retry routing available without authority projection."""
+    app = AgentWorkbenchApplication(read_projection=_SetupFailedReadProjection())
+
+    def forbidden_authority_status(*, project_id: int) -> NoReturn:
+        del project_id
+        message = "failed setup retry should not require authority status"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(app, "authority_status", forbidden_authority_status)
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge project setup retry --project-id 7 "
+            "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+            "--expected-context-fingerprint <expected_context_fingerprint>"
+        )
+    ]
 
 
 def test_application_workflow_next_fingerprint_changes_with_pack_inputs() -> None:

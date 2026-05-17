@@ -8,7 +8,13 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 from models.db import get_engine
+from services.agent_workbench.authority_decision import (
+    AuthorityAcceptRequest,
+    AuthorityDecisionRunner,
+    AuthorityRejectRequest,
+)
 from services.agent_workbench.authority_projection import AuthorityProjectionService
+from services.agent_workbench.authority_review import AuthorityReviewService
 from services.agent_workbench.command_registry import installed_command_names
 from services.agent_workbench.command_schema import (
     capabilities_payload,
@@ -32,6 +38,8 @@ from services.agent_workbench.schema_readiness import (
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
+
+
 class _ReadProjection(Protocol):
     """Read projection methods exposed by the application facade."""
 
@@ -85,6 +93,32 @@ class _ProjectSetupRunner(Protocol):
         ...
 
 
+class _AuthorityReview(Protocol):
+    """Authority review methods exposed through the facade."""
+
+    def review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        """Return a pending authority review packet."""
+        ...
+
+
+class _AuthorityDecisionRunner(Protocol):
+    """Authority decision methods exposed through the facade."""
+
+    def accept(self, request: AuthorityAcceptRequest) -> dict[str, Any]:
+        """Accept pending authority from a guarded request."""
+        ...
+
+    def reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
+        """Reject pending authority from a guarded request."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
@@ -94,11 +128,15 @@ class AgentWorkbenchApplication:
         read_projection: _ReadProjection | None = None,
         authority_projection: _AuthorityProjection | None = None,
         project_setup_runner: _ProjectSetupRunner | None = None,
+        authority_review: _AuthorityReview | None = None,
+        authority_decision_runner: _AuthorityDecisionRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
         self._authority_projection = authority_projection
         self._project_setup_runner = project_setup_runner
+        self._authority_review = authority_review
+        self._authority_decision_runner = authority_decision_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -187,6 +225,28 @@ class AgentWorkbenchApplication:
 
     def workflow_next(self, *, project_id: int) -> dict[str, Any]:
         """Return installed next commands for the current workflow state."""
+        workflow = self.workflow_state(project_id=project_id)
+        if not workflow.get("ok"):
+            return workflow
+
+        setup_status = _setup_status(workflow)
+        if _fsm_state_from_envelope(workflow) == "SETUP_REQUIRED" and setup_status in {
+            "authority_pending_review",
+            "authority_rejected",
+            "failed",
+        }:
+            authority = (
+                self.authority_status(project_id=project_id)
+                if setup_status != "failed"
+                else None
+            )
+            return _setup_workflow_next(
+                project_id=project_id,
+                setup_status=setup_status,
+                workflow=workflow,
+                authority=authority,
+            )
+
         pack = self.context_pack(project_id=project_id, phase="sprint-planning")
         if not pack.get("ok"):
             return pack
@@ -357,6 +417,28 @@ class AgentWorkbenchApplication:
         )
         return self._get_project_setup_runner().retry_setup(request)
 
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> dict[str, Any]:
+        """Return a pending authority review packet."""
+        return self._get_authority_review().review(
+            project_id=project_id,
+            include_spec=include_spec,
+            output_format=output_format,
+        )
+
+    def authority_accept(self, request: AuthorityAcceptRequest) -> dict[str, Any]:
+        """Accept pending authority through the decision runner."""
+        return self._get_authority_decision_runner().accept(request)
+
+    def authority_reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
+        """Reject pending authority through the decision runner."""
+        return self._get_authority_decision_runner().reject(request)
+
     def authority_status(self, *, project_id: int) -> dict[str, Any]:
         """Return authority status projection."""
         return self._get_authority_projection().status(project_id=project_id)
@@ -400,11 +482,150 @@ class AgentWorkbenchApplication:
             self._project_setup_runner = ProjectSetupMutationRunner(engine=get_engine())
         return self._project_setup_runner
 
+    def _get_authority_review(self) -> _AuthorityReview:
+        """Return the authority review service, constructing the default lazily."""
+        if self._authority_review is None:
+            self._authority_review = AuthorityReviewService()
+        return self._authority_review
+
+    def _get_authority_decision_runner(self) -> _AuthorityDecisionRunner:
+        """Return the authority decision runner, constructing the default lazily."""
+        if self._authority_decision_runner is None:
+            self._authority_decision_runner = AuthorityDecisionRunner()
+        return self._authority_decision_runner
+
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
     """Return dictionary data from a successful child projection."""
     data = envelope.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def _fsm_state_from_envelope(envelope: dict[str, Any]) -> str | None:
+    """Return normalized FSM state from a workflow envelope."""
+    data = _envelope_data(envelope)
+    state = data.get("state")
+    state_data = state if isinstance(state, dict) else {}
+    fsm_state = state_data.get("fsm_state")
+    return str(fsm_state).strip().upper() if fsm_state is not None else None
+
+
+def _setup_status(envelope: dict[str, Any]) -> str | None:
+    """Return normalized setup status from a workflow envelope."""
+    data = _envelope_data(envelope)
+    state = data.get("state")
+    state_data = state if isinstance(state, dict) else {}
+    setup_status = state_data.get("setup_status")
+    return str(setup_status).strip().lower() if setup_status is not None else None
+
+
+def _setup_workflow_next(
+    *,
+    project_id: int,
+    setup_status: str,
+    workflow: dict[str, Any],
+    authority: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return setup substate routing without loading sprint-planning context."""
+    if authority is not None and not authority.get("ok"):
+        return authority
+
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": [],
+        "blocked_commands": [],
+        "blocked_future_commands": [],
+    }
+    if setup_status == "authority_pending_review":
+        data["next_valid_commands"] = [
+            f"agileforge authority review --project-id {project_id}"
+        ]
+        data["decision_commands_after_review"] = [
+            (
+                f"agileforge authority accept --project-id {project_id} "
+                "--review-token <review_token>"
+            ),
+            (
+                f"agileforge authority reject --project-id {project_id} "
+                "--review-token <review_token> --reason <reason>"
+            ),
+        ]
+    elif setup_status == "authority_rejected":
+        data["next_actions"] = [
+            {
+                "command": (
+                    "agileforge project spec update "
+                    f"--project-id {project_id} --spec-file "
+                    f"{_authority_spec_file_template(authority)}"
+                ),
+                "installed": False,
+                "reason": (
+                    "Spec update/recompile is required after authority rejection."
+                ),
+            }
+        ]
+    elif setup_status == "failed":
+        data["next_valid_commands"] = [
+            (
+                f"agileforge project setup retry --project-id {project_id} "
+                "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+                "--expected-context-fingerprint <expected_context_fingerprint>"
+            )
+        ]
+
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "authority": (
+                _fingerprint_input(_envelope_data(authority))
+                if authority is not None
+                else {}
+            ),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "decision_commands_after_review": data.get(
+                "decision_commands_after_review",
+                [],
+            ),
+            "next_actions": data.get("next_actions", []),
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": [
+            *_section_warnings(
+                section="workflow",
+                source="workflow_state",
+                envelope=workflow,
+            ),
+            *(
+                _section_warnings(
+                    section="authority",
+                    source="authority_status",
+                    envelope=authority,
+                )
+                if authority is not None
+                else []
+            ),
+        ],
+        "errors": [],
+    }
+
+
+def _authority_spec_file_template(authority: dict[str, Any]) -> str:
+    """Return a concrete disk spec path when available, else a template token."""
+    authority_data = _envelope_data(authority)
+    disk_spec = authority_data.get("disk_spec")
+    if isinstance(disk_spec, dict):
+        resolved_path = disk_spec.get("resolved_path")
+        if isinstance(resolved_path, str) and resolved_path:
+            return resolved_path
+    return "<updated-spec-file>"
 
 
 def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:

@@ -20,6 +20,7 @@ class CommandMetadata:
     accepts_expected_artifact_fingerprint: bool = False
     accepts_expected_context_fingerprint: bool = False
     accepts_expected_authority_version: bool = False
+    guard_policy: tuple[str, ...] = ()
     requires_idempotency_key: bool = False
     idempotency_policy: dict[str, str] = field(
         default_factory=lambda: {
@@ -209,10 +210,109 @@ _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
     ),
 )
 
+_AUTHORITY_DECISION_GUARDS: tuple[str, ...] = (
+    "review_token",
+    "pending_authority_id",
+    "expected_authority_fingerprint",
+    "expected_source_spec_hash",
+    "expected_disk_spec_hash",
+    "expected_resolved_spec_path",
+    "expected_state",
+    "expected_setup_status",
+    "expected_content_included",
+    "expected_omission_assessment",
+    "expected_coverage_summary_fingerprint",
+)
+
+_PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge authority review",
+        mutates=False,
+        phase="phase_2c",
+        input_required=("project_id",),
+        input_optional=("include_spec", "format"),
+        errors=(
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_PENDING.value,
+            ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge authority accept",
+        mutates=True,
+        phase="phase_2c",
+        guard_policy=_AUTHORITY_DECISION_GUARDS,
+        input_required=("project_id", "idempotency_key"),
+        input_optional=(
+            *_AUTHORITY_DECISION_GUARDS,
+            "allow_incomplete_review",
+            "incomplete_review_rationale",
+            "changed_by",
+            "actor_mode",
+            "policy",
+            "correlation_id",
+        ),
+        errors=(
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_PENDING.value,
+            ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value,
+            ErrorCode.AUTHORITY_ALREADY_DECIDED.value,
+            ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
+            ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.STALE_AUTHORITY_VERSION.value,
+            ErrorCode.STALE_ARTIFACT_FINGERPRINT.value,
+            ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+            ErrorCode.MUTATION_RESUME_CONFLICT.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge authority reject",
+        mutates=True,
+        phase="phase_2c",
+        guard_policy=_AUTHORITY_DECISION_GUARDS,
+        input_required=("project_id", "reason", "idempotency_key"),
+        input_optional=(
+            *_AUTHORITY_DECISION_GUARDS,
+            "changed_by",
+            "actor_mode",
+            "policy",
+            "correlation_id",
+        ),
+        errors=(
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_PENDING.value,
+            ErrorCode.AUTHORITY_ALREADY_DECIDED.value,
+            ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
+            ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.STALE_AUTHORITY_VERSION.value,
+            ErrorCode.STALE_ARTIFACT_FINGERPRINT.value,
+            ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+            ErrorCode.MUTATION_RESUME_CONFLICT.value,
+        ),
+    ),
+)
+
 
 def installed_commands() -> tuple[CommandMetadata, ...]:
     """Return installed command metadata for the current workbench phase."""
-    return (*_PHASE_1_COMMANDS, *_PHASE_2A_COMMANDS, *_PHASE_2B_COMMANDS)
+    return (
+        *_PHASE_1_COMMANDS,
+        *_PHASE_2A_COMMANDS,
+        *_PHASE_2B_COMMANDS,
+        *_PHASE_2C_COMMANDS,
+    )
 
 
 def installed_command_names() -> set[str]:

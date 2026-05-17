@@ -39,6 +39,7 @@ def capabilities_payload() -> dict[str, Any]:
             "accepts_expected_authority_version": (
                 command.accepts_expected_authority_version
             ),
+            "guard_policy": _guard_policy(command),
             "input": {
                 "required": list(command.input_required),
                 "optional": list(command.input_optional),
@@ -97,6 +98,9 @@ def _command_metadata(command_name: str) -> CommandMetadata:
 
 def _guard_policy(command: CommandMetadata) -> list[str]:
     """Return enabled guard field names for a command contract."""
+    if command.guard_policy:
+        return list(command.guard_policy)
+
     guard_fields = [
         ("expected_state", command.accepts_expected_state),
         (
