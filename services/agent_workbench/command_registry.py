@@ -244,6 +244,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=True,
         phase="phase_2c",
         guard_policy=_AUTHORITY_DECISION_GUARDS,
+        requires_idempotency_key=True,
         input_required=("project_id", "idempotency_key"),
         input_optional=(
             *_AUTHORITY_DECISION_GUARDS,
@@ -277,6 +278,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=True,
         phase="phase_2c",
         guard_policy=_AUTHORITY_DECISION_GUARDS,
+        requires_idempotency_key=True,
         input_required=("project_id", "reason", "idempotency_key"),
         input_optional=(
             *_AUTHORITY_DECISION_GUARDS,
@@ -289,6 +291,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.SCHEMA_NOT_READY.value,
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_PENDING.value,
+            ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value,
             ErrorCode.AUTHORITY_ALREADY_DECIDED.value,
             ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
             ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value,

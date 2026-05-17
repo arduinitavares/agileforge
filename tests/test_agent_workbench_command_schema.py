@@ -264,6 +264,7 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     schema = command_schema_payload("agileforge authority accept")
 
     assert schema["mutates"] is True
+    assert schema["idempotency_required"] is True
     assert schema["input"]["required"] == ["project_id", "idempotency_key"]
     assert "review_token" in schema["input"]["optional"]
     assert "expected_authority_fingerprint" in schema["input"]["optional"]
@@ -285,6 +286,7 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     schema = command_schema_payload("agileforge authority reject")
 
     assert schema["mutates"] is True
+    assert schema["idempotency_required"] is True
     assert schema["input"]["required"] == ["project_id", "reason", "idempotency_key"]
     assert "review_token" in schema["input"]["optional"]
     assert "expected_source_spec_hash" in schema["input"]["optional"]
@@ -295,7 +297,7 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     assert "expected_source_spec_hash" in schema["guard_policy"]
     assert ErrorCode.AUTHORITY_ALREADY_DECIDED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_SOURCE_CHANGED.value in schema["errors"]
-    assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value not in schema["errors"]
+    assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
 
 
 def test_phase_2c_authority_commands_are_registered_and_available() -> None:
