@@ -196,7 +196,8 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
             "command": (
                 "agileforge authority accept "
                 f"--project-id {project_id} "
-                f"--review-token {guard_tokens['review_token']}"
+                f"--review-token {guard_tokens['review_token']} "
+                "--idempotency-key <idempotency_key>"
             ),
             "mode": "human",
             "installed": True,
@@ -208,7 +209,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
                 "agileforge authority reject "
                 f"--project-id {project_id} "
                 f"--review-token {guard_tokens['review_token']} "
-                '--reason "..."'
+                '--reason "..." --idempotency-key <idempotency_key>'
             ),
             "mode": "human",
             "installed": True,
@@ -249,6 +250,7 @@ def test_review_text_format_returns_ok_packet_with_human_text(
     assert "Review token:" in data["text"]
     assert "ACCEPT:" in data["text"]
     assert "REJECT:" in data["text"]
+    assert "--idempotency-key <idempotency_key>" in data["text"]
 
 
 def test_review_preserves_rejected_features_from_valid_compiled_authority(

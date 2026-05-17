@@ -549,23 +549,24 @@ def _setup_workflow_next(
             {
                 "command": (
                     f"agileforge authority accept --project-id {project_id} "
-                    "--review-token <review_token>"
+                    "--review-token <review_token> "
+                    "--idempotency-key <idempotency_key>"
                 ),
                 "installed": True,
                 "requires_cli_installation": False,
                 "after_review": True,
-                "requires": ["review_token"],
+                "requires": ["review_token", "idempotency_key"],
             },
             {
                 "command": (
                     f"agileforge authority reject --project-id {project_id} "
                     "--review-token <review_token> "
-                    "--reason <reason>"
+                    "--reason <reason> --idempotency-key <idempotency_key>"
                 ),
                 "installed": True,
                 "requires_cli_installation": False,
                 "after_review": True,
-                "requires": ["review_token", "reason"],
+                "requires": ["review_token", "reason", "idempotency_key"],
             },
         ]
     elif setup_status == "authority_rejected":
