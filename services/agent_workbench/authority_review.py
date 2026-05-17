@@ -610,6 +610,7 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
                 "mode": "human",
                 "installed": True,
                 "requires_cli_installation": False,
+                "requires": ["review_token", "idempotency_key"],
                 "reason": "Record the reviewed pending authority as canonical.",
             },
             {
@@ -622,6 +623,7 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
                 "mode": "human",
                 "installed": True,
                 "requires_cli_installation": False,
+                "requires": ["review_token", "reason", "idempotency_key"],
                 "reason": "Record that the pending authority must not be used.",
             },
         ],

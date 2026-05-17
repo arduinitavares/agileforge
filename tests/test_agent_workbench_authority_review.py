@@ -202,6 +202,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
             "mode": "human",
             "installed": True,
             "requires_cli_installation": False,
+            "requires": ["review_token", "idempotency_key"],
             "reason": "Record the reviewed pending authority as canonical.",
         },
         {
@@ -214,6 +215,7 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
             "mode": "human",
             "installed": True,
             "requires_cli_installation": False,
+            "requires": ["review_token", "reason", "idempotency_key"],
             "reason": "Record that the pending authority must not be used.",
         },
     ]

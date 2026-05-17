@@ -14,6 +14,7 @@ type JsonObject = dict[str, object]
 
 PROJECT_ID = 7
 INVALID_COMMAND_EXIT_CODE = 2
+AUTHORITY_REVIEW_REQUIRED_EXIT_CODE = 4
 
 
 class _AuthorityDecisionCliApplication:
@@ -252,6 +253,23 @@ def test_authority_accept_with_review_token_does_not_require_idempotency_key(
     assert request["actor_mode"] == "cli-human"
 
 
+def test_authority_accept_without_token_non_tty_requires_review(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify non-interactive accept requires a review token."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        ["authority", "accept", "--project-id", str(PROJECT_ID)],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == AUTHORITY_REVIEW_REQUIRED_EXIT_CODE
+    assert _first_error(payload)["code"] == "AUTHORITY_REVIEW_REQUIRED"
+    assert app.calls == []
+
+
 def test_authority_accept_explicit_agent_mode_requires_idempotency_key(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -331,6 +349,30 @@ def test_authority_reject_requires_reason(
     payload = _stdout_payload(capsys)
     assert rc == INVALID_COMMAND_EXIT_CODE
     assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
+def test_authority_reject_without_token_non_tty_requires_review(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify non-interactive reject requires a review token."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--reason",
+            "Spec needs revision.",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == AUTHORITY_REVIEW_REQUIRED_EXIT_CODE
+    assert _first_error(payload)["code"] == "AUTHORITY_REVIEW_REQUIRED"
     assert app.calls == []
 
 
