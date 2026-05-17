@@ -265,12 +265,12 @@ def _accept_request(
     idempotency_key: str = "accept-key",
     **kwargs: Any,
 ) -> AuthorityAcceptRequest:
+    values = {"changed_by": "decision-test", **kwargs}
     return AuthorityAcceptRequest(
         project_id=project_id,
         review_token=review_token,
         idempotency_key=idempotency_key,
-        changed_by="decision-test",
-        **kwargs,
+        **values,
     )
 
 
@@ -671,6 +671,37 @@ def test_idempotency_same_key_different_request_fails(
             project_id=project_id,
             review_token=snapshot.review_token,
             policy="manual",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_idempotency_same_key_different_changed_by_fails(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    runner = _runner(session, _workflow_for(project_id))
+    assert runner.accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=snapshot.review_token,
+            changed_by="first-actor",
+        )
+    )["ok"]
+
+    result = runner.accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=snapshot.review_token,
+            changed_by="second-actor",
         )
     )
 

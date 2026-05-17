@@ -867,6 +867,7 @@ def normalized_decision_request_hash(
             },
             "policy": request.policy,
             "actor_mode": request.actor_mode,
+            "decided_by": request.changed_by or request.actor_mode,
             "allow_incomplete_review": (
                 request.allow_incomplete_review
                 if isinstance(request, AuthorityAcceptRequest)
