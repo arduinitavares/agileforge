@@ -233,6 +233,114 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
     ]
 
 
+def test_review_fallback_preserves_persisted_authority_fields(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Fallback review rendering preserves normalized persisted authority fields."""
+    project_id, _spec_version_id, authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+            artifact_json=json.dumps(
+                {
+                    "assumptions": [
+                        {
+                            "id": "ASM-7",
+                            "text": "Review assumes CLI output is JSON.",
+                            "support": "direct",
+                            "source_refs": ["Submission Contract"],
+                            "source_excerpt": (
+                                "The review output must include guard tokens."
+                            ),
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    assert authority is not None
+    authority.eligible_feature_ids = json.dumps(
+        [
+            {
+                "id": "ELIG-2",
+                "text": "Allow read-only packet rendering.",
+                "support": "direct",
+                "source_refs": ["Submission Contract"],
+                "source_excerpt": "The review output must include guard tokens.",
+            }
+        ]
+    )
+    authority.rejected_features = json.dumps(
+        [
+            {
+                "id": "REJ-9",
+                "text": "Reject automatic authority acceptance.",
+                "support": "direct",
+                "source_refs": ["Manual Checkpoint"],
+                "source_excerpt": "Humans must approve authority before use.",
+            }
+        ]
+    )
+    authority.spec_gaps = json.dumps(
+        [
+            {
+                "id": "GAP-3",
+                "text": "Spec does not define text output formatting.",
+                "support": "inferred",
+                "source_refs": [],
+                "source_excerpt": None,
+            }
+        ]
+    )
+    session.add(authority)
+    session.commit()
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    artifact = result["data"]["pending_authority"]["artifact"]
+    assert artifact["eligible_feature_rules"] == [
+        {
+            "id": "ELIG-2",
+            "text": "Allow read-only packet rendering.",
+            "support": "direct",
+            "source_refs": ["Submission Contract"],
+            "source_excerpt": "The review output must include guard tokens.",
+        }
+    ]
+    assert artifact["rejected_features"] == [
+        {
+            "id": "REJ-9",
+            "text": "Reject automatic authority acceptance.",
+            "support": "direct",
+            "source_refs": ["Manual Checkpoint"],
+            "source_excerpt": "Humans must approve authority before use.",
+        }
+    ]
+    assert artifact["gaps"] == [
+        {
+            "id": "GAP-3",
+            "text": "Spec does not define text output formatting.",
+            "support": "inferred",
+            "source_refs": [],
+            "source_excerpt": None,
+        }
+    ]
+    assert artifact["assumptions"] == [
+        {
+            "id": "ASM-7",
+            "text": "Review assumes CLI output is JSON.",
+            "support": "direct",
+            "source_refs": ["Submission Contract"],
+            "source_excerpt": "The review output must include guard tokens.",
+        }
+    ]
+
+
 def test_review_includes_full_source_under_default_limit(
     session: Session,
     tmp_path: Path,

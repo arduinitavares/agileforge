@@ -741,34 +741,30 @@ def _authority_artifact_payload(
 
 
 def _fallback_authority_artifact(authority: CompiledSpecAuthority) -> JsonDict:
+    assumptions = _normalized_persisted_items(
+        _fallback_assumption_items(authority.compiled_artifact_json),
+        prefix="ASM",
+    )
     return {
         "domain": None,
         "scope_themes": _json_list(authority.scope_themes),
-        "invariants": [
-            {
-                "id": str(item.get("id", f"INV-{index}")),
-                "text": str(item.get("text", item)),
-                "support": "inferred",
-                "source_refs": [],
-                "source_excerpt": None,
-            }
-            if isinstance(item, Mapping)
-            else _plain_item(item_id=f"INV-{index}", text=str(item))
-            for index, item in enumerate(_json_list(authority.invariants), start=1)
-        ],
-        "eligible_feature_rules": [],
-        "rejected_features": [
-            _plain_item(item_id=f"REJ-{index}", text=str(item))
-            for index, item in enumerate(
-                _json_list(authority.rejected_features),
-                start=1,
-            )
-        ],
-        "gaps": [
-            _plain_item(item_id=f"GAP-{index}", text=str(item))
-            for index, item in enumerate(_json_list(authority.spec_gaps), start=1)
-        ],
-        "assumptions": [],
+        "invariants": _normalized_persisted_items(
+            _json_list(authority.invariants),
+            prefix="INV",
+        ),
+        "eligible_feature_rules": _normalized_persisted_items(
+            _json_list(authority.eligible_feature_ids),
+            prefix="ELIG",
+        ),
+        "rejected_features": _normalized_persisted_items(
+            _json_list(authority.rejected_features),
+            prefix="REJ",
+        ),
+        "gaps": _normalized_persisted_items(
+            _json_list(authority.spec_gaps),
+            prefix="GAP",
+        ),
+        "assumptions": assumptions,
         "source_map": {},
     }
 
@@ -781,6 +777,30 @@ def _json_list(raw: str | None) -> list[Any]:
     except JSONDecodeError:
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _json_mapping(raw: str | None) -> Mapping[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, Mapping) else {}
+
+
+def _fallback_assumption_items(raw: str | None) -> list[Any]:
+    parsed = _json_mapping(raw)
+    assumptions = parsed.get("assumptions")
+    if isinstance(assumptions, list):
+        return assumptions
+    result = parsed.get("result")
+    if isinstance(result, Mapping) and isinstance(result.get("assumptions"), list):
+        return list(result["assumptions"])
+    root = parsed.get("root")
+    if isinstance(root, Mapping) and isinstance(root.get("assumptions"), list):
+        return list(root["assumptions"])
+    return []
 
 
 def _normalized_persisted_items(items: list[Any], *, prefix: str) -> list[JsonDict]:
