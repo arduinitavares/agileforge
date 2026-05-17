@@ -678,6 +678,10 @@ def _authority_artifact_payload(
         _plain_item(item_id=f"ASM-{index}", text=assumption)
         for index, assumption in enumerate(artifact.assumptions, start=1)
     ]
+    rejected_features = _normalized_persisted_items(
+        _json_list(authority.rejected_features),
+        prefix="REJ",
+    )
     classification_evidence = [
         *[
             _ClassificationEvidence(
@@ -695,6 +699,14 @@ def _authority_artifact_payload(
             )
             for item in assumptions
         ],
+        *[
+            _ClassificationEvidence(
+                item_id=str(item["id"]),
+                text=str(item["text"]),
+                kind="rejected_feature",
+            )
+            for item in rejected_features
+        ],
     ]
 
     return (
@@ -709,7 +721,7 @@ def _authority_artifact_payload(
                 )
                 for index, rule in enumerate(artifact.eligible_feature_rules, start=1)
             ],
-            "rejected_features": [],
+            "rejected_features": rejected_features,
             "gaps": gaps,
             "assumptions": assumptions,
             "source_map": {
@@ -769,6 +781,49 @@ def _json_list(raw: str | None) -> list[Any]:
     except JSONDecodeError:
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _normalized_persisted_items(items: list[Any], *, prefix: str) -> list[JsonDict]:
+    normalized: list[JsonDict] = []
+    for index, item in enumerate(items, start=1):
+        fallback_id = f"{prefix}-{index}"
+        if isinstance(item, Mapping):
+            source_refs = _dedupe_sorted(_as_list(item.get("source_refs")))
+            source_excerpt = item.get("source_excerpt")
+            normalized.append(
+                {
+                    "id": str(item.get("id") or fallback_id),
+                    "text": _persisted_item_text(item),
+                    "support": _persisted_item_support(item, source_refs),
+                    "source_refs": source_refs,
+                    "source_excerpt": (
+                        str(source_excerpt) if source_excerpt is not None else None
+                    ),
+                }
+            )
+        else:
+            normalized.append(_plain_item(item_id=fallback_id, text=str(item)))
+    return normalized
+
+
+def _persisted_item_text(item: Mapping[str, Any]) -> str:
+    for key in ("text", "feature", "title", "reason", "rationale"):
+        value = item.get(key)
+        if value is not None and str(value):
+            return str(value)
+    return str(dict(item))
+
+
+def _persisted_item_support(
+    item: Mapping[str, Any],
+    source_refs: list[str],
+) -> str:
+    support = item.get("support")
+    if support in {"direct", "inferred"}:
+        return str(support)
+    if source_refs or item.get("source_excerpt"):
+        return "direct"
+    return "inferred"
 
 
 def _plain_item(item_id: str, text: str) -> JsonDict:

@@ -193,6 +193,46 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     )
 
 
+def test_review_preserves_rejected_features_from_valid_compiled_authority(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Valid review packets preserve normalized rejected feature entries."""
+    project_id, _spec_version_id, authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    assert authority is not None
+    authority.rejected_features = json.dumps(
+        [
+            {
+                "id": "REJ-1",
+                "text": "Do not add unauthenticated dashboard publishing.",
+            }
+        ]
+    )
+    session.add(authority)
+    session.commit()
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    assert result["data"]["pending_authority"]["artifact"]["rejected_features"] == [
+        {
+            "id": "REJ-1",
+            "text": "Do not add unauthenticated dashboard publishing.",
+            "support": "inferred",
+            "source_refs": [],
+            "source_excerpt": None,
+        }
+    ]
+
+
 def test_review_includes_full_source_under_default_limit(
     session: Session,
     tmp_path: Path,
