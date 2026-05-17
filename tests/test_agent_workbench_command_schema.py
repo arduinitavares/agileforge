@@ -112,7 +112,9 @@ def test_capabilities_include_top_level_contract_metadata() -> None:
     assert payload["schema_version"] == "agileforge.cli.capabilities.v1"
     assert payload["command_version"] == COMMAND_VERSION
     assert payload["storage_schema_version"] == STORAGE_SCHEMA_VERSION
-    assert payload["installed_command_count"] == len(commands)
+    assert payload["installed_command_count"] == sum(
+        1 for command in commands if command["installed"] is True
+    )
 
 
 def test_phase_1_command_schema_payloads_publish_real_inputs() -> None:
@@ -253,8 +255,11 @@ def test_phase_2b_commands_are_registered_and_available() -> None:
 def test_authority_review_is_registered_as_read_only_command() -> None:
     """Publish the authority review read-only contract for agents."""
     schema = command_schema_payload("agileforge authority review")
+    capabilities = _capability_by_name()
 
     assert schema["mutates"] is False
+    assert schema["installed"] is False
+    assert capabilities["agileforge authority review"]["installed"] is False
     assert schema["input"]["required"] == ["project_id"]
     assert schema["input"]["optional"] == ["include_spec", "format"]
 
@@ -264,7 +269,10 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     schema = command_schema_payload("agileforge authority accept")
 
     assert schema["mutates"] is True
+    assert schema["installed"] is False
     assert schema["idempotency_required"] is True
+    assert schema["idempotency_policy"]["non_dry_run"] == "required"
+    assert schema["idempotency_policy"]["dry_run"] != "not_applicable"
     assert schema["input"]["required"] == ["project_id", "idempotency_key"]
     assert "review_token" in schema["input"]["optional"]
     assert "expected_authority_fingerprint" in schema["input"]["optional"]
@@ -286,7 +294,10 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     schema = command_schema_payload("agileforge authority reject")
 
     assert schema["mutates"] is True
+    assert schema["installed"] is False
     assert schema["idempotency_required"] is True
+    assert schema["idempotency_policy"]["non_dry_run"] == "required"
+    assert schema["idempotency_policy"]["dry_run"] != "not_applicable"
     assert schema["input"]["required"] == ["project_id", "reason", "idempotency_key"]
     assert "review_token" in schema["input"]["optional"]
     assert "expected_source_spec_hash" in schema["input"]["optional"]
@@ -300,10 +311,13 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
 
 
-def test_phase_2c_authority_commands_are_registered_and_available() -> None:
-    """Expose Phase 2C authority decision command names through the registry."""
+def test_phase_2c_authority_commands_are_discoverable_but_not_installed() -> None:
+    """Expose authority contracts without claiming Task 5 CLI availability."""
     names = installed_command_names()
+    capabilities = _capability_by_name()
 
-    assert EXPECTED_PHASE_2C_COMMAND_NAMES.issubset(names)
+    assert EXPECTED_PHASE_2C_COMMAND_NAMES.isdisjoint(names)
     for command_name in EXPECTED_PHASE_2C_COMMAND_NAMES:
-        assert command_is_available(command_name) is True
+        assert command_is_available(command_name) is False
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is False

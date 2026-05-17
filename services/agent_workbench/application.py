@@ -537,18 +537,37 @@ def _setup_workflow_next(
         "blocked_future_commands": [],
     }
     if setup_status == "authority_pending_review":
-        data["next_valid_commands"] = [
-            f"agileforge authority review --project-id {project_id}"
+        data["next_actions"] = [
+            {
+                "command": f"agileforge authority review --project-id {project_id}",
+                "installed": False,
+                "requires_cli_installation": True,
+                "reason": "CLI parser wiring is scheduled for Task 5.",
+            }
         ]
-        data["decision_commands_after_review"] = [
-            (
-                f"agileforge authority accept --project-id {project_id} "
-                "--review-token <review_token>"
-            ),
-            (
-                f"agileforge authority reject --project-id {project_id} "
-                "--review-token <review_token> --reason <reason>"
-            ),
+        data["decision_actions_after_review"] = [
+            {
+                "command": (
+                    f"agileforge authority accept --project-id {project_id} "
+                    "--review-token <review_token> "
+                    "--idempotency-key <idempotency_key>"
+                ),
+                "installed": False,
+                "requires_cli_installation": True,
+                "after_review": True,
+                "requires": ["review_token", "idempotency_key"],
+            },
+            {
+                "command": (
+                    f"agileforge authority reject --project-id {project_id} "
+                    "--review-token <review_token> "
+                    "--reason <reason> --idempotency-key <idempotency_key>"
+                ),
+                "installed": False,
+                "requires_cli_installation": True,
+                "after_review": True,
+                "requires": ["review_token", "reason", "idempotency_key"],
+            },
         ]
     elif setup_status == "authority_rejected":
         data["next_actions"] = [
@@ -587,8 +606,8 @@ def _setup_workflow_next(
             "next_valid_commands": data["next_valid_commands"],
             "blocked_commands": data["blocked_commands"],
             "blocked_future_commands": data["blocked_future_commands"],
-            "decision_commands_after_review": data.get(
-                "decision_commands_after_review",
+            "decision_actions_after_review": data.get(
+                "decision_actions_after_review",
                 [],
             ),
             "next_actions": data.get("next_actions", []),

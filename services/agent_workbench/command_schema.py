@@ -4,7 +4,7 @@ from typing import Any
 
 from services.agent_workbench.command_registry import (
     CommandMetadata,
-    installed_commands,
+    command_contracts,
 )
 from services.agent_workbench.contract_models import (
     CommandContractSchema,
@@ -18,11 +18,12 @@ CAPABILITIES_SCHEMA_VERSION: str = "agileforge.cli.capabilities.v1"
 
 
 def capabilities_payload() -> dict[str, Any]:
-    """Return installed command capability metadata."""
+    """Return command capability metadata for installed and future contracts."""
     commands = [
         {
             "name": command.name,
             "command_version": command.command_version,
+            "installed": command.installed,
             "phase": command.phase,
             "stable": command.stable,
             "mutates": command.mutates,
@@ -46,13 +47,15 @@ def capabilities_payload() -> dict[str, Any]:
             },
             "errors": list(command.errors),
         }
-        for command in installed_commands()
+        for command in command_contracts()
     ]
     return {
         "schema_version": CAPABILITIES_SCHEMA_VERSION,
         "command_version": COMMAND_VERSION,
         "storage_schema_version": STORAGE_SCHEMA_VERSION,
-        "installed_command_count": len(commands),
+        "installed_command_count": sum(
+            1 for command in commands if command["installed"] is True
+        ),
         "commands": commands,
     }
 
@@ -64,6 +67,7 @@ def command_schema_payload(command_name: str) -> dict[str, Any]:
     contract = CommandContractSchema(
         name=command.name,
         command_version=command.command_version,
+        installed=command.installed,
         stable=command.stable,
         mutates=command.mutates,
         destructive=command.destructive,
@@ -88,8 +92,8 @@ def command_schema_payload(command_name: str) -> dict[str, Any]:
 
 
 def _command_metadata(command_name: str) -> CommandMetadata:
-    """Return metadata for one installed command."""
-    for command in installed_commands():
+    """Return metadata for one discoverable command contract."""
+    for command in command_contracts():
         if command.name == command_name:
             return command
     msg = f"Unknown command: {command_name}"

@@ -30,6 +30,7 @@ class CommandContractSchema(BaseModel):
 
     name: str
     command_version: str
+    installed: bool
     stable: bool
     mutates: bool
     destructive: bool

@@ -8,12 +8,13 @@ from services.agent_workbench.version import COMMAND_VERSION
 
 @dataclass(frozen=True)
 class CommandMetadata:
-    """Metadata for an installed workbench command."""
+    """Metadata for a discoverable workbench command contract."""
 
     name: str
     mutates: bool
     phase: str
     command_version: str = COMMAND_VERSION
+    installed: bool = True
     stable: bool = True
     destructive: bool = False
     accepts_expected_state: bool = False
@@ -141,6 +142,12 @@ _DRY_RUN_IDEMPOTENCY_POLICY: dict[str, str] = {
     "dry_run_trace_field": "dry_run_id",
 }
 
+_AUTHORITY_DECISION_IDEMPOTENCY_POLICY: dict[str, str] = {
+    "non_dry_run": "required",
+    "dry_run": "not_supported",
+    "dry_run_trace_field": "none",
+}
+
 _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge project create",
@@ -229,6 +236,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         name="agileforge authority review",
         mutates=False,
         phase="phase_2c",
+        installed=False,
         input_required=("project_id",),
         input_optional=("include_spec", "format"),
         errors=(
@@ -243,8 +251,10 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         name="agileforge authority accept",
         mutates=True,
         phase="phase_2c",
+        installed=False,
         guard_policy=_AUTHORITY_DECISION_GUARDS,
         requires_idempotency_key=True,
+        idempotency_policy=_AUTHORITY_DECISION_IDEMPOTENCY_POLICY,
         input_required=("project_id", "idempotency_key"),
         input_optional=(
             *_AUTHORITY_DECISION_GUARDS,
@@ -277,8 +287,10 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         name="agileforge authority reject",
         mutates=True,
         phase="phase_2c",
+        installed=False,
         guard_policy=_AUTHORITY_DECISION_GUARDS,
         requires_idempotency_key=True,
+        idempotency_policy=_AUTHORITY_DECISION_IDEMPOTENCY_POLICY,
         input_required=("project_id", "reason", "idempotency_key"),
         input_optional=(
             *_AUTHORITY_DECISION_GUARDS,
@@ -308,14 +320,19 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
-def installed_commands() -> tuple[CommandMetadata, ...]:
-    """Return installed command metadata for the current workbench phase."""
+def command_contracts() -> tuple[CommandMetadata, ...]:
+    """Return discoverable command contracts for the current workbench phase."""
     return (
         *_PHASE_1_COMMANDS,
         *_PHASE_2A_COMMANDS,
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
     )
+
+
+def installed_commands() -> tuple[CommandMetadata, ...]:
+    """Return CLI-installed command metadata for the current workbench phase."""
+    return tuple(command for command in command_contracts() if command.installed)
 
 
 def installed_command_names() -> set[str]:

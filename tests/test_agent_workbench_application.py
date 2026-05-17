@@ -640,18 +640,38 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == [
-        "agileforge authority review --project-id 7"
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_actions"] == [
+        {
+            "command": "agileforge authority review --project-id 7",
+            "installed": False,
+            "requires_cli_installation": True,
+            "reason": "CLI parser wiring is scheduled for Task 5.",
+        }
     ]
-    assert result["data"]["decision_commands_after_review"] == [
-        (
-            "agileforge authority accept --project-id 7 "
-            "--review-token <review_token>"
-        ),
-        (
-            "agileforge authority reject --project-id 7 "
-            "--review-token <review_token> --reason <reason>"
-        ),
+    assert result["data"]["decision_actions_after_review"] == [
+        {
+            "command": (
+                "agileforge authority accept --project-id 7 "
+                "--review-token <review_token> "
+                "--idempotency-key <idempotency_key>"
+            ),
+            "installed": False,
+            "requires_cli_installation": True,
+            "after_review": True,
+            "requires": ["review_token", "idempotency_key"],
+        },
+        {
+            "command": (
+                "agileforge authority reject --project-id 7 "
+                "--review-token <review_token> "
+                "--reason <reason> --idempotency-key <idempotency_key>"
+            ),
+            "installed": False,
+            "requires_cli_installation": True,
+            "after_review": True,
+            "requires": ["review_token", "reason", "idempotency_key"],
+        },
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
@@ -706,9 +726,51 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_setup_pending_re
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == [
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_actions"][0]["command"] == (
         "agileforge authority review --project-id 7"
-    ]
+    )
+
+
+def test_workflow_next_pending_review_does_not_emit_executable_authority_command() -> None:  # noqa: E501
+    """Do not send agents to authority CLI commands before Task 5 parser wiring."""
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityPendingReviewReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_actions"][0]["installed"] is False
+    assert result["data"]["next_actions"][0]["requires_cli_installation"] is True
+
+
+def test_workflow_next_no_longer_calls_sprint_context_pack_when_authority_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep rejected authority setup routing independent from sprint context packs."""
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityRejectedReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    def forbidden_context_pack(
+        *,
+        project_id: int,
+        phase: str = "overview",
+    ) -> NoReturn:
+        del project_id, phase
+        message = "workflow_next must not call context_pack"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(app, "context_pack", forbidden_context_pack)
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_actions"][0]["installed"] is False
 
 
 def test_workflow_next_routes_failed_setup_to_retry_action() -> None:
