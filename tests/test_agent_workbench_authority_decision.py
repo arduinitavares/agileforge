@@ -562,7 +562,7 @@ def test_explicit_accept_fabricated_completeness_guards_fails(
     result = _runner(session, _workflow_for(project_id)).accept(request)
 
     assert result["ok"] is False
-    assert result["errors"][0]["code"] == "STALE_ARTIFACT_FINGERPRINT"
+    assert result["errors"][0]["code"] == "STALE_CONTEXT_FINGERPRINT"
 
 
 def test_explicit_reject_allows_missing_completeness_guards(

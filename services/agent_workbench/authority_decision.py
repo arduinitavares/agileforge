@@ -1142,6 +1142,12 @@ def _stale_guard_error(
         "expected_resolved_spec_path",
     }:
         code = ErrorCode.AUTHORITY_SOURCE_CHANGED
+    elif field_name in {
+        "expected_content_included",
+        "expected_omission_assessment",
+        "expected_coverage_summary_fingerprint",
+    }:
+        code = ErrorCode.STALE_CONTEXT_FINGERPRINT
     return _error(
         command=command,
         code=code,
