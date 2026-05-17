@@ -801,6 +801,114 @@ def test_review_tilde_fenced_code_ignores_headings_and_counts_one_block(
     assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
 
 
+def test_review_tilde_fence_does_not_close_on_backticks(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A tilde fence ignores backtick fence markers inside the block."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "~~~markdown\n"
+        "```\n"
+        "# Not A Heading\n"
+        "The fenced example must remain one block.\n"
+        "```\n"
+        "~~~\n\n"
+        "## Background\n\n"
+        "Descriptive text.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    headings = [entry["heading"] for entry in spec["source_outline"]]
+    assert headings == ["Submission Contract", "Background"]
+    assert spec["coverage_summary"]["uncovered_sections"] == 1
+    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
+
+
+def test_review_backtick_fence_does_not_close_on_tildes(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A backtick fence ignores tilde fence markers inside the block."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "```markdown\n"
+        "~~~\n"
+        "# Not A Heading\n"
+        "The fenced example must remain one block.\n"
+        "~~~\n"
+        "```\n\n"
+        "## Background\n\n"
+        "Descriptive text.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    headings = [entry["heading"] for entry in spec["source_outline"]]
+    assert headings == ["Submission Contract", "Background"]
+    assert spec["coverage_summary"]["uncovered_sections"] == 1
+    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
+
+
+def test_review_long_backtick_fence_requires_matching_close_length(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A longer backtick opener ignores shorter backtick fences inside it."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "````markdown\n"
+        "```\n"
+        "# Not A Heading\n"
+        "The fenced example must remain one block.\n"
+        "```\n"
+        "````\n\n"
+        "## Background\n\n"
+        "Descriptive text.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    headings = [entry["heading"] for entry in spec["source_outline"]]
+    assert headings == ["Submission Contract", "Background"]
+    assert spec["coverage_summary"]["uncovered_sections"] == 1
+    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
+
+
 def test_missing_spec_file_returns_spec_file_not_found(
     session: Session,
     tmp_path: Path,

@@ -57,7 +57,7 @@ _REQUIREMENT_HEADING_RE: Final[re.Pattern[str]] = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"^(?:`{3,}|~{3,})")
+_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"^(`{3,}|~{3,})")
 
 
 @dataclass(frozen=True)
@@ -923,14 +923,15 @@ def _parse_markdown_sections(text: str) -> tuple[list[_Section], list[JsonDict]]
     current = _Section("ROOT", None, 1, max(len(lines), 1))
     content_before_heading = False
     section_number = 0
-    in_fence = False
+    fence: _FenceMarker | None = None
     for index, line in enumerate(lines, start=1):
         stripped = line.strip()
-        if _is_fence_line(stripped):
-            in_fence = not in_fence
+        marker = _fence_marker(stripped)
+        if marker is not None and (fence is None or marker.closes(fence)):
+            fence = None if fence is not None else marker
             content_before_heading = True
             continue
-        if in_fence:
+        if fence is not None:
             if stripped:
                 content_before_heading = True
             continue
@@ -973,7 +974,7 @@ def _parse_section_blocks(  # noqa: C901
     diagnostics: list[JsonDict] = []
     paragraph: list[tuple[int, str]] = []
     fence_lines: list[tuple[int, str]] = []
-    in_fence = False
+    fence: _FenceMarker | None = None
     fence_start = 0
 
     def flush_paragraph() -> None:
@@ -990,9 +991,10 @@ def _parse_section_blocks(  # noqa: C901
         if line_number == section.line_start and _HEADING_RE.match(line):
             continue
         stripped = line.strip()
-        if _is_fence_line(stripped):
+        marker = _fence_marker(stripped)
+        if marker is not None and (fence is None or marker.closes(fence)):
             flush_paragraph()
-            if in_fence:
+            if fence is not None:
                 if fence_lines:
                     block_text = "\n".join(line for _line_no, line in fence_lines)
                     blocks.append(
@@ -1004,12 +1006,12 @@ def _parse_section_blocks(  # noqa: C901
                         )
                     )
                     fence_lines.clear()
-                in_fence = False
+                fence = None
             else:
-                in_fence = True
+                fence = marker
                 fence_start = line_number
             continue
-        if in_fence:
+        if fence is not None:
             if stripped:
                 fence_lines.append((line_number, line))
             continue
@@ -1024,7 +1026,7 @@ def _parse_section_blocks(  # noqa: C901
             continue
         paragraph.append((line_number, line))
     flush_paragraph()
-    if in_fence:
+    if fence is not None:
         if fence_lines:
             block_text = "\n".join(line for _line_no, line in fence_lines)
             blocks.append(
@@ -1045,8 +1047,24 @@ def _parse_section_blocks(  # noqa: C901
     return blocks, diagnostics
 
 
-def _is_fence_line(stripped: str) -> bool:
-    return bool(_FENCE_RE.match(stripped))
+@dataclass(frozen=True)
+class _FenceMarker:
+    """Markdown fenced-code marker family and length."""
+
+    character: str
+    length: int
+
+    def closes(self, opener: _FenceMarker) -> bool:
+        """Return whether this marker closes the given opener."""
+        return self.character == opener.character and self.length >= opener.length
+
+
+def _fence_marker(stripped: str) -> _FenceMarker | None:
+    match = _FENCE_RE.match(stripped)
+    if match is None:
+        return None
+    marker = match.group(1)
+    return _FenceMarker(character=marker[0], length=len(marker))
 
 
 def _content_block(
