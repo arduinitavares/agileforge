@@ -1,7 +1,7 @@
 # services/agent_workbench/authority_decision.py
 """Guarded authority accept/reject mutation service."""
 
-# ruff: noqa: C901, PLR0911, PLR0913
+# ruff: noqa: C901, PLR0911, PLR0912, PLR0913
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ from uuid import uuid4
 from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from models import db as model_db
+from models.agent_workbench import CliMutationLedger
 from models.specs import SpecAuthorityAcceptance
 from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
@@ -34,6 +36,9 @@ from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
     RecoveryAction,
+    _db_datetime,
+    _json_dump,
+    _json_load,
 )
 from services.agent_workbench.schema_readiness import (
     check_authority_decision_readiness,
@@ -41,8 +46,6 @@ from services.agent_workbench.schema_readiness import (
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
-
-    from models.agent_workbench import CliMutationLedger
 
 JsonDict = dict[str, Any]
 
@@ -236,6 +239,12 @@ class AuthorityDecisionRunner:
                     mutation_event_id=_event_id(loaded.ledger),
                 )
 
+            if loaded.replayed or loaded.ledger.status != MutationStatus.PENDING.value:
+                return _replay_terminal_non_success(
+                    command=command,
+                    row=loaded.ledger,
+                )
+
             mutation_event_id = _event_id(loaded.ledger)
             lease_owner = _required(loaded.ledger.lease_owner)
             return self._execute_owned_decision(
@@ -260,18 +269,30 @@ class AuthorityDecisionRunner:
             command=command,
         )
         if replay_conflict is not None:
-            self._finalize_validation_failed(
+            if not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-            )
+                response=replay_conflict,
+            ):
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
             return replay_conflict
 
         snapshot_result = self._normalize_snapshot(request=request, command=command)
         if isinstance(snapshot_result, dict):
-            self._finalize_validation_failed(
+            if not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-            )
+                response=snapshot_result,
+            ):
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
             return snapshot_result
         snapshot = snapshot_result
 
@@ -282,10 +303,16 @@ class AuthorityDecisionRunner:
             command=command,
         )
         if guard_error is not None:
-            self._finalize_validation_failed(
+            if not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-            )
+                response=guard_error,
+            ):
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
             return guard_error
 
         workflow_error = self._validate_current_workflow(
@@ -293,10 +320,16 @@ class AuthorityDecisionRunner:
             command=command,
         )
         if workflow_error is not None:
-            self._finalize_validation_failed(
+            if not self._finalize_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-            )
+                response=workflow_error,
+            ):
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
             return workflow_error
 
         with _decision_lock(self._engine):
@@ -305,10 +338,16 @@ class AuthorityDecisionRunner:
                 command=command,
             )
             if terminal_error is not None:
-                self._finalize_validation_failed(
+                if not self._finalize_validation_failed(
                     mutation_event_id=mutation_event_id,
                     lease_owner=lease_owner,
-                )
+                    response=terminal_error,
+                ):
+                    return _ledger_error(
+                        command=command,
+                        code=MUTATION_RESUME_CONFLICT,
+                        mutation_event_id=mutation_event_id,
+                    )
                 return terminal_error
 
             if decision == "accept":
@@ -318,10 +357,16 @@ class AuthorityDecisionRunner:
                     command=command,
                 )
                 if incomplete_error is not None:
-                    self._finalize_validation_failed(
+                    if not self._finalize_validation_failed(
                         mutation_event_id=mutation_event_id,
                         lease_owner=lease_owner,
-                    )
+                        response=incomplete_error,
+                    ):
+                        return _ledger_error(
+                            command=command,
+                            code=MUTATION_RESUME_CONFLICT,
+                            mutation_event_id=mutation_event_id,
+                        )
                     return incomplete_error
 
             recorded = self._record_terminal_decision(
@@ -331,6 +376,21 @@ class AuthorityDecisionRunner:
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
                 command=command,
+            )
+        if (
+            isinstance(recorded, dict)
+            and _first_error_code(recorded)
+            == ErrorCode.AUTHORITY_ALREADY_DECIDED.value
+            and not self._finalize_validation_failed(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                response=recorded,
+            )
+        ):
+            return _ledger_error(
+                command=command,
+                code=MUTATION_RESUME_CONFLICT,
+                mutation_event_id=mutation_event_id,
             )
         if isinstance(recorded, dict):
             return recorded
@@ -361,7 +421,7 @@ class AuthorityDecisionRunner:
                 next_step="workflow_state_written",
             )
 
-        response = _success(_response_data(decision=decision, row=recorded))
+        response = _success(_response_data(row=recorded))
         if not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
@@ -842,7 +902,23 @@ class AuthorityDecisionRunner:
                 completed_step="decision_recorded",
                 next_step="workflow_state_written",
             )
-        response = _success(_response_data(decision=decision, row=row))
+        if _decision_from_status(row.status) != decision:
+            response = _authority_already_decided_error(command=command, row=row)
+            marked = self._mark_recovery_required_after_decision(
+                command=command,
+                mutation_event_id=mutation_event_id,
+                lease_owner=recovery_owner,
+                error=RuntimeError("Recoverable authority decision status mismatch."),
+                code=ErrorCode.AUTHORITY_ALREADY_DECIDED,
+            )
+            if not marked:
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
+            return response
+        response = _success(_response_data(row=row))
         if not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
             lease_owner=recovery_owner,
@@ -907,15 +983,31 @@ class AuthorityDecisionRunner:
         *,
         mutation_event_id: int,
         lease_owner: str,
-    ) -> None:
-        self._ledger.transition_status(
-            mutation_event_id=mutation_event_id,
-            expected_status=MutationStatus.PENDING,
-            expected_lease_owner=lease_owner,
-            new_status=MutationStatus.VALIDATION_FAILED,
-            new_lease_owner=None,
-            now=_now(),
-        )
+        response: JsonDict,
+    ) -> bool:
+        db_now = _db_datetime(_now())
+        with Session(self._engine) as session:
+            result = session.exec(
+                update(CliMutationLedger)
+                .where(CliMutationLedger.mutation_event_id == mutation_event_id)
+                .where(CliMutationLedger.status == MutationStatus.PENDING.value)
+                .where(CliMutationLedger.lease_owner == lease_owner)
+                .values(
+                    status=MutationStatus.VALIDATION_FAILED.value,
+                    current_step="validation_failed",
+                    response_json=_json_dump(response),
+                    last_error_json=_json_dump(_first_error(response)),
+                    recovery_action=RecoveryAction.NONE.value,
+                    recovery_safe_to_auto_resume=False,
+                    lease_owner=None,
+                    lease_acquired_at=None,
+                    last_heartbeat_at=None,
+                    lease_expires_at=None,
+                    updated_at=db_now,
+                )
+            )
+            session.commit()
+            return result.rowcount == 1
 
 
 def terminal_decision_key(
@@ -1084,10 +1176,9 @@ def _accept_incomplete_error(
 
 def _response_data(
     *,
-    decision: Literal["accept", "reject"],
     row: SpecAuthorityAcceptance,
 ) -> JsonDict:
-    if decision == "accept":
+    if row.status == "accepted":
         return {
             "project_id": row.product_id,
             "authority_id": row.pending_authority_id,
@@ -1129,6 +1220,14 @@ def _response_data(
     }
 
 
+def _decision_from_status(status: str) -> Literal["accept", "reject"] | None:
+    if status == "accepted":
+        return "accept"
+    if status == "rejected":
+        return "reject"
+    return None
+
+
 def _retarget_error(payload: JsonDict, *, command: str) -> JsonDict:
     if payload.get("ok") is not False:
         return payload
@@ -1146,6 +1245,46 @@ def _retarget_error(payload: JsonDict, *, command: str) -> JsonDict:
             details=dict(first.get("details") or {}),
             remediation=list(first.get("remediation") or []),
         ),
+    )
+
+
+def _first_error(response: JsonDict) -> JsonDict:
+    errors = response.get("errors")
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        return dict(errors[0])
+    return {}
+
+
+def _first_error_code(response: JsonDict) -> str | None:
+    error = _first_error(response)
+    code = error.get("code")
+    return str(code) if code is not None else None
+
+
+def _replay_terminal_non_success(
+    *,
+    command: str,
+    row: CliMutationLedger,
+) -> JsonDict:
+    loaded = _json_load(row.response_json)
+    if isinstance(loaded, dict):
+        return loaded
+    last_error = _json_load(row.last_error_json)
+    code = ErrorCode.MUTATION_FAILED.value
+    details: JsonDict = {
+        "mutation_event_id": row.mutation_event_id,
+        "status": row.status,
+    }
+    if isinstance(last_error, dict):
+        maybe_code = last_error.get("code")
+        if maybe_code is not None:
+            code = str(maybe_code)
+        details["last_error"] = last_error
+    return _error(
+        command=command,
+        code=code,
+        details=details,
+        remediation=["Use a new idempotency key for a new request."],
     )
 
 
