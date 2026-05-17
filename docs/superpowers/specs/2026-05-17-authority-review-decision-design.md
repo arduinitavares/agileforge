@@ -92,8 +92,8 @@ This artifact is not canonical until accepted.
 
 Acceptance is an explicit decision that the compiled authority correctly
 represents the reviewed spec. It writes an accepted `SpecAuthorityAcceptance`
-row with `policy="human"`, the reviewer identity, compiler provenance, prompt
-hash, and spec hash.
+row with an explicit decision policy, the reviewer identity, compiler
+provenance, prompt hash, and spec hash.
 
 Acceptance is not a generic quality score. It is a canonicalization decision.
 After acceptance, downstream workflow phases can trust that authority as the
@@ -136,7 +136,31 @@ whitespace, UTF-8 encoding, and this namespaced payload:
 - prompt hash
 - workflow `fsm_state`
 - workflow `setup_status`
+- source content inclusion flag
+- source coverage omission assessment
+- source coverage summary digest
 - review token schema version: `agileforge.authority_review.v1`
+
+The canonical payload uses these field names and scalar types:
+
+```json
+{
+  "schema": "agileforge.authority_review.v1",
+  "project_id": 4,
+  "pending_authority_id": 4,
+  "authority_fingerprint": "sha256:...",
+  "source_spec_hash": "sha256:...",
+  "disk_spec_hash": "sha256:...",
+  "resolved_spec_path": "/absolute/path/to/spec.md",
+  "compiler_version": "1.0.0",
+  "prompt_hash": "sha256:...",
+  "fsm_state": "SETUP_REQUIRED",
+  "setup_status": "authority_pending_review",
+  "content_included": true,
+  "omission_assessment": "complete",
+  "coverage_summary_fingerprint": "sha256:..."
+}
+```
 
 Human commands use the review token so humans do not manually type fingerprints
 or pending ids. Expert and agent commands support either the review token or
@@ -151,7 +175,22 @@ The existing `SpecAuthorityAcceptance` table already models decisions with
 formalizes it as an append-only authority decision log. The implementation must
 add decision-time provenance fields for the reviewed authority fingerprint,
 review token or review fingerprint, source spec hash, disk spec hash, actor,
-and actor mode.
+actor mode, decision policy, review completeness, and incomplete-review override
+rationale when applicable.
+
+Allowed decision policy values are:
+
+- `manual`: CLI human decision using a review token.
+- `agent_requested`: non-interactive expert or agent decision.
+- `dashboard_manual`: authenticated dashboard human decision.
+- `test`: automated test fixture or test-only command path.
+
+Allowed actor mode values are:
+
+- `cli-human`
+- `cli-agent`
+- `dashboard-human`
+- `test`
 
 All code must read accepted authority through repository or service methods that
 filter `status="accepted"`. Direct ad hoc table reads that treat any row in
@@ -214,13 +253,15 @@ agileforge authority accept \
   --expected-source-spec-hash sha256:... \
   --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
+  --expected-setup-status authority_pending_review \
   --idempotency-key agent-unique-key
 ```
 
 In human mode, AgileForge resolves the current pending authority, verifies the
 review token or interactive confirmation against the current pending authority,
-uses domain idempotence for already-accepted authority, and generates internal
-tracing metadata. Humans do not type idempotency keys.
+checks for an existing decision matching the reviewed guard tuple before current
+pending-state validation, and generates internal tracing metadata. Humans do not
+type idempotency keys.
 
 In expert/agent mode, the command fails if the review token or explicit pending
 authority id, fingerprint, source spec hash, or expected workflow state no
@@ -251,6 +292,7 @@ agileforge authority reject \
   --expected-source-spec-hash sha256:... \
   --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
+  --expected-setup-status authority_pending_review \
   --reason "It missed the token storage rule." \
   --idempotency-key agent-unique-key
 ```
@@ -294,8 +336,10 @@ Rejection requires a rationale in both modes.
       "omission_assessment": "complete | incomplete"
     },
     "excerpt": "...",
-    "content_included": false,
-    "content_truncated": false
+    "content_included": true,
+    "content_truncated": false,
+    "source_content": "# Submission Contract\n...",
+    "source_content_sha256": "sha256:..."
   },
   "pending_authority": {
     "authority_id": 4,
@@ -393,6 +437,10 @@ source-map evidence. If full source is omitted, the packet must set
 coverage rules can prove every source section is covered or intentionally
 classified.
 
+When `content_included=true`, `source_content` must contain the full source text
+used for review and `source_content_sha256` must equal the SHA-256 hash of that
+exact text. When `content_included=false`, both fields must be `null`.
+
 Every invariant, gap, assumption, rejected feature, and eligibility rule must
 include `support`, `source_refs`, and `source_excerpt` fields. Items without
 direct source support must use `support="inferred"`, `source_refs=[]`, and a
@@ -421,12 +469,51 @@ Before recording either decision, the service must validate:
 If any validation fails, the command returns a stale structured error and tells
 the reviewer to run `agileforge authority review --project-id <id>` again.
 
+Acceptance must also validate review completeness. If the reviewed packet has
+`coverage_summary.omission_assessment="incomplete"`, accept must fail with
+`AUTHORITY_REVIEW_INCOMPLETE` by default. An incomplete review can be accepted
+only through an explicit override:
+
+- interactive CLI human mode after the user sees the incomplete-review warning
+  and types the required confirmation phrase
+- non-interactive human, dashboard, or expert/agent mode with both
+  `--allow-incomplete-review` and a non-empty
+  `--incomplete-review-rationale`
+
+The decision record must persist the override flag and rationale. Agent mode
+defaults to failure; an agent-supplied override is treated as an explicit
+`agent_requested` policy decision, not as normal accept behavior. Rejection does
+not require complete omission assessment because rejection does not canonicalize
+authority, but it still uses the same source-freshness checks so the decision
+log refers to a verified reviewed snapshot.
+
+Decision handling must check replayable prior results before current pending
+state validation. The order is:
+
+1. If an idempotency key is present, load the stored mutation by command and
+   key. Same key plus same canonical request hash returns the stored response;
+   same key plus different canonical request hash returns
+   `IDEMPOTENCY_KEY_REUSED`.
+2. If no idempotency replay applies, look for an existing terminal decision
+   matching the exact review token or explicit guard tuple, decision, decision
+   policy, and rationale where relevant. A match returns the stored decision
+   response even if `pending_authority_id` has since cleared and setup advanced.
+3. Only when no replayable decision exists does the service validate current
+   pending state and write a new decision.
+
 Decision writes must happen inside one transactional boundary that acquires a
 SQLite write lock before validation and uses conditional writes against the
 project id, spec version id, pending authority id, authority fingerprint, source
 spec hash, disk spec hash, `fsm_state`, and `setup_status`. The mutation must
 finalize exactly one terminal decision. If another process wins the terminal
 decision first, the losing command returns `AUTHORITY_ALREADY_DECIDED`.
+
+The canonical request hash for idempotency must include the command name,
+decision, project id, pending authority id, review token or explicit guard
+tuple, expected state, expected setup status, source hashes, decision policy,
+actor mode, incomplete-review override flag, incomplete-review rationale, and
+rejection rationale. It must exclude correlation id, generated timestamps, and
+other tracing-only metadata.
 
 A repeated accept for the same project, spec version, pending authority,
 fingerprint, source hashes, and decision returns the original accepted decision.
@@ -449,6 +536,8 @@ On successful acceptance:
 - Store the reviewed authority fingerprint, review token or review fingerprint,
   source spec hash, disk spec hash, actor, actor mode, policy, and rationale
   when provided.
+- Store `review_completeness`, incomplete-review override flag, and
+  incomplete-review override rationale when applicable.
 - Promote the accepted authority in the canonical read projection: after commit,
   `authority status` must return `status="current"`, `authority_id` equal to the
   accepted compiled authority id, `accepted_spec_version_id` equal to the
@@ -470,6 +559,7 @@ On successful rejection:
 - Store the reviewed authority fingerprint, review token or review fingerprint,
   source spec hash, disk spec hash, actor, actor mode, policy, and required
   rationale.
+- Store `review_completeness` and the reviewed packet's omission assessment.
 - Set `setup_status="authority_rejected"`.
 - Keep `fsm_state="SETUP_REQUIRED"`.
 - Store or expose the rejection rationale in setup/status projections.
@@ -544,6 +634,7 @@ Add these authority-specific errors:
 - `AUTHORITY_NOT_PENDING`
 - `AUTHORITY_ALREADY_DECIDED`
 - `AUTHORITY_SOURCE_CHANGED`
+- `AUTHORITY_REVIEW_INCOMPLETE`
 
 Actor identity must be explicit in each decision response and persisted decision
 record. CLI human decisions default to the local OS username and actor mode
@@ -568,8 +659,11 @@ successful setup checkpoint:
 - Title: `Pending Authority Review`
 - Message: setup compiled successfully and needs review before Vision.
 - Show review evidence or a link/action to the authority review view.
-- Show Accept and Reject actions that submit the exact review token or
-  fingerprint rendered on the page.
+- Show Accept and Reject actions that submit the exact review token rendered on
+  the page, or the complete explicit guard set: pending authority id, authority
+  fingerprint, source spec hash, disk spec hash, expected state, expected setup
+  status, and review completeness fields. Authority fingerprint alone is a
+  display value and is never a sufficient mutation guard.
 - Show a stale-review message requiring reload if the authority or source spec
   changed after the page was rendered.
 - Do not label this state as `Project Setup Required`.
@@ -593,11 +687,21 @@ Tests must prove:
 - Review output that omits full source content includes a complete source
   outline, section coverage markers, bounded excerpts, and an explicit
   `omission_assessment` value.
+- Review output includes `source_content` and `source_content_sha256` when
+  `content_included=true`; both are `null` when `content_included=false`.
 - Human non-interactive accept requires a review token but does not require
   manually typing `pending_authority_id`, fingerprint, or idempotency key.
 - Human interactive accept submits the same guarded decision request after typed
   confirmation.
+- Accept fails with `AUTHORITY_REVIEW_INCOMPLETE` when the reviewed packet has
+  `omission_assessment="incomplete"` and no explicit override rationale is
+  provided.
+- Incomplete-review accept override persists the override flag, rationale,
+  actor mode, and decision policy.
 - Expert accept rejects stale pending authority fingerprints.
+- Same idempotency key and same canonical request hash returns the stored
+  response; same key and different canonical request hash returns
+  `IDEMPOTENCY_KEY_REUSED`.
 - Accept and reject reject changed disk spec hashes after review.
 - Accept and reject reject missing, unreadable, moved, or oversized unverified
   disk specs at decision time.
@@ -617,7 +721,11 @@ Tests must prove:
 - `workflow next` advertises review while authority is pending and exposes
   accept/reject templates that require review tokens.
 - Dashboard copy distinguishes pending review from setup failure.
+- Dashboard mutation requests that submit only an authority fingerprint are
+  rejected before the decision service writes anything.
 - Dashboard stale-review submissions fail with a reload/review-again message.
+- Decision retry after successful accept or reject replays the stored response
+  before stale current-state validation.
 - Existing project create behavior still ends in `authority_pending_review`.
 
 ## Revision History
@@ -631,6 +739,9 @@ Tests must prove:
 - 2026-05-17: Tightened canonical authority projection, review-token semantics,
   source coverage requirements, terminal-decision concurrency, rejected-row
   safety, and decision-time source-file failure behavior.
+- 2026-05-17: Added incomplete-review acceptance gating, dashboard guard
+  tightening, source-content schema fields, decision replay ordering, and
+  explicit policy/actor-mode values.
 
 ## Open Follow-Up
 
