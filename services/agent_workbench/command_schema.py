@@ -41,6 +41,8 @@ def capabilities_payload() -> dict[str, Any]:
                 command.accepts_expected_authority_version
             ),
             "guard_policy": _guard_policy(command),
+            "guard_policy_is_authoritative": _guard_policy_is_authoritative(command),
+            "legacy_guard_flags": _legacy_guard_flags(command),
             "input": {
                 "required": list(command.input_required),
                 "optional": list(command.input_optional),
@@ -80,6 +82,8 @@ def command_schema_payload(command_name: str) -> dict[str, Any]:
             envelope_schema=_envelope_schema(),
         ),
         guard_policy=_guard_policy(command),
+        guard_policy_is_authoritative=_guard_policy_is_authoritative(command),
+        legacy_guard_flags=_legacy_guard_flags(command),
         idempotency_required=command.requires_idempotency_key,
         idempotency_policy=command.idempotency_policy,
         errors=errors,
@@ -121,6 +125,27 @@ def _guard_policy(command: CommandMetadata) -> list[str]:
         ),
     ]
     return [name for name, enabled in guard_fields if enabled]
+
+
+def _guard_policy_is_authoritative(command: CommandMetadata) -> bool:
+    """Return whether guard_policy supersedes legacy guard booleans."""
+    return bool(command.guard_policy)
+
+
+def _legacy_guard_flags(command: CommandMetadata) -> dict[str, bool]:
+    """Return legacy guard booleans grouped to avoid confusing partial coverage."""
+    return {
+        "accepts_expected_state": command.accepts_expected_state,
+        "accepts_expected_artifact_fingerprint": (
+            command.accepts_expected_artifact_fingerprint
+        ),
+        "accepts_expected_context_fingerprint": (
+            command.accepts_expected_context_fingerprint
+        ),
+        "accepts_expected_authority_version": (
+            command.accepts_expected_authority_version
+        ),
+    }
 
 
 def _envelope_schema() -> dict[str, Any]:

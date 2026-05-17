@@ -24,7 +24,7 @@ class CommandOutputSchema(BaseModel):
 
 
 class CommandContractSchema(BaseModel):
-    """Stable contract documentation for one installed command."""
+    """Stable contract documentation for one discoverable command."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -37,6 +37,8 @@ class CommandContractSchema(BaseModel):
     input: CommandInputSchema
     output: CommandOutputSchema
     guard_policy: list[str]
+    guard_policy_is_authoritative: bool
+    legacy_guard_flags: dict[str, bool]
     idempotency_required: bool
     idempotency_policy: dict[str, str]
     errors: list[str]

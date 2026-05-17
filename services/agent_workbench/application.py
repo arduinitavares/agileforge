@@ -306,7 +306,7 @@ class AgentWorkbenchApplication:
         )
 
     def capabilities(self) -> dict[str, Any]:
-        """Return installed command capabilities in an application envelope."""
+        """Return installed and pending command capabilities in an envelope."""
         return _data_envelope(capabilities_payload())
 
     def command_schema(self, command_name: str) -> dict[str, Any]:

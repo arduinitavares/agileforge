@@ -267,6 +267,7 @@ def test_authority_review_is_registered_as_read_only_command() -> None:
 def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     """Publish the authority accept mutation contract for agents."""
     schema = command_schema_payload("agileforge authority accept")
+    capabilities = _capability_by_name()
 
     assert schema["mutates"] is True
     assert schema["installed"] is False
@@ -283,6 +284,13 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     assert "expected_coverage_summary_fingerprint" in schema["input"]["optional"]
     assert "review_token" in schema["guard_policy"]
     assert "expected_coverage_summary_fingerprint" in schema["guard_policy"]
+    assert schema["guard_policy_is_authoritative"] is True
+    assert schema["legacy_guard_flags"]["accepts_expected_state"] is True
+    assert schema["legacy_guard_flags"]["accepts_expected_artifact_fingerprint"] is (
+        False
+    )
+    assert capabilities["agileforge authority accept"]["guard_policy_is_authoritative"]
+    assert capabilities["agileforge authority accept"]["accepts_expected_state"] is True
     assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
     assert ErrorCode.AUTHORITY_ALREADY_DECIDED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_SOURCE_CHANGED.value in schema["errors"]
@@ -292,6 +300,7 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
 def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> None:
     """Publish the authority reject mutation contract for agents."""
     schema = command_schema_payload("agileforge authority reject")
+    capabilities = _capability_by_name()
 
     assert schema["mutates"] is True
     assert schema["installed"] is False
@@ -306,6 +315,13 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     assert "expected_setup_status" in schema["input"]["optional"]
     assert "review_token" in schema["guard_policy"]
     assert "expected_source_spec_hash" in schema["guard_policy"]
+    assert schema["guard_policy_is_authoritative"] is True
+    assert schema["legacy_guard_flags"]["accepts_expected_state"] is True
+    assert schema["legacy_guard_flags"]["accepts_expected_artifact_fingerprint"] is (
+        False
+    )
+    assert capabilities["agileforge authority reject"]["guard_policy_is_authoritative"]
+    assert capabilities["agileforge authority reject"]["accepts_expected_state"] is True
     assert ErrorCode.AUTHORITY_ALREADY_DECIDED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_SOURCE_CHANGED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
