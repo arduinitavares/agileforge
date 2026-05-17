@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
@@ -48,6 +49,9 @@ JsonDict = dict[str, Any]
 AUTHORITY_DECISION_COMMAND = "agileforge authority decision"
 AUTHORITY_ACCEPT_COMMAND = "agileforge authority accept"
 AUTHORITY_REJECT_COMMAND = "agileforge authority reject"
+_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
+_KEY_MIN_LENGTH = 8
+_KEY_MAX_LENGTH = 128
 _ENGINE_LOCKS: WeakKeyDictionary[Engine, RLock] = WeakKeyDictionary()
 _ENGINE_LOCKS_GUARD = RLock()
 
@@ -116,9 +120,11 @@ class AuthorityDecisionBase(BaseModel):
         if self.idempotency_key is None:
             if self.review_token is not None and self.actor_mode == "human":
                 self.idempotency_key = f"human-token:{uuid4()}"
+                _validate_token(name="idempotency_key", value=self.idempotency_key)
                 return self
             msg = "idempotency_key is required for non-dry-run agent mutations"
             raise ValueError(msg)
+        _validate_token(name="idempotency_key", value=self.idempotency_key)
         return self
 
 
@@ -170,6 +176,8 @@ class AuthorityDecisionRunner:
         self._ledger = MutationLedgerRepository(engine=self._engine)
         self._workflow = workflow or SyncAuthorityDecisionWorkflowAdapter()
         self._lease_seconds = DEFAULT_LEASE_SECONDS
+        self.fail_decision_progress_for_test: bool = False
+        self.inject_terminal_conflict_after_precheck_for_test: bool = False
 
     def accept(self, request: AuthorityAcceptRequest) -> JsonDict:
         """Accept the currently reviewed pending authority."""
@@ -334,12 +342,18 @@ class AuthorityDecisionRunner:
                 request=request,
             )
         except Exception as exc:  # noqa: BLE001
-            self._mark_recovery_required_after_decision(
+            marked = self._mark_recovery_required_after_decision(
+                command=command,
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
-                project_id=request.project_id,
                 error=exc,
             )
+            if not marked:
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
             return _recovery_required_response(
                 command=command,
                 mutation_event_id=mutation_event_id,
@@ -593,6 +607,8 @@ class AuthorityDecisionRunner:
                     code=MUTATION_IN_PROGRESS,
                     mutation_event_id=mutation_event_id,
                 )
+            if self.inject_terminal_conflict_after_precheck_for_test:
+                self._insert_terminal_conflict_for_test(snapshot=snapshot)
             row = SpecAuthorityAcceptance(
                 product_id=snapshot.project_id,
                 spec_version_id=snapshot.spec_version_id,
@@ -628,6 +644,28 @@ class AuthorityDecisionRunner:
             )
             session.add(row)
             try:
+                session.flush()
+                if self.fail_decision_progress_for_test:
+                    session.rollback()
+                    return _ledger_error(
+                        command=command,
+                        code=MUTATION_RESUME_CONFLICT,
+                        mutation_event_id=mutation_event_id,
+                    )
+                if not MutationLedgerRepository.mark_step_complete_in_session(
+                    session,
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    step="decision_recorded",
+                    next_step="workflow_state_written",
+                    now=now,
+                ):
+                    session.rollback()
+                    return _ledger_error(
+                        command=command,
+                        code=MUTATION_RESUME_CONFLICT,
+                        mutation_event_id=mutation_event_id,
+                    )
                 session.commit()
             except IntegrityError:
                 session.rollback()
@@ -643,23 +681,48 @@ class AuthorityDecisionRunner:
                     )
                 raise
             session.refresh(row)
-            if not MutationLedgerRepository.mark_step_complete_in_session(
-                session,
-                mutation_event_id=mutation_event_id,
-                lease_owner=lease_owner,
-                step="decision_recorded",
-                next_step="workflow_state_written",
-                now=now,
-            ):
-                session.rollback()
-                return _ledger_error(
-                    command=command,
-                    code=MUTATION_RESUME_CONFLICT,
-                    mutation_event_id=mutation_event_id,
-                )
-            session.commit()
-            session.refresh(row)
             return row
+
+    def _insert_terminal_conflict_for_test(
+        self,
+        *,
+        snapshot: ReviewedAuthoritySnapshot,
+    ) -> None:
+        key = terminal_decision_key(
+            project_id=snapshot.project_id,
+            spec_version_id=snapshot.spec_version_id,
+            pending_authority_id=snapshot.pending_authority_id,
+        )
+        with Session(self._engine) as session:
+            if session.exec(
+                select(SpecAuthorityAcceptance).where(
+                    SpecAuthorityAcceptance.terminal_decision_key == key
+                )
+            ).first():
+                return
+            row = SpecAuthorityAcceptance(
+                product_id=snapshot.project_id,
+                spec_version_id=snapshot.spec_version_id,
+                status="rejected",
+                policy="test",
+                decided_by="external-conflict",
+                decided_at=_now(),
+                rationale="Injected terminal conflict.",
+                compiler_version=snapshot.compiler_version,
+                prompt_hash=snapshot.prompt_hash,
+                spec_hash=snapshot.source_spec_hash,
+                pending_authority_id=snapshot.pending_authority_id,
+                authority_fingerprint=snapshot.authority_fingerprint,
+                review_token="injected-conflict",  # noqa: S106
+                review_fingerprint=snapshot.coverage_summary_fingerprint,
+                disk_spec_hash=snapshot.disk_spec_hash,
+                resolved_spec_path=snapshot.resolved_spec_path,
+                actor_mode="test",
+                review_completeness=snapshot.omission_assessment,
+                terminal_decision_key=key,
+            )
+            session.add(row)
+            session.commit()
 
     def _write_workflow_state(
         self,
@@ -692,19 +755,20 @@ class AuthorityDecisionRunner:
     def _mark_recovery_required_after_decision(
         self,
         *,
+        command: str,
         mutation_event_id: int,
         lease_owner: str,
-        project_id: int,
         error: Exception,
-    ) -> None:
-        del project_id
-        self._ledger.mark_recovery_required(
+        code: str | ErrorCode = ErrorCode.WORKFLOW_SESSION_FAILED,
+    ) -> bool:
+        del command
+        return self._ledger.mark_recovery_required(
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
             recovery_action=RecoveryAction.RESUME_FROM_STEP,
             safe_to_auto_resume=True,
             last_error={
-                "code": ErrorCode.WORKFLOW_SESSION_FAILED.value,
+                "code": str(code.value if isinstance(code, ErrorCode) else code),
                 "message": str(error),
                 "completed_step": "decision_recorded",
                 "next_step": "workflow_state_written",
@@ -738,12 +802,46 @@ class AuthorityDecisionRunner:
             )
         row = self._find_recoverable_decision(request=request)
         if row is None:
-            return _ledger_error(
+            marked = self._mark_recovery_required_after_decision(
                 command=command,
-                code=MUTATION_RECOVERY_REQUIRED,
                 mutation_event_id=mutation_event_id,
+                lease_owner=recovery_owner,
+                error=RuntimeError("Recoverable authority decision row was missing."),
+                code=MUTATION_RECOVERY_REQUIRED,
             )
-        self._write_workflow_state_from_row(row)
+            if not marked:
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
+            return _recovery_required_response(
+                command=command,
+                mutation_event_id=mutation_event_id,
+                completed_step="decision_recorded",
+                next_step="workflow_state_written",
+            )
+        try:
+            self._write_workflow_state_from_row(row)
+        except Exception as exc:  # noqa: BLE001
+            marked = self._mark_recovery_required_after_decision(
+                command=command,
+                mutation_event_id=mutation_event_id,
+                lease_owner=recovery_owner,
+                error=exc,
+            )
+            if not marked:
+                return _ledger_error(
+                    command=command,
+                    code=MUTATION_RESUME_CONFLICT,
+                    mutation_event_id=mutation_event_id,
+                )
+            return _recovery_required_response(
+                command=command,
+                mutation_event_id=mutation_event_id,
+                completed_step="decision_recorded",
+                next_step="workflow_state_written",
+            )
         response = _success(_response_data(decision=decision, row=row))
         if not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
@@ -1168,6 +1266,20 @@ def _required_int(value: int | None) -> int:
         msg = "Required integer value was missing."
         raise ValueError(msg)
     return value
+
+
+def _validate_token(*, name: str, value: str) -> None:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        msg = f"{name} must be ASCII"
+        raise ValueError(msg) from exc
+    if not _KEY_MIN_LENGTH <= len(value) <= _KEY_MAX_LENGTH:
+        msg = f"{name} must be 8-128 characters"
+        raise ValueError(msg)
+    if _KEY_PATTERN.fullmatch(value) is None:
+        msg = f"{name} must match [A-Za-z0-9._:-]+"
+        raise ValueError(msg)
 
 
 def _cast_accept(request: AuthorityDecisionBase) -> AuthorityAcceptRequest:

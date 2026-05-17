@@ -1,6 +1,6 @@
 """Tests for guarded authority accept/reject decisions."""
 
-# ruff: noqa: ANN401, D102, D103, D107, EM101, TC002, TC003, TRY003
+# ruff: noqa: ANN401, D102, D103, D107, EM101, S106, TC002, TC003, TRY003
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import Any, Final, cast
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlmodel import select
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from models.agent_workbench import CliMutationLedger
 from models.core import Product
 from models.specs import (
     CompiledSpecAuthority,
@@ -31,6 +33,7 @@ from services.agent_workbench.authority_review import (
     build_authority_review_snapshot,
     sha256_prefixed,
 )
+from services.agent_workbench.mutation_ledger import MutationStatus, _json_load
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
@@ -41,9 +44,6 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerOutput,
 )
-
-if TYPE_CHECKING:
-    from sqlmodel import Session
 
 PROMPT_HASH: Final[str] = "a" * 64
 COMPILER_VERSION: Final[str] = "1.0.0"
@@ -339,6 +339,14 @@ def _terminal_rows(session: Session) -> list[SpecAuthorityAcceptance]:
             )
         ).all()
     )
+
+
+def _ledger_for_key(session: Session, idempotency_key: str) -> CliMutationLedger:
+    return session.exec(
+        select(CliMutationLedger).where(
+            CliMutationLedger.idempotency_key == idempotency_key
+        )
+    ).one()
 
 
 def test_accept_with_review_token_promotes_authority_and_advances_to_vision(
@@ -709,6 +717,25 @@ def test_idempotency_same_key_different_changed_by_fails(
     assert result["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_empty_idempotency_key_is_rejected() -> None:
+    with pytest.raises(ValueError, match="idempotency_key must be 8-128 characters"):
+        AuthorityAcceptRequest(
+            project_id=1,
+            review_token="token",
+            idempotency_key="",
+        )
+
+
+def test_malformed_idempotency_key_is_rejected() -> None:
+    with pytest.raises(ValueError, match="idempotency_key must match"):
+        AuthorityRejectRequest(
+            project_id=1,
+            review_token="token",
+            idempotency_key="bad key 1",
+            reason="reject",
+        )
+
+
 def test_decision_replay_runs_before_current_pending_state_validation(
     session: Session,
     tmp_path: Path,
@@ -767,6 +794,139 @@ def test_missing_disk_spec_at_decision_fails_specific_error(
     assert result["errors"][0]["code"] == "SPEC_FILE_NOT_FOUND"
 
 
+def test_progress_failure_rolls_back_decision_row(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    runner = _runner(session, _workflow_for(project_id))
+    runner.fail_decision_progress_for_test = True
+
+    result = runner.accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RESUME_CONFLICT"
+    assert _terminal_rows(session) == []
+
+
+def test_workflow_failure_after_decision_marks_recovery_required(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    workflow = _workflow_for(project_id)
+    workflow.fail_update = True
+
+    result = _runner(session, workflow).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    assert result["errors"][0]["details"]["completed_steps"] == [
+        "decision_recorded"
+    ]
+    assert result["errors"][0]["details"]["next_step"] == "workflow_state_written"
+    ledger = _ledger_for_key(session, "accept-key")
+    assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+    assert ledger.current_step == "workflow_state_written"
+    assert _json_load(ledger.completed_steps_json) == ["decision_recorded"]
+    assert len(_terminal_rows(session)) == 1
+
+
+def test_same_idempotency_key_repairs_workflow_state_on_retry(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    workflow = _workflow_for(project_id)
+    workflow.fail_update = True
+    runner = _runner(session, workflow)
+    request = _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    assert runner.accept(request)["ok"] is False
+
+    workflow.fail_update = False
+    result = runner.accept(request)
+
+    assert result["ok"] is True
+    ledger = _ledger_for_key(session, "accept-key")
+    assert ledger.status == MutationStatus.SUCCEEDED.value
+    state = workflow.get_session_status(str(project_id))
+    assert state["setup_status"] == "passed"
+    assert state["fsm_state"] == "VISION_INTERVIEW"
+
+
+def test_repeated_workflow_failure_during_resume_preserves_recovery_required(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    workflow = _workflow_for(project_id)
+    workflow.fail_update = True
+    runner = _runner(session, workflow)
+    request = _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    assert runner.accept(request)["ok"] is False
+
+    result = runner.accept(request)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    ledger = _ledger_for_key(session, "accept-key")
+    assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+    assert ledger.current_step == "workflow_state_written"
+    assert _json_load(ledger.completed_steps_json) == ["decision_recorded"]
+
+
+def test_recovery_required_with_missing_decision_row_does_not_stay_pending(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    snapshot = _snapshot(session, project_id)
+    workflow = _workflow_for(project_id)
+    workflow.fail_update = True
+    runner = _runner(session, workflow)
+    request = _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    assert runner.accept(request)["ok"] is False
+    for row in _terminal_rows(session):
+        session.delete(row)
+    session.commit()
+    workflow.fail_update = False
+
+    result = runner.accept(request)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    ledger = _ledger_for_key(session, "accept-key")
+    assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+
+
 def test_concurrent_accept_reject_records_one_terminal_decision(
     session: Session,
     tmp_path: Path,
@@ -809,6 +969,45 @@ def test_concurrent_accept_reject_records_one_terminal_decision(
         and result["errors"][0]["code"] == "AUTHORITY_ALREADY_DECIDED"
     ) == 1
     assert len(_terminal_rows(session)) == 1
+
+
+def test_database_unique_index_blocks_duplicate_terminal_decision_key(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "authority.sqlite3"
+    engine = create_engine(
+        f"sqlite:///{db_path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    _make_schema_v3_ready(engine)
+    with Session(engine) as seed_session:
+        project_id, _spec_version_id, _authority_id, _path = (
+            _seed_pending_review_project(seed_session, tmp_path=tmp_path)
+        )
+        snapshot = _snapshot(seed_session, project_id)
+
+    workflow = _workflow_for(project_id)
+    runner = AuthorityDecisionRunner(engine=engine, workflow=workflow)
+    runner.inject_terminal_conflict_after_precheck_for_test = True
+    result = runner.accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=snapshot.review_token,
+            idempotency_key="db-unique-conflict",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_ALREADY_DECIDED"
+    with Session(engine) as verify_session:
+        rows = verify_session.exec(select(SpecAuthorityAcceptance)).all()
+        assert len(rows) == 1
+        assert rows[0].terminal_decision_key == terminal_decision_key(
+            project_id=snapshot.project_id,
+            spec_version_id=snapshot.spec_version_id,
+            pending_authority_id=snapshot.pending_authority_id,
+        )
 
 
 def test_rejected_decision_never_satisfies_accepted_authority_projection(
