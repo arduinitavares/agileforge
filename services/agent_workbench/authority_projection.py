@@ -442,6 +442,13 @@ def _pending_authority_fingerprint(
     )
 
 
+def pending_authority_fingerprint(
+    authority: CompiledSpecAuthority | None,
+) -> str | None:
+    """Return the stable public fingerprint for a pending compiled authority."""
+    return _pending_authority_fingerprint(authority)
+
+
 def _spec_fingerprint_payload(spec: SpecRegistry | None) -> JsonDict | None:
     """Return deterministic spec fields for status fingerprinting."""
     if spec is None:
