@@ -184,6 +184,34 @@ def _add_terminal_decision_key_column(engine: Engine) -> None:
         )
 
 
+def _assert_no_backfill_or_secondary_indexes(engine: Engine) -> None:
+    columns = _acceptance_columns(engine)
+    if {"pending_authority_id", "provenance_source"}.issubset(columns):
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS migrated_count
+                    FROM spec_authority_acceptance
+                    WHERE pending_authority_id IS NOT NULL
+                       OR provenance_source = 'legacy_backfill'
+                    """
+                )
+            ).one()
+        assert row.migrated_count == 0
+
+    with engine.connect() as conn:
+        indexes = {
+            row._mapping["name"]
+            for row in conn.execute(
+                text("PRAGMA index_list('spec_authority_acceptance')")
+            )
+        }
+    assert "ix_spec_authority_acceptance_pending_authority_id" not in indexes
+    assert "ix_spec_authority_acceptance_authority_fingerprint" not in indexes
+    assert "ix_spec_authority_acceptance_review_token" not in indexes
+
+
 def _add_pending_authority_id_column(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(
@@ -606,14 +634,9 @@ def test_authority_decision_migration_rejects_terminal_index_name_on_other_table
     with pytest.raises(RuntimeError, match="reserved by another table"):
         migrate_spec_authority_tables(engine)
 
-    with engine.connect() as conn:
-        target_indexes = {
-            row._mapping["name"]
-            for row in conn.execute(
-                text("PRAGMA index_list('spec_authority_acceptance')")
-            )
-        }
-    assert "uq_spec_authority_terminal_decision_key" not in target_indexes
+    assert "spec_authority_acceptance" not in _table_names(engine)
+    assert "compiled_spec_authority" not in _table_names(engine)
+    assert "spec_registry" not in _table_names(engine)
     assert "agent_workbench_schema_versions" not in _table_names(engine)
 
 
@@ -706,6 +729,16 @@ def test_authority_decision_migration_rejects_malformed_terminal_index(
     engine = _engine(tmp_path)
     _create_legacy_acceptance_table(engine)
     _create_minimal_compiled_authority_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
     _add_terminal_decision_key_column(engine)
     with engine.begin() as conn:
         conn.execute(
@@ -720,6 +753,14 @@ def test_authority_decision_migration_rejects_malformed_terminal_index(
     with pytest.raises(RuntimeError, match="Malformed terminal decision index"):
         migrate_spec_authority_tables(engine)
 
+    columns = _acceptance_columns(engine)
+    assert "terminal_decision_key" in columns
+    assert (NEW_AUTHORITY_DECISION_COLUMNS - {"terminal_decision_key"}).isdisjoint(
+        columns
+    )
+    _assert_no_backfill_or_secondary_indexes(engine)
+    assert "agent_workbench_schema_versions" not in _table_names(engine)
+
 
 def test_authority_decision_migration_rejects_narrower_terminal_index(
     tmp_path: Path,
@@ -733,6 +774,18 @@ def test_authority_decision_migration_rejects_narrower_terminal_index(
 
     with pytest.raises(RuntimeError, match="Malformed terminal decision index"):
         migrate_spec_authority_tables(engine)
+
+    with engine.connect() as conn:
+        provenance_rows = conn.execute(
+            text(
+                """
+                SELECT COUNT(*) AS migrated_count
+                FROM spec_authority_acceptance
+                WHERE provenance_source = 'legacy_backfill'
+                """
+            )
+        ).one()
+    assert provenance_rows.migrated_count == 0
 
 
 def test_schema_readiness_requires_terminal_decision_invariant(

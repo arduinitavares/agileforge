@@ -238,6 +238,7 @@ def migrate_spec_authority_tables(engine: Engine) -> list[str]:
 
     Returns list of applied migration actions.
     """
+    _preflight_terminal_decision_index_contract(engine)
     _preflight_spec_authority_acceptance_contract(engine)
 
     actions: list[str] = []
@@ -275,6 +276,7 @@ def _migrate_spec_authority_acceptance_contract(engine: Engine) -> list[str]:
     """Ensure authority decision provenance columns, indexes, and backfill exist."""
     actions: list[str] = []
 
+    _preflight_terminal_decision_index_contract(engine)
     _preflight_spec_authority_acceptance_contract(engine)
 
     for column_name, column_def in SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS.items():
@@ -375,6 +377,29 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
             _raise_for_duplicate_generated_legacy_terminal_decision_keys(backfill_plan)
 
         if "terminal_decision_key" in existing_columns:
+            _raise_for_duplicate_existing_terminal_decision_keys(conn)
+
+
+def _preflight_terminal_decision_index_contract(engine: Engine) -> None:
+    """Validate terminal-index hazards before authority-decision writes."""
+    master_row = _terminal_decision_index_master_row(engine)
+    if master_row is not None and master_row["tbl_name"] != "spec_authority_acceptance":
+        _raise_terminal_decision_index_name_reserved(master_row)
+
+    existing_tables = _get_existing_tables(engine)
+    if "spec_authority_acceptance" not in existing_tables:
+        return
+
+    existing_indexes = _get_existing_indexes(engine, "spec_authority_acceptance")
+    if SPEC_AUTHORITY_TERMINAL_DECISION_INDEX in existing_indexes:
+        is_valid, reasons = _terminal_decision_index_contract(engine)
+        if not is_valid:
+            _raise_malformed_terminal_decision_index(reasons)
+        return
+
+    existing_columns = _get_existing_columns(engine, "spec_authority_acceptance")
+    if "terminal_decision_key" in existing_columns:
+        with engine.connect() as conn:
             _raise_for_duplicate_existing_terminal_decision_keys(conn)
 
 
@@ -590,29 +615,13 @@ def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
     """Ensure terminal decision uniqueness using a partial SQLite unique index."""
     master_row = _terminal_decision_index_master_row(engine)
     if master_row is not None and master_row["tbl_name"] != "spec_authority_acceptance":
-        message = (
-            "Terminal decision index name is reserved by another table: "
-            f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
-            f"table_name={master_row['tbl_name']}. Remediation: drop or rename "
-            "the conflicting index before rerunning migrations."
-        )
-        raise RuntimeError(message)
+        _raise_terminal_decision_index_name_reserved(master_row)
 
     existing_indexes = _get_existing_indexes(engine, "spec_authority_acceptance")
     if SPEC_AUTHORITY_TERMINAL_DECISION_INDEX in existing_indexes:
         is_valid, reasons = _terminal_decision_index_contract(engine)
         if not is_valid:
-            reason_text = ", ".join(reasons)
-            message = (
-                "Malformed terminal decision index detected: "
-                f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
-                "table_name=spec_authority_acceptance "
-                f"reasons=[{reason_text}]. Remediation: drop the malformed "
-                f"index `{SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}` and rerun "
-                "database migrations so the canonical partial unique index can "
-                "be created."
-            )
-            raise RuntimeError(message)
+            _raise_malformed_terminal_decision_index(reasons)
         return False
 
     with engine.connect() as conn:
@@ -643,6 +652,30 @@ def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
         )
         raise RuntimeError(message)
     return True
+
+
+def _raise_terminal_decision_index_name_reserved(master_row: RowMapping) -> None:
+    message = (
+        "Terminal decision index name is reserved by another table: "
+        f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
+        f"table_name={master_row['tbl_name']}. Remediation: drop or rename "
+        "the conflicting index before rerunning migrations."
+    )
+    raise RuntimeError(message)
+
+
+def _raise_malformed_terminal_decision_index(reasons: list[str]) -> None:
+    reason_text = ", ".join(reasons)
+    message = (
+        "Malformed terminal decision index detected: "
+        f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
+        "table_name=spec_authority_acceptance "
+        f"reasons=[{reason_text}]. Remediation: drop the malformed "
+        f"index `{SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}` and rerun "
+        "database migrations so the canonical partial unique index can "
+        "be created."
+    )
+    raise RuntimeError(message)
 
 
 def _terminal_decision_index_master_row(engine: Engine) -> RowMapping | None:
