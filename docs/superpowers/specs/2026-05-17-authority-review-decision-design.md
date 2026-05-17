@@ -167,10 +167,11 @@ or pending ids. Expert and agent commands support either the review token or
 the complete explicit guard set. Accept commands must include either a review
 token or a complete explicit guard set including authority, source, workflow,
 and review-completeness guards. Explicit accept requests that omit any
-review-completeness guard fail before decision validation. The dashboard must
-combine the review token with normal
-dashboard authentication and CSRF protections; the review token alone must never
-authorize a decision.
+review-completeness guard fail before decision validation. Explicit
+review-completeness guards must match the service-computed review snapshot for
+the current pending authority, source spec, disk spec, and workflow state. The
+dashboard must combine the review token with normal dashboard authentication and
+CSRF protections; the review token alone must never authorize a decision.
 
 ### Coverage Summary Fingerprint
 
@@ -218,7 +219,11 @@ Completeness is true only when every parsed source section has
 `coverage_status` in `covered|intentionally_classified`, and the parser reports
 `unclassified_content_blocks=0`. If the outline parser cannot parse a section,
 cannot classify a content block, or cannot prove coverage for any section,
-`omission_assessment` must be `incomplete`.
+`omission_assessment` must be `incomplete` and the review packet must include a
+machine-readable coverage diagnostic. Review packet generation does not fail for
+malformed Markdown structure; it fails only when the source file is missing,
+unreadable, too large for the requested output mode, or cannot be decoded by the
+source decode policy.
 
 Section parsing uses Markdown heading boundaries. Content before the first
 heading is represented as a synthetic section with `section_id="ROOT"`.
@@ -264,6 +269,12 @@ this section, including `pending_authority_id`, and must add this SQLite
 uniqueness invariant for terminal decisions:
 
 ```sql
+-- table constraint in the rebuilt spec_authority_acceptance table
+CONSTRAINT ck_spec_authority_terminal_pending_not_null CHECK (
+  status NOT IN ('accepted', 'rejected')
+  OR pending_authority_id IS NOT NULL
+);
+
 CREATE UNIQUE INDEX uq_spec_authority_terminal_decision
 ON spec_authority_acceptance (
   product_id,
@@ -272,6 +283,12 @@ ON spec_authority_acceptance (
 )
 WHERE status IN ('accepted', 'rejected');
 ```
+
+Terminal decision rows require non-null `pending_authority_id`. SQLite allows
+multiple `NULL` values in unique indexes, so the non-null invariant is part of
+the correctness contract, not a convenience. The migration must enforce it with
+a table rebuild, a checked normalized decision key, or another SQLite-valid
+constraint that schema readiness can verify.
 
 If a future storage backend cannot express a partial unique index by terminal
 status, its migration must add an equivalent normalized decision-key column or
@@ -386,6 +403,13 @@ agileforge authority reject \
 
 Rejection requires a rationale in both modes.
 
+Explicit reject does not require review-completeness guards because it does not
+canonicalize authority. If an explicit reject request supplies
+`expected_content_included`, `expected_omission_assessment`, or
+`expected_coverage_summary_fingerprint`, each supplied value must match the
+service-computed review snapshot. Source, pending authority, and workflow guards
+remain required for explicit reject.
+
 ## Review Packet Contract
 
 `agileforge authority review --project-id <id>` returns:
@@ -406,22 +430,27 @@ Rejection requires a rationale in both modes.
     "disk_status": "readable",
     "disk_sha256": "sha256...",
     "size_bytes": 12345,
+    "review_source_limit_bytes": 262144,
     "source_outline": [
       {
         "section_id": "S1",
         "heading": "Submission Contract",
         "line_start": 12,
         "line_end": 48,
-        "coverage_status": "covered | partial | uncovered",
-        "covered_by": ["INV-1", "INV-2"]
+        "coverage_status": "covered | intentionally_classified | partial | uncovered",
+        "covered_by": ["INV-1", "INV-2"],
+        "classification_reason": null
       }
     ],
     "coverage_summary": {
       "covered_sections": 8,
       "partial_sections": 1,
+      "intentionally_classified_sections": 0,
       "uncovered_sections": 0,
+      "unclassified_content_blocks": 0,
       "omission_assessment": "complete | incomplete"
     },
+    "coverage_diagnostics": [],
     "excerpt": "...",
     "content_included": true,
     "content_truncated": false,
@@ -518,23 +547,28 @@ Rejection requires a rationale in both modes.
 ```
 
 Default JSON output includes full source content when the spec file is readable
-and within the configured default review size limit. When full source content is
-omitted because the file exceeds that limit or the caller requested a summarized
-packet, the packet must include a complete source outline, section-level
-coverage status, bounded source excerpts, compiled authority fields, and
-source-map evidence. If full source is omitted, the packet must set
+and its raw byte length is at or below the default review source limit:
+`262144` bytes. The limit is configurable through
+`AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES` and must be reported in the
+review packet metadata. When full source content is omitted because the file
+exceeds that limit or the caller requested a summarized packet, the packet must
+include a complete source outline, section-level coverage status, bounded source
+excerpts, compiled authority fields, and source-map evidence. If full source is
+omitted, the packet must set
 `coverage_summary.omission_assessment="incomplete"` unless every parsed source
 section has `coverage_status` in `covered|intentionally_classified` and
 `unclassified_content_blocks=0`.
 
 When `content_included=true`, `source_content` must contain the full source text
-used for review and `source_content_sha256` must equal the SHA-256 hash of that
-exact text. When `content_included=false`, both fields must be `null`.
-`source_content_sha256` and `disk_sha256` hash the exact bytes read from disk for
-the review packet. `source_spec_hash` is the persisted hash recorded on the
-`SpecRegistry` row for the compiled spec version; the decision service must
-compare both values because registry content and current disk content can drift
-independently.
+used for review. The source decode policy is strict UTF-8 with no Unicode or
+newline normalization; decode failure returns `SPEC_FILE_INVALID`. When
+`content_included=false`, `source_content` and `source_content_sha256` must be
+`null`. `disk_sha256` is SHA-256 over the exact raw bytes read from the resolved
+disk path. `source_content_sha256` is SHA-256 over `source_content` re-encoded
+as UTF-8 exactly as returned in the JSON payload. `source_spec_hash` is the
+persisted hash recorded on the `SpecRegistry` row for the compiled spec version;
+the decision service must compare all relevant hashes because registry content,
+current disk content, and rendered review content can drift independently.
 
 Every invariant, gap, assumption, rejected feature, and eligibility rule must
 include `support`, `source_refs`, and `source_excerpt` fields. Items without
@@ -554,18 +588,25 @@ Before recording either decision, the service must validate:
 - the pending authority fingerprint matches the review token or explicit
   expected fingerprint
 - the source spec hash recorded with the pending authority still matches the
-  source spec hash in the review token
-- the current disk spec hash still matches the reviewed disk spec hash
+  source spec hash in the review token or explicit guard
+- the current disk spec hash still matches the reviewed disk spec hash from the
+  review token or explicit guard
 - `fsm_state=="SETUP_REQUIRED"`
 - `setup_status=="authority_pending_review"`
 - explicit accept requests without a review token include
   `expected_content_included`, `expected_omission_assessment`, and
   `expected_coverage_summary_fingerprint`
+- supplied explicit review-completeness guards match the service-computed review
+  snapshot generated with the same canonical review algorithm as
+  `authority review`
 - no terminal decision already exists for the same project id, spec version id,
   and pending authority id
 
-If any validation fails, the command returns a stale structured error and tells
-the reviewer to run `agileforge authority review --project-id <id>` again.
+If any stale validation fails, the command returns a stale structured error and
+tells the reviewer to run `agileforge authority review --project-id <id>` again.
+Missing explicit accept completeness guards return `AUTHORITY_GUARD_INCOMPLETE`.
+Mismatched explicit completeness guards return `STALE_CONTEXT_FINGERPRINT` with
+the expected and actual review-completeness values in error details.
 
 Acceptance must also validate review completeness. If the reviewed packet has
 `coverage_summary.omission_assessment="incomplete"`, accept must fail with
@@ -785,12 +826,16 @@ Tests must prove:
 - Review output includes full compiled artifact fields, source spec hash, disk
   status, evidence fields, guard tokens, review token, and assessment schema.
 - Default review output includes full source content under the configured size
-  limit.
+  limit and reports `review_source_limit_bytes`.
 - Review output that omits full source content includes a complete source
   outline, section coverage markers, bounded excerpts, and an explicit
   `omission_assessment` value.
+- Malformed Markdown structure does not fail review generation; it emits
+  coverage diagnostics and `omission_assessment="incomplete"`.
 - Review output includes `source_content` and `source_content_sha256` when
   `content_included=true`; both are `null` when `content_included=false`.
+- Hash fields follow the documented semantics for raw disk bytes, returned
+  UTF-8 source content, and persisted `SpecRegistry` hash.
 - Human non-interactive accept requires a review token but does not require
   manually typing `pending_authority_id`, fingerprint, or idempotency key.
 - Human interactive accept submits the same guarded decision request after typed
@@ -802,8 +847,12 @@ Tests must prove:
   `AUTHORITY_GUARD_INCOMPLETE` unless it provides
   `expected_content_included`, `expected_omission_assessment`, and
   `expected_coverage_summary_fingerprint`.
+- Explicit accept with fabricated or stale completeness guards fails with
+  `STALE_CONTEXT_FINGERPRINT`.
 - Token-mode accept and explicit-guard accept make the same decision for the
   same authority/source/workflow/review-completeness snapshot.
+- Explicit reject without review-completeness guards is allowed, while supplied
+  reject completeness guards are match-validated.
 - Incomplete-review accept override persists the override flag, rationale,
   actor mode, and decision policy.
 - Expert accept rejects stale pending authority fingerprints.
@@ -829,6 +878,8 @@ Tests must prove:
 - The database enforces one terminal decision per project/spec/pending authority
   tuple, and schema readiness fails when the terminal-decision uniqueness
   invariant is missing.
+- Terminal decision rows with `pending_authority_id=NULL` fail schema or write
+  validation, and duplicate null-key terminal rows cannot be inserted.
 - `workflow next` advertises review while authority is pending and exposes
   accept/reject templates that require review tokens.
 - Dashboard copy distinguishes pending review from setup failure.
@@ -856,6 +907,9 @@ Tests must prove:
 - 2026-05-17: Aligned explicit guard mode with review-token completeness,
   defined coverage summary fingerprinting and section coverage, and specified
   the terminal-decision uniqueness invariant.
+- 2026-05-17: Required explicit completeness guards to match the recomputed
+  review snapshot, added terminal non-null decision-key enforcement, clarified
+  hash/decode semantics, and defined explicit-reject completeness behavior.
 
 ## Open Follow-Up
 
