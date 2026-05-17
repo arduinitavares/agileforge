@@ -164,9 +164,70 @@ The canonical payload uses these field names and scalar types:
 
 Human commands use the review token so humans do not manually type fingerprints
 or pending ids. Expert and agent commands support either the review token or
-explicit guard fields. The dashboard must combine the review token with normal
+the complete explicit guard set. Accept commands must include either a review
+token or a complete explicit guard set including authority, source, workflow,
+and review-completeness guards. Explicit accept requests that omit any
+review-completeness guard fail before decision validation. The dashboard must
+combine the review token with normal
 dashboard authentication and CSRF protections; the review token alone must never
 authorize a decision.
+
+### Coverage Summary Fingerprint
+
+`coverage_summary_fingerprint` has this format:
+
+```text
+sha256:<digest>
+```
+
+`<digest>` is SHA-256 over canonical JSON with sorted keys, no insignificant
+whitespace, UTF-8 encoding, and this namespaced payload:
+
+```json
+{
+  "schema": "agileforge.authority_coverage_summary.v1",
+  "spec_version_id": 4,
+  "resolved_spec_path": "/absolute/path/to/spec.md",
+  "source_content_sha256": "sha256:...",
+  "content_included": true,
+  "content_truncated": false,
+  "source_outline": [
+    {
+      "section_id": "S1",
+      "heading": "Submission Contract",
+      "line_start": 12,
+      "line_end": 48,
+      "coverage_status": "covered",
+      "covered_by": ["INV-1", "INV-2"],
+      "classification_reason": null
+    }
+  ],
+  "coverage_summary": {
+    "covered_sections": 8,
+    "partial_sections": 0,
+    "intentionally_classified_sections": 1,
+    "uncovered_sections": 0,
+    "unclassified_content_blocks": 0,
+    "omission_assessment": "complete"
+  }
+}
+```
+
+The `source_outline` array is ordered by `line_start`, then `section_id`.
+Completeness is true only when every parsed source section has
+`coverage_status` in `covered|intentionally_classified`, and the parser reports
+`unclassified_content_blocks=0`. If the outline parser cannot parse a section,
+cannot classify a content block, or cannot prove coverage for any section,
+`omission_assessment` must be `incomplete`.
+
+Section parsing uses Markdown heading boundaries. Content before the first
+heading is represented as a synthetic section with `section_id="ROOT"`.
+Tables, code blocks, paragraphs, and list blocks are content blocks inside their
+nearest section. A section is `covered` only when its mandatory content maps to
+at least one authority item. A section is `intentionally_classified` only when
+every non-covered block is represented by a gap, assumption, rejected feature,
+or out-of-scope classification with a non-empty `classification_reason`.
+`partial` and `uncovered` sections make omission assessment incomplete.
 
 ### Decision Record
 
@@ -197,6 +258,26 @@ filter `status="accepted"`. Direct ad hoc table reads that treat any row in
 `spec_authority_acceptance` as acceptance are forbidden. Rejected rows must
 never satisfy accepted-authority checks, never unlock Vision, and never appear
 as canonical authority in read projections.
+
+The storage migration for this slice must add the provenance columns named in
+this section, including `pending_authority_id`, and must add this SQLite
+uniqueness invariant for terminal decisions:
+
+```sql
+CREATE UNIQUE INDEX uq_spec_authority_terminal_decision
+ON spec_authority_acceptance (
+  product_id,
+  spec_version_id,
+  pending_authority_id
+)
+WHERE status IN ('accepted', 'rejected');
+```
+
+If a future storage backend cannot express a partial unique index by terminal
+status, its migration must add an equivalent normalized decision-key column or
+service-enforced unique index and schema readiness must verify it. Existing
+databases must fail `schema check` until the provenance columns and terminal
+decision invariant exist.
 
 A future schema cleanup can rename the table to `SpecAuthorityDecision`, but
 that rename is not required to unblock this feature.
@@ -254,6 +335,9 @@ agileforge authority accept \
   --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
   --expected-setup-status authority_pending_review \
+  --expected-content-included true \
+  --expected-omission-assessment complete \
+  --expected-coverage-summary-fingerprint sha256:... \
   --idempotency-key agent-unique-key
 ```
 
@@ -293,6 +377,9 @@ agileforge authority reject \
   --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
   --expected-setup-status authority_pending_review \
+  --expected-content-included true \
+  --expected-omission-assessment complete \
+  --expected-coverage-summary-fingerprint sha256:... \
   --reason "It missed the token storage rule." \
   --idempotency-key agent-unique-key
 ```
@@ -422,7 +509,10 @@ Rejection requires a rationale in both modes.
     "expected_source_spec_hash": "sha256:...",
     "expected_disk_spec_hash": "sha256:...",
     "expected_state": "SETUP_REQUIRED",
-    "expected_setup_status": "authority_pending_review"
+    "expected_setup_status": "authority_pending_review",
+    "expected_content_included": true,
+    "expected_omission_assessment": "complete",
+    "expected_coverage_summary_fingerprint": "sha256:..."
   }
 }
 ```
@@ -433,13 +523,18 @@ omitted because the file exceeds that limit or the caller requested a summarized
 packet, the packet must include a complete source outline, section-level
 coverage status, bounded source excerpts, compiled authority fields, and
 source-map evidence. If full source is omitted, the packet must set
-`coverage_summary.omission_assessment="incomplete"` unless the source outline
-coverage rules can prove every source section is covered or intentionally
-classified.
+`coverage_summary.omission_assessment="incomplete"` unless every parsed source
+section has `coverage_status` in `covered|intentionally_classified` and
+`unclassified_content_blocks=0`.
 
 When `content_included=true`, `source_content` must contain the full source text
 used for review and `source_content_sha256` must equal the SHA-256 hash of that
 exact text. When `content_included=false`, both fields must be `null`.
+`source_content_sha256` and `disk_sha256` hash the exact bytes read from disk for
+the review packet. `source_spec_hash` is the persisted hash recorded on the
+`SpecRegistry` row for the compiled spec version; the decision service must
+compare both values because registry content and current disk content can drift
+independently.
 
 Every invariant, gap, assumption, rejected feature, and eligibility rule must
 include `support`, `source_refs`, and `source_excerpt` fields. Items without
@@ -463,6 +558,9 @@ Before recording either decision, the service must validate:
 - the current disk spec hash still matches the reviewed disk spec hash
 - `fsm_state=="SETUP_REQUIRED"`
 - `setup_status=="authority_pending_review"`
+- explicit accept requests without a review token include
+  `expected_content_included`, `expected_omission_assessment`, and
+  `expected_coverage_summary_fingerprint`
 - no terminal decision already exists for the same project id, spec version id,
   and pending authority id
 
@@ -510,10 +608,12 @@ decision first, the losing command returns `AUTHORITY_ALREADY_DECIDED`.
 
 The canonical request hash for idempotency must include the command name,
 decision, project id, pending authority id, review token or explicit guard
-tuple, expected state, expected setup status, source hashes, decision policy,
-actor mode, incomplete-review override flag, incomplete-review rationale, and
-rejection rationale. It must exclude correlation id, generated timestamps, and
-other tracing-only metadata.
+tuple, expected state, expected setup status, source hashes,
+`expected_content_included`, `expected_omission_assessment`,
+`expected_coverage_summary_fingerprint`, decision policy, actor mode,
+incomplete-review override flag, incomplete-review rationale, and rejection
+rationale. It must exclude correlation id, generated timestamps, and other
+tracing-only metadata.
 
 A repeated accept for the same project, spec version, pending authority,
 fingerprint, source hashes, and decision returns the original accepted decision.
@@ -624,6 +724,7 @@ Required structured errors:
 - `STALE_CONTEXT_FINGERPRINT`
 - `SPEC_FILE_NOT_FOUND`
 - `SPEC_FILE_INVALID`
+- `AUTHORITY_GUARD_INCOMPLETE`
 - `IDEMPOTENCY_KEY_REUSED`
 - `MUTATION_IN_PROGRESS`
 - `MUTATION_RECOVERY_REQUIRED`
@@ -662,8 +763,9 @@ successful setup checkpoint:
 - Show Accept and Reject actions that submit the exact review token rendered on
   the page, or the complete explicit guard set: pending authority id, authority
   fingerprint, source spec hash, disk spec hash, expected state, expected setup
-  status, and review completeness fields. Authority fingerprint alone is a
-  display value and is never a sufficient mutation guard.
+  status, expected content included flag, expected omission assessment, and
+  expected coverage summary fingerprint. Authority fingerprint alone is a display
+  value and is never a sufficient mutation guard.
 - Show a stale-review message requiring reload if the authority or source spec
   changed after the page was rendered.
 - Do not label this state as `Project Setup Required`.
@@ -696,6 +798,12 @@ Tests must prove:
 - Accept fails with `AUTHORITY_REVIEW_INCOMPLETE` when the reviewed packet has
   `omission_assessment="incomplete"` and no explicit override rationale is
   provided.
+- Explicit accept without a review token fails with
+  `AUTHORITY_GUARD_INCOMPLETE` unless it provides
+  `expected_content_included`, `expected_omission_assessment`, and
+  `expected_coverage_summary_fingerprint`.
+- Token-mode accept and explicit-guard accept make the same decision for the
+  same authority/source/workflow/review-completeness snapshot.
 - Incomplete-review accept override persists the override flag, rationale,
   actor mode, and decision policy.
 - Expert accept rejects stale pending authority fingerprints.
@@ -718,6 +826,9 @@ Tests must prove:
 - Rejected decision rows never satisfy accepted-authority reads and never unlock
   Vision.
 - Concurrent accept/reject attempts record exactly one winning decision.
+- The database enforces one terminal decision per project/spec/pending authority
+  tuple, and schema readiness fails when the terminal-decision uniqueness
+  invariant is missing.
 - `workflow next` advertises review while authority is pending and exposes
   accept/reject templates that require review tokens.
 - Dashboard copy distinguishes pending review from setup failure.
@@ -742,6 +853,9 @@ Tests must prove:
 - 2026-05-17: Added incomplete-review acceptance gating, dashboard guard
   tightening, source-content schema fields, decision replay ordering, and
   explicit policy/actor-mode values.
+- 2026-05-17: Aligned explicit guard mode with review-token completeness,
+  defined coverage summary fingerprinting and section coverage, and specified
+  the terminal-decision uniqueness invariant.
 
 ## Open Follow-Up
 
