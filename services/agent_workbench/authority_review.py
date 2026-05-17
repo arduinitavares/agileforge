@@ -5,9 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -28,6 +27,15 @@ from services.agent_workbench.authority_projection import (
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
+from utils.spec_authority_ir import (
+    ContentBlock as _ContentBlock,
+)
+from utils.spec_authority_ir import (
+    Section as _Section,
+)
+from utils.spec_authority_ir import (
+    parse_markdown_sections as _parse_markdown_sections,
+)
 from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
@@ -46,23 +54,6 @@ AUTHORITY_REVIEW_COMMAND: Final[str] = "agileforge authority review"
 REVIEW_TOKEN_SCHEMA: Final[str] = "agileforge.authority_review.v1"  # noqa: S105
 COVERAGE_SCHEMA: Final[str] = "agileforge.authority_coverage_summary.v1"
 DEFAULT_REVIEW_SOURCE_LIMIT_BYTES: Final[int] = 262_144
-
-_HEADING_RE: Final[re.Pattern[str]] = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-_NORMATIVE_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b("
-    r"must|required|shall|only|never|cannot|forbidden|accepted when|"
-    r"rejected when|input|output|schema|field|constraint"
-    r")\b",
-    re.IGNORECASE,
-)
-_REQUIREMENT_HEADING_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b("
-    r"requirements|invariants|rules|acceptance|security|scope|out of scope|"
-    r"schema|contract"
-    r")\b",
-    re.IGNORECASE,
-)
-_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"^(`{3,}|~{3,})")
 
 
 @dataclass(frozen=True)
@@ -153,27 +144,6 @@ class AuthorityReviewSnapshot:
                 self.coverage_summary_fingerprint
             ),
         }
-
-
-@dataclass(frozen=True)
-class _ContentBlock:
-    """A parsed Markdown content block within a section."""
-
-    text: str
-    line_start: int
-    line_end: int
-    requirement_bearing: bool
-
-
-@dataclass
-class _Section:
-    """A Markdown section with parsed content blocks."""
-
-    section_id: str
-    heading: str | None
-    line_start: int
-    line_end: int
-    blocks: list[_ContentBlock] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1141,173 +1111,6 @@ def _coverage_gap_source_refs(
         elif isinstance(section_id, str) and section_id.strip():
             refs.append(section_id.strip())
     return _dedupe_sorted(refs)
-
-
-def _parse_markdown_sections(text: str) -> tuple[list[_Section], list[JsonDict]]:
-    lines = text.splitlines()
-    sections: list[_Section] = []
-    current = _Section("ROOT", None, 1, max(len(lines), 1))
-    content_before_heading = False
-    section_number = 0
-    fence: _FenceMarker | None = None
-    for index, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        marker = _fence_marker(stripped)
-        if marker is not None and (fence is None or marker.closes(fence)):
-            fence = None if fence is not None else marker
-            content_before_heading = True
-            continue
-        if fence is not None:
-            if stripped:
-                content_before_heading = True
-            continue
-        match = _HEADING_RE.match(line)
-        if match is None:
-            if stripped:
-                content_before_heading = True
-            continue
-        if current.section_id != "ROOT" or content_before_heading:
-            current.line_end = index - 1
-            sections.append(current)
-        section_number += 1
-        current = _Section(
-            section_id=f"S{section_number}",
-            heading=match.group(2).strip(),
-            line_start=index,
-            line_end=len(lines),
-        )
-        content_before_heading = False
-    if current.section_id != "ROOT" or content_before_heading or not sections:
-        current.line_end = len(lines) if lines else 1
-        sections.append(current)
-
-    diagnostics: list[JsonDict] = []
-    for section in sections:
-        blocks, section_diagnostics = _parse_section_blocks(lines, section)
-        section.blocks = blocks
-        diagnostics.extend(section_diagnostics)
-    diagnostics.sort(
-        key=lambda item: (item["section_id"], item["code"], item["message"])
-    )
-    return sections, diagnostics
-
-
-def _parse_section_blocks(  # noqa: C901
-    lines: list[str],
-    section: _Section,
-) -> tuple[list[_ContentBlock], list[JsonDict]]:
-    blocks: list[_ContentBlock] = []
-    diagnostics: list[JsonDict] = []
-    paragraph: list[tuple[int, str]] = []
-    fence_lines: list[tuple[int, str]] = []
-    fence: _FenceMarker | None = None
-    fence_start = 0
-
-    def flush_paragraph() -> None:
-        if not paragraph:
-            return
-        line_start = paragraph[0][0]
-        line_end = paragraph[-1][0]
-        block_text = "\n".join(line for _line_no, line in paragraph).strip()
-        blocks.append(_content_block(block_text, line_start, line_end, section.heading))
-        paragraph.clear()
-
-    for line_number in range(section.line_start, section.line_end + 1):
-        line = lines[line_number - 1] if 0 <= line_number - 1 < len(lines) else ""
-        if line_number == section.line_start and _HEADING_RE.match(line):
-            continue
-        stripped = line.strip()
-        marker = _fence_marker(stripped)
-        if marker is not None and (fence is None or marker.closes(fence)):
-            flush_paragraph()
-            if fence is not None:
-                if fence_lines:
-                    block_text = "\n".join(line for _line_no, line in fence_lines)
-                    blocks.append(
-                        _content_block(
-                            block_text,
-                            fence_start,
-                            line_number,
-                            section.heading,
-                        )
-                    )
-                    fence_lines.clear()
-                fence = None
-            else:
-                fence = marker
-                fence_start = line_number
-            continue
-        if fence is not None:
-            if stripped:
-                fence_lines.append((line_number, line))
-            continue
-        if not stripped:
-            flush_paragraph()
-            continue
-        if stripped.startswith(("- ", "* ", "+ ", "|")):
-            flush_paragraph()
-            blocks.append(
-                _content_block(stripped, line_number, line_number, section.heading)
-            )
-            continue
-        paragraph.append((line_number, line))
-    flush_paragraph()
-    if fence is not None:
-        if fence_lines:
-            block_text = "\n".join(line for _line_no, line in fence_lines)
-            blocks.append(
-                _content_block(
-                    block_text,
-                    fence_start,
-                    section.line_end,
-                    section.heading,
-                )
-            )
-        diagnostics.append(
-            {
-                "section_id": section.section_id,
-                "code": "MARKDOWN_FENCE_UNCLOSED",
-                "message": "Fenced code block was not closed before end of file.",
-            }
-        )
-    return blocks, diagnostics
-
-
-@dataclass(frozen=True)
-class _FenceMarker:
-    """Markdown fenced-code marker family and length."""
-
-    character: str
-    length: int
-
-    def closes(self, opener: _FenceMarker) -> bool:
-        """Return whether this marker closes the given opener."""
-        return self.character == opener.character and self.length >= opener.length
-
-
-def _fence_marker(stripped: str) -> _FenceMarker | None:
-    match = _FENCE_RE.match(stripped)
-    if match is None:
-        return None
-    marker = match.group(1)
-    return _FenceMarker(character=marker[0], length=len(marker))
-
-
-def _content_block(
-    text: str,
-    line_start: int,
-    line_end: int,
-    heading: str | None,
-) -> _ContentBlock:
-    requirement_bearing = bool(_NORMATIVE_RE.search(text)) or bool(
-        heading and _REQUIREMENT_HEADING_RE.search(heading)
-    )
-    return _ContentBlock(
-        text=text,
-        line_start=line_start,
-        line_end=line_end,
-        requirement_bearing=requirement_bearing,
-    )
 
 
 def _classify_section(
