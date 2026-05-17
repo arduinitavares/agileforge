@@ -83,6 +83,10 @@ def _acceptance_columns(engine: Engine) -> set[str]:
     }
 
 
+def _table_names(engine: Engine) -> set[str]:
+    return set(inspect(engine).get_table_names())
+
+
 def _assert_no_authority_decision_columns_added(engine: Engine) -> None:
     assert _acceptance_columns(engine).isdisjoint(NEW_AUTHORITY_DECISION_COLUMNS)
 
@@ -207,6 +211,27 @@ def _replace_terminal_index_with_narrower_unique_partial_index(engine: Engine) -
         )
 
 
+def _create_same_name_index_on_other_table(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE unrelated_terminal_indexes (
+                    terminal_decision_key VARCHAR
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX uq_spec_authority_terminal_decision_key
+                ON unrelated_terminal_indexes (terminal_decision_key)
+                """
+            )
+        )
+
+
 def test_authority_decision_migration_adds_provenance_columns(
     tmp_path: Path,
 ) -> None:
@@ -297,6 +322,12 @@ def test_authority_decision_migration_blocks_ambiguous_legacy_acceptance(
         migrate_spec_authority_tables(engine)
 
     _assert_no_authority_decision_columns_added(engine)
+    compiled_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("compiled_spec_authority")
+    }
+    assert "compiled_artifact_json" not in compiled_columns
+    assert "spec_registry" not in _table_names(engine)
 
 
 def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
@@ -315,6 +346,33 @@ def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
     with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
         migrate_spec_authority_tables(engine)
 
+    _assert_no_authority_decision_columns_added(engine)
+    compiled_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("compiled_spec_authority")
+    }
+    assert "compiled_artifact_json" not in compiled_columns
+    assert "spec_registry" not in _table_names(engine)
+
+
+def test_authority_decision_migration_blocks_legacy_rows_before_compiled_table_ddl(
+    tmp_path: Path,
+) -> None:
+    """Reject terminal legacy rows before creating missing base authority tables."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="compiled_spec_authority table is missing"):
+        migrate_spec_authority_tables(engine)
+
+    tables = _table_names(engine)
+    assert "compiled_spec_authority" not in tables
+    assert "spec_registry" not in tables
     _assert_no_authority_decision_columns_added(engine)
 
 
@@ -384,6 +442,7 @@ def test_authority_decision_migration_blocks_duplicate_legacy_terminal_keys_befo
         migrate_spec_authority_tables(engine)
 
     _assert_no_authority_decision_columns_added(engine)
+    assert "spec_registry" not in _table_names(engine)
 
 
 def test_authority_decision_migration_blocks_existing_duplicate_terminal_keys(
@@ -449,6 +508,27 @@ def test_authority_decision_migration_blocks_existing_duplicate_terminal_keys(
         )
     }
     assert "uq_spec_authority_terminal_decision_key" not in indexes
+
+
+def test_authority_decision_migration_rejects_terminal_index_name_on_other_table(
+    tmp_path: Path,
+) -> None:
+    """Reject a globally conflicting SQLite index name on another table."""
+    engine = _engine(tmp_path)
+    _create_same_name_index_on_other_table(engine)
+
+    with pytest.raises(RuntimeError, match="reserved by another table"):
+        migrate_spec_authority_tables(engine)
+
+    with engine.connect() as conn:
+        target_indexes = {
+            row._mapping["name"]
+            for row in conn.execute(
+                text("PRAGMA index_list('spec_authority_acceptance')")
+            )
+        }
+    assert "uq_spec_authority_terminal_decision_key" not in target_indexes
+    assert "agent_workbench_schema_versions" not in _table_names(engine)
 
 
 def test_terminal_decision_unique_key_blocks_duplicate_accept_reject_rows(

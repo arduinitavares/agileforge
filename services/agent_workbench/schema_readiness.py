@@ -116,7 +116,7 @@ def check_schema_readiness(
 
     for requirement in requirements:
         if requirement.table not in table_names:
-            missing[requirement.table] = list(requirement.columns)
+            missing[requirement.table] = _missing_requirement(requirement)
             continue
 
         existing_columns = {
@@ -172,17 +172,22 @@ def _is_missing_sqlite_file(engine: Engine) -> bool:
 def _missing_all(requirements: Sequence[SchemaRequirement]) -> dict[str, list[str]]:
     """Return every required column as missing for absent schema storage."""
     return {
-        requirement.table: [
-            *requirement.columns,
-            *requirement.indexes,
-            *(
-                [f"storage_schema_version:{requirement.storage_schema_version}"]
-                if requirement.storage_schema_version is not None
-                else []
-            ),
-        ]
+        requirement.table: _missing_requirement(requirement)
         for requirement in requirements
     }
+
+
+def _missing_requirement(requirement: SchemaRequirement) -> list[str]:
+    """Return all schema elements represented by a requirement."""
+    return [
+        *requirement.columns,
+        *requirement.indexes,
+        *(
+            [f"storage_schema_version:{requirement.storage_schema_version}"]
+            if requirement.storage_schema_version is not None
+            else []
+        ),
+    ]
 
 
 def _index_contract_ready(engine: Engine, table_name: str, index_name: str) -> bool:

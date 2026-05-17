@@ -238,6 +238,8 @@ def migrate_spec_authority_tables(engine: Engine) -> list[str]:
 
     Returns list of applied migration actions.
     """
+    _preflight_spec_authority_acceptance_contract(engine)
+
     actions: list[str] = []
 
     # 1. Ensure spec_registry table exists
@@ -307,6 +309,10 @@ def _migrate_spec_authority_acceptance_contract(engine: Engine) -> list[str]:
 
 def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
     """Validate legacy data that can be checked before adding provenance columns."""
+    existing_tables = _get_existing_tables(engine)
+    if "spec_authority_acceptance" not in existing_tables:
+        return
+
     existing_columns = _get_existing_columns(engine, "spec_authority_acceptance")
     if not existing_columns:
         return
@@ -326,6 +332,31 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
                 .mappings()
                 .all()
             )
+            if legacy_rows and "compiled_spec_authority" not in existing_tables:
+                message = (
+                    "Legacy authority decisions cannot be backfilled because "
+                    "compiled_spec_authority table is missing. Remediation: "
+                    "restore or recreate compiled authority rows for legacy "
+                    "accepted/rejected decisions before rerunning migrations."
+                )
+                raise RuntimeError(message)
+            if legacy_rows:
+                compiled_columns = _get_existing_columns(
+                    engine, "compiled_spec_authority"
+                )
+                required_join_columns = {"authority_id", "spec_version_id"}
+                if not required_join_columns.issubset(compiled_columns):
+                    missing_columns = ", ".join(
+                        sorted(required_join_columns - compiled_columns)
+                    )
+                    message = (
+                        "Legacy authority decisions cannot be backfilled because "
+                        "compiled_spec_authority is missing required join columns: "
+                        f"{missing_columns}. Remediation: restore a compiled "
+                        "authority table with authority_id and spec_version_id "
+                        "before rerunning migrations."
+                    )
+                    raise RuntimeError(message)
             backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
             _raise_for_duplicate_generated_legacy_terminal_decision_keys(backfill_plan)
 
@@ -543,6 +574,16 @@ def _raise_duplicate_legacy_terminal_decision_key(
 
 def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
     """Ensure terminal decision uniqueness using a partial SQLite unique index."""
+    master_row = _terminal_decision_index_master_row(engine)
+    if master_row is not None and master_row["tbl_name"] != "spec_authority_acceptance":
+        message = (
+            "Terminal decision index name is reserved by another table: "
+            f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
+            f"table_name={master_row['tbl_name']}. Remediation: drop or rename "
+            "the conflicting index before rerunning migrations."
+        )
+        raise RuntimeError(message)
+
     existing_indexes = _get_existing_indexes(engine, "spec_authority_acceptance")
     if SPEC_AUTHORITY_TERMINAL_DECISION_INDEX in existing_indexes:
         is_valid, reasons = _terminal_decision_index_contract(engine)
@@ -577,7 +618,36 @@ def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
     )
     with engine.begin() as conn:
         conn.execute(text(create_index_sql))
+    is_valid, reasons = _terminal_decision_index_contract(engine)
+    if not is_valid:
+        reason_text = ", ".join(reasons)
+        message = (
+            "Created terminal decision index failed validation: "
+            f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
+            f"reasons=[{reason_text}]. Remediation: drop the malformed index "
+            "and rerun migrations."
+        )
+        raise RuntimeError(message)
     return True
+
+
+def _terminal_decision_index_master_row(engine: Engine) -> RowMapping | None:
+    """Return sqlite_master metadata for the canonical index name if present."""
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    """
+                SELECT name, tbl_name, sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name = :index_name
+                """
+                ),
+                {"index_name": SPEC_AUTHORITY_TERMINAL_DECISION_INDEX},
+            )
+            .mappings()
+            .first()
+        )
 
 
 def _terminal_decision_index_contract(engine: Engine) -> tuple[bool, list[str]]:
