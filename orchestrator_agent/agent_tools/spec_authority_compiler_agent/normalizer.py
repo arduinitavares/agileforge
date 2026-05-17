@@ -10,10 +10,11 @@ The caller MUST use the normalized output downstream.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic import ValidationError
 
@@ -25,6 +26,16 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
+from utils.spec_authority_ir import (
+    AuthorityTargetKind,
+    IrProvenance,
+    MappingProvenance,
+    RequirementCandidate,
+    build_authority_mappings,
+    extract_requirement_candidates,
+    parse_markdown_sections,
+    source_units_from_sections,
+)
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -33,6 +44,10 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerOutput,
+    SpecAuthorityIrPacketLimits,
+    SpecAuthorityMapping,
+    SpecAuthorityRequirementCandidate,
+    SpecAuthoritySourceUnit,
 )
 
 logger: logging.Logger = logging.getLogger(name=__name__)
@@ -94,6 +109,15 @@ class _SourceEvidenceCandidate:
 
     excerpt: str
     location: str | None
+
+
+@dataclass(frozen=True)
+class _CompactIrModelHints:
+    """Raw compact IR hints supplied by the model before host normalization."""
+
+    ir_provenance: IrProvenance | None
+    candidates: list[SpecAuthorityRequirementCandidate]
+    mappings: list[SpecAuthorityMapping]
 
 
 def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
@@ -543,6 +567,330 @@ def _repair_source_map_from_source_text(
     return True
 
 
+def _invariant_text(invariant: Invariant) -> str:
+    """Return searchable text for an invariant authority item."""
+    parameters = invariant.parameters
+    if invariant.type == InvariantType.REQUIRED_FIELD:
+        return f"required field {getattr(parameters, 'field_name', '')}"
+    if invariant.type == InvariantType.FORBIDDEN_CAPABILITY:
+        return f"forbidden capability {getattr(parameters, 'capability', '')}"
+    if invariant.type == InvariantType.MAX_VALUE:
+        return (
+            f"maximum {getattr(parameters, 'field_name', '')} "
+            f"{getattr(parameters, 'max_value', '')}"
+        )
+    if invariant.type == InvariantType.RELATION_CONSTRAINT:
+        return f"relation constraint {getattr(parameters, 'expression', '')}"
+    return invariant.id
+
+
+def _authority_items(success: SpecAuthorityCompilationSuccess) -> list[dict[str, str]]:
+    """Build authority item dictionaries understood by the shared IR mapper."""
+    return [
+        {
+            "id": invariant.id,
+            "authority_target_kind": AuthorityTargetKind.INVARIANT.value,
+            "text": _invariant_text(invariant),
+        }
+        for invariant in success.invariants
+    ]
+
+
+def _candidate_for_source_entry(
+    entry: SourceMapEntry,
+    invariant: Invariant | None,
+    candidates: list[RequirementCandidate],
+) -> RequirementCandidate | None:
+    """Choose the candidate referenced by a normalized source map entry."""
+    excerpt = _compact_whitespace(entry.excerpt)
+    exact_matches = [
+        candidate
+        for candidate in candidates
+        if excerpt
+        and excerpt
+        in {
+            _compact_whitespace(candidate.source_quote),
+            _compact_whitespace(candidate.statement),
+        }
+    ]
+    if exact_matches:
+        return exact_matches[0]
+    if invariant is None:
+        return None
+    supported = [
+        candidate
+        for candidate in candidates
+        if _source_map_support_error(invariant, candidate.statement) is None
+    ]
+    if not supported:
+        return None
+    return max(
+        supported,
+        key=lambda candidate: _source_map_support_score(invariant, candidate.statement),
+    )
+
+
+def _legacy_mapping_provenance(
+    entry: SourceMapEntry,
+    entry_index: int,
+    original_source_map: list[SourceMapEntry],
+) -> MappingProvenance:
+    """Classify source-map evidence generated from legacy fields."""
+    if entry_index < len(original_source_map):
+        original = original_source_map[entry_index]
+        if _compact_whitespace(original.excerpt) == _compact_whitespace(entry.excerpt):
+            return MappingProvenance.HOST_INFERRED
+    return MappingProvenance.HOST_REPAIRED_QUOTE
+
+
+def _source_quote_hash(text: str) -> str:
+    """Return the canonical hash for exact source quote bytes."""
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def _model_to_host_candidate_ids(
+    model_ir_provenance: IrProvenance | None,
+    model_candidates: list[SpecAuthorityRequirementCandidate],
+    host_candidates: list[RequirementCandidate],
+) -> dict[str, str]:
+    """Return model candidate IDs that exactly match one host candidate quote."""
+    if model_ir_provenance not in {IrProvenance.MODEL_EMITTED, IrProvenance.MIXED}:
+        return {}
+    host_by_quote_hash: dict[str, list[RequirementCandidate]] = {}
+    for candidate in host_candidates:
+        host_by_quote_hash.setdefault(candidate.quote_hash, []).append(candidate)
+
+    model_to_host: dict[str, str] = {}
+    for candidate in model_candidates:
+        if candidate.provenance != IrProvenance.MODEL_EMITTED:
+            continue
+        if _source_quote_hash(candidate.source_quote) != candidate.quote_hash:
+            continue
+        matching_hosts = [
+            host
+            for host in host_by_quote_hash.get(candidate.quote_hash, [])
+            if host.source_quote == candidate.source_quote
+        ]
+        if len(matching_hosts) == 1:
+            model_to_host[candidate.candidate_id] = matching_hosts[0].candidate_id
+    return model_to_host
+
+
+def _model_quote_mapping_keys(
+    model_ir_provenance: IrProvenance | None,
+    model_mappings: list[SpecAuthorityMapping],
+    model_candidates: list[SpecAuthorityRequirementCandidate],
+    host_candidates: list[RequirementCandidate],
+    authority_id_aliases: dict[str, set[str]],
+) -> set[tuple[str, str]]:
+    """Return host candidate/authority pairs backed by exact model quote hints."""
+    model_to_host_candidate_id = _model_to_host_candidate_ids(
+        model_ir_provenance,
+        model_candidates,
+        host_candidates,
+    )
+    host_quote_hash_by_id = {
+        candidate.candidate_id: candidate.quote_hash for candidate in host_candidates
+    }
+    alias_to_current_id = {
+        alias: current_id
+        for current_id, aliases in authority_id_aliases.items()
+        for alias in aliases
+    }
+    keys: set[tuple[str, str]] = set()
+    for mapping in model_mappings:
+        if mapping.mapping_provenance != MappingProvenance.MODEL_QUOTE:
+            continue
+        if mapping.authority_target_kind != AuthorityTargetKind.INVARIANT:
+            continue
+        host_candidate_id = model_to_host_candidate_id.get(mapping.candidate_id)
+        if host_candidate_id is None:
+            continue
+        host_quote_hash = host_quote_hash_by_id[host_candidate_id]
+        if mapping.source_quote_hash != host_quote_hash:
+            continue
+        current_authority_id = alias_to_current_id.get(mapping.authority_item_id)
+        if current_authority_id is not None:
+            keys.add((host_candidate_id, current_authority_id))
+    return keys
+
+
+def _authority_id_aliases(
+    success: SpecAuthorityCompilationSuccess,
+    original_invariant_ids: list[str],
+) -> dict[str, set[str]]:
+    """Map normalized authority IDs to model/legacy IDs that referred to them."""
+    aliases: dict[str, set[str]] = {
+        invariant.id: {invariant.id} for invariant in success.invariants
+    }
+    original_id_counts: dict[str, int] = {}
+    for original_id in original_invariant_ids:
+        original_id_counts[original_id] = original_id_counts.get(original_id, 0) + 1
+    for index, invariant in enumerate(success.invariants):
+        if index >= len(original_invariant_ids):
+            continue
+        original_id = original_invariant_ids[index]
+        if original_id_counts.get(original_id) != 1:
+            continue
+        aliases.setdefault(invariant.id, {invariant.id}).add(original_id)
+    return aliases
+
+
+def _mapping_entries_for_compact_ir(
+    success: SpecAuthorityCompilationSuccess,
+    candidates: list[RequirementCandidate],
+    *,
+    model_hints: _CompactIrModelHints,
+    original_source_map: list[SourceMapEntry],
+    original_invariant_ids: list[str],
+) -> list[dict[str, str | None]]:
+    """Convert normalized source_map entries into shared IR mapping inputs."""
+    invariants_by_id = {invariant.id: invariant for invariant in success.invariants}
+    model_quote_keys = _model_quote_mapping_keys(
+        model_hints.ir_provenance,
+        model_hints.mappings,
+        model_hints.candidates,
+        candidates,
+        _authority_id_aliases(success, original_invariant_ids),
+    )
+    entries: list[dict[str, str | None]] = []
+    for entry_index, source_entry in enumerate(success.source_map):
+        invariant = invariants_by_id.get(source_entry.invariant_id)
+        candidate = _candidate_for_source_entry(source_entry, invariant, candidates)
+        if candidate is None:
+            continue
+        provenance = _legacy_mapping_provenance(
+            source_entry,
+            entry_index,
+            original_source_map,
+        )
+        if (
+            candidate.candidate_id,
+            source_entry.invariant_id,
+        ) in model_quote_keys:
+            provenance = MappingProvenance.MODEL_QUOTE
+        entries.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "authority_item_id": source_entry.invariant_id,
+                "authority_target_kind": AuthorityTargetKind.INVARIANT.value,
+                "source_quote": candidate.source_quote,
+                "source_quote_hash": candidate.quote_hash,
+                "mapping_provenance": provenance.value,
+            }
+        )
+    return entries
+
+
+def _set_compact_ir(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str | None,
+    original_source_map: list[SourceMapEntry],
+    original_invariant_ids: list[str],
+    model_hints: _CompactIrModelHints,
+) -> None:
+    """Populate compact authority IR without treating host parsing as acceptance."""
+    if not source_text:
+        success.ir_schema_version = None
+        success.ir_provenance = IrProvenance.LEGACY_ABSENT
+        success.source_units = []
+        success.requirement_candidates = []
+        success.authority_mappings = []
+        success.ir_packet_limits = None
+        return
+
+    sections, diagnostics = parse_markdown_sections(source_text)
+    if diagnostics:
+        logger.info("Spec authority IR parser diagnostics: %s", diagnostics)
+    source_units = source_units_from_sections(sections)
+    candidates = extract_requirement_candidates(source_units)
+    model_host_candidate_ids = set(
+        _model_to_host_candidate_ids(
+            model_hints.ir_provenance,
+            model_hints.candidates,
+            candidates,
+        ).values()
+    )
+    candidates = [
+        replace(candidate, provenance=IrProvenance.MODEL_EMITTED)
+        if candidate.candidate_id in model_host_candidate_ids
+        else candidate
+        for candidate in candidates
+    ]
+    mapping_entries = _mapping_entries_for_compact_ir(
+        success,
+        candidates,
+        model_hints=model_hints,
+        original_source_map=original_source_map,
+        original_invariant_ids=original_invariant_ids,
+    )
+    authority_mappings = build_authority_mappings(
+        candidates,
+        _authority_items(success),
+        mapping_entries,
+    )
+    mapped_model_quotes = any(
+        mapping.mapping_provenance == MappingProvenance.MODEL_QUOTE
+        for mapping in authority_mappings
+    )
+    model_candidate_hints = any(
+        candidate.provenance == IrProvenance.MODEL_EMITTED for candidate in candidates
+    )
+    success.ir_schema_version = "authority-ir-v1"
+    success.ir_provenance = (
+        IrProvenance.MIXED
+        if mapped_model_quotes or model_candidate_hints
+        else IrProvenance.HOST_PARSED
+    )
+    success.source_units = [
+        SpecAuthoritySourceUnit(
+            unit_id=unit.unit_id,
+            section_id=unit.section_id,
+            heading_path=list(unit.heading_path),
+            kind=unit.kind,
+            line_start=unit.line_start,
+            line_end=unit.line_end,
+            text_hash=unit.text_hash,
+            text_excerpt=unit.text_excerpt,
+            disposition=unit.disposition,
+            disposition_reason=unit.disposition_reason,
+        )
+        for unit in source_units
+    ]
+    success.requirement_candidates = [
+        SpecAuthorityRequirementCandidate(
+            candidate_id=candidate.candidate_id,
+            source_unit_id=candidate.source_unit_id,
+            statement=candidate.statement,
+            source_quote=candidate.source_quote,
+            quote_hash=candidate.quote_hash,
+            line_start=candidate.line_start,
+            line_end=candidate.line_end,
+            classification=candidate.classification,
+            provenance=candidate.provenance,
+        )
+        for candidate in candidates
+    ]
+    success.authority_mappings = [
+        SpecAuthorityMapping(
+            candidate_id=mapping.candidate_id,
+            authority_item_id=mapping.authority_item_id,
+            authority_target_kind=mapping.authority_target_kind,
+            mapping_status=mapping.mapping_status,
+            mapping_rationale=mapping.mapping_rationale,
+            source_quote_hash=mapping.source_quote_hash,
+            mapping_provenance=mapping.mapping_provenance,
+        )
+        for mapping in authority_mappings
+    ]
+    success.ir_packet_limits = SpecAuthorityIrPacketLimits(
+        max_candidates=len(success.requirement_candidates),
+        max_findings=0,
+        truncated=False,
+    )
+
+
 def normalize_compiler_output(
     raw_json: str,
     *,
@@ -616,6 +964,11 @@ def normalize_compiler_output(
         return parsed
 
     success: SpecAuthorityCompilationSuccess = parsed.root
+    model_hints = _CompactIrModelHints(
+        ir_provenance=success.ir_provenance,
+        candidates=list(success.requirement_candidates),
+        mappings=list(success.authority_mappings),
+    )
 
     _filter_meta_policy_invariants(success)
     _deduplicate_semantic_invariants(success)
@@ -631,6 +984,13 @@ def normalize_compiler_output(
         logger.warning("No invariants extracted from spec authority compiler output")
         if "No invariants extracted from spec" not in success.gaps:
             success.gaps.append("No invariants extracted from spec")
+        _set_compact_ir(
+            success,
+            source_text=source_text,
+            original_source_map=list(success.source_map),
+            original_invariant_ids=[],
+            model_hints=model_hints,
+        )
         return SpecAuthorityCompilerOutput(root=success)
 
     if not success.source_map:
@@ -640,10 +1000,12 @@ def normalize_compiler_output(
             blocking_gaps=["Missing source_map required for deterministic IDs"],
         )
 
+    original_source_map = list(success.source_map)
     _repair_source_map_from_source_text(success, source_text=source_text)
 
     # Snapshot original invariant IDs/types before rewriting
     original_invariants = list(success.invariants)
+    original_invariant_ids = [invariant.id for invariant in success.invariants]
     # Multi-map: an original ID may appear on several invariants with
     # different types or parameters (common LLM behaviour).  A plain dict loses
     # all but the last invariant; we keep them all so source_map rewriting can
@@ -823,5 +1185,13 @@ def normalize_compiler_output(
             len(missing),
             missing,
         )
+
+    _set_compact_ir(
+        success,
+        source_text=source_text,
+        original_source_map=original_source_map,
+        original_invariant_ids=original_invariant_ids,
+        model_hints=model_hints,
+    )
 
     return SpecAuthorityCompilerOutput(root=success)

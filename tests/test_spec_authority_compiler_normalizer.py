@@ -404,6 +404,522 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
 
 
+def test_legacy_ir_provenance_does_not_create_accept_ready_packet() -> None:
+    """Host-parsed legacy artifacts expose incomplete IR, not trusted coverage."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "# Requirements",
+            "- The payload must include user_id.",
+            "- The payload must include account_id.",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "- The payload must include user_id."
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.ir_provenance == "host_parsed"
+    assert success.ir_provenance != "model_emitted"
+    assert len(success.requirement_candidates) == 2  # noqa: PLR2004
+    assert {mapping.mapping_provenance for mapping in success.authority_mappings} == {
+        "host_inferred"
+    }
+    assert all(
+        mapping.mapping_status != "covered" for mapping in success.authority_mappings
+    )
+
+
+def test_legacy_without_source_text_marks_ir_absent_not_model_emitted() -> None:
+    """Legacy compiler output without current source cannot become model IR."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    normalized = normalize_compiler_output(json.dumps(_legacy_success_payload()))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.ir_provenance == "legacy_absent"
+    assert normalized.root.ir_provenance != "model_emitted"
+    assert normalized.root.source_units == []
+    assert normalized.root.requirement_candidates == []
+    assert normalized.root.authority_mappings == []
+
+
+def test_unrelated_source_refs_become_weak_mappings() -> None:
+    """Host-repaired mappings stay weak when the model cited unrelated source."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "# Requirements",
+            "- The payload must include user_id.",
+            "- The payload must include account_id.",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "- The payload must include account_id."
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.ir_provenance == "host_parsed"
+    assert success.source_map[0].excerpt == "- The payload must include user_id."
+    assert len(success.authority_mappings) == 1
+    mapping = success.authority_mappings[0]
+    assert mapping.mapping_provenance == "host_repaired_quote"
+    assert mapping.mapping_provenance != "model_quote"
+    assert mapping.mapping_status == "weak_mapping"
+
+
+def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> None:
+    """Exact model quote hints are re-keyed to host candidates and normalized IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    quote_hash = f"sha256:{hashlib.sha256(source_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-model",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": quote_hash,
+                    "text_excerpt": source_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": None,
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-model",
+                    "source_unit_id": "SRC-model",
+                    "statement": source_quote,
+                    "source_quote": source_quote,
+                    "quote_hash": quote_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "REQ-model",
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Exact quote maps to required field.",
+                    "source_quote_hash": quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+            "ir_packet_limits": {
+                "max_candidates": 1,
+                "max_findings": 0,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.ir_provenance == "mixed"
+    assert len(success.authority_mappings) == 1
+    mapping = success.authority_mappings[0]
+    assert mapping.authority_item_id == success.invariants[0].id
+    assert mapping.mapping_provenance == "model_quote"
+    assert mapping.mapping_status == "covered"
+
+
+def test_model_emitted_candidate_without_mapping_marks_root_mixed() -> None:
+    """Root provenance reflects retained model candidates even without mappings."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    quote_hash = f"sha256:{hashlib.sha256(source_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-model",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": quote_hash,
+                    "text_excerpt": source_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": None,
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-model",
+                    "source_unit_id": "SRC-model",
+                    "statement": source_quote,
+                    "source_quote": source_quote,
+                    "quote_hash": quote_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [],
+            "ir_packet_limits": {
+                "max_candidates": 1,
+                "max_findings": 0,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.ir_provenance == "mixed"
+    assert any(
+        candidate.provenance == "model_emitted"
+        for candidate in normalized.root.requirement_candidates
+    )
+
+
+def test_swapped_legacy_authority_id_cannot_launder_model_quote_mapping() -> None:
+    """Model mappings cannot use swapped legacy source-map IDs as aliases."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    user_quote = "- The payload must include user_id."
+    account_quote = "- The payload must include account_id."
+    source_text = "\n".join(["# Requirements", user_quote, account_quote])
+    user_hash = f"sha256:{hashlib.sha256(user_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "user_id"},
+        },
+        {
+            "id": "INV-2222222222222222",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "account_id"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-2222222222222222",
+            "excerpt": user_quote,
+            "location": "line 2",
+        },
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": account_quote,
+            "location": "line 3",
+        },
+    ]
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-model",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": user_hash,
+                    "text_excerpt": user_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": None,
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-model-user",
+                    "source_unit_id": "SRC-model",
+                    "statement": user_quote,
+                    "source_quote": user_quote,
+                    "quote_hash": user_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "REQ-model-user",
+                    "authority_item_id": "INV-2222222222222222",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Swapped legacy ID should not survive.",
+                    "source_quote_hash": user_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+            "ir_packet_limits": {
+                "max_candidates": 1,
+                "max_findings": 0,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    user_mappings = [
+        mapping
+        for mapping in normalized.root.authority_mappings
+        if mapping.source_quote_hash == user_hash
+    ]
+    assert user_mappings
+    assert all(
+        mapping.mapping_provenance != "model_quote" for mapping in user_mappings
+    )
+    assert all(mapping.mapping_status != "covered" for mapping in user_mappings)
+
+
+def test_model_quote_requires_model_quote_text_to_match_hash() -> None:
+    """A supplied quote hash cannot launder stale model quote text."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_quote = "- The payload must include user_id."
+    stale_quote = "- The payload must include stale_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    quote_hash = f"sha256:{hashlib.sha256(source_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-model",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": quote_hash,
+                    "text_excerpt": stale_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": None,
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-model",
+                    "source_unit_id": "SRC-model",
+                    "statement": stale_quote,
+                    "source_quote": stale_quote,
+                    "quote_hash": quote_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "REQ-model",
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Stale model quote should not be trusted.",
+                    "source_quote_hash": quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+            "ir_packet_limits": {
+                "max_candidates": 1,
+                "max_findings": 0,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.ir_provenance == "host_parsed"
+    assert all(
+        candidate.provenance != "model_emitted"
+        for candidate in success.requirement_candidates
+    )
+    assert success.authority_mappings[0].mapping_provenance != "model_quote"
+    assert success.authority_mappings[0].mapping_status == "weak_mapping"
+
+
+def test_host_parsed_model_hints_do_not_promote_candidate_provenance() -> None:
+    """Only explicitly model-emitted compact IR can preserve model provenance."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    quote_hash = f"sha256:{hashlib.sha256(source_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "host_parsed",
+            "source_units": [
+                {
+                    "unit_id": "SRC-host",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": quote_hash,
+                    "text_excerpt": source_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": None,
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-host",
+                    "source_unit_id": "SRC-host",
+                    "statement": source_quote,
+                    "source_quote": source_quote,
+                    "quote_hash": quote_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "host_parsed",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "REQ-host",
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Host parsed hint should stay host parsed.",
+                    "source_quote_hash": quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+            "ir_packet_limits": {
+                "max_candidates": 1,
+                "max_findings": 0,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.ir_provenance == "host_parsed"
+    assert all(
+        candidate.provenance != "model_emitted"
+        for candidate in normalized.root.requirement_candidates
+    )
+    assert normalized.root.authority_mappings[0].mapping_provenance != "model_quote"
+
+
+def test_swapped_legacy_source_refs_become_host_repaired_quotes() -> None:
+    """Repaired provenance is based on source-map position, not global text reuse."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "# Requirements",
+            "- The payload must include user_id.",
+            "- The payload must include account_id.",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "user_id"},
+        },
+        {
+            "id": "INV-2222222222222222",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "account_id"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": "- The payload must include account_id.",
+            "location": "line 3",
+        },
+        {
+            "invariant_id": "INV-2222222222222222",
+            "excerpt": "- The payload must include user_id.",
+            "location": "line 2",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(normalized.root.authority_mappings) == 2  # noqa: PLR2004
+    repaired_provenance = {
+        mapping.mapping_provenance
+        for mapping in normalized.root.authority_mappings
+    }
+    assert repaired_provenance == {"host_repaired_quote"}
+    assert all(
+        mapping.mapping_status == "weak_mapping"
+        for mapping in normalized.root.authority_mappings
+    )
+
+
 def test_normalizer_fails_when_source_map_missing_or_unmatchable() -> None:
     """Normalizer must fail deterministically if source_map cannot support ID mapping."""  # noqa: E501
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
