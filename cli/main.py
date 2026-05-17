@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
+    IncompleteReviewOverride,
 )
 from services.agent_workbench.envelope import (
     WorkbenchError,
@@ -52,6 +53,7 @@ type JsonObject = dict[str, object]
 type JsonList = list[object]
 CommandResult = tuple[str, JsonObject]
 CommandHandler = Callable[[argparse.Namespace, "_Application"], CommandResult]
+INCOMPLETE_REVIEW_OVERRIDE_PARTS = 3
 
 
 class _AuthorityRequestKwargs(TypedDict):
@@ -609,6 +611,12 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_accept.add_argument("--idempotency-key")
     authority_accept.add_argument("--allow-incomplete-review", action="store_true")
     authority_accept.add_argument("--incomplete-review-rationale")
+    authority_accept.add_argument(
+        "--incomplete-review-override",
+        action="append",
+        default=[],
+        metavar="CANDIDATE_ID:FINDING_CODE:RATIONALE",
+    )
     authority_accept.add_argument("--changed-by")
     authority_accept.set_defaults(command_handler=_authority_accept)
     authority_reject = authority_sub.add_parser(
@@ -994,16 +1002,50 @@ def _authority_validation_failure(
 
 def _validate_incomplete_override(args: argparse.Namespace) -> CommandResult | None:
     """Validate incomplete review override arguments."""
-    if not args.allow_incomplete_review:
+    overrides = cast("list[str]", args.incomplete_review_override or [])
+    if overrides:
+        try:
+            _parse_incomplete_review_overrides(overrides)
+        except ValueError as exc:
+            return _invalid_command(
+                "agileforge authority accept",
+                str(exc),
+                details={"field": "incomplete_review_override"},
+            )
         return None
-    rationale = args.incomplete_review_rationale
-    if isinstance(rationale, str) and rationale.strip():
+    if not args.allow_incomplete_review and not args.incomplete_review_rationale:
         return None
     return _invalid_command(
         "agileforge authority accept",
-        "--allow-incomplete-review requires --incomplete-review-rationale.",
-        details={"missing": ["incomplete_review_rationale"]},
+        "Incomplete review acceptance requires candidate-specific overrides.",
+        details={"missing": ["incomplete_review_overrides"]},
     )
+
+
+def _parse_incomplete_review_overrides(
+    raw_overrides: list[str],
+) -> list[IncompleteReviewOverride]:
+    """Parse repeated candidate-scoped incomplete review override flags."""
+    parsed: list[IncompleteReviewOverride] = []
+    for raw in raw_overrides:
+        parts = raw.split(":", 2)
+        if len(parts) != INCOMPLETE_REVIEW_OVERRIDE_PARTS or not all(
+            part.strip() for part in parts
+        ):
+            msg = (
+                "--incomplete-review-override must be "
+                "<candidate_id>:<finding_code>:<rationale>."
+            )
+            raise ValueError(msg)
+        candidate_id, finding_code, rationale = (part.strip() for part in parts)
+        parsed.append(
+            IncompleteReviewOverride(
+                candidate_id=candidate_id,
+                finding_code=finding_code,
+                rationale=rationale,
+            )
+        )
+    return parsed
 
 
 def _validate_authority_explicit_args(
@@ -1049,6 +1091,9 @@ def _authority_accept(  # noqa: PLR0911
                 **_authority_request_kwargs(args),
                 allow_incomplete_review=args.allow_incomplete_review,
                 incomplete_review_rationale=args.incomplete_review_rationale,
+                incomplete_review_overrides=_parse_incomplete_review_overrides(
+                    cast("list[str]", args.incomplete_review_override or [])
+                ),
             )
         except (ValidationError, ValueError) as exc:
             return _authority_validation_failure(command, exc)
@@ -1067,6 +1112,9 @@ def _authority_accept(  # noqa: PLR0911
                 **_authority_request_kwargs(args),
                 allow_incomplete_review=args.allow_incomplete_review,
                 incomplete_review_rationale=args.incomplete_review_rationale,
+                incomplete_review_overrides=_parse_incomplete_review_overrides(
+                    cast("list[str]", args.incomplete_review_override or [])
+                ),
             )
         except (ValidationError, ValueError) as exc:
             return _authority_validation_failure(command, exc)
@@ -1220,25 +1268,22 @@ def _interactive_authority_accept(
             "Authority acceptance confirmation did not match.",
             details={"required_phrase": phrase},
         )
-    rationale = None
     if omission != "complete":
-        rationale = _input_from_stderr("Incomplete review rationale: ").strip()
-        if not rationale:
-            return _invalid_command(
-                command,
-                "Incomplete authority acceptance requires a rationale.",
-                details={"missing": ["incomplete_review_rationale"]},
-            )
+        validation_error = _validate_incomplete_override(args)
+        if validation_error is not None:
+            return validation_error
     token_args = _args_from_review_token(
         args,
         review_token=review_token,
-        incomplete_review_rationale=rationale,
     )
     try:
         request = AuthorityAcceptRequest(
             **_authority_request_kwargs(token_args),
             allow_incomplete_review=token_args.allow_incomplete_review,
             incomplete_review_rationale=token_args.incomplete_review_rationale,
+            incomplete_review_overrides=_parse_incomplete_review_overrides(
+                cast("list[str]", token_args.incomplete_review_override or [])
+            ),
         )
     except (ValidationError, ValueError) as exc:
         return _authority_validation_failure(command, exc)

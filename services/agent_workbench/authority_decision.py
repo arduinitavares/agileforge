@@ -45,6 +45,8 @@ from services.agent_workbench.schema_readiness import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sqlalchemy.engine import Engine
 
 JsonDict = dict[str, Any]
@@ -135,11 +137,22 @@ class AuthorityDecisionBase(BaseModel):
         return self
 
 
+class IncompleteReviewOverride(BaseModel):
+    """Candidate-scoped incomplete review override request."""
+
+    candidate_id: str = Field(min_length=1)
+    finding_code: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+
 class AuthorityAcceptRequest(AuthorityDecisionBase):
     """Guarded authority acceptance request."""
 
     allow_incomplete_review: bool = False
     incomplete_review_rationale: str | None = None
+    incomplete_review_overrides: list[IncompleteReviewOverride] = Field(
+        default_factory=list
+    )
 
 
 class AuthorityRejectRequest(AuthorityDecisionBase):
@@ -167,6 +180,8 @@ class ReviewedAuthoritySnapshot:
     coverage_summary_fingerprint: str
     review_token: str | None
     spec_version_id: int
+    review_findings: list[JsonDict]
+    ir_packet_limits: JsonDict
 
 
 class AuthorityDecisionRunner:
@@ -695,10 +710,22 @@ class AuthorityDecisionRunner:
                 review_completeness=snapshot.omission_assessment,
                 incomplete_review_override=(
                     isinstance(request, AuthorityAcceptRequest)
-                    and request.allow_incomplete_review
+                    and (
+                        request.allow_incomplete_review
+                        or bool(request.incomplete_review_overrides)
+                    )
                 ),
                 incomplete_review_rationale=(
                     request.incomplete_review_rationale
+                    if isinstance(request, AuthorityAcceptRequest)
+                    else None
+                ),
+                incomplete_review_overrides_json=(
+                    _persisted_incomplete_review_overrides_json(
+                        request,
+                        snapshot=snapshot,
+                        recorded_at=now,
+                    )
                     if isinstance(request, AuthorityAcceptRequest)
                     else None
                 ),
@@ -1078,6 +1105,14 @@ def normalized_decision_request_hash(
                 if isinstance(request, AuthorityAcceptRequest)
                 else None
             ),
+            "incomplete_review_overrides": (
+                [
+                    override.model_dump(mode="json")
+                    for override in request.incomplete_review_overrides
+                ]
+                if isinstance(request, AuthorityAcceptRequest)
+                else None
+            ),
             "reason": (
                 request.reason
                 if isinstance(request, AuthorityRejectRequest)
@@ -1106,6 +1141,8 @@ def _snapshot_from_review(
         coverage_summary_fingerprint=snapshot.coverage_summary_fingerprint,
         review_token=snapshot.review_token,
         spec_version_id=_required_int(snapshot.spec_version_id),
+        review_findings=list(snapshot.review_findings),
+        ir_packet_limits=dict(snapshot.ir_packet_limits),
     )
 
 
@@ -1172,21 +1209,166 @@ def _accept_incomplete_error(
     snapshot: ReviewedAuthoritySnapshot,
     command: str,
 ) -> JsonDict | None:
-    if snapshot.omission_assessment == "complete":
+    blocking_findings = _blocking_review_findings(snapshot.review_findings)
+    if request.allow_incomplete_review and not request.incomplete_review_overrides:
+        return _invalid_override_error(
+            command=command,
+            message=(
+                "Broad incomplete-review override is not accepted without "
+                "candidate-specific overrides."
+            ),
+            details={"missing": ["incomplete_review_overrides"]},
+        )
+    if request.incomplete_review_rationale and not request.incomplete_review_overrides:
+        return _invalid_override_error(
+            command=command,
+            message=(
+                "Incomplete review rationale must be attached to "
+                "candidate-specific overrides."
+            ),
+            details={"missing": ["incomplete_review_overrides"]},
+        )
+    if not blocking_findings and not request.incomplete_review_overrides:
         return None
-    if request.allow_incomplete_review and request.incomplete_review_rationale:
-        return None
+    if not blocking_findings and request.incomplete_review_overrides:
+        return _invalid_override_error(
+            command=command,
+            message="Incomplete review overrides did not match blocking findings.",
+            details={"unmatched_overrides": _override_keys(request)},
+        )
+    if request.incomplete_review_overrides:
+        validation_error = _validate_incomplete_review_overrides(
+            request=request,
+            blocking_findings=blocking_findings,
+            command=command,
+        )
+        if validation_error is None:
+            return None
+        return validation_error
     return _error(
         command=command,
         code=ErrorCode.AUTHORITY_REVIEW_INCOMPLETE,
         details={
             "omission_assessment": snapshot.omission_assessment,
             "allow_incomplete_review": request.allow_incomplete_review,
+            "blocking_findings": blocking_findings,
         },
         remediation=[
-            "Review uncovered source sections or pass an explicit incomplete "
-            "review rationale."
+            "Review blocking findings and provide candidate-specific overrides."
         ],
+    )
+
+
+def _blocking_review_findings(findings: list[JsonDict]) -> list[JsonDict]:
+    return [
+        finding
+        for finding in findings
+        if finding.get("severity") == "blocking"
+        and finding.get("code") != "AUTHORITY_COVERAGE_INCOMPLETE"
+    ]
+
+
+def _validate_incomplete_review_overrides(
+    *,
+    request: AuthorityAcceptRequest,
+    blocking_findings: list[JsonDict],
+    command: str,
+) -> JsonDict | None:
+    non_overrideable = [
+        finding
+        for finding in blocking_findings
+        if finding.get("override_allowed") is False
+    ]
+    requested_keys = set(_override_keys(request))
+    if non_overrideable:
+        return _invalid_override_error(
+            command=command,
+            message="Non-overrideable authority review findings cannot be accepted.",
+            details={"non_overrideable_findings": non_overrideable},
+        )
+    if any(
+        (
+            str(finding.get("code")),
+            candidate_id,
+        )
+        in requested_keys
+        for finding in non_overrideable
+        for candidate_id in _finding_candidate_ids(finding)
+    ) or any(
+        str(override.finding_code) == "AUTHORITY_REVIEW_PACKET_TRUNCATED"
+        for override in request.incomplete_review_overrides
+    ):
+        return _invalid_override_error(
+            command=command,
+            message=(
+                "Review packet truncation and non-overrideable findings cannot "
+                "be overridden."
+            ),
+            details={"non_overrideable_findings": non_overrideable},
+        )
+
+    valid_keys = {
+        (str(finding.get("code")), candidate_id)
+        for finding in blocking_findings
+        if finding.get("override_allowed") is not False
+        for candidate_id in _finding_candidate_ids(finding)
+    }
+    missing_keys = sorted(valid_keys - requested_keys)
+    extra_keys = sorted(requested_keys - valid_keys)
+    if extra_keys:
+        return _invalid_override_error(
+            command=command,
+            message=(
+                "Incomplete review override does not match a current blocking "
+                "finding."
+            ),
+            details={"unmatched_overrides": extra_keys},
+        )
+    if missing_keys:
+        return _error(
+            command=command,
+            code=ErrorCode.AUTHORITY_REVIEW_INCOMPLETE,
+            details={
+                "missing_overrides": missing_keys,
+                "blocking_findings": blocking_findings,
+            },
+            remediation=[
+                "Provide an override for each affected candidate and finding code."
+            ],
+        )
+    return None
+
+
+def _finding_candidate_ids(finding: Mapping[str, Any]) -> list[str]:
+    candidate_ids = finding.get("candidate_ids")
+    if not isinstance(candidate_ids, list):
+        return []
+    return [str(candidate_id) for candidate_id in candidate_ids if candidate_id]
+
+
+def _override_keys(request: AuthorityAcceptRequest) -> list[tuple[str, str]]:
+    return [
+        (override.finding_code, override.candidate_id)
+        for override in request.incomplete_review_overrides
+    ]
+
+
+def _invalid_override_error(
+    *,
+    command: str,
+    message: str,
+    details: JsonDict,
+) -> JsonDict:
+    return error_envelope(
+        command=command,
+        error=workbench_error(
+            ErrorCode.INVALID_COMMAND,
+            message=message,
+            details=details,
+            remediation=[
+                "Pass repeated candidate-specific incomplete-review overrides."
+            ],
+        ),
     )
 
 
@@ -1261,10 +1443,16 @@ def _retarget_error(payload: JsonDict, *, command: str) -> JsonDict:
     first = errors[0]
     if not isinstance(first, dict):
         return payload
+    original_code = str(first.get("code") or ErrorCode.COMMAND_EXCEPTION.value)
+    code = (
+        ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE
+        if original_code in {ErrorCode.SPEC_FILE_NOT_FOUND.value}
+        else original_code
+    )
     return error_envelope(
         command=command,
         error=workbench_error(
-            str(first.get("code") or ErrorCode.COMMAND_EXCEPTION.value),
+            code,
             message=str(first.get("message") or "Authority decision failed."),
             details=dict(first.get("details") or {}),
             remediation=list(first.get("remediation") or []),
@@ -1397,6 +1585,31 @@ def _rationale(
     if decision == "reject":
         return _cast_reject(request).reason
     return _cast_accept(request).incomplete_review_rationale
+
+
+def _persisted_incomplete_review_overrides_json(
+    request: AuthorityAcceptRequest | AuthorityRejectRequest,
+    *,
+    snapshot: ReviewedAuthoritySnapshot,
+    recorded_at: datetime,
+) -> str | None:
+    if not isinstance(request, AuthorityAcceptRequest):
+        return None
+    if not request.incomplete_review_overrides:
+        return None
+    actor = request.actor_mode
+    payload = [
+        {
+            "candidate_id": override.candidate_id,
+            "finding_code": override.finding_code,
+            "rationale": override.rationale,
+            "actor": actor,
+            "recorded_at": recorded_at.isoformat().replace("+00:00", "Z"),
+            "review_token": snapshot.review_token,
+        }
+        for override in request.incomplete_review_overrides
+    ]
+    return _json_dump(payload)
 
 
 def _lease_owner(*, idempotency_key: str, correlation_id: str | None) -> str:

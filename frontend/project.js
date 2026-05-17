@@ -437,9 +437,11 @@ function renderAuthorityReviewCard(visible) {
 
     card.classList.remove('hidden');
     const summary = document.getElementById('authority-review-summary');
+    const findingsEl = document.getElementById('authority-review-findings');
     const preview = document.getElementById('authority-review-preview');
     if (!currentAuthorityReview) {
         if (summary) summary.innerText = 'Loading authority review...';
+        if (findingsEl) findingsEl.innerText = '';
         if (preview) preview.innerText = '';
         return;
     }
@@ -452,6 +454,13 @@ function renderAuthorityReviewCard(visible) {
     const path = spec.resolved_path || 'linked specification';
     if (summary) {
         summary.innerText = `${project.name || 'Project'} authority ${authorityId} awaits review. Coverage: ${omission}. Source: ${path}.`;
+    }
+    if (findingsEl) {
+        const findings = pending.review_findings || [];
+        const blockingCount = findings.filter((finding) => finding?.severity === 'blocking').length;
+        findingsEl.innerText = blockingCount
+            ? `${blockingCount} blocking review finding(s) require resolution or candidate-specific overrides.`
+            : '';
     }
 
     if (preview) {
@@ -551,6 +560,9 @@ async function acceptAuthorityReview() {
         return;
     }
 
+    const incompleteReviewOverrides = collectIncompleteReviewOverrides();
+    if (incompleteReviewOverrides === null) return;
+
     const btn = document.getElementById('btn-accept-authority');
     const original = btn?.innerHTML;
     if (btn) {
@@ -562,7 +574,10 @@ async function acceptAuthorityReview() {
         const response = await fetch(`/api/projects/${selectedProjectId}/authority/accept`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ review_token: reviewToken }),
+            body: JSON.stringify({
+                review_token: reviewToken,
+                incomplete_review_overrides: incompleteReviewOverrides,
+            }),
         });
         const data = await response.json();
         if (!response.ok || data.status !== 'success') {
@@ -581,6 +596,40 @@ async function acceptAuthorityReview() {
             btn.disabled = false;
         }
     }
+}
+
+function collectIncompleteReviewOverrides() {
+    const findings = currentAuthorityReview?.pending_authority?.review_findings || [];
+    const blocking = findings.filter((finding) => (
+        finding?.severity === 'blocking'
+        && finding?.code !== 'AUTHORITY_COVERAGE_INCOMPLETE'
+    ));
+    if (!blocking.length) return [];
+
+    const overrides = [];
+    for (const finding of blocking) {
+        if (finding.override_allowed === false) {
+            setAuthorityReviewError(`${finding.code} must be resolved before accepting authority.`);
+            return null;
+        }
+        const candidateIds = Array.isArray(finding.candidate_ids) ? finding.candidate_ids : [];
+        for (const candidateId of candidateIds) {
+            const rationale = window.prompt(
+                `Rationale for overriding ${finding.code} on ${candidateId}:`,
+                '',
+            );
+            if (!rationale || !rationale.trim()) {
+                setAuthorityReviewError('Candidate-specific override rationale is required.');
+                return null;
+            }
+            overrides.push({
+                candidate_id: String(candidateId),
+                finding_code: String(finding.code),
+                rationale: rationale.trim(),
+            });
+        }
+    }
+    return overrides;
 }
 
 async function rejectAuthorityReview() {

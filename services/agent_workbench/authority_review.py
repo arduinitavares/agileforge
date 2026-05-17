@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from json import JSONDecodeError
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -27,9 +27,8 @@ from services.agent_workbench.authority_projection import (
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
-from utils.spec_authority_ir import (
-    ContentBlock as _ContentBlock,
-)
+from utils import spec_authority_ir as authority_ir
+from utils.spec_authority_ir import ContentBlock as _ContentBlock
 from utils.spec_authority_ir import (
     Section as _Section,
 )
@@ -93,6 +92,13 @@ class AuthorityReviewSnapshot:
     source_outline: list[JsonDict]
     coverage_summary: JsonDict
     coverage_diagnostics: list[JsonDict]
+    source_units: list[JsonDict]
+    requirement_candidates: list[JsonDict]
+    authority_mappings: list[JsonDict]
+    review_findings: list[JsonDict]
+    ir_provenance: str
+    ir_packet_limits: JsonDict
+    ir_coverage_summary: JsonDict
     excerpt: str
     content_truncated: bool
     source_content: str | None
@@ -480,6 +486,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     artifact, authority_evidence, classification_evidence = (
         _authority_artifact_payload(authority)
     )
+    ir_payload = _authority_ir_payload(text=source.text, authority=authority)
     outline, coverage_summary, diagnostics = _coverage_payload(
         text=source.text,
         authority_evidence=authority_evidence,
@@ -490,6 +497,10 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         outline=outline,
         coverage_summary=coverage_summary,
         diagnostics=diagnostics,
+    )
+    artifact = _artifact_with_review_findings(
+        artifact,
+        review_findings=ir_payload["review_findings"],
     )
     source_content_sha256 = (
         sha256_prefixed(source.text.encode("utf-8")) if content_included else None
@@ -536,6 +547,16 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         source_outline=outline,
         coverage_summary=coverage_summary,
         coverage_diagnostics=diagnostics,
+        source_units=cast("list[JsonDict]", ir_payload["source_units"]),
+        requirement_candidates=cast(
+            "list[JsonDict]",
+            ir_payload["requirement_candidates"],
+        ),
+        authority_mappings=cast("list[JsonDict]", ir_payload["authority_mappings"]),
+        review_findings=cast("list[JsonDict]", ir_payload["review_findings"]),
+        ir_provenance=str(ir_payload["ir_provenance"]),
+        ir_packet_limits=cast("JsonDict", ir_payload["ir_packet_limits"]),
+        ir_coverage_summary=cast("JsonDict", ir_payload["coverage_summary"]),
         excerpt=_bounded_excerpt(source.text),
         content_truncated=content_truncated,
         source_content=source.text if content_included else None,
@@ -544,6 +565,364 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         compiled_at=_iso_z(authority.compiled_at),
         artifact=artifact,
     )
+
+
+def _authority_ir_payload(
+    *,
+    text: str,
+    authority: CompiledSpecAuthority,
+) -> JsonDict:
+    """Build the host-derived review IR packet for rendering and decisions."""
+    sections, diagnostics = authority_ir.parse_markdown_sections(text)
+    source_units = authority_ir.source_units_from_sections(sections)
+    candidates = authority_ir.extract_requirement_candidates(source_units)
+    success = _load_compiled_artifact(authority)
+    authority_items = _review_authority_items(success, authority)
+    mapping_entries = _review_mapping_entries(success, candidates)
+    mappings = authority_ir.build_authority_mappings(
+        candidates,
+        authority_items,
+        mapping_entries,
+    )
+    ir_provenance = (
+        success.ir_provenance
+        if success is not None and success.ir_provenance is not None
+        else authority_ir.IrProvenance.HOST_PARSED
+    )
+    findings = authority_ir.derive_review_findings(
+        source_units,
+        candidates,
+        mappings,
+        ir_provenance,
+    )
+    findings.extend(_diagnostic_review_findings(diagnostics))
+    packet_truncated = _packet_would_truncate(source_units, candidates, findings)
+    if packet_truncated:
+        findings = [
+            authority_ir.AuthorityReviewFinding(
+                finding_id="AUTHORITY_REVIEW_PACKET_TRUNCATED:0",
+                severity="blocking",
+                code="AUTHORITY_REVIEW_PACKET_TRUNCATED",
+                message=(
+                    "Authority review packet exceeded render limits and cannot be "
+                    "accepted with incomplete-review overrides."
+                ),
+                candidate_ids=[],
+                source_unit_ids=[],
+                override_allowed=False,
+            ),
+            *findings,
+        ]
+
+    rendered_findings = [_finding_payload(finding) for finding in findings]
+    return {
+        "source_units": _render_source_units(source_units),
+        "requirement_candidates": _render_candidates(candidates, findings, mappings),
+        "authority_mappings": _render_mappings(mappings),
+        "review_findings": rendered_findings[: authority_ir.MAX_REVIEW_FINDINGS],
+        "ir_provenance": str(ir_provenance),
+        "coverage_summary": authority_ir.coverage_summary_from_findings(
+            findings,
+            mappings,
+        ),
+        "coverage_diagnostics": diagnostics,
+        "ir_packet_limits": {
+            "max_source_units": authority_ir.MAX_REVIEW_SOURCE_UNITS,
+            "max_candidates": authority_ir.MAX_REVIEW_CANDIDATES,
+            "max_findings": authority_ir.MAX_REVIEW_FINDINGS,
+            "max_excerpt_bytes": authority_ir.MAX_REVIEW_EXCERPT_BYTES,
+            "truncated": packet_truncated,
+        },
+    }
+
+
+def _diagnostic_review_findings(
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> list[authority_ir.AuthorityReviewFinding]:
+    """Convert parser diagnostics into non-overrideable review blockers."""
+    findings: list[authority_ir.AuthorityReviewFinding] = []
+    for diagnostic in diagnostics:
+        code = str(diagnostic.get("code") or "UNKNOWN_DIAGNOSTIC")
+        section_id = str(diagnostic.get("section_id") or "")
+        message = str(diagnostic.get("message") or "Source parser diagnostic.")
+        findings.append(
+            authority_ir.AuthorityReviewFinding(
+                finding_id=f"AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC:{code}:{section_id}",
+                severity="blocking",
+                code="AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC",
+                message=f"Source parser diagnostic {code}: {message}",
+                candidate_ids=[],
+                source_unit_ids=[section_id] if section_id else [],
+                override_allowed=False,
+            )
+        )
+    return findings
+
+
+def _review_authority_items(
+    success: SpecAuthorityCompilationSuccess | None,
+    authority: CompiledSpecAuthority,
+) -> list[JsonDict]:
+    """Return authority targets with review-compatible target kinds."""
+    if success is None:
+        artifact = _fallback_authority_artifact(authority)
+        return [
+            *[
+                {**item, "kind": "invariant"}
+                for item in _mapping_items(artifact.get("invariants"))
+            ],
+            *[
+                {**item, "kind": "eligible_feature_rule"}
+                for item in _mapping_items(artifact.get("eligible_feature_rules"))
+            ],
+            *[
+                {**item, "kind": "rejected_feature"}
+                for item in _mapping_items(artifact.get("rejected_features"))
+            ],
+            *[{**item, "kind": "gap"} for item in _mapping_items(artifact.get("gaps"))],
+            *[
+                {**item, "kind": "assumption"}
+                for item in _mapping_items(artifact.get("assumptions"))
+            ],
+        ]
+
+    items: list[JsonDict] = [
+        {
+            "id": invariant.id,
+            "kind": "invariant",
+            "text": _invariant_text(invariant),
+        }
+        for invariant in success.invariants
+    ]
+    items.extend(
+        {
+            "id": f"ELIG-{index}",
+            "kind": "eligible_feature_rule",
+            "text": rule.rule,
+        }
+        for index, rule in enumerate(success.eligible_feature_rules, start=1)
+    )
+    items.extend(
+        {"id": f"REJ-{index}", "kind": "rejected_feature", "text": feature}
+        for index, feature in enumerate(success.rejected_features, start=1)
+    )
+    items.extend(
+        {"id": f"GAP-{index}", "kind": "gap", "text": gap}
+        for index, gap in enumerate(success.gaps, start=1)
+    )
+    items.extend(
+        {"id": f"ASM-{index}", "kind": "assumption", "text": assumption}
+        for index, assumption in enumerate(success.assumptions, start=1)
+    )
+    return items
+
+
+def _mapping_items(value: object) -> list[JsonDict]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [
+        {str(key): item_value for key, item_value in item.items()}
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
+def _review_mapping_entries(
+    success: SpecAuthorityCompilationSuccess | None,
+    candidates: list[authority_ir.RequirementCandidate],
+) -> list[JsonDict]:
+    """Return candidate-keyed mapping entries from compact IR or source map."""
+    if success is None:
+        return []
+    if success.authority_mappings:
+        return [
+            cast("JsonDict", mapping.model_dump(mode="json"))
+            for mapping in success.authority_mappings
+        ]
+
+    entries: list[JsonDict] = []
+    candidates_by_quote = {
+        _normalized_quote(candidate.source_quote): candidate for candidate in candidates
+    }
+    for source_map in success.source_map:
+        candidate = candidates_by_quote.get(_normalized_quote(source_map.excerpt))
+        if candidate is None:
+            continue
+        entries.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "authority_item_id": source_map.invariant_id,
+                "authority_target_kind": "invariant",
+                "source_quote_hash": candidate.quote_hash,
+                "mapping_provenance": "model_quote",
+            }
+        )
+    return entries
+
+
+def _normalized_quote(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _packet_would_truncate(
+    source_units: list[authority_ir.SourceUnit],
+    candidates: list[authority_ir.RequirementCandidate],
+    findings: list[authority_ir.AuthorityReviewFinding],
+) -> bool:
+    return (
+        len(source_units) > authority_ir.MAX_REVIEW_SOURCE_UNITS
+        or len(candidates) > authority_ir.MAX_REVIEW_CANDIDATES
+        or len(findings) > authority_ir.MAX_REVIEW_FINDINGS
+        or any(
+            len(unit.text_excerpt.encode("utf-8"))
+            > authority_ir.MAX_REVIEW_EXCERPT_BYTES
+            for unit in source_units
+        )
+        or any(
+            len(candidate.source_quote.encode("utf-8"))
+            > authority_ir.MAX_REVIEW_EXCERPT_BYTES
+            for candidate in candidates
+        )
+    )
+
+
+def _render_source_units(source_units: list[authority_ir.SourceUnit]) -> list[JsonDict]:
+    rendered: list[JsonDict] = []
+    for unit in source_units[: authority_ir.MAX_REVIEW_SOURCE_UNITS]:
+        payload = asdict(unit)
+        payload["disposition"] = str(unit.disposition)
+        payload["heading_path"] = list(unit.heading_path)
+        payload["text_excerpt"] = _bounded_utf8(
+            unit.text_excerpt,
+            authority_ir.MAX_REVIEW_EXCERPT_BYTES,
+        )
+        rendered.append(payload)
+    return rendered
+
+
+def _render_candidates(
+    candidates: list[authority_ir.RequirementCandidate],
+    findings: list[authority_ir.AuthorityReviewFinding],
+    mappings: list[authority_ir.AuthorityMapping],
+) -> list[JsonDict]:
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda candidate: _candidate_sort_key(candidate, findings, mappings),
+    )
+    rendered: list[JsonDict] = []
+    for candidate in sorted_candidates[: authority_ir.MAX_REVIEW_CANDIDATES]:
+        payload = asdict(candidate)
+        payload["provenance"] = str(candidate.provenance)
+        payload["statement"] = _bounded_utf8(
+            candidate.statement,
+            authority_ir.MAX_REVIEW_EXCERPT_BYTES,
+        )
+        payload["source_quote"] = _bounded_utf8(
+            candidate.source_quote,
+            authority_ir.MAX_REVIEW_EXCERPT_BYTES,
+        )
+        rendered.append(payload)
+    return rendered
+
+
+def _candidate_sort_key(
+    candidate: authority_ir.RequirementCandidate,
+    findings: list[authority_ir.AuthorityReviewFinding],
+    mappings: list[authority_ir.AuthorityMapping],
+) -> tuple[int, int, str]:
+    candidate_findings = [
+        finding
+        for finding in findings
+        if candidate.candidate_id in finding.candidate_ids
+    ]
+    if any(finding.severity == "blocking" for finding in candidate_findings):
+        return (0, candidate.line_start, candidate.candidate_id)
+    candidate_mappings = [
+        mapping
+        for mapping in mappings
+        if mapping.candidate_id == candidate.candidate_id
+    ]
+    if any(
+        mapping.mapping_status == authority_ir.CoverageStatus.WEAK_MAPPING
+        for mapping in candidate_mappings
+    ):
+        return (1, candidate.line_start, candidate.candidate_id)
+    if any(
+        finding.code == "AUTHORITY_CANDIDATE_UNCOVERED"
+        for finding in candidate_findings
+    ):
+        return (2, candidate.line_start, candidate.candidate_id)
+    if any(
+        finding.code == "AUTHORITY_CANDIDATE_UNCERTAIN"
+        for finding in candidate_findings
+    ):
+        return (3, candidate.line_start, candidate.candidate_id)
+    return (4, candidate.line_start, candidate.candidate_id)
+
+
+def _render_mappings(mappings: list[authority_ir.AuthorityMapping]) -> list[JsonDict]:
+    rendered: list[JsonDict] = []
+    for mapping in mappings:
+        payload = asdict(mapping)
+        payload["authority_target_kind"] = str(mapping.authority_target_kind)
+        payload["mapping_status"] = str(mapping.mapping_status)
+        payload["mapping_provenance"] = str(mapping.mapping_provenance)
+        rendered.append(payload)
+    return rendered
+
+
+def _finding_payload(finding: authority_ir.AuthorityReviewFinding) -> JsonDict:
+    return asdict(finding)
+
+
+def _bounded_utf8(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _artifact_with_review_findings(
+    artifact: JsonDict,
+    *,
+    review_findings: Sequence[Mapping[str, Any]],
+) -> JsonDict:
+    """Add host-derived blocking findings to rendered gaps."""
+    blocking = [
+        finding
+        for finding in review_findings
+        if finding.get("severity") == "blocking"
+        and finding.get("code") != "AUTHORITY_COVERAGE_INCOMPLETE"
+    ]
+    if not blocking:
+        return artifact
+    gaps = list(cast("Sequence[Mapping[str, Any]]", artifact.get("gaps") or []))
+    existing_texts = {str(gap.get("text", "")) for gap in gaps}
+    appended: list[JsonDict] = []
+    for index, finding in enumerate(blocking, start=1):
+        code = str(finding.get("code") or "")
+        if any(code in text for text in existing_texts):
+            continue
+        candidate_ids = [
+            str(candidate_id) for candidate_id in _as_list(finding.get("candidate_ids"))
+        ]
+        suffix = (
+            f" Affected candidates: {', '.join(candidate_ids)}."
+            if candidate_ids
+            else ""
+        )
+        appended.append(
+            {
+                "id": f"GAP-REVIEW-{index}",
+                "text": f"{code}: {finding.get('message')}.{suffix}",
+                "support": "inferred",
+                "source_refs": candidate_ids,
+                "source_excerpt": None,
+            }
+        )
+    if not appended:
+        return artifact
+    return {**artifact, "gaps": [*gaps, *appended]}
 
 
 def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
@@ -557,6 +936,7 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
         "size_bytes": snapshot.size_bytes,
         "review_source_limit_bytes": snapshot.review_source_limit_bytes,
         "source_outline": snapshot.source_outline,
+        "source_units": snapshot.source_units,
         "coverage_summary": snapshot.coverage_summary,
         "coverage_summary_fingerprint": snapshot.coverage_summary_fingerprint,
         "coverage_diagnostics": snapshot.coverage_diagnostics,
@@ -583,7 +963,14 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
             "prompt_hash": snapshot.prompt_hash,
             "compiled_at": snapshot.compiled_at,
             "artifact": snapshot.artifact,
+            "ir_provenance": snapshot.ir_provenance,
+            "requirement_candidates": snapshot.requirement_candidates,
+            "authority_mappings": snapshot.authority_mappings,
+            "review_findings": snapshot.review_findings,
+            "coverage_summary": snapshot.ir_coverage_summary,
+            "ir_packet_limits": snapshot.ir_packet_limits,
         },
+        "review_findings": snapshot.review_findings,
         "review_guidance": _review_guidance(),
         "next_actions": [
             {

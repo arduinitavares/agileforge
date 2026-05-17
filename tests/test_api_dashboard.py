@@ -605,6 +605,59 @@ def test_dashboard_accept_rejects_fingerprint_only_guard(
     )
 
 
+def test_dashboard_accept_passes_candidate_scoped_incomplete_review_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard accept forwards candidate-specific override payloads."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/accept",
+        json={
+            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            "incomplete_review_overrides": [
+                {
+                    "candidate_id": "REQ-1",
+                    "finding_code": "AUTHORITY_CANDIDATE_UNCOVERED",
+                    "rationale": "Reviewed uncovered candidate.",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    assert len(fake_app.accept_requests) == 1
+    assert fake_app.accept_requests[0].incomplete_review_overrides[0].candidate_id == (
+        "REQ-1"
+    )
+
+
+def test_dashboard_accept_rejects_broad_incomplete_review_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard boundary rejects legacy broad override payloads alone."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/accept",
+        json={
+            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            "allow_incomplete_review": True,
+            "incomplete_review_rationale": "Reviewed manually.",
+        },
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    assert response.json()["detail"]["errors"][0]["code"] == "INVALID_COMMAND"
+    assert fake_app.accept_requests == []
+
+
 def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

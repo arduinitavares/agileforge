@@ -262,6 +262,73 @@ def test_authority_accept_with_review_token_does_not_require_idempotency_key(
     assert request["actor_mode"] == "cli-human"
 
 
+def test_authority_accept_repeated_incomplete_review_override_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify candidate-scoped incomplete-review overrides reach the service."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            str(_guard_payload()["review_token"]),
+            "--incomplete-review-override",
+            "REQ-1:AUTHORITY_CANDIDATE_UNCOVERED:Reviewed uncovered text.",
+            "--incomplete-review-override",
+            "REQ-2:AUTHORITY_CANDIDATE_WEAK_MAPPING:Reviewed weak mapping.",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    request = app.calls[0][1]
+    assert request["incomplete_review_overrides"] == [
+        {
+            "candidate_id": "REQ-1",
+            "finding_code": "AUTHORITY_CANDIDATE_UNCOVERED",
+            "rationale": "Reviewed uncovered text.",
+        },
+        {
+            "candidate_id": "REQ-2",
+            "finding_code": "AUTHORITY_CANDIDATE_WEAK_MAPPING",
+            "rationale": "Reviewed weak mapping.",
+        },
+    ]
+
+
+def test_authority_accept_rejects_broad_incomplete_review_override_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The legacy broad override flags alone are rejected at the CLI boundary."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            str(_guard_payload()["review_token"]),
+            "--allow-incomplete-review",
+            "--incomplete-review-rationale",
+            "Reviewed manually.",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
 def test_authority_accept_without_token_non_tty_requires_review(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

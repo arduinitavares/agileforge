@@ -18,6 +18,7 @@ from services.agent_workbench.authority_review import (
     sha256_prefixed,
 )
 from tests.typing_helpers import require_id
+from utils.spec_authority_ir import MAX_REVIEW_CANDIDATES
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -60,6 +61,7 @@ def _compiled_success_json(
             )
         ],
         eligible_feature_rules=[],
+        rejected_features=[],
         gaps=[],
         assumptions=[],
         source_map=[
@@ -71,6 +73,8 @@ def _compiled_success_json(
         ],
         compiler_version=COMPILER_VERSION,
         prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
@@ -393,7 +397,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
             "source_excerpt": "Humans must approve authority before use.",
         }
     ]
-    assert artifact["gaps"] == [
+    assert artifact["gaps"][:1] == [
         {
             "id": "GAP-3",
             "text": "Spec does not define text output formatting.",
@@ -641,6 +645,81 @@ def test_review_incomplete_coverage_adds_actionable_review_gap(
     assert any("Audit Contract" in text for text in gap_texts)
 
 
+def test_review_packet_renders_derived_ir_and_findings(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review packet includes host-derived IR and blocking findings."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "The review output must include guard tokens.\n\n"
+        "## Audit Contract\n\n"
+        "The audit trail must record every accepted or rejected authority decision.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    spec = data["spec"]
+    pending = data["pending_authority"]
+    assert spec["source_units"]
+    assert pending["requirement_candidates"]
+    assert pending["authority_mappings"]
+    assert pending["ir_provenance"] in {"host_parsed", "mixed", "model_emitted"}
+    assert pending["review_findings"]
+    assert any(
+        finding["code"] == "AUTHORITY_CANDIDATE_UNCOVERED"
+        for finding in pending["review_findings"]
+    )
+    assert pending["coverage_summary"]["all_candidates_covered"] is False
+    assert data["review_findings"] == pending["review_findings"]
+    gap_texts = [str(gap["text"]) for gap in pending["artifact"]["gaps"]]
+    assert any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in gap_texts)
+
+
+def test_review_packet_truncation_creates_non_overrideable_blocking_finding(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Truncated rendered IR packets are never overrideable at accept time."""
+    monkeypatch.setattr("utils.spec_authority_ir.MAX_REVIEW_CANDIDATES", 1)
+    spec_content = "# Submission Contract\n\n" + "\n".join(
+        f"- The runner must record audit field {index}."
+        for index in range(MAX_REVIEW_CANDIDATES + 2)
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    findings = result["data"]["pending_authority"]["review_findings"]
+    assert findings[0]["code"] == "AUTHORITY_REVIEW_PACKET_TRUNCATED"
+    assert findings[0]["severity"] == "blocking"
+    assert findings[0]["override_allowed"] is False
+
+
 def test_review_omits_large_covered_source_and_marks_omission_complete(
     session: Session,
     tmp_path: Path,
@@ -811,6 +890,28 @@ def test_malformed_markdown_emits_diagnostic_instead_of_failing(
             "section_id": "S1",
             "code": "MARKDOWN_FENCE_UNCLOSED",
             "message": "Fenced code block was not closed before end of file.",
+        }
+    ]
+    findings = result["data"]["pending_authority"]["review_findings"]
+    diagnostic_findings = [
+        finding
+        for finding in findings
+        if finding["code"] == "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC"
+    ]
+    assert diagnostic_findings == [
+        {
+            "finding_id": (
+                "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC:MARKDOWN_FENCE_UNCLOSED:S1"
+            ),
+            "severity": "blocking",
+            "code": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC",
+            "message": (
+                "Source parser diagnostic MARKDOWN_FENCE_UNCLOSED: "
+                "Fenced code block was not closed before end of file."
+            ),
+            "candidate_ids": [],
+            "source_unit_ids": ["S1"],
+            "override_allowed": False,
         }
     ]
 

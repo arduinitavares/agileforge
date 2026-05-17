@@ -29,6 +29,7 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.AUTHORITY_NOT_PENDING: (4, False),
     ErrorCode.AUTHORITY_ALREADY_DECIDED: (10, False),
     ErrorCode.AUTHORITY_SOURCE_CHANGED: (11, True),
+    ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE: (11, True),
     ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: (20, False),
     ErrorCode.AUTHORITY_GUARD_INCOMPLETE: (2, False),
     ErrorCode.SCHEMA_VERSION_MISMATCH: (5, True),
@@ -77,6 +78,7 @@ def test_registry_covers_authority_review_decision_error_codes() -> None:
         "AUTHORITY_NOT_PENDING",
         "AUTHORITY_ALREADY_DECIDED",
         "AUTHORITY_SOURCE_CHANGED",
+        "AUTHORITY_SOURCE_UNAVAILABLE",
         "AUTHORITY_REVIEW_INCOMPLETE",
         "AUTHORITY_GUARD_INCOMPLETE",
     ]:

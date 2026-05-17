@@ -314,6 +314,14 @@ class RetrySetupRequest(BaseModel):
     spec_file_path: str = Field(min_length=1)
 
 
+class IncompleteReviewOverrideApiRequest(BaseModel):
+    """Candidate-scoped incomplete review override payload."""
+
+    candidate_id: str = Field(min_length=1)
+    finding_code: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+
 class AuthorityDecisionApiRequest(BaseModel):
     """Dashboard authority accept request with review-token or explicit guards."""
 
@@ -330,6 +338,9 @@ class AuthorityDecisionApiRequest(BaseModel):
     expected_coverage_summary_fingerprint: str | None = None
     allow_incomplete_review: bool = False
     incomplete_review_rationale: str | None = None
+    incomplete_review_overrides: list[IncompleteReviewOverrideApiRequest] = Field(
+        default_factory=list
+    )
 
 
 class AuthorityRejectApiRequest(AuthorityDecisionApiRequest):
@@ -580,6 +591,23 @@ def _validate_dashboard_authority_guards(req: AuthorityDecisionApiRequest) -> No
             "explicit guard set."
         ),
         missing=missing,
+    )
+
+
+def _validate_dashboard_incomplete_review_override(
+    req: AuthorityDecisionApiRequest,
+) -> None:
+    """Reject legacy broad incomplete-review overrides without candidates."""
+    if req.incomplete_review_overrides:
+        return
+    if not req.allow_incomplete_review and req.incomplete_review_rationale is None:
+        return
+    _dashboard_authority_error(
+        code="INVALID_COMMAND",
+        message=(
+            "Incomplete review acceptance requires candidate-specific overrides."
+        ),
+        missing=["incomplete_review_overrides"],
     )
 
 
@@ -1752,6 +1780,7 @@ async def accept_project_authority(
         raise HTTPException(status_code=404, detail="Project not found")
 
     _validate_dashboard_authority_guards(req)
+    _validate_dashboard_incomplete_review_override(req)
     request = AuthorityAcceptRequest(
         **_authority_request_kwargs(project_id=project_id, req=req)
     )

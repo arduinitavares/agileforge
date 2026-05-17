@@ -150,5 +150,6 @@ class SpecAuthorityAcceptance(SQLModel, table=True):
     review_completeness: str | None = Field(default=None)
     incomplete_review_override: bool = Field(default=False)
     incomplete_review_rationale: str | None = Field(default=None)
+    incomplete_review_overrides_json: str | None = Field(default=None, sa_type=Text)
     terminal_decision_key: str | None = Field(default=None, index=True)
     provenance_source: str = Field(default="normal")

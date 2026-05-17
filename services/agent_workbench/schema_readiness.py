@@ -81,6 +81,7 @@ AUTHORITY_DECISION_REQUIRED_COLUMNS: tuple[str, ...] = (
     "review_completeness",
     "incomplete_review_override",
     "incomplete_review_rationale",
+    "incomplete_review_overrides_json",
     "terminal_decision_key",
     "provenance_source",
 )

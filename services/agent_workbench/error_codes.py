@@ -39,6 +39,7 @@ class ErrorCode(StrEnum):
     AUTHORITY_NOT_PENDING = "AUTHORITY_NOT_PENDING"
     AUTHORITY_ALREADY_DECIDED = "AUTHORITY_ALREADY_DECIDED"
     AUTHORITY_SOURCE_CHANGED = "AUTHORITY_SOURCE_CHANGED"
+    AUTHORITY_SOURCE_UNAVAILABLE = "AUTHORITY_SOURCE_UNAVAILABLE"
     AUTHORITY_REVIEW_INCOMPLETE = "AUTHORITY_REVIEW_INCOMPLETE"
     AUTHORITY_GUARD_INCOMPLETE = "AUTHORITY_GUARD_INCOMPLETE"
     STALE_STATE = "STALE_STATE"
@@ -173,6 +174,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=11,
         retryable=True,
         description="Authority source material changed during review.",
+    ),
+    ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_SOURCE_UNAVAILABLE.value,
+        default_exit_code=11,
+        retryable=True,
+        description="Authority source material is unavailable for review.",
     ),
     ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: ErrorMetadata(
         code=ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value,

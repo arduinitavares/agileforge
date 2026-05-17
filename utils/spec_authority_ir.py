@@ -13,6 +13,11 @@ from typing import Final, cast
 
 JsonDict = dict[str, object]
 
+MAX_REVIEW_SOURCE_UNITS: Final[int] = 500
+MAX_REVIEW_CANDIDATES: Final[int] = 1000
+MAX_REVIEW_FINDINGS: Final[int] = 200
+MAX_REVIEW_EXCERPT_BYTES: Final[int] = 1000
+
 _HEADING_RE: Final[re.Pattern[str]] = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _NORMATIVE_RE: Final[re.Pattern[str]] = re.compile(
     r"\b("

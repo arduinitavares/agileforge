@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS spec_authority_acceptance (
     review_completeness VARCHAR,
     incomplete_review_override BOOLEAN NOT NULL DEFAULT 0,
     incomplete_review_rationale VARCHAR,
+    incomplete_review_overrides_json TEXT,
     terminal_decision_key VARCHAR,
     provenance_source VARCHAR NOT NULL DEFAULT 'normal'
 )
@@ -218,6 +219,7 @@ SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS: dict[str, str] = {
     "review_completeness": "VARCHAR",
     "incomplete_review_override": "BOOLEAN NOT NULL DEFAULT 0",
     "incomplete_review_rationale": "VARCHAR",
+    "incomplete_review_overrides_json": "TEXT",
     "terminal_decision_key": "VARCHAR",
     "provenance_source": "VARCHAR NOT NULL DEFAULT 'normal'",
 }
