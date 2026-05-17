@@ -2,15 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+
+from utils.spec_authority_ir import (
+    AuthorityTargetKind,
+    CoverageStatus,
+    IrProvenance,
+    MappingProvenance,
+    SourceUnitDisposition,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _DATETIME_TYPE = datetime
 MIN_STORY_POINTS = 1
 MAX_STORY_POINTS = 8
+MAX_COMPACT_IR_EXCERPT_BYTES = 2_000
+_COMPACT_IR_GAP_FINDING_CODES: Final[tuple[str, ...]] = (
+    "AUTHORITY_CANDIDATE_UNCOVERED",
+    "AUTHORITY_CANDIDATE_WEAK_MAPPING",
+    "AUTHORITY_CANDIDATE_INTENTIONALLY_CLASSIFIED",
+    "AUTHORITY_CANDIDATE_PARTIAL",
+    "AUTHORITY_CANDIDATE_UNCERTAIN",
+    "AUTHORITY_COVERAGE_INCOMPLETE",
+)
 
 
 class ValidationFailure(BaseModel):
@@ -341,6 +363,171 @@ class EligibleFeatureRule(BaseModel):
     ]
 
 
+class _CompactIrExcerptTooLargeError(ValueError):
+    """Raised when compact IR stores more than a bounded excerpt."""
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(
+            f"{field_name} must be <= {MAX_COMPACT_IR_EXCERPT_BYTES} UTF-8 bytes."
+        )
+
+
+class _CompactIrLineRangeError(ValueError):
+    """Raised when a compact IR line range is invalid."""
+
+    def __init__(self) -> None:
+        super().__init__("line_end must be greater than or equal to line_start.")
+
+
+class _CompactIrSourceReferenceError(ValueError):
+    """Raised when a candidate references a missing source unit."""
+
+    def __init__(self, candidate_id: str, source_unit_id: str) -> None:
+        super().__init__(
+            f"Requirement candidate {candidate_id} references missing "
+            f"source unit {source_unit_id}."
+        )
+
+
+class _CompactIrMappingCandidateError(ValueError):
+    """Raised when a mapping references a missing requirement candidate."""
+
+    def __init__(self, candidate_id: str) -> None:
+        super().__init__(
+            f"Authority mapping references missing candidate {candidate_id}."
+        )
+
+
+class _CompactIrMappingAuthorityError(ValueError):
+    """Raised when a mapping references a missing authority item."""
+
+    def __init__(
+        self,
+        authority_item_id: str,
+        target_kind: AuthorityTargetKind,
+    ) -> None:
+        super().__init__(
+            f"Authority mapping references missing {target_kind.value} "
+            f"item {authority_item_id}."
+        )
+
+
+class _CompactIrMappingTargetKindError(ValueError):
+    """Raised when a mapping target kind does not match the target collection."""
+
+    def __init__(
+        self,
+        authority_item_id: str,
+        target_kind: AuthorityTargetKind,
+        actual_kind: AuthorityTargetKind,
+    ) -> None:
+        super().__init__(
+            f"Authority mapping target kind {target_kind.value} is incompatible "
+            f"with {authority_item_id}, which belongs to {actual_kind.value}."
+        )
+
+
+class _CompactIrProvenanceRequiredError(ValueError):
+    """Raised when compact IR data is present without artifact provenance."""
+
+    def __init__(self) -> None:
+        super().__init__("ir_provenance is required when compact IR fields are set.")
+
+
+class SpecAuthorityIrPacketLimits(BaseModel):
+    """Limits that shaped the compact authority IR packet."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_candidates: Annotated[
+        int,
+        Field(ge=0, description="Maximum requirement candidates included."),
+    ]
+    max_findings: Annotated[
+        int,
+        Field(ge=0, description="Maximum review findings included."),
+    ]
+    max_excerpt_bytes: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=MAX_COMPACT_IR_EXCERPT_BYTES,
+            description="Maximum UTF-8 bytes allowed for compact excerpts.",
+        ),
+    ] = MAX_COMPACT_IR_EXCERPT_BYTES
+    truncated: Annotated[
+        bool,
+        Field(description="Whether packet lists were truncated."),
+    ] = False
+
+
+class SpecAuthoritySourceUnit(BaseModel):
+    """Compact source-unit metadata for authority IR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_id: Annotated[str, Field(min_length=1)]
+    section_id: Annotated[str, Field(min_length=1)]
+    heading_path: list[str] = Field(default_factory=list)
+    kind: Annotated[str, Field(min_length=1)]
+    line_start: Annotated[int, Field(ge=1)]
+    line_end: Annotated[int, Field(ge=1)]
+    text_hash: Annotated[str, Field(min_length=1)]
+    text_excerpt: Annotated[str, Field(min_length=1)]
+    disposition: SourceUnitDisposition
+    disposition_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_compact_excerpt(self) -> Self:
+        """Ensure only bounded display excerpts are persisted."""
+        if len(self.text_excerpt.encode("utf-8")) > MAX_COMPACT_IR_EXCERPT_BYTES:
+            field_name = "text_excerpt"
+            raise _CompactIrExcerptTooLargeError(field_name)
+        if self.line_end < self.line_start:
+            raise _CompactIrLineRangeError
+        return self
+
+
+class SpecAuthorityRequirementCandidate(BaseModel):
+    """Compact requirement-candidate metadata for authority IR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: Annotated[str, Field(min_length=1)]
+    source_unit_id: Annotated[str, Field(min_length=1)]
+    statement: Annotated[str, Field(min_length=1)]
+    source_quote: Annotated[str, Field(min_length=1)]
+    quote_hash: Annotated[str, Field(min_length=1)]
+    line_start: Annotated[int, Field(ge=1)]
+    line_end: Annotated[int, Field(ge=1)]
+    classification: Annotated[str, Field(min_length=1)]
+    provenance: IrProvenance
+
+    @model_validator(mode="after")
+    def validate_compact_quote(self) -> Self:
+        """Ensure source quote is a bounded compact excerpt."""
+        if len(self.source_quote.encode("utf-8")) > MAX_COMPACT_IR_EXCERPT_BYTES:
+            field_name = "source_quote"
+            raise _CompactIrExcerptTooLargeError(field_name)
+        if self.line_end < self.line_start:
+            raise _CompactIrLineRangeError
+        return self
+
+
+class SpecAuthorityMapping(BaseModel):
+    """Compact requirement-candidate to authority-item mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: Annotated[str, Field(min_length=1)]
+    authority_item_id: Annotated[str, Field(min_length=1)]
+    authority_target_kind: AuthorityTargetKind
+    mapping_status: CoverageStatus
+    mapping_rationale: Annotated[str, Field(min_length=1)]
+    source_quote_hash: str | None = None
+    mapping_provenance: MappingProvenance
+
+
 class SpecAuthorityCompilationSuccess(BaseModel):
     """Successful spec authority compilation output."""
 
@@ -361,6 +548,13 @@ class SpecAuthorityCompilationSuccess(BaseModel):
     eligible_feature_rules: Annotated[
         list[EligibleFeatureRule],
         Field(description="Optional feature eligibility rules (may be empty)."),
+    ]
+    rejected_features: Annotated[
+        list[str],
+        Field(
+            default_factory=list,
+            description="Optional rejected feature/scope exclusions (may be empty).",
+        ),
     ]
     gaps: Annotated[
         list[str],
@@ -385,6 +579,182 @@ class SpecAuthorityCompilationSuccess(BaseModel):
             description="SHA-256 hash of the compiler prompt/instructions.",
         ),
     ]
+    ir_schema_version: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional compact authority IR schema version.",
+        ),
+    ]
+    ir_provenance: Annotated[
+        IrProvenance | None,
+        Field(default=None, description="Provenance for compact authority IR fields."),
+    ]
+    source_units: list[SpecAuthoritySourceUnit] = Field(
+        default_factory=list,
+        description="Compact parsed source-unit metadata.",
+    )
+    requirement_candidates: list[SpecAuthorityRequirementCandidate] = Field(
+        default_factory=list,
+        description="Compact atomic requirement-candidate metadata.",
+    )
+    authority_mappings: list[SpecAuthorityMapping] = Field(
+        default_factory=list,
+        description="Compact candidate-to-authority mappings.",
+    )
+    ir_packet_limits: SpecAuthorityIrPacketLimits | None = Field(
+        default=None,
+        description="Limits used when building the compact IR packet.",
+    )
+
+    @model_validator(mode="after")
+    def validate_compact_ir_references(self) -> Self:
+        """Validate compact IR provenance and internal references."""
+        has_ir_payload = bool(
+            self.ir_schema_version
+            or self.source_units
+            or self.requirement_candidates
+            or self.authority_mappings
+            or self.ir_packet_limits
+        )
+        if has_ir_payload and self.ir_provenance is None:
+            raise _CompactIrProvenanceRequiredError
+
+        source_unit_ids = {unit.unit_id for unit in self.source_units}
+        for candidate in self.requirement_candidates:
+            if candidate.source_unit_id not in source_unit_ids:
+                raise _CompactIrSourceReferenceError(
+                    candidate.candidate_id,
+                    candidate.source_unit_id,
+                )
+
+        candidate_ids = {
+            candidate.candidate_id for candidate in self.requirement_candidates
+        }
+        authority_item_kinds = self._authority_item_kinds_by_id()
+        for mapping in self.authority_mappings:
+            if mapping.candidate_id not in candidate_ids:
+                raise _CompactIrMappingCandidateError(mapping.candidate_id)
+            actual_kind = authority_item_kinds.get(mapping.authority_item_id)
+            if actual_kind is None:
+                raise _CompactIrMappingAuthorityError(
+                    mapping.authority_item_id,
+                    mapping.authority_target_kind,
+                )
+            if mapping.authority_target_kind != actual_kind:
+                raise _CompactIrMappingTargetKindError(
+                    mapping.authority_item_id,
+                    mapping.authority_target_kind,
+                    actual_kind,
+                )
+        return self
+
+    def _authority_item_kinds_by_id(self) -> dict[str, AuthorityTargetKind]:
+        """Return authority target IDs available to compact IR mappings."""
+        item_kinds = {
+            invariant.id: AuthorityTargetKind.INVARIANT for invariant in self.invariants
+        }
+        candidate_ids = {
+            candidate.candidate_id for candidate in self.requirement_candidates
+        }
+        for index, _rule in enumerate(self.eligible_feature_rules, start=1):
+            item_kinds[f"ELIG-{index}"] = AuthorityTargetKind.ELIGIBLE_FEATURE_RULE
+            item_kinds[f"EFR-{index}"] = AuthorityTargetKind.ELIGIBLE_FEATURE_RULE
+            for candidate_id in candidate_ids:
+                item_kinds[
+                    _generated_compact_target_id(
+                        "EFR",
+                        candidate_id,
+                        AuthorityTargetKind.ELIGIBLE_FEATURE_RULE,
+                        _rule.rule,
+                    )
+                ] = AuthorityTargetKind.ELIGIBLE_FEATURE_RULE
+        for index, _feature in enumerate(self.rejected_features, start=1):
+            item_kinds[f"REJ-{index}"] = AuthorityTargetKind.REJECTED_FEATURE
+            item_kinds[f"RF-{index}"] = AuthorityTargetKind.REJECTED_FEATURE
+            for candidate_id in candidate_ids:
+                item_kinds[
+                    _generated_compact_target_id(
+                        "RF",
+                        candidate_id,
+                        AuthorityTargetKind.REJECTED_FEATURE,
+                        _feature,
+                    )
+                ] = AuthorityTargetKind.REJECTED_FEATURE
+        for index, _gap in enumerate(self.gaps, start=1):
+            item_kinds[f"GAP-{index}"] = AuthorityTargetKind.GAP
+            for candidate_id in candidate_ids:
+                for finding_code in _COMPACT_IR_GAP_FINDING_CODES:
+                    item_kinds[
+                        _generated_compact_gap_id(
+                            candidate_id,
+                            finding_code,
+                            _gap,
+                        )
+                    ] = AuthorityTargetKind.GAP
+        for index, _assumption in enumerate(self.assumptions, start=1):
+            item_kinds[f"ASM-{index}"] = AuthorityTargetKind.ASSUMPTION
+            for candidate_id in candidate_ids:
+                item_kinds[
+                    _generated_compact_assumption_id(
+                        candidate_id,
+                        AuthorityTargetKind.ASSUMPTION,
+                        _assumption,
+                    )
+                ] = AuthorityTargetKind.ASSUMPTION
+        return item_kinds
+
+
+def _normalize_compact_ir_text(text: str) -> str:
+    return " ".join(text.strip().split())
+
+
+def _compact_ir_canonical_hash(payload: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _generated_compact_gap_id(
+    candidate_id: str,
+    finding_code: str,
+    normalized_gap_text: str,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "finding_code": finding_code,
+        "normalized_gap_text": _normalize_compact_ir_text(normalized_gap_text),
+    }
+    return f"GAP-{_compact_ir_canonical_hash(payload)}"
+
+
+def _generated_compact_assumption_id(
+    candidate_id: str,
+    target_kind: AuthorityTargetKind,
+    normalized_assumption_text: str,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "normalized_assumption_text": _normalize_compact_ir_text(
+            normalized_assumption_text
+        ),
+        "target_kind": target_kind.value,
+    }
+    return f"ASM-{_compact_ir_canonical_hash(payload)}"
+
+
+def _generated_compact_target_id(
+    prefix: str,
+    candidate_id: str,
+    target_kind: AuthorityTargetKind,
+    text: str,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "normalized_text": _normalize_compact_ir_text(text),
+        "target_kind": target_kind.value,
+    }
+    return f"{prefix}-{_compact_ir_canonical_hash(payload)}"
 
 
 class SpecAuthorityCompilationFailure(BaseModel):

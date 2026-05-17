@@ -1,8 +1,13 @@
 """Unit tests for host-side normalization of spec authority compiler outputs."""
 
+import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
+
+import pytest
+from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (  # noqa: E501
     compute_invariant_id,
@@ -14,6 +19,332 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
 )
+
+
+def _legacy_success_payload() -> dict[str, Any]:
+    return {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-aaaaaaaaaaaaaaaa",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+                "excerpt": "The payload must include user_id.",
+                "location": "spec:line:1",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+
+def _compact_ir_success_payload() -> dict[str, Any]:
+    payload = _legacy_success_payload()
+    quote_hash = "sha256:" + ("1" * 64)
+    payload.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-aaaaaaaaaaaa-bbbbbbbbbbbb-1",
+                    "section_id": "S1",
+                    "heading_path": ["Requirements"],
+                    "kind": "paragraph",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "text_hash": "sha256:" + ("2" * 64),
+                    "text_excerpt": "The payload must include user_id.",
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": "normative requirement",
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "REQ-aaaaaaaaaaaaaaaa",
+                    "source_unit_id": "SRC-aaaaaaaaaaaa-bbbbbbbbbbbb-1",
+                    "statement": "The payload must include user_id.",
+                    "source_quote": "The payload must include user_id.",
+                    "quote_hash": quote_hash,
+                    "line_start": 1,
+                    "line_end": 1,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "REQ-aaaaaaaaaaaaaaaa",
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": (
+                        "Exact quote maps to required field invariant."
+                    ),
+                    "source_quote_hash": quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+            "ir_packet_limits": {
+                "max_candidates": 50,
+                "max_findings": 50,
+                "max_excerpt_bytes": 2000,
+                "truncated": False,
+            },
+        }
+    )
+    return payload
+
+
+def _test_compact_ir_hash(payload: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _test_generated_gap_id(
+    candidate_id: str,
+    finding_code: str,
+    text: str,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "finding_code": finding_code,
+        "normalized_gap_text": " ".join(text.strip().split()),
+    }
+    return f"GAP-{_test_compact_ir_hash(payload)}"
+
+
+def _test_generated_assumption_id(candidate_id: str, text: str) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "normalized_assumption_text": " ".join(text.strip().split()),
+        "target_kind": "assumption",
+    }
+    return f"ASM-{_test_compact_ir_hash(payload)}"
+
+
+def _test_generated_target_id(
+    prefix: str,
+    candidate_id: str,
+    target_kind: str,
+    text: str,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "normalized_text": " ".join(text.strip().split()),
+        "target_kind": target_kind,
+    }
+    return f"{prefix}-{_test_compact_ir_hash(payload)}"
+
+
+def test_legacy_success_without_ir_stays_valid() -> None:
+    """Historical compiled authority JSON without compact IR remains loadable."""
+    success = SpecAuthorityCompilationSuccess.model_validate(_legacy_success_payload())
+
+    assert success.rejected_features == []
+    assert success.ir_schema_version is None
+    assert success.ir_provenance is None
+    assert success.source_units == []
+    assert success.requirement_candidates == []
+    assert success.authority_mappings == []
+    assert success.ir_packet_limits is None
+
+
+def test_success_schema_accepts_compact_ir_with_provenance() -> None:
+    """Model-emitted compact IR with explicit provenance loads successfully."""
+    success = SpecAuthorityCompilationSuccess.model_validate(
+        _compact_ir_success_payload()
+    )
+
+    assert success.ir_schema_version == "authority-ir-v1"
+    assert success.ir_provenance == "model_emitted"
+    assert success.source_units[0].unit_id == "SRC-aaaaaaaaaaaa-bbbbbbbbbbbb-1"
+    assert success.requirement_candidates[0].source_unit_id == (
+        "SRC-aaaaaaaaaaaa-bbbbbbbbbbbb-1"
+    )
+    assert success.authority_mappings[0].authority_item_id == "INV-aaaaaaaaaaaaaaaa"
+
+
+def test_success_schema_rejects_mapping_with_missing_candidate_id() -> None:
+    """Mappings must reference requirement candidates in the same artifact."""
+    payload = _compact_ir_success_payload()
+    payload["authority_mappings"][0]["candidate_id"] = "REQ-missing"
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_candidate_with_missing_source_unit_id() -> None:
+    """Candidates must reference source units in the same artifact."""
+    payload = _compact_ir_success_payload()
+    payload["requirement_candidates"][0]["source_unit_id"] = "SRC-missing"
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_mapping_with_missing_authority_item_id() -> None:
+    """Mappings must reference authority items in the compiled artifact."""
+    payload = _compact_ir_success_payload()
+    payload["authority_mappings"][0]["authority_item_id"] = "INV-bbbbbbbbbbbbbbbb"
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_mapping_target_kind_mismatch() -> None:
+    """Mapping target kind must match the referenced authority collection."""
+    payload = _compact_ir_success_payload()
+    payload["authority_mappings"][0]["authority_target_kind"] = "gap"
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_accepts_rejected_feature_mapping() -> None:
+    """Rejected feature mappings validate against rejected feature targets."""
+    payload = _compact_ir_success_payload()
+    payload["rejected_features"] = ["Do not expose access tokens."]
+    payload["authority_mappings"][0]["authority_item_id"] = "RF-1"
+    payload["authority_mappings"][0]["authority_target_kind"] = "rejected_feature"
+
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert success.rejected_features == ["Do not expose access tokens."]
+    assert success.authority_mappings[0].authority_item_id == "RF-1"
+
+
+def test_success_schema_accepts_generated_non_invariant_mapping_ids() -> None:
+    """Content-derived non-invariant target IDs validate independent of order."""
+    payload = _compact_ir_success_payload()
+    candidate_id = payload["requirement_candidates"][0]["candidate_id"]
+    gap_text = "No invariant exists for the requirement."
+    assumption_text = "Operators configure this outside AgileForge."
+    eligible_rule = "Future phase support is allowed after validation."
+    rejected_feature = "Do not expose access tokens."
+    payload["gaps"] = [gap_text]
+    payload["assumptions"] = [assumption_text]
+    payload["eligible_feature_rules"] = [{"rule": eligible_rule}]
+    payload["rejected_features"] = [rejected_feature]
+    payload["authority_mappings"] = [
+        {
+            "candidate_id": candidate_id,
+            "authority_item_id": _test_generated_gap_id(
+                candidate_id,
+                "AUTHORITY_CANDIDATE_UNCOVERED",
+                gap_text,
+            ),
+            "authority_target_kind": "gap",
+            "mapping_status": "weak_mapping",
+            "mapping_rationale": "Gap records missing canonical authority.",
+            "source_quote_hash": None,
+            "mapping_provenance": "model_quote",
+        },
+        {
+            "candidate_id": candidate_id,
+            "authority_item_id": _test_generated_assumption_id(
+                candidate_id,
+                assumption_text,
+            ),
+            "authority_target_kind": "assumption",
+            "mapping_status": "intentionally_classified",
+            "mapping_rationale": "Assumption records unresolved context.",
+            "source_quote_hash": None,
+            "mapping_provenance": "model_quote",
+        },
+        {
+            "candidate_id": candidate_id,
+            "authority_item_id": _test_generated_target_id(
+                "EFR",
+                candidate_id,
+                "eligible_feature_rule",
+                eligible_rule,
+            ),
+            "authority_target_kind": "eligible_feature_rule",
+            "mapping_status": "covered",
+            "mapping_rationale": "Eligible feature rule constrains future scope.",
+            "source_quote_hash": None,
+            "mapping_provenance": "model_quote",
+        },
+        {
+            "candidate_id": candidate_id,
+            "authority_item_id": _test_generated_target_id(
+                "RF",
+                candidate_id,
+                "rejected_feature",
+                rejected_feature,
+            ),
+            "authority_target_kind": "rejected_feature",
+            "mapping_status": "covered",
+            "mapping_rationale": "Rejected feature blocks unsafe scope.",
+            "source_quote_hash": None,
+            "mapping_provenance": "model_quote",
+        },
+    ]
+
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert len(success.authority_mappings) == 4  # noqa: PLR2004
+
+
+def test_compact_ir_fields_do_not_require_or_persist_full_source_text() -> None:
+    """Compact IR keeps excerpts and rejects full source text fields."""
+    success = SpecAuthorityCompilationSuccess.model_validate(
+        _compact_ir_success_payload()
+    )
+    dumped = success.model_dump(mode="json")
+
+    assert "source_text" not in dumped["source_units"][0]
+    assert "full_source_text" not in dumped["source_units"][0]
+
+    payload = _compact_ir_success_payload()
+    payload["source_units"][0]["source_text"] = "The full specification source."
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_compact_ir_without_provenance() -> None:
+    """Any compact IR payload requires explicit IR provenance."""
+    payload = _compact_ir_success_payload()
+    payload.pop("ir_provenance")
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_trusted_review_findings() -> None:
+    """Compiler output cannot persist trusted review findings."""
+    payload = _compact_ir_success_payload()
+    payload["review_findings"] = [
+        {
+            "code": "AUTHORITY_COVERAGE_COMPLETE",
+            "severity": "info",
+            "message": "Model says coverage is complete.",
+        }
+    ]
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_success_schema_rejects_unbounded_compact_ir_excerpt() -> None:
+    """Compact IR excerpts must stay bounded and not store full source text."""
+    payload = _compact_ir_success_payload()
+    payload["source_units"][0]["text_excerpt"] = "x" * 2_001
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
 
 
 def test_normalizer_rewrites_bad_ids_from_llm() -> None:
