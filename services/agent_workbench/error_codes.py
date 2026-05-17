@@ -35,6 +35,12 @@ class ErrorCode(StrEnum):
     AUTHORITY_NOT_COMPILED = "AUTHORITY_NOT_COMPILED"
     AUTHORITY_ACCEPTANCE_MISMATCH = "AUTHORITY_ACCEPTANCE_MISMATCH"
     AUTHORITY_INVARIANTS_INVALID = "AUTHORITY_INVARIANTS_INVALID"
+    AUTHORITY_REVIEW_REQUIRED = "AUTHORITY_REVIEW_REQUIRED"
+    AUTHORITY_NOT_PENDING = "AUTHORITY_NOT_PENDING"
+    AUTHORITY_ALREADY_DECIDED = "AUTHORITY_ALREADY_DECIDED"
+    AUTHORITY_SOURCE_CHANGED = "AUTHORITY_SOURCE_CHANGED"
+    AUTHORITY_REVIEW_INCOMPLETE = "AUTHORITY_REVIEW_INCOMPLETE"
+    AUTHORITY_GUARD_INCOMPLETE = "AUTHORITY_GUARD_INCOMPLETE"
     STALE_STATE = "STALE_STATE"
     STALE_ARTIFACT_FINGERPRINT = "STALE_ARTIFACT_FINGERPRINT"
     STALE_CONTEXT_FINGERPRINT = "STALE_CONTEXT_FINGERPRINT"
@@ -143,6 +149,42 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="Authority invariants are invalid.",
+    ),
+    ErrorCode.AUTHORITY_REVIEW_REQUIRED: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_REVIEW_REQUIRED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Authority review is required before this operation.",
+    ),
+    ErrorCode.AUTHORITY_NOT_PENDING: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_NOT_PENDING.value,
+        default_exit_code=4,
+        retryable=False,
+        description="The requested authority is not pending review.",
+    ),
+    ErrorCode.AUTHORITY_ALREADY_DECIDED: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_ALREADY_DECIDED.value,
+        default_exit_code=10,
+        retryable=False,
+        description="The requested authority already has a terminal decision.",
+    ),
+    ErrorCode.AUTHORITY_SOURCE_CHANGED: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_SOURCE_CHANGED.value,
+        default_exit_code=11,
+        retryable=True,
+        description="Authority source material changed during review.",
+    ),
+    ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value,
+        default_exit_code=20,
+        retryable=False,
+        description="Authority review is incomplete.",
+    ),
+    ErrorCode.AUTHORITY_GUARD_INCOMPLETE: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Required authority review guard inputs are incomplete.",
     ),
     ErrorCode.STALE_STATE: ErrorMetadata(
         code=ErrorCode.STALE_STATE.value,

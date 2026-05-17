@@ -122,7 +122,11 @@ class SpecAuthorityAcceptance(SQLModel, table=True):
         index=True,
     )
     status: str = Field(description="Decision status: accepted | rejected")
-    policy: str = Field(description="Decision policy: auto | human")
+    policy: str = Field(
+        description=(
+            "Decision policy: manual | agent_requested | dashboard_manual | test"
+        )
+    )
     decided_by: str = Field(description="Who or what made the decision")
     decided_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
@@ -136,3 +140,15 @@ class SpecAuthorityAcceptance(SQLModel, table=True):
     compiler_version: str = Field(description="Compiler version at decision time")
     prompt_hash: str = Field(description="Prompt hash at decision time")
     spec_hash: str = Field(description="Spec hash at decision time")
+    pending_authority_id: int | None = Field(default=None, index=True)
+    authority_fingerprint: str | None = Field(default=None, index=True)
+    review_token: str | None = Field(default=None, index=True)
+    review_fingerprint: str | None = Field(default=None)
+    disk_spec_hash: str | None = Field(default=None)
+    resolved_spec_path: str | None = Field(default=None)
+    actor_mode: str | None = Field(default=None)
+    review_completeness: str | None = Field(default=None)
+    incomplete_review_override: bool = Field(default=False)
+    incomplete_review_rationale: str | None = Field(default=None)
+    terminal_decision_key: str | None = Field(default=None, index=True)
+    provenance_source: str = Field(default="normal")

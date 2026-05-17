@@ -25,6 +25,12 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.AUTHORITY_NOT_COMPILED: (4, False),
     ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: (4, False),
     ErrorCode.AUTHORITY_INVARIANTS_INVALID: (4, False),
+    ErrorCode.AUTHORITY_REVIEW_REQUIRED: (4, False),
+    ErrorCode.AUTHORITY_NOT_PENDING: (4, False),
+    ErrorCode.AUTHORITY_ALREADY_DECIDED: (10, False),
+    ErrorCode.AUTHORITY_SOURCE_CHANGED: (11, True),
+    ErrorCode.AUTHORITY_REVIEW_INCOMPLETE: (20, False),
+    ErrorCode.AUTHORITY_GUARD_INCOMPLETE: (2, False),
     ErrorCode.SCHEMA_VERSION_MISMATCH: (5, True),
     ErrorCode.STALE_STATE: (3, True),
     ErrorCode.STALE_ARTIFACT_FINGERPRINT: (3, True),
@@ -60,6 +66,21 @@ def test_registry_covers_representative_phase_2a_error_codes() -> None:
     assert "STALE_FINGERPRINT" not in codes
     assert codes == {code.value for code in ErrorCode}
     assert all(isinstance(code, str) for code in codes)
+
+
+def test_registry_covers_authority_review_decision_error_codes() -> None:
+    """Expose stable authority review decision error taxonomy."""
+    codes = registered_error_codes()
+
+    for code in [
+        "AUTHORITY_REVIEW_REQUIRED",
+        "AUTHORITY_NOT_PENDING",
+        "AUTHORITY_ALREADY_DECIDED",
+        "AUTHORITY_SOURCE_CHANGED",
+        "AUTHORITY_REVIEW_INCOMPLETE",
+        "AUTHORITY_GUARD_INCOMPLETE",
+    ]:
+        assert code in codes, code
 
 
 @pytest.mark.parametrize(
@@ -114,7 +135,8 @@ def test_workbench_error_accepts_string_codes_and_overrides() -> None:
     assert error.message == "State changed while the command was running."
     assert error.details == {"expected": "abc", "actual": "def"}
     assert error.remediation == ["Refresh and retry the command."]
-    assert error.exit_code == error_metadata(
-        ErrorCode.STALE_ARTIFACT_FINGERPRINT
-    ).default_exit_code
+    assert (
+        error.exit_code
+        == error_metadata(ErrorCode.STALE_ARTIFACT_FINGERPRINT).default_exit_code
+    )
     assert error.retryable is True

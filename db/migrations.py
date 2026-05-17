@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "2"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "3"
 
 
 def _get_existing_tables(engine: Engine) -> set[str]:
@@ -191,9 +191,44 @@ CREATE TABLE IF NOT EXISTS spec_authority_acceptance (
     rationale TEXT,
     compiler_version VARCHAR NOT NULL,
     prompt_hash VARCHAR NOT NULL,
-    spec_hash VARCHAR NOT NULL
+    spec_hash VARCHAR NOT NULL,
+    pending_authority_id INTEGER,
+    authority_fingerprint VARCHAR,
+    review_token VARCHAR,
+    review_fingerprint VARCHAR,
+    disk_spec_hash VARCHAR,
+    resolved_spec_path VARCHAR,
+    actor_mode VARCHAR,
+    review_completeness VARCHAR,
+    incomplete_review_override BOOLEAN NOT NULL DEFAULT 0,
+    incomplete_review_rationale VARCHAR,
+    terminal_decision_key VARCHAR,
+    provenance_source VARCHAR NOT NULL DEFAULT 'normal'
 )
 """
+
+SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS: dict[str, str] = {
+    "pending_authority_id": "INTEGER",
+    "authority_fingerprint": "VARCHAR",
+    "review_token": "VARCHAR",
+    "review_fingerprint": "VARCHAR",
+    "disk_spec_hash": "VARCHAR",
+    "resolved_spec_path": "VARCHAR",
+    "actor_mode": "VARCHAR",
+    "review_completeness": "VARCHAR",
+    "incomplete_review_override": "BOOLEAN NOT NULL DEFAULT 0",
+    "incomplete_review_rationale": "VARCHAR",
+    "terminal_decision_key": "VARCHAR",
+    "provenance_source": "VARCHAR NOT NULL DEFAULT 'normal'",
+}
+
+SPEC_AUTHORITY_ACCEPTANCE_INDEXES: dict[str, list[str]] = {
+    "ix_spec_authority_acceptance_pending_authority_id": ["pending_authority_id"],
+    "ix_spec_authority_acceptance_authority_fingerprint": ["authority_fingerprint"],
+    "ix_spec_authority_acceptance_review_token": ["review_token"],
+}
+
+SPEC_AUTHORITY_TERMINAL_DECISION_INDEX = "uq_spec_authority_terminal_decision_key"
 
 
 def migrate_spec_authority_tables(engine: Engine) -> list[str]:
@@ -228,7 +263,136 @@ def migrate_spec_authority_tables(engine: Engine) -> list[str]:
     ):
         actions.append("created table: spec_authority_acceptance")
 
+    actions.extend(_migrate_spec_authority_acceptance_contract(engine))
+
     return actions
+
+
+def _migrate_spec_authority_acceptance_contract(engine: Engine) -> list[str]:
+    """Ensure authority decision provenance columns, indexes, and backfill exist."""
+    actions: list[str] = []
+
+    for column_name, column_def in SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS.items():
+        if _ensure_column_exists(
+            engine,
+            "spec_authority_acceptance",
+            column_name,
+            column_def,
+        ):
+            actions.append(f"added column: spec_authority_acceptance.{column_name}")
+
+    backfilled_rows = _backfill_legacy_authority_decisions(engine)
+    if backfilled_rows:
+        actions.append(
+            f"backfilled spec_authority_acceptance legacy decisions: {backfilled_rows}"
+        )
+
+    for index_name, columns in SPEC_AUTHORITY_ACCEPTANCE_INDEXES.items():
+        if _ensure_index_exists(
+            engine,
+            "spec_authority_acceptance",
+            index_name,
+            columns,
+        ):
+            actions.append(f"created index: {index_name}")
+
+    if _ensure_terminal_decision_unique_index(engine):
+        actions.append(f"created index: {SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}")
+
+    return actions
+
+
+def _backfill_legacy_authority_decisions(engine: Engine) -> int:
+    """Backfill terminal authority provenance for legacy accepted/rejected rows."""
+    with engine.begin() as conn:
+        legacy_rows = (
+            conn.execute(
+                text(
+                    """
+                SELECT id, product_id, spec_version_id
+                FROM spec_authority_acceptance
+                WHERE status IN ('accepted', 'rejected')
+                  AND pending_authority_id IS NULL
+                """
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+        for row in legacy_rows:
+            authority_rows = (
+                conn.execute(
+                    text(
+                        """
+                    SELECT authority_id
+                    FROM compiled_spec_authority
+                    WHERE spec_version_id = :spec_version_id
+                    ORDER BY authority_id
+                    """
+                    ),
+                    {"spec_version_id": row["spec_version_id"]},
+                )
+                .mappings()
+                .all()
+            )
+            if len(authority_rows) != 1:
+                count = len(authority_rows)
+                message = (
+                    "Ambiguous legacy authority decision cannot be backfilled: "
+                    f"acceptance_id={row['id']} product_id={row['product_id']} "
+                    f"spec_version_id={row['spec_version_id']} matched {count} "
+                    "compiled_spec_authority rows. Remediation: resolve the "
+                    "legacy compiled authority so exactly one row matches this "
+                    "spec version, then rerun migrations."
+                )
+                raise RuntimeError(message)
+
+            authority_id = authority_rows[0]["authority_id"]
+            terminal_decision_key = (
+                f"{row['product_id']}:{row['spec_version_id']}:{authority_id}"
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE spec_authority_acceptance
+                    SET pending_authority_id = :authority_id,
+                        terminal_decision_key = :terminal_decision_key,
+                        provenance_source = 'legacy_backfill'
+                    WHERE id = :acceptance_id
+                    """
+                ),
+                {
+                    "authority_id": authority_id,
+                    "terminal_decision_key": terminal_decision_key,
+                    "acceptance_id": row["id"],
+                },
+            )
+
+    return len(legacy_rows)
+
+
+def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
+    """Ensure terminal decision uniqueness using a partial SQLite unique index."""
+    existing_indexes = _get_existing_indexes(engine, "spec_authority_acceptance")
+    if SPEC_AUTHORITY_TERMINAL_DECISION_INDEX in existing_indexes:
+        return False
+
+    create_index_sql = f"""
+    CREATE UNIQUE INDEX IF NOT EXISTS {SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}
+    ON spec_authority_acceptance (terminal_decision_key)
+    WHERE terminal_decision_key IS NOT NULL
+    """
+    logger.info(
+        "db.migration.create_index",
+        extra={
+            "table_name": "spec_authority_acceptance",
+            "index_name": SPEC_AUTHORITY_TERMINAL_DECISION_INDEX,
+        },
+    )
+    with engine.begin() as conn:
+        conn.execute(text(create_index_sql))
+    return True
 
 
 def migrate_product_spec_cache(engine: Engine) -> list[str]:
