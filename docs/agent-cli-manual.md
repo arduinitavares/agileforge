@@ -627,6 +627,34 @@ agileforge authority review --project-id "$PROJECT_ID" > review.json
 python -m json.tool review.json >/dev/null
 ```
 
+Important review packet fields:
+
+- `pending_authority.ir_provenance`: `model_emitted`, `mixed`,
+  `host_parsed`, or `legacy_absent`. Treat `host_parsed` and
+  `legacy_absent` as review evidence quality signals, not acceptance proof.
+- `pending_authority.requirement_candidates`: atomic source requirements with
+  stable `candidate_id` values. Candidate IDs are the handles used for
+  incomplete-review overrides.
+- `pending_authority.authority_mappings`: candidate-to-authority mappings.
+  `weak_mapping` means the source evidence or target kind is not strong enough
+  to count as accepted coverage without candidate-specific human review.
+- `review_findings`: host-derived findings. Findings with
+  `severity: "blocking"` must stop acceptance unless each overrideable
+  candidate/finding pair is explicitly overridden by a human.
+- `pending_authority.coverage_summary`: candidate-level coverage counts and
+  whether all candidates are covered.
+- `pending_authority.ir_packet_limits`: render limits and `truncated` status.
+
+Agent review rule:
+
+- Never recommend acceptance while any blocking `review_findings` entry exists.
+- Do not treat `gaps: []` inside the compiled artifact as sufficient; host code
+  derives review findings from current source, candidate coverage, mapping
+  provenance, parser diagnostics, and packet limits.
+- `AUTHORITY_REVIEW_PACKET_TRUNCATED` is blocking and non-overrideable in this
+  phase. Rerun review after reducing packet size or improving the spec/compiler;
+  do not attempt to accept a truncated review packet.
+
 Extract the token and guard tuple:
 
 ```sh
@@ -710,24 +738,74 @@ The complete explicit guard tuple is:
 Reject explicit mode uses the same guards, plus `--reason`.
 
 If accept returns `AUTHORITY_REVIEW_INCOMPLETE`, do not force the same token
-through normal accept. First rerun review with full source:
+through normal accept. First inspect `review_findings`:
 
 ```sh
 agileforge authority review --project-id "$PROJECT_ID" --include-spec full > review.json
 python -m json.tool review.json >/dev/null
+
+python - <<'PY'
+import json
+p=json.load(open("review.json"))
+for f in p["data"].get("review_findings", []):
+    if f.get("severity") == "blocking":
+        print(f["code"], f.get("candidate_ids"), f.get("override_allowed"))
+PY
 ```
 
-If a human reviewed omitted source out of band and still approves, use explicit
-override with rationale:
+If a human reviewed the affected source out of band and still approves, use
+candidate-specific override flags. Broad legacy flags are invalid without
+candidate IDs. Repeat `--incomplete-review-override` once per blocking
+candidate/finding pair:
 
 ```sh
 agileforge authority accept \
   --project-id "$PROJECT_ID" \
   --review-token "$review_token" \
   --allow-incomplete-review \
-  --incomplete-review-rationale "Human reviewer inspected omitted source file directly." \
+  --incomplete-review-override "REQ-abc123:AUTHORITY_CANDIDATE_UNCOVERED:Human reviewer inspected this source requirement directly." \
   --idempotency-key "authority-accept-incomplete-$PROJECT_ID-$(date +%Y%m%d%H%M%S)"
 ```
+
+The override format is:
+
+```text
+<candidate_id>:<finding_code>:<rationale>
+```
+
+Rules:
+
+- `candidate_id` must be present in the current blocking finding.
+- `finding_code` must match that current blocking finding.
+- `rationale` must be non-empty and specific to that candidate.
+- Overrides for non-blocking candidates are rejected.
+- Overrides for `AUTHORITY_REVIEW_PACKET_TRUNCATED` or other
+  `override_allowed: false` findings are rejected.
+- `--allow-incomplete-review --incomplete-review-rationale ...` without at
+  least one `--incomplete-review-override` is rejected by the CLI, API,
+  dashboard route, and service.
+- Interactive CLI accept uses the same candidate-specific override model as
+  non-interactive CLI, API, and dashboard flows.
+
+Dashboard/API acceptance uses the same request shape:
+
+```json
+{
+  "review_token": "agileforge.authority_review.v1:sha256:...",
+  "incomplete_review_overrides": [
+    {
+      "candidate_id": "REQ-abc123",
+      "finding_code": "AUTHORITY_CANDIDATE_UNCOVERED",
+      "rationale": "Human reviewer inspected this source requirement directly."
+    }
+  ]
+}
+```
+
+If the source spec is missing or unreadable at decision time, accept/reject
+fails closed before writing a decision row. `AUTHORITY_SOURCE_UNAVAILABLE`
+means the reviewed source cannot be reloaded; restore the spec file or rerun
+review from a readable source before deciding.
 
 Expected outcomes:
 
@@ -955,7 +1033,8 @@ Registered CLI error codes include:
 | `AUTHORITY_NOT_PENDING` | There is no pending authority decision for this project. | Re-read `authority status` and `workflow next`. |
 | `AUTHORITY_ALREADY_DECIDED` | The pending authority already has a terminal decision. | Replay the same idempotency key or refresh status. |
 | `AUTHORITY_SOURCE_CHANGED` | The source spec or authority snapshot changed after review. | Rerun `authority review` and decide from the new packet. |
-| `AUTHORITY_REVIEW_INCOMPLETE` | Review packet omitted or could not prove source coverage. | Rerun review with `--include-spec full`, or use explicit override with rationale after out-of-band review. |
+| `AUTHORITY_SOURCE_UNAVAILABLE` | The source spec cannot be read at decision time. | Restore the readable source file, then rerun `authority review`. |
+| `AUTHORITY_REVIEW_INCOMPLETE` | Review packet has blocking findings, weak mappings, parser diagnostics, or incomplete source coverage. | Inspect `review_findings`; fix the spec/compiler, or use candidate-specific overrides only for overrideable findings. |
 | `AUTHORITY_GUARD_INCOMPLETE` | Explicit authority decision mode omitted required guards. | Pass every field from `guard_tokens` and an idempotency key. |
 | `AUTHORITY_ACCEPTANCE_MISMATCH` | Accepted authority provenance drifted. | Stop and surface. |
 | `AUTHORITY_INVARIANTS_INVALID` | Stored invariant JSON is invalid. | Stop and surface storage issue. |
