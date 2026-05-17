@@ -196,12 +196,11 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
             "command": (
                 "agileforge authority accept "
                 f"--project-id {project_id} "
-                f"--review-token {guard_tokens['review_token']} "
-                "--idempotency-key <idempotency_key>"
+                f"--review-token {guard_tokens['review_token']}"
             ),
             "mode": "human",
-            "installed": False,
-            "requires_cli_installation": True,
+            "installed": True,
+            "requires_cli_installation": False,
             "reason": "Record the reviewed pending authority as canonical.",
         },
         {
@@ -209,11 +208,11 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
                 "agileforge authority reject "
                 f"--project-id {project_id} "
                 f"--review-token {guard_tokens['review_token']} "
-                '--reason "..." --idempotency-key <idempotency_key>'
+                '--reason "..."'
             ),
             "mode": "human",
-            "installed": False,
-            "requires_cli_installation": True,
+            "installed": True,
+            "requires_cli_installation": False,
             "reason": "Record that the pending authority must not be used.",
         },
     ]

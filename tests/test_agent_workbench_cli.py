@@ -929,6 +929,15 @@ def test_top_level_help_describes_agent_workbench_commands(
     assert "agent-facing CLI" in captured.out
     assert "read-only" not in captured.out
     assert "agileforge project list" in captured.out
+    assert "agileforge authority review --project-id 1" in captured.out
+    assert (
+        "agileforge authority accept --project-id 1 --review-token <review_token>"
+        in captured.out
+    )
+    assert (
+        'agileforge authority reject --project-id 1 --review-token <review_token> '
+        '--reason "..."'
+    ) in captured.out
     assert (
         "agileforge context pack --project-id 1 --phase sprint-planning"
         in captured.out

@@ -258,8 +258,8 @@ def test_authority_review_is_registered_as_read_only_command() -> None:
     capabilities = _capability_by_name()
 
     assert schema["mutates"] is False
-    assert schema["installed"] is False
-    assert capabilities["agileforge authority review"]["installed"] is False
+    assert schema["installed"] is True
+    assert capabilities["agileforge authority review"]["installed"] is True
     assert schema["input"]["required"] == ["project_id"]
     assert schema["input"]["optional"] == ["include_spec", "format"]
 
@@ -270,7 +270,7 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     capabilities = _capability_by_name()
 
     assert schema["mutates"] is True
-    assert schema["installed"] is False
+    assert schema["installed"] is True
     assert schema["idempotency_required"] is True
     assert schema["idempotency_policy"]["non_dry_run"] == "required"
     assert schema["idempotency_policy"]["dry_run"] != "not_applicable"
@@ -303,7 +303,7 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     capabilities = _capability_by_name()
 
     assert schema["mutates"] is True
-    assert schema["installed"] is False
+    assert schema["installed"] is True
     assert schema["idempotency_required"] is True
     assert schema["idempotency_policy"]["non_dry_run"] == "required"
     assert schema["idempotency_policy"]["dry_run"] != "not_applicable"
@@ -327,13 +327,13 @@ def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> Non
     assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
 
 
-def test_phase_2c_authority_commands_are_discoverable_but_not_installed() -> None:
-    """Expose authority contracts without claiming Task 5 CLI availability."""
+def test_phase_2c_authority_commands_are_registered_and_available() -> None:
+    """Expose Task 5 authority commands as installed CLI capabilities."""
     names = installed_command_names()
     capabilities = _capability_by_name()
 
-    assert EXPECTED_PHASE_2C_COMMAND_NAMES.isdisjoint(names)
+    assert EXPECTED_PHASE_2C_COMMAND_NAMES.issubset(names)
     for command_name in EXPECTED_PHASE_2C_COMMAND_NAMES:
-        assert command_is_available(command_name) is False
+        assert command_is_available(command_name) is True
         assert command_name in capabilities
-        assert capabilities[command_name]["installed"] is False
+        assert capabilities[command_name]["installed"] is True

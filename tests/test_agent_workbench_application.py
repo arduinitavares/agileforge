@@ -644,33 +644,32 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     assert result["data"]["next_actions"] == [
         {
             "command": "agileforge authority review --project-id 7",
-            "installed": False,
-            "requires_cli_installation": True,
-            "reason": "CLI parser wiring is scheduled for Task 5.",
+            "installed": True,
+            "requires_cli_installation": False,
+            "reason": "Review pending authority before accepting or rejecting it.",
         }
     ]
     assert result["data"]["decision_actions_after_review"] == [
         {
             "command": (
                 "agileforge authority accept --project-id 7 "
-                "--review-token <review_token> "
-                "--idempotency-key <idempotency_key>"
+                "--review-token <review_token>"
             ),
-            "installed": False,
-            "requires_cli_installation": True,
+            "installed": True,
+            "requires_cli_installation": False,
             "after_review": True,
-            "requires": ["review_token", "idempotency_key"],
+            "requires": ["review_token"],
         },
         {
             "command": (
                 "agileforge authority reject --project-id 7 "
                 "--review-token <review_token> "
-                "--reason <reason> --idempotency-key <idempotency_key>"
+                "--reason <reason>"
             ),
-            "installed": False,
-            "requires_cli_installation": True,
+            "installed": True,
+            "requires_cli_installation": False,
             "after_review": True,
-            "requires": ["review_token", "reason", "idempotency_key"],
+            "requires": ["review_token", "reason"],
         },
     ]
     assert result["data"]["blocked_commands"] == []
@@ -732,8 +731,8 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_setup_pending_re
     )
 
 
-def test_workflow_next_pending_review_does_not_emit_executable_authority_command() -> None:  # noqa: E501
-    """Do not send agents to authority CLI commands before Task 5 parser wiring."""
+def test_workflow_next_pending_review_emits_installed_authority_command() -> None:
+    """Send agents to installed authority CLI commands after parser wiring."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityPendingReviewReadProjection(),
         authority_projection=_FakeAuthorityProjection(),
@@ -743,8 +742,8 @@ def test_workflow_next_pending_review_does_not_emit_executable_authority_command
 
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == []
-    assert result["data"]["next_actions"][0]["installed"] is False
-    assert result["data"]["next_actions"][0]["requires_cli_installation"] is True
+    assert result["data"]["next_actions"][0]["installed"] is True
+    assert result["data"]["next_actions"][0]["requires_cli_installation"] is False
 
 
 def test_workflow_next_no_longer_calls_sprint_context_pack_when_authority_rejected(

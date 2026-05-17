@@ -540,33 +540,32 @@ def _setup_workflow_next(
         data["next_actions"] = [
             {
                 "command": f"agileforge authority review --project-id {project_id}",
-                "installed": False,
-                "requires_cli_installation": True,
-                "reason": "CLI parser wiring is scheduled for Task 5.",
+                "installed": True,
+                "requires_cli_installation": False,
+                "reason": "Review pending authority before accepting or rejecting it.",
             }
         ]
         data["decision_actions_after_review"] = [
             {
                 "command": (
                     f"agileforge authority accept --project-id {project_id} "
-                    "--review-token <review_token> "
-                    "--idempotency-key <idempotency_key>"
+                    "--review-token <review_token>"
                 ),
-                "installed": False,
-                "requires_cli_installation": True,
+                "installed": True,
+                "requires_cli_installation": False,
                 "after_review": True,
-                "requires": ["review_token", "idempotency_key"],
+                "requires": ["review_token"],
             },
             {
                 "command": (
                     f"agileforge authority reject --project-id {project_id} "
                     "--review-token <review_token> "
-                    "--reason <reason> --idempotency-key <idempotency_key>"
+                    "--reason <reason>"
                 ),
-                "installed": False,
-                "requires_cli_installation": True,
+                "installed": True,
+                "requires_cli_installation": False,
                 "after_review": True,
-                "requires": ["review_token", "reason", "idempotency_key"],
+                "requires": ["review_token", "reason"],
             },
         ]
     elif setup_status == "authority_rejected":

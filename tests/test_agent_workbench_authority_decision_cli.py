@@ -1,0 +1,410 @@
+"""Tests for authority review/decision CLI commands."""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any, cast
+
+import pytest
+
+from cli.main import main
+
+type JsonObject = dict[str, object]
+
+PROJECT_ID = 7
+INVALID_COMMAND_EXIT_CODE = 2
+
+
+class _AuthorityDecisionCliApplication:
+    """Fake application facade used to verify authority decision routing."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> JsonObject:
+        """Return a review packet with guard tokens."""
+        self.calls.append(
+            (
+                "authority_review",
+                {
+                    "project_id": project_id,
+                    "include_spec": include_spec,
+                    "output_format": output_format,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project": {
+                    "project_id": project_id,
+                    "fsm_state": "SETUP_REQUIRED",
+                    "setup_status": "authority_pending_review",
+                },
+                "spec": {
+                    "resolved_path": "/repo/specs/app.md",
+                    "spec_hash": "sha256:source",
+                    "disk_sha256": "sha256:disk",
+                    "content_included": True,
+                    "coverage_summary_fingerprint": "sha256:coverage",
+                },
+                "pending_authority": {
+                    "authority_id": 99,
+                    "authority_fingerprint": "sha256:authority",
+                },
+                "guard_tokens": _guard_payload(),
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def authority_accept(self, request: object) -> JsonObject:
+        """Record the accept request payload."""
+        self.calls.append(("authority_accept", _request_payload(request)))
+        return {"ok": True, "data": {"accepted": True}, "warnings": [], "errors": []}
+
+    def authority_reject(self, request: object) -> JsonObject:
+        """Record the reject request payload."""
+        self.calls.append(("authority_reject", _request_payload(request)))
+        return {"ok": True, "data": {"rejected": True}, "warnings": [], "errors": []}
+
+
+def _request_payload(request: object) -> dict[str, object]:
+    """Return a JSON-like request payload from a pydantic model."""
+    model_dump = cast("Any", request).model_dump
+    dumped = model_dump()
+    assert isinstance(dumped, dict)
+    return cast("dict[str, object]", dumped)
+
+
+def _stdout_payload(capsys: pytest.CaptureFixture[str]) -> JsonObject:
+    """Return captured stdout as a JSON object."""
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return cast("JsonObject", json.loads(captured.out))
+
+
+def _first_error(payload: JsonObject) -> JsonObject:
+    """Return the first error object from an envelope."""
+    errors = payload["errors"]
+    assert isinstance(errors, list)
+    assert errors
+    error = errors[0]
+    assert isinstance(error, dict)
+    return cast("JsonObject", error)
+
+
+def _guard_payload() -> dict[str, object]:
+    """Return a complete authority guard token set."""
+    return {
+        "review_token": "agileforge.authority_review.v1:sha256:" + ("a" * 64),
+        "pending_authority_id": 99,
+        "expected_authority_fingerprint": "sha256:authority",
+        "expected_source_spec_hash": "sha256:source",
+        "expected_disk_spec_hash": "sha256:disk",
+        "expected_resolved_spec_path": "/repo/specs/app.md",
+        "expected_state": "SETUP_REQUIRED",
+        "expected_setup_status": "authority_pending_review",
+        "expected_content_included": True,
+        "expected_omission_assessment": "complete",
+        "expected_coverage_summary_fingerprint": "sha256:coverage",
+    }
+
+
+def _explicit_guard_args(*, include_completeness: bool = True) -> list[str]:
+    """Return CLI args for explicit authority guards."""
+    guards = _guard_payload()
+    args = [
+        "--pending-authority-id",
+        str(guards["pending_authority_id"]),
+        "--expected-authority-fingerprint",
+        str(guards["expected_authority_fingerprint"]),
+        "--expected-source-spec-hash",
+        str(guards["expected_source_spec_hash"]),
+        "--expected-disk-spec-hash",
+        str(guards["expected_disk_spec_hash"]),
+        "--expected-resolved-spec-path",
+        str(guards["expected_resolved_spec_path"]),
+        "--expected-state",
+        str(guards["expected_state"]),
+        "--expected-setup-status",
+        str(guards["expected_setup_status"]),
+    ]
+    if include_completeness:
+        args.extend(
+            [
+                "--expected-content-included",
+                "true",
+                "--expected-omission-assessment",
+                str(guards["expected_omission_assessment"]),
+                "--expected-coverage-summary-fingerprint",
+                str(guards["expected_coverage_summary_fingerprint"]),
+            ]
+        )
+    return args
+
+
+def test_authority_review_parser_calls_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority review routes parser args to the application."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "review",
+            "--project-id",
+            str(PROJECT_ID),
+            "--include-spec",
+            "full",
+            "--format",
+            "json",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert cast("JsonObject", payload["meta"])["command"] == (
+        "agileforge authority review"
+    )
+    assert app.calls == [
+        (
+            "authority_review",
+            {
+                "project_id": PROJECT_ID,
+                "include_spec": "full",
+                "output_format": "json",
+            },
+        )
+    ]
+
+
+def test_authority_accept_with_review_token_does_not_require_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify human token mode generates idempotency when omitted."""
+    app = _AuthorityDecisionCliApplication()
+    review_token = cast("str", _guard_payload()["review_token"])
+
+    rc = main(
+        [
+            "authority",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            review_token,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls[0][0] == "authority_accept"
+    request = app.calls[0][1]
+    assert request["project_id"] == PROJECT_ID
+    assert request["review_token"] == review_token
+    assert str(request["idempotency_key"]).startswith("human-token:")
+    assert request["actor_mode"] == "cli-human"
+
+
+def test_authority_accept_explicit_agent_mode_requires_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify explicit accept mode requires idempotency."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            *_explicit_guard_args(),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert cast("JsonObject", payload["meta"])["command"] == (
+        "agileforge authority accept"
+    )
+    assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
+def test_authority_accept_explicit_agent_mode_requires_completeness_guards(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify explicit accept mode requires completeness guard fields."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            *_explicit_guard_args(include_completeness=False),
+            "--idempotency-key",
+            "explicit-accept-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _first_error(payload)
+    assert error["code"] == "INVALID_COMMAND"
+    details = cast("JsonObject", error["details"])
+    assert details["missing"] == [
+        "expected_content_included",
+        "expected_omission_assessment",
+        "expected_coverage_summary_fingerprint",
+    ]
+    assert app.calls == []
+
+
+def test_authority_reject_requires_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify reject requires a rationale in token mode."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            str(_guard_payload()["review_token"]),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
+def test_authority_reject_explicit_mode_requires_resolved_path_guard(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify explicit reject mode requires source path guards."""
+    app = _AuthorityDecisionCliApplication()
+    args = _explicit_guard_args()
+    path_index = args.index("--expected-resolved-spec-path")
+    del args[path_index : path_index + 2]
+
+    rc = main(
+        [
+            "authority",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            *args,
+            "--reason",
+            "Spec needs more detail.",
+            "--idempotency-key",
+            "explicit-reject-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _first_error(payload)
+    assert error["code"] == "INVALID_COMMAND"
+    assert cast("JsonObject", error["details"])["missing"] == [
+        "expected_resolved_spec_path"
+    ]
+    assert app.calls == []
+
+
+def test_authority_help_shows_review_accept_reject_examples(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify help shows authority decision commands and examples."""
+    with pytest.raises(SystemExit) as top_level:
+        main(["--help"])
+
+    captured = capsys.readouterr()
+    assert top_level.value.code == 0
+    assert "agileforge authority review --project-id 1" in captured.out
+    assert (
+        "agileforge authority accept --project-id 1 --review-token <review_token>"
+        in captured.out
+    )
+    assert (
+        'agileforge authority reject --project-id 1 --review-token <review_token> '
+        '--reason "..."'
+    ) in captured.out
+
+    with pytest.raises(SystemExit) as authority:
+        main(["authority", "--help"])
+
+    captured = capsys.readouterr()
+    assert authority.value.code == 0
+    assert "review" in captured.out
+    assert "accept" in captured.out
+    assert "reject" in captured.out
+
+
+def test_authority_review_keeps_stdout_json_clean_when_service_logs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority review preserves one clean JSON stdout envelope."""
+    app = _AuthorityDecisionCliApplication()
+    original_review = app.authority_review
+
+    def noisy_review(
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> JsonObject:
+        sys.stdout.write("LiteLLM completion() model=openai/example\n")
+        return original_review(
+            project_id=project_id,
+            include_spec=include_spec,
+            output_format=output_format,
+        )
+
+    app.authority_review = noisy_review  # type: ignore[method-assign]
+
+    rc = main(
+        ["authority", "review", "--project-id", str(PROJECT_ID)],
+        application=app,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.startswith("{")
+    assert "LiteLLM" not in captured.out
+    assert "LiteLLM" in captured.err
+    payload = cast("JsonObject", json.loads(captured.out))
+    assert payload["ok"] is True
+    assert app.calls == [
+        (
+            "authority_review",
+            {
+                "project_id": PROJECT_ID,
+                "include_spec": "auto",
+                "output_format": "json",
+            },
+        )
+    ]

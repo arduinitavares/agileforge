@@ -9,13 +9,21 @@ import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
 from typing import NoReturn, Protocol, cast
+from uuid import uuid4
 
+from pydantic import ValidationError
+
+from services.agent_workbench.authority_decision import (
+    AuthorityAcceptRequest,
+    AuthorityRejectRequest,
+)
 from services.agent_workbench.envelope import (
     WorkbenchError,
     WorkbenchWarning,
     error_envelope,
     success_envelope,
 )
+from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from utils.logging_config import configure_logging
 
 DEFAULT_CONTEXT_PHASE: str = "overview"
@@ -24,19 +32,43 @@ COMMAND_EXCEPTION_EXIT_CODE: int = 1
 HELP_DESCRIPTION: str = (
     "AgileForge agent-facing CLI for workflow inspection and guarded mutations."
 )
-HELP_EPILOG: str = """\
+HELP_EPILOG: str = (
+    """\
 Examples:
   agileforge project list
   agileforge status --project-id 1
   agileforge workflow state --project-id 1
   agileforge authority status --project-id 1
+  agileforge authority review --project-id 1
+  agileforge authority accept --project-id 1 --review-token <review_token>
+  agileforge authority reject --project-id 1 --review-token <review_token> """
+    """--reason "..."
   agileforge sprint candidates --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
+)
 type JsonObject = dict[str, object]
 type JsonList = list[object]
 CommandResult = tuple[str, JsonObject]
 CommandHandler = Callable[[argparse.Namespace, "_Application"], CommandResult]
+AUTHORITY_EXPLICIT_GUARD_FIELDS: tuple[str, ...] = (
+    "pending_authority_id",
+    "expected_authority_fingerprint",
+    "expected_source_spec_hash",
+    "expected_disk_spec_hash",
+    "expected_resolved_spec_path",
+    "expected_state",
+    "expected_setup_status",
+)
+AUTHORITY_COMPLETENESS_GUARD_FIELDS: tuple[str, ...] = (
+    "expected_content_included",
+    "expected_omission_assessment",
+    "expected_coverage_summary_fingerprint",
+)
+AUTHORITY_ALL_GUARD_FIELDS: tuple[str, ...] = (
+    *AUTHORITY_EXPLICIT_GUARD_FIELDS,
+    *AUTHORITY_COMPLETENESS_GUARD_FIELDS,
+)
 
 
 class _CliParseError(Exception):
@@ -112,6 +144,24 @@ class _Application(Protocol):
         spec_version_id: int | None = None,
     ) -> JsonObject:
         """Return authority invariants projection."""
+        ...
+
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> JsonObject:
+        """Return a pending authority review packet."""
+        ...
+
+    def authority_accept(self, request: AuthorityAcceptRequest) -> JsonObject:
+        """Accept pending authority from a guarded request."""
+        ...
+
+    def authority_reject(self, request: AuthorityRejectRequest) -> JsonObject:
+        """Reject pending authority from a guarded request."""
         ...
 
     def story_show(self, *, story_id: int) -> JsonObject:
@@ -364,6 +414,34 @@ def _parse_error_envelope(message: str, argv: list[str] | None) -> JsonObject:
     )
 
 
+def _parse_bool_token(value: str) -> bool:
+    """Parse an explicit true/false CLI token."""
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    msg = "expected one of: true, false"
+    raise argparse.ArgumentTypeError(msg)
+
+
+def _add_authority_guard_args(command: argparse.ArgumentParser) -> None:
+    """Add explicit authority review guard arguments to a parser."""
+    command.add_argument("--pending-authority-id", type=int)
+    command.add_argument("--expected-authority-fingerprint")
+    command.add_argument("--expected-source-spec-hash")
+    command.add_argument("--expected-disk-spec-hash")
+    command.add_argument("--expected-resolved-spec-path")
+    command.add_argument("--expected-state")
+    command.add_argument("--expected-setup-status")
+    command.add_argument("--expected-content-included", type=_parse_bool_token)
+    command.add_argument(
+        "--expected-omission-assessment",
+        choices=("complete", "incomplete"),
+    )
+    command.add_argument("--expected-coverage-summary-fingerprint")
+
+
 def _exception_envelope(exc: Exception) -> JsonObject:
     """Return a structured envelope for unexpected command exceptions."""
     return error_envelope(
@@ -470,6 +548,41 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_invariants.add_argument("--project-id", type=int, required=True)
     authority_invariants.add_argument("--spec-version-id", type=int)
     authority_invariants.set_defaults(command_handler=_authority_invariants)
+    authority_review = authority_sub.add_parser(
+        "review",
+        help="Build a pending authority review packet.",
+    )
+    authority_review.add_argument("--project-id", type=int, required=True)
+    authority_review.add_argument(
+        "--include-spec",
+        choices=("auto", "full", "summary"),
+        default="auto",
+    )
+    authority_review.add_argument("--format", choices=("json", "text"), default="json")
+    authority_review.set_defaults(command_handler=_authority_review)
+    authority_accept = authority_sub.add_parser(
+        "accept",
+        help="Accept reviewed pending authority.",
+    )
+    authority_accept.add_argument("--project-id", type=int, required=True)
+    authority_accept.add_argument("--review-token")
+    _add_authority_guard_args(authority_accept)
+    authority_accept.add_argument("--idempotency-key")
+    authority_accept.add_argument("--allow-incomplete-review", action="store_true")
+    authority_accept.add_argument("--incomplete-review-rationale")
+    authority_accept.add_argument("--changed-by")
+    authority_accept.set_defaults(command_handler=_authority_accept)
+    authority_reject = authority_sub.add_parser(
+        "reject",
+        help="Reject reviewed pending authority.",
+    )
+    authority_reject.add_argument("--project-id", type=int, required=True)
+    authority_reject.add_argument("--review-token")
+    _add_authority_guard_args(authority_reject)
+    authority_reject.add_argument("--reason")
+    authority_reject.add_argument("--idempotency-key")
+    authority_reject.add_argument("--changed-by")
+    authority_reject.set_defaults(command_handler=_authority_reject)
 
     story = subparsers.add_parser("story", help="Inspect user stories.")
     story_sub = story.add_subparsers(
@@ -692,6 +805,412 @@ def _authority_invariants(
         project_id=args.project_id,
         spec_version_id=args.spec_version_id,
     )
+
+
+def _authority_review(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority review to the application facade."""
+    return "agileforge authority review", application.authority_review(
+        project_id=args.project_id,
+        include_spec=args.include_spec,
+        output_format=args.format,
+    )
+
+
+def _invalid_command(
+    command: str,
+    message: str,
+    *,
+    details: dict[str, object] | None = None,
+    remediation: list[str] | None = None,
+) -> CommandResult:
+    """Return a structured invalid-command result."""
+    return _mutation_arg_error(
+        command,
+        WorkbenchError(
+            code=ErrorCode.INVALID_COMMAND.value,
+            message=message,
+            details=details or {},
+            remediation=remediation or ["Run agileforge authority --help."],
+            exit_code=INVALID_COMMAND_EXIT_CODE,
+            retryable=False,
+        ),
+    )
+
+
+def _authority_review_required(command: str) -> CommandResult:
+    """Return a missing-review-token result for non-interactive decisions."""
+    return _mutation_arg_error(
+        command,
+        workbench_error(
+            ErrorCode.AUTHORITY_REVIEW_REQUIRED,
+            message="Run authority review first and pass --review-token.",
+            remediation=[
+                "Run agileforge authority review --project-id <id>.",
+                "Pass --review-token, or run from a TTY for interactive review.",
+            ],
+        ),
+    )
+
+
+def _has_explicit_authority_args(args: argparse.Namespace) -> bool:
+    """Return whether explicit decision mode appears to be requested."""
+    return bool(args.idempotency_key) or any(
+        getattr(args, field_name) is not None
+        for field_name in AUTHORITY_ALL_GUARD_FIELDS
+    )
+
+
+def _missing_authority_guards(
+    args: argparse.Namespace,
+    *,
+    require_completeness: bool,
+) -> list[str]:
+    """Return required explicit guard fields missing from parsed args."""
+    fields = list(AUTHORITY_EXPLICIT_GUARD_FIELDS)
+    if require_completeness:
+        fields.extend(AUTHORITY_COMPLETENESS_GUARD_FIELDS)
+    return [field_name for field_name in fields if getattr(args, field_name) is None]
+
+
+def _authority_actor_mode(changed_by: str | None, *, token_mode: bool) -> str:
+    """Return the actor mode implied by CLI decision input."""
+    if not token_mode:
+        return "cli-agent"
+    if changed_by is None:
+        return "cli-human"
+    normalized = changed_by.lower()
+    if "agent" in normalized or "bot" in normalized or "automation" in normalized:
+        return "cli-agent"
+    return "cli-human"
+
+
+def _decision_idempotency_key(args: argparse.Namespace) -> str | None:
+    """Return an explicit or generated idempotency key for token mode."""
+    if args.idempotency_key:
+        return cast("str", args.idempotency_key)
+    if args.review_token:
+        return f"human-token:{uuid4()}"
+    return None
+
+
+def _authority_request_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    """Return request keyword args common to accept/reject decisions."""
+    values: dict[str, object] = {
+        "project_id": args.project_id,
+        "review_token": args.review_token,
+        "idempotency_key": _decision_idempotency_key(args),
+        "changed_by": args.changed_by,
+        "actor_mode": _authority_actor_mode(
+            args.changed_by,
+            token_mode=bool(args.review_token),
+        ),
+    }
+    for field_name in AUTHORITY_ALL_GUARD_FIELDS:
+        values[field_name] = getattr(args, field_name)
+    return values
+
+
+def _authority_validation_failure(
+    command: str,
+    exc: ValidationError | ValueError,
+) -> CommandResult:
+    """Return a structured invalid-command result for request model errors."""
+    return _invalid_command(
+        command,
+        "Invalid authority decision arguments.",
+        details={"validation_error": str(exc)},
+    )
+
+
+def _validate_incomplete_override(args: argparse.Namespace) -> CommandResult | None:
+    """Validate incomplete review override arguments."""
+    if not args.allow_incomplete_review:
+        return None
+    rationale = args.incomplete_review_rationale
+    if isinstance(rationale, str) and rationale.strip():
+        return None
+    return _invalid_command(
+        "agileforge authority accept",
+        "--allow-incomplete-review requires --incomplete-review-rationale.",
+        details={"missing": ["incomplete_review_rationale"]},
+    )
+
+
+def _validate_authority_explicit_args(
+    args: argparse.Namespace,
+    *,
+    command: str,
+    require_completeness: bool,
+) -> CommandResult | None:
+    """Validate explicit authority decision mode arguments."""
+    missing = _missing_authority_guards(
+        args,
+        require_completeness=require_completeness,
+    )
+    if missing:
+        return _invalid_command(
+            command,
+            "Explicit authority decision mode requires guard fields.",
+            details={"missing": missing},
+            remediation=["Pass --review-token or every required explicit guard."],
+        )
+    if not args.idempotency_key:
+        return _invalid_command(
+            command,
+            "Explicit authority decision mode requires --idempotency-key.",
+            details={"missing": ["idempotency_key"]},
+        )
+    return None
+
+
+def _authority_accept(  # noqa: PLR0911
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority accept to the application facade."""
+    command = "agileforge authority accept"
+    validation_error = _validate_incomplete_override(args)
+    if validation_error is not None:
+        return validation_error
+
+    if args.review_token:
+        try:
+            request = AuthorityAcceptRequest(
+                **_authority_request_kwargs(args),
+                allow_incomplete_review=args.allow_incomplete_review,
+                incomplete_review_rationale=args.incomplete_review_rationale,
+            )
+        except (ValidationError, ValueError) as exc:
+            return _authority_validation_failure(command, exc)
+        return command, application.authority_accept(request)
+
+    if _has_explicit_authority_args(args):
+        validation_error = _validate_authority_explicit_args(
+            args,
+            command=command,
+            require_completeness=True,
+        )
+        if validation_error is not None:
+            return validation_error
+        try:
+            request = AuthorityAcceptRequest(
+                **_authority_request_kwargs(args),
+                allow_incomplete_review=args.allow_incomplete_review,
+                incomplete_review_rationale=args.incomplete_review_rationale,
+            )
+        except (ValidationError, ValueError) as exc:
+            return _authority_validation_failure(command, exc)
+        return command, application.authority_accept(request)
+
+    if not sys.stdin.isatty():
+        return _authority_review_required(command)
+
+    return _interactive_authority_accept(args, application)
+
+
+def _authority_reject(  # noqa: PLR0911
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority reject to the application facade."""
+    command = "agileforge authority reject"
+    if args.review_token:
+        if not _non_empty(args.reason):
+            return _invalid_command(
+                command,
+                "--reason is required for authority reject.",
+                details={"missing": ["reason"]},
+            )
+        try:
+            request = AuthorityRejectRequest(
+                **_authority_request_kwargs(args),
+                reason=args.reason,
+            )
+        except (ValidationError, ValueError) as exc:
+            return _authority_validation_failure(command, exc)
+        return command, application.authority_reject(request)
+
+    if _has_explicit_authority_args(args):
+        if not _non_empty(args.reason):
+            return _invalid_command(
+                command,
+                "--reason is required for authority reject.",
+                details={"missing": ["reason"]},
+            )
+        validation_error = _validate_authority_explicit_args(
+            args,
+            command=command,
+            require_completeness=False,
+        )
+        if validation_error is not None:
+            return validation_error
+        try:
+            request = AuthorityRejectRequest(
+                **_authority_request_kwargs(args),
+                reason=args.reason,
+            )
+        except (ValidationError, ValueError) as exc:
+            return _authority_validation_failure(command, exc)
+        return command, application.authority_reject(request)
+
+    if not sys.stdin.isatty():
+        return _authority_review_required(command)
+
+    return _interactive_authority_reject(args, application)
+
+
+def _non_empty(value: object) -> bool:
+    """Return whether a CLI string value is non-empty after trimming."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _review_data(result: JsonObject) -> Mapping[object, object] | None:
+    """Return the data mapping from a review result."""
+    return _as_mapping(result.get("data"))
+
+
+def _guard_tokens_from_review(result: JsonObject) -> Mapping[object, object] | None:
+    """Return guard tokens from a review result."""
+    data = _review_data(result)
+    if data is None:
+        return None
+    return _as_mapping(data.get("guard_tokens"))
+
+
+def _print_authority_review_summary(result: JsonObject) -> None:
+    """Print a compact review summary for interactive decisions."""
+    data = _review_data(result) or {}
+    project = _as_mapping(data.get("project")) or {}
+    spec = _as_mapping(data.get("spec")) or {}
+    pending = _as_mapping(data.get("pending_authority")) or {}
+    guards = _as_mapping(data.get("guard_tokens")) or {}
+    sys.stderr.write(
+        "\n".join(
+            [
+                "Authority review",
+                f"  project_id: {project.get('project_id', '')}",
+                f"  authority_id: {pending.get('authority_id', '')}",
+                f"  spec_path: {spec.get('resolved_path', '')}",
+                (
+                    "  omission_assessment: "
+                    f"{guards.get('expected_omission_assessment', '')}"
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+
+def _args_from_review_token(
+    args: argparse.Namespace,
+    *,
+    review_token: str,
+    incomplete_review_rationale: str | None = None,
+) -> argparse.Namespace:
+    """Return a decision namespace populated for token-mode submission."""
+    values = vars(args).copy()
+    values["review_token"] = review_token
+    values["idempotency_key"] = f"human-token:{uuid4()}"
+    values["changed_by"] = args.changed_by
+    if incomplete_review_rationale is not None:
+        values["allow_incomplete_review"] = True
+        values["incomplete_review_rationale"] = incomplete_review_rationale
+    return argparse.Namespace(**values)
+
+
+def _interactive_authority_accept(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Review and confirm authority acceptance in a TTY session."""
+    command = "agileforge authority accept"
+    review = application.authority_review(
+        project_id=args.project_id,
+        include_spec="auto",
+        output_format="json",
+    )
+    if review.get("ok") is not True:
+        return command, review
+    guards = _guard_tokens_from_review(review)
+    review_token = guards.get("review_token") if guards is not None else None
+    if not isinstance(review_token, str):
+        return _authority_review_required(command)
+    _print_authority_review_summary(review)
+    omission = guards.get("expected_omission_assessment")
+    phrase = (
+        "ACCEPT AUTHORITY"
+        if omission == "complete"
+        else "ACCEPT INCOMPLETE AUTHORITY"
+    )
+    typed = input(f'Type "{phrase}" to continue: ')
+    if typed != phrase:
+        return _invalid_command(
+            command,
+            "Authority acceptance confirmation did not match.",
+            details={"required_phrase": phrase},
+        )
+    rationale = None
+    if omission != "complete":
+        rationale = input("Incomplete review rationale: ").strip()
+        if not rationale:
+            return _invalid_command(
+                command,
+                "Incomplete authority acceptance requires a rationale.",
+                details={"missing": ["incomplete_review_rationale"]},
+            )
+    token_args = _args_from_review_token(
+        args,
+        review_token=review_token,
+        incomplete_review_rationale=rationale,
+    )
+    try:
+        request = AuthorityAcceptRequest(
+            **_authority_request_kwargs(token_args),
+            allow_incomplete_review=token_args.allow_incomplete_review,
+            incomplete_review_rationale=token_args.incomplete_review_rationale,
+        )
+    except (ValidationError, ValueError) as exc:
+        return _authority_validation_failure(command, exc)
+    return command, application.authority_accept(request)
+
+
+def _interactive_authority_reject(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Review and confirm authority rejection in a TTY session."""
+    command = "agileforge authority reject"
+    review = application.authority_review(
+        project_id=args.project_id,
+        include_spec="auto",
+        output_format="json",
+    )
+    if review.get("ok") is not True:
+        return command, review
+    guards = _guard_tokens_from_review(review)
+    review_token = guards.get("review_token") if guards is not None else None
+    if not isinstance(review_token, str):
+        return _authority_review_required(command)
+    _print_authority_review_summary(review)
+    reason = input("Rejection reason: ").strip()
+    if not reason:
+        return _invalid_command(
+            command,
+            "Authority rejection requires a reason.",
+            details={"missing": ["reason"]},
+        )
+    token_args = _args_from_review_token(args, review_token=review_token)
+    try:
+        request = AuthorityRejectRequest(
+            **_authority_request_kwargs(token_args),
+            reason=reason,
+        )
+    except (ValidationError, ValueError) as exc:
+        return _authority_validation_failure(command, exc)
+    return command, application.authority_reject(request)
 
 
 def _story_show(args: argparse.Namespace, application: _Application) -> CommandResult:
