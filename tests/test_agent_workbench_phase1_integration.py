@@ -254,7 +254,7 @@ def _cli_payload(
     assert meta["command_version"] == "1"
     assert isinstance(meta["agileforge_version"], str)
     assert meta["agileforge_version"]
-    assert meta["storage_schema_version"] == "2"
+    assert meta["storage_schema_version"] == "3"
     assert isinstance(meta["correlation_id"], str)
     assert meta["correlation_id"]
     assert isinstance(meta["generated_at"], str)
@@ -308,32 +308,42 @@ def test_phase1_cli_drives_real_application_facade(
         (
             ["workflow", "next", "--project-id", str(project_id)],
             "agileforge workflow next",
-            lambda data: data["next_valid_commands"]
-            == [f"agileforge sprint candidates --project-id {project_id}"],
+            lambda data: (
+                data["next_valid_commands"]
+                == [f"agileforge sprint candidates --project-id {project_id}"]
+            ),
         ),
         (
             ["authority", "status", "--project-id", str(project_id)],
             "agileforge authority status",
-            lambda data: data["status"] == "current"
-            and _mapping(data["disk_spec"])["matches_accepted"] is True,
+            lambda data: (
+                data["status"] == "current"
+                and _mapping(data["disk_spec"])["matches_accepted"] is True
+            ),
         ),
         (
             ["authority", "invariants", "--project-id", str(project_id)],
             "agileforge authority invariants",
-            lambda data: data["count"] == 1
-            and _mapping(_sequence(data["invariants"])[0])["id"] == "INV-1",
+            lambda data: (
+                data["count"] == 1
+                and _mapping(_sequence(data["invariants"])[0])["id"] == "INV-1"
+            ),
         ),
         (
             ["story", "show", "--story-id", str(story_id)],
             "agileforge story show",
-            lambda data: data["story_id"] == story_id
-            and data["accepted_spec_version_id"] == spec_version_id,
+            lambda data: (
+                data["story_id"] == story_id
+                and data["accepted_spec_version_id"] == spec_version_id
+            ),
         ),
         (
             ["sprint", "candidates", "--project-id", str(project_id)],
             "agileforge sprint candidates",
-            lambda data: data["count"] == 1
-            and _mapping(_sequence(data["items"])[0])["story_id"] == story_id,
+            lambda data: (
+                data["count"] == 1
+                and _mapping(_sequence(data["items"])[0])["story_id"] == story_id
+            ),
         ),
         (
             [
@@ -354,17 +364,17 @@ def test_phase1_cli_drives_real_application_facade(
                     "--selected-story-ids 1,2,3"
                 ]
                 and data["blocked_commands"] == []
-                and _mapping(_mapping(data["phase_data"])["sprint_candidates"])[
-                    "count"
-                ]
+                and _mapping(_mapping(data["phase_data"])["sprint_candidates"])["count"]
                 == 1
             ),
         ),
         (
             ["status", "--project-id", str(project_id)],
             "agileforge status",
-            lambda data: _mapping(data["project"])["product_id"] == project_id
-            and _mapping(data["authority"])["status"] == "current",
+            lambda data: (
+                _mapping(data["project"])["product_id"] == project_id
+                and _mapping(data["authority"])["status"] == "current"
+            ),
         ),
     ]
 

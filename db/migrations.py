@@ -375,6 +375,11 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
                 raise RuntimeError(message)
             backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
             _raise_for_duplicate_generated_legacy_terminal_decision_keys(backfill_plan)
+            if "terminal_decision_key" in existing_columns:
+                _raise_for_generated_terminal_decision_key_conflicts(
+                    conn,
+                    backfill_plan,
+                )
 
         if "terminal_decision_key" in existing_columns:
             _raise_for_duplicate_existing_terminal_decision_keys(conn)

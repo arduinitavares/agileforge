@@ -550,6 +550,76 @@ def test_authority_decision_migration_blocks_existing_duplicate_terminal_keys(
     assert "uq_spec_authority_terminal_decision_key" not in indexes
 
 
+def test_authority_decision_migration_preflights_generated_existing_key_conflict(
+    tmp_path: Path,
+) -> None:
+    """Reject legacy-generated terminal keys that conflict with existing rows."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _add_terminal_decision_key_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="accepted",
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="rejected",
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET pending_authority_id = :authority_id,
+                    terminal_decision_key = :terminal_decision_key
+                WHERE status = 'accepted'
+                """
+            ),
+            {
+                "authority_id": LEGACY_AUTHORITY_ID,
+                "terminal_decision_key": "7:11:13",
+            },
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Duplicate legacy authority terminal decision",
+    ):
+        migrate_spec_authority_tables(engine)
+
+    columns = _acceptance_columns(engine)
+    assert {"pending_authority_id", "terminal_decision_key"}.issubset(columns)
+    assert (
+        NEW_AUTHORITY_DECISION_COLUMNS
+        - {"pending_authority_id", "terminal_decision_key"}
+    ).isdisjoint(columns)
+    _assert_no_backfill_or_secondary_indexes(engine)
+    with engine.connect() as conn:
+        legacy_row = conn.execute(
+            text(
+                """
+                SELECT pending_authority_id, terminal_decision_key
+                FROM spec_authority_acceptance
+                WHERE status = 'rejected'
+                """
+            )
+        ).one()
+    assert legacy_row.pending_authority_id is None
+    assert legacy_row.terminal_decision_key is None
+    assert "agent_workbench_schema_versions" not in _table_names(engine)
+
+
 def test_authority_decision_migration_preflights_partial_schema_null_authority(
     tmp_path: Path,
 ) -> None:
