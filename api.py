@@ -335,7 +335,7 @@ class AuthorityDecisionApiRequest(BaseModel):
 class AuthorityRejectApiRequest(AuthorityDecisionApiRequest):
     """Dashboard authority rejection request."""
 
-    reason: str
+    reason: str = Field(min_length=1)
 
 
 class VisionGenerateRequest(BaseModel):

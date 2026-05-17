@@ -634,6 +634,30 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     assert workflow.states[str(product.product_id)]["setup_error"] == reason
 
 
+def test_dashboard_reject_empty_reason_returns_request_boundary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an empty authority rejection reason before app service dispatch."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/reject",
+        json={
+            "review_token": "agileforge.authority_review.v1:sha256:test",
+            "reason": "",
+        },
+    )
+
+    assert response.status_code == HTTP_UNPROCESSABLE
+    assert fake_app.reject_requests == []
+    errors = response.json()["detail"]
+    assert errors[0]["loc"] == ["body", "reason"]
+    assert errors[0]["type"] == "string_too_short"
+
+
 def test_dashboard_pending_review_copy_is_not_project_setup_required() -> None:
     """Keep the dashboard pending review panel copy authority-specific."""
     html = Path("frontend/project.html").read_text()
