@@ -1,7 +1,7 @@
 # Authority Review And Decision Design
 
 **Date:** 2026-05-17
-**Status:** In Review
+**Status:** Accepted
 **Scope:** CLI-first pending Spec Authority review, assisted assessment, accept,
 reject, and workflow advancement
 
