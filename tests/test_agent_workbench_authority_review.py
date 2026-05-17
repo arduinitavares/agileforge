@@ -218,6 +218,39 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     ]
 
 
+def test_review_text_format_returns_ok_packet_with_human_text(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Text format preserves JSON envelope data and adds human-readable text."""
+    project_id, _spec_version_id, authority_id, spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id,
+        output_format="text",
+    )
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+    data = result["data"]
+    assert data["project"]["project_id"] == project_id
+    assert data["pending_authority"]["authority_id"] == authority_id
+    assert data["spec"]["resolved_path"] == str(spec_path.resolve())
+    assert isinstance(data["text"], str)
+    assert "Authority review" in data["text"]
+    assert f"Project: {project_id}" in data["text"]
+    assert f"Pending authority: {authority_id}" in data["text"]
+    assert "Review token:" in data["text"]
+    assert "ACCEPT:" in data["text"]
+    assert "REJECT:" in data["text"]
+
+
 def test_review_preserves_rejected_features_from_valid_compiled_authority(
     session: Session,
     tmp_path: Path,

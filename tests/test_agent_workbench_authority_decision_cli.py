@@ -189,6 +189,39 @@ def test_authority_review_parser_calls_application(
     ]
 
 
+def test_authority_review_parser_passes_text_format_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority review accepts text format without changing stdout mode."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "review",
+            "--project-id",
+            str(PROJECT_ID),
+            "--format",
+            "text",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls == [
+        (
+            "authority_review",
+            {
+                "project_id": PROJECT_ID,
+                "include_spec": "auto",
+                "output_format": "text",
+            },
+        )
+    ]
+
+
 def test_authority_accept_with_review_token_does_not_require_idempotency_key(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -277,8 +277,12 @@ class AuthorityReviewService:
                 include_spec,
                 ["auto", "full", "summary"],
             )
-        if output_format != "json":
-            return _invalid_input_error("output_format", output_format, ["json"])
+        if output_format not in {"json", "text"}:
+            return _invalid_input_error(
+                "output_format",
+                output_format,
+                ["json", "text"],
+            )
 
         readiness = check_schema_readiness(self._engine, _AUTHORITY_REQUIREMENTS)
         if not readiness.ok:
@@ -306,7 +310,10 @@ class AuthorityReviewService:
             if isinstance(snapshot, dict):
                 return snapshot
 
-            return _success(_render_review_packet(snapshot))
+            packet = _render_review_packet(snapshot)
+            if output_format == "text":
+                packet["text"] = _render_review_text(packet)
+            return _success(packet)
 
 
 def _success(data: JsonDict) -> JsonDict:
@@ -618,6 +625,59 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
         ],
         "guard_tokens": snapshot.guard_tokens,
     }
+
+
+def _render_review_text(packet: JsonDict) -> str:
+    """Return a compact human-readable review summary."""
+    project = _mapping_or_none(packet.get("project"))
+    spec = _mapping_or_none(packet.get("spec"))
+    pending = _mapping_or_none(packet.get("pending_authority"))
+    guards = _mapping_or_none(packet.get("guard_tokens"))
+    next_actions = packet.get("next_actions")
+    actions = next_actions if isinstance(next_actions, list) else []
+    lines = [
+        "Authority review",
+        f"Project: {_mapping_value(project, 'project_id')}",
+        f"Project name: {_mapping_value(project, 'name')}",
+        f"FSM state: {_mapping_value(project, 'fsm_state')}",
+        f"Setup status: {_mapping_value(project, 'setup_status')}",
+        f"Pending authority: {_mapping_value(pending, 'authority_id')}",
+        (
+            "Authority fingerprint: "
+            f"{_mapping_value(pending, 'authority_fingerprint')}"
+        ),
+        f"Spec path: {_mapping_value(spec, 'resolved_path')}",
+        f"Spec hash: {_mapping_value(spec, 'spec_hash')}",
+        (
+            "Omission assessment: "
+            f"{_mapping_value(guards, 'expected_omission_assessment')}"
+        ),
+        f"Review token: {_mapping_value(guards, 'review_token')}",
+        f"ACCEPT: {_action_command(actions, index=0)}",
+        f"REJECT: {_action_command(actions, index=1)}",
+    ]
+    return "\n".join(lines)
+
+
+def _action_command(actions: list[object], *, index: int) -> str:
+    if index >= len(actions):
+        return ""
+    action = _mapping_or_none(actions[index])
+    if action is None:
+        return ""
+    return str(action.get("command", ""))
+
+
+def _mapping_value(mapping: Mapping[object, object] | None, key: str) -> object:
+    if mapping is None:
+        return ""
+    return mapping.get(key, "")
+
+
+def _mapping_or_none(value: object) -> Mapping[object, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    return None
 
 
 def _review_source_limit() -> int:
