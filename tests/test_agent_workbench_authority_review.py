@@ -766,6 +766,41 @@ def test_review_counts_fenced_code_as_one_content_block(
     assert summary["unclassified_content_blocks"] == 1
 
 
+def test_review_tilde_fenced_code_ignores_headings_and_counts_one_block(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Tilde fenced code behaves like backtick fenced code."""
+    spec_content = (
+        "# Submission Contract\n\n"
+        "~~~markdown\n"
+        "# Not A Heading\n"
+        "The fenced example must stay in one block.\n"
+        "This line must not become a second block.\n"
+        "~~~\n\n"
+        "## Background\n\n"
+        "Descriptive text.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
+        )
+    )
+
+    result = AuthorityReviewService(engine=session.get_bind()).review(
+        project_id=project_id
+    )
+
+    spec = result["data"]["spec"]
+    headings = [entry["heading"] for entry in spec["source_outline"]]
+    assert headings == ["Submission Contract", "Background"]
+    assert spec["coverage_summary"]["uncovered_sections"] == 1
+    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
+
+
 def test_missing_spec_file_returns_spec_file_not_found(
     session: Session,
     tmp_path: Path,

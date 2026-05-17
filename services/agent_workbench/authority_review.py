@@ -57,6 +57,7 @@ _REQUIREMENT_HEADING_RE: Final[re.Pattern[str]] = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_FENCE_RE: Final[re.Pattern[str]] = re.compile(r"^(?:`{3,}|~{3,})")
 
 
 @dataclass(frozen=True)
@@ -925,7 +926,7 @@ def _parse_markdown_sections(text: str) -> tuple[list[_Section], list[JsonDict]]
     in_fence = False
     for index, line in enumerate(lines, start=1):
         stripped = line.strip()
-        if stripped.startswith("```"):
+        if _is_fence_line(stripped):
             in_fence = not in_fence
             content_before_heading = True
             continue
@@ -989,7 +990,7 @@ def _parse_section_blocks(  # noqa: C901
         if line_number == section.line_start and _HEADING_RE.match(line):
             continue
         stripped = line.strip()
-        if stripped.startswith("```"):
+        if _is_fence_line(stripped):
             flush_paragraph()
             if in_fence:
                 if fence_lines:
@@ -1042,6 +1043,10 @@ def _parse_section_blocks(  # noqa: C901
             }
         )
     return blocks, diagnostics
+
+
+def _is_fence_line(stripped: str) -> bool:
+    return bool(_FENCE_RE.match(stripped))
 
 
 def _content_block(
