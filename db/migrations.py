@@ -19,7 +19,7 @@ Usage:
 import logging
 
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from utils.task_metadata import canonical_task_metadata_json
 
@@ -321,38 +321,10 @@ def _backfill_legacy_authority_decisions(engine: Engine) -> int:
             .all()
         )
 
-        for row in legacy_rows:
-            authority_rows = (
-                conn.execute(
-                    text(
-                        """
-                    SELECT authority_id
-                    FROM compiled_spec_authority
-                    WHERE spec_version_id = :spec_version_id
-                    ORDER BY authority_id
-                    """
-                    ),
-                    {"spec_version_id": row["spec_version_id"]},
-                )
-                .mappings()
-                .all()
-            )
-            if len(authority_rows) != 1:
-                count = len(authority_rows)
-                message = (
-                    "Ambiguous legacy authority decision cannot be backfilled: "
-                    f"acceptance_id={row['id']} product_id={row['product_id']} "
-                    f"spec_version_id={row['spec_version_id']} matched {count} "
-                    "compiled_spec_authority rows. Remediation: resolve the "
-                    "legacy compiled authority so exactly one row matches this "
-                    "spec version, then rerun migrations."
-                )
-                raise RuntimeError(message)
+        backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
+        _raise_for_duplicate_legacy_terminal_decision_keys(conn, backfill_plan)
 
-            authority_id = authority_rows[0]["authority_id"]
-            terminal_decision_key = (
-                f"{row['product_id']}:{row['spec_version_id']}:{authority_id}"
-            )
+        for row in backfill_plan:
             conn.execute(
                 text(
                     """
@@ -364,13 +336,127 @@ def _backfill_legacy_authority_decisions(engine: Engine) -> int:
                     """
                 ),
                 {
-                    "authority_id": authority_id,
-                    "terminal_decision_key": terminal_decision_key,
-                    "acceptance_id": row["id"],
+                    "authority_id": row["authority_id"],
+                    "terminal_decision_key": row["terminal_decision_key"],
+                    "acceptance_id": row["acceptance_id"],
                 },
             )
 
     return len(legacy_rows)
+
+
+def _legacy_authority_decision_backfill_plan(
+    conn: Connection,
+    legacy_rows: list[RowMapping],
+) -> list[dict[str, int | str]]:
+    """Resolve legacy terminal decisions to authority IDs before writing updates."""
+    backfill_plan: list[dict[str, int | str]] = []
+    for row in legacy_rows:
+        authority_rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT authority_id
+                    FROM compiled_spec_authority
+                    WHERE spec_version_id = :spec_version_id
+                    ORDER BY authority_id
+                    """
+                ),
+                {"spec_version_id": row["spec_version_id"]},
+            )
+            .mappings()
+            .all()
+        )
+        if len(authority_rows) != 1:
+            count = len(authority_rows)
+            message = (
+                "Ambiguous legacy authority decision cannot be backfilled: "
+                f"acceptance_id={row['id']} product_id={row['product_id']} "
+                f"spec_version_id={row['spec_version_id']} matched {count} "
+                "compiled_spec_authority rows. Remediation: resolve the "
+                "legacy compiled authority so exactly one row matches this "
+                "spec version, then rerun migrations."
+            )
+            raise RuntimeError(message)
+
+        authority_id = int(authority_rows[0]["authority_id"])
+        product_id = int(row["product_id"])
+        spec_version_id = int(row["spec_version_id"])
+        backfill_plan.append(
+            {
+                "acceptance_id": int(row["id"]),
+                "authority_id": authority_id,
+                "terminal_decision_key": (
+                    f"{product_id}:{spec_version_id}:{authority_id}"
+                ),
+            }
+        )
+    return backfill_plan
+
+
+def _raise_for_duplicate_legacy_terminal_decision_keys(
+    conn: Connection,
+    backfill_plan: list[dict[str, int | str]],
+) -> None:
+    """Reject duplicate generated terminal keys before legacy updates are written."""
+    generated_ids_by_key: dict[str, list[int]] = {}
+    for row in backfill_plan:
+        terminal_decision_key = str(row["terminal_decision_key"])
+        generated_ids_by_key.setdefault(terminal_decision_key, []).append(
+            int(row["acceptance_id"])
+        )
+
+    for terminal_decision_key, acceptance_ids in generated_ids_by_key.items():
+        if len(acceptance_ids) > 1:
+            _raise_duplicate_legacy_terminal_decision_key(
+                terminal_decision_key,
+                acceptance_ids,
+            )
+
+    if not generated_ids_by_key:
+        return
+
+    existing_rows = (
+        conn.execute(
+            text(
+                """
+                SELECT id, terminal_decision_key
+                FROM spec_authority_acceptance
+                WHERE terminal_decision_key IS NOT NULL
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    planned_acceptance_ids = {int(row["acceptance_id"]) for row in backfill_plan}
+    for row in existing_rows:
+        terminal_decision_key = str(row["terminal_decision_key"])
+        if (
+            terminal_decision_key in generated_ids_by_key
+            and int(row["id"]) not in planned_acceptance_ids
+        ):
+            _raise_duplicate_legacy_terminal_decision_key(
+                terminal_decision_key,
+                [*generated_ids_by_key[terminal_decision_key], int(row["id"])],
+            )
+
+
+def _raise_duplicate_legacy_terminal_decision_key(
+    terminal_decision_key: str,
+    acceptance_ids: list[int],
+) -> None:
+    """Raise a remediable error for duplicate legacy terminal decision keys."""
+    sorted_ids = ", ".join(
+        str(acceptance_id) for acceptance_id in sorted(acceptance_ids)
+    )
+    message = (
+        "Duplicate legacy authority terminal decision cannot be backfilled: "
+        f"terminal_decision_key={terminal_decision_key} "
+        f"acceptance_ids=[{sorted_ids}]. Remediation: remove or consolidate "
+        "duplicate legacy accepted/rejected rows before rerunning migrations."
+    )
+    raise RuntimeError(message)
 
 
 def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:

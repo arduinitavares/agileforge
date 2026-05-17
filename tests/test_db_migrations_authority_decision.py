@@ -303,6 +303,60 @@ def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
         migrate_spec_authority_tables(engine)
 
 
+def test_authority_decision_migration_blocks_duplicate_legacy_terminal_keys(
+    tmp_path: Path,
+) -> None:
+    """Reject duplicate generated terminal keys before any legacy backfill writes."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="accepted",
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="rejected",
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Duplicate legacy authority terminal decision",
+    ):
+        migrate_spec_authority_tables(engine)
+
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    """
+                SELECT pending_authority_id,
+                       terminal_decision_key,
+                       provenance_source
+                FROM spec_authority_acceptance
+                ORDER BY id
+                """
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    assert rows
+    assert all(row["pending_authority_id"] is None for row in rows)
+    assert all(row["terminal_decision_key"] is None for row in rows)
+    assert all(row["provenance_source"] != "legacy_backfill" for row in rows)
+
+
 def test_terminal_decision_unique_key_blocks_duplicate_accept_reject_rows(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +493,27 @@ def test_schema_readiness_requires_terminal_decision_invariant(
     migrate_agent_workbench_contract_tables(engine)
 
     after = schema_readiness.check_schema_readiness(engine, requirements)
+    assert after.ok is True
+    assert after.missing == {}
+
+
+def test_check_authority_decision_readiness_public_helper(
+    tmp_path: Path,
+) -> None:
+    """Expose decision storage readiness for future authority write services."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    migrate_agent_workbench_contract_tables(engine)
+
+    before = schema_readiness.check_authority_decision_readiness(engine)
+    assert before.ok is False
+    assert "spec_authority_acceptance" in before.missing
+
+    migrate_spec_authority_tables(engine)
+    migrate_agent_workbench_contract_tables(engine)
+
+    after = schema_readiness.check_authority_decision_readiness(engine)
     assert after.ok is True
     assert after.missing == {}
 

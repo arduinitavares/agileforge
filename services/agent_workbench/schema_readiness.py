@@ -147,6 +147,11 @@ def check_schema_readiness(
     return SchemaReadiness(ok=not missing, missing=missing)
 
 
+def check_authority_decision_readiness(engine: Engine) -> SchemaReadiness:
+    """Return readiness for authority decision write-path storage."""
+    return check_schema_readiness(engine, AUTHORITY_DECISION_REQUIREMENTS)
+
+
 def _is_missing_sqlite_file(engine: Engine) -> bool:
     """Return whether a SQLite file URL targets an absent database file."""
     if not engine.url.drivername.startswith("sqlite"):
