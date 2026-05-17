@@ -182,6 +182,20 @@ def _replace_terminal_index_with_malformed_index(engine: Engine) -> None:
         )
 
 
+def _replace_terminal_index_with_narrower_unique_partial_index(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX uq_spec_authority_terminal_decision_key"))
+        conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX uq_spec_authority_terminal_decision_key
+                ON spec_authority_acceptance (terminal_decision_key)
+                WHERE terminal_decision_key IS NOT NULL AND status = 'accepted'
+                """
+            )
+        )
+
+
 def test_authority_decision_migration_adds_provenance_columns(
     tmp_path: Path,
 ) -> None:
@@ -393,6 +407,20 @@ def test_authority_decision_migration_rejects_malformed_terminal_index(
         migrate_spec_authority_tables(engine)
 
 
+def test_authority_decision_migration_rejects_narrower_terminal_index(
+    tmp_path: Path,
+) -> None:
+    """Fail migration when the same-name partial index has extra predicates."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    migrate_spec_authority_tables(engine)
+    _replace_terminal_index_with_narrower_unique_partial_index(engine)
+
+    with pytest.raises(RuntimeError, match="Malformed terminal decision index"):
+        migrate_spec_authority_tables(engine)
+
+
 def test_schema_readiness_requires_terminal_decision_invariant(
     tmp_path: Path,
 ) -> None:
@@ -425,6 +453,28 @@ def test_schema_readiness_rejects_malformed_terminal_decision_index(
     migrate_spec_authority_tables(engine)
     migrate_agent_workbench_contract_tables(engine)
     _replace_terminal_index_with_malformed_index(engine)
+
+    result = schema_readiness.check_schema_readiness(
+        engine,
+        schema_readiness.AUTHORITY_DECISION_REQUIREMENTS,
+    )
+
+    assert result.ok is False
+    assert result.missing == {
+        "spec_authority_acceptance": ["uq_spec_authority_terminal_decision_key"]
+    }
+
+
+def test_schema_readiness_rejects_narrower_terminal_decision_index(
+    tmp_path: Path,
+) -> None:
+    """Report not-ready when the same-name partial index has extra predicates."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    migrate_spec_authority_tables(engine)
+    migrate_agent_workbench_contract_tables(engine)
+    _replace_terminal_index_with_narrower_unique_partial_index(engine)
 
     result = schema_readiness.check_schema_readiness(
         engine,

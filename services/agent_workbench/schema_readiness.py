@@ -232,12 +232,20 @@ def _terminal_decision_index_ready(engine: Engine) -> bool:
 
 def _has_terminal_decision_partial_predicate(index_sql: str) -> bool:
     """Return whether index SQL contains the canonical partial predicate."""
+    normalized_sql = _normalize_index_sql(index_sql)
+    _, separator, where_clause = normalized_sql.partition(" where ")
+    if not separator:
+        return False
+    expected = _normalize_index_sql(TERMINAL_DECISION_INDEX_PREDICATE)
+    return where_clause == expected
+
+
+def _normalize_index_sql(index_sql: str) -> str:
+    """Normalize SQLite index SQL enough for canonical predicate comparison."""
     normalized = index_sql.lower()
-    for token in ('"', "'", "`", "[", "]", "(", ")"):
+    for token in ('"', "'", "`", "[", "]", "(", ")", ";"):
         normalized = normalized.replace(token, " ")
-    normalized = " ".join(normalized.split())
-    expected = f"where {TERMINAL_DECISION_INDEX_PREDICATE.lower()}"
-    return expected in normalized
+    return " ".join(normalized.split())
 
 
 def _storage_schema_version(engine: Engine) -> str | None:
