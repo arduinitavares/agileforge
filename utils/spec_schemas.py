@@ -549,13 +549,10 @@ class SpecAuthorityCompilationSuccess(BaseModel):
         list[EligibleFeatureRule],
         Field(description="Optional feature eligibility rules (may be empty)."),
     ]
-    rejected_features: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="Optional rejected feature/scope exclusions (may be empty).",
-        ),
-    ]
+    rejected_features: list[str] = Field(
+        default_factory=list,
+        description="Optional rejected feature/scope exclusions (may be empty).",
+    )
     gaps: Annotated[
         list[str],
         Field(description="Missing or ambiguous spec items."),
@@ -579,17 +576,14 @@ class SpecAuthorityCompilationSuccess(BaseModel):
             description="SHA-256 hash of the compiler prompt/instructions.",
         ),
     ]
-    ir_schema_version: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description="Optional compact authority IR schema version.",
-        ),
-    ]
-    ir_provenance: Annotated[
-        IrProvenance | None,
-        Field(default=None, description="Provenance for compact authority IR fields."),
-    ]
+    ir_schema_version: str | None = Field(
+        default=None,
+        description="Optional compact authority IR schema version.",
+    )
+    ir_provenance: IrProvenance | None = Field(
+        default=None,
+        description="Provenance for compact authority IR fields.",
+    )
     source_units: list[SpecAuthoritySourceUnit] = Field(
         default_factory=list,
         description="Compact parsed source-unit metadata.",
