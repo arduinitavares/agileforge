@@ -141,6 +141,12 @@ def check_schema_readiness(
                     f"storage_schema_version:{requirement.storage_schema_version}"
                 )
 
+        if _authority_decision_terminal_data_checkable(
+            requirement,
+            existing_columns,
+        ) and not _authority_decision_terminal_data_ready(engine):
+            missing_elements.append("authority_decision_terminal_data")
+
         if missing_elements:
             missing[requirement.table] = missing_elements
 
@@ -243,6 +249,51 @@ def _terminal_decision_index_ready(engine: Engine) -> bool:
         ).first()
         index_sql = "" if sql_row is None else str(sql_row._mapping["sql"] or "")
         return _has_terminal_decision_partial_predicate(index_sql)
+
+
+def _authority_decision_terminal_data_checkable(
+    requirement: SchemaRequirement,
+    existing_columns: set[str],
+) -> bool:
+    """Return whether terminal authority data can be validated for readiness."""
+    required_columns = {
+        "product_id",
+        "spec_version_id",
+        "status",
+        "pending_authority_id",
+        "terminal_decision_key",
+    }
+    return (
+        requirement.table == "spec_authority_acceptance"
+        and required_columns.issubset(existing_columns)
+    )
+
+
+def _authority_decision_terminal_data_ready(engine: Engine) -> bool:
+    """Return whether terminal decision rows satisfy the storage invariant."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM spec_authority_acceptance
+                WHERE status IN ('accepted', 'rejected')
+                  AND (
+                    pending_authority_id IS NULL
+                    OR terminal_decision_key IS NULL
+                    OR terminal_decision_key != (
+                        CAST(product_id AS TEXT)
+                        || ':'
+                        || CAST(spec_version_id AS TEXT)
+                        || ':'
+                        || CAST(pending_authority_id AS TEXT)
+                    )
+                  )
+                LIMIT 1
+                """
+            )
+        ).first()
+    return row is None
 
 
 def _has_terminal_decision_partial_predicate(index_sql: str) -> bool:

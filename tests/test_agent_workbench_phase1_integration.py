@@ -126,6 +126,8 @@ def _seed_phase1_project(
         spec_gaps=json.dumps([]),
     )
     session.add(authority)
+    session.flush()
+    authority_id = require_id(authority.authority_id, "authority_id")
 
     acceptance = SpecAuthorityAcceptance(
         product_id=project_id,
@@ -138,6 +140,8 @@ def _seed_phase1_project(
         compiler_version=COMPILER_VERSION,
         prompt_hash=PROMPT_HASH,
         spec_hash=spec_hash,
+        pending_authority_id=authority_id,
+        terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_id}",
     )
     session.add(acceptance)
 

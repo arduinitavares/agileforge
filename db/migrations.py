@@ -320,37 +320,13 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
         return
 
     with engine.connect() as conn:
-        if "pending_authority_id" in existing_columns:
-            legacy_rows = (
-                conn.execute(
-                    text(
-                        """
-                        SELECT id, product_id, spec_version_id
-                        FROM spec_authority_acceptance
-                        WHERE status IN ('accepted', 'rejected')
-                          AND pending_authority_id IS NULL
-                        """
-                    )
-                )
-                .mappings()
-                .all()
-            )
-        else:
-            legacy_rows = (
-                conn.execute(
-                    text(
-                        """
-                        SELECT id, product_id, spec_version_id
-                        FROM spec_authority_acceptance
-                        WHERE status IN ('accepted', 'rejected')
-                        """
-                    )
-                )
-                .mappings()
-                .all()
-            )
+        terminal_rows = _terminal_authority_decision_rows(conn, existing_columns)
+        _raise_for_terminal_key_without_pending_authority(terminal_rows)
+        needs_compiled_lookup = any(
+            row["pending_authority_id"] is None for row in terminal_rows
+        )
 
-        if legacy_rows and "compiled_spec_authority" not in existing_tables:
+        if needs_compiled_lookup and "compiled_spec_authority" not in existing_tables:
             message = (
                 "Legacy authority decisions cannot be backfilled because "
                 "compiled_spec_authority table is missing. Remediation: "
@@ -358,10 +334,12 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
                 "accepted/rejected decisions before rerunning migrations."
             )
             raise RuntimeError(message)
-        if legacy_rows:
+        if terminal_rows:
             compiled_columns = _get_existing_columns(engine, "compiled_spec_authority")
             required_join_columns = {"authority_id", "spec_version_id"}
-            if not required_join_columns.issubset(compiled_columns):
+            if needs_compiled_lookup and not required_join_columns.issubset(
+                compiled_columns
+            ):
                 missing_columns = ", ".join(
                     sorted(required_join_columns - compiled_columns)
                 )
@@ -373,7 +351,10 @@ def _preflight_spec_authority_acceptance_contract(engine: Engine) -> None:
                     "before rerunning migrations."
                 )
                 raise RuntimeError(message)
-            backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
+            backfill_plan = _legacy_authority_decision_backfill_plan(
+                conn,
+                terminal_rows,
+            )
             _raise_for_duplicate_generated_legacy_terminal_decision_keys(backfill_plan)
             if "terminal_decision_key" in existing_columns:
                 _raise_for_generated_terminal_decision_key_conflicts(
@@ -410,23 +391,13 @@ def _preflight_terminal_decision_index_contract(engine: Engine) -> None:
 
 def _backfill_legacy_authority_decisions(engine: Engine) -> int:
     """Backfill terminal authority provenance for legacy accepted/rejected rows."""
+    existing_columns = _get_existing_columns(engine, "spec_authority_acceptance")
     with engine.begin() as conn:
-        legacy_rows = (
-            conn.execute(
-                text(
-                    """
-                SELECT id, product_id, spec_version_id
-                FROM spec_authority_acceptance
-                WHERE status IN ('accepted', 'rejected')
-                  AND pending_authority_id IS NULL
-                """
-                )
-            )
-            .mappings()
-            .all()
+        terminal_rows = _terminal_authority_decision_rows(conn, existing_columns)
+        backfill_plan = _legacy_authority_decision_backfill_plan(
+            conn,
+            terminal_rows,
         )
-
-        backfill_plan = _legacy_authority_decision_backfill_plan(conn, legacy_rows)
         _raise_for_duplicate_legacy_terminal_decision_keys(conn, backfill_plan)
 
         for row in backfill_plan:
@@ -447,56 +418,145 @@ def _backfill_legacy_authority_decisions(engine: Engine) -> int:
                 },
             )
 
-    return len(legacy_rows)
+    return len(backfill_plan)
+
+
+def _terminal_authority_decision_rows(
+    conn: Connection,
+    existing_columns: set[str],
+) -> list[RowMapping]:
+    """Return terminal authority decision rows with nullable provenance aliases."""
+    has_pending_authority_id = "pending_authority_id" in existing_columns
+    has_terminal_decision_key = "terminal_decision_key" in existing_columns
+    if has_pending_authority_id and has_terminal_decision_key:
+        query = """
+        SELECT id,
+               product_id,
+               spec_version_id,
+               pending_authority_id,
+               terminal_decision_key
+        FROM spec_authority_acceptance
+        WHERE status IN ('accepted', 'rejected')
+        """
+    elif has_pending_authority_id:
+        query = """
+        SELECT id,
+               product_id,
+               spec_version_id,
+               pending_authority_id,
+               NULL AS terminal_decision_key
+        FROM spec_authority_acceptance
+        WHERE status IN ('accepted', 'rejected')
+        """
+    elif has_terminal_decision_key:
+        query = """
+        SELECT id,
+               product_id,
+               spec_version_id,
+               NULL AS pending_authority_id,
+               terminal_decision_key
+        FROM spec_authority_acceptance
+        WHERE status IN ('accepted', 'rejected')
+        """
+    else:
+        query = """
+        SELECT id,
+               product_id,
+               spec_version_id,
+               NULL AS pending_authority_id,
+               NULL AS terminal_decision_key
+        FROM spec_authority_acceptance
+        WHERE status IN ('accepted', 'rejected')
+        """
+    return conn.execute(text(query)).mappings().all()
 
 
 def _legacy_authority_decision_backfill_plan(
     conn: Connection,
-    legacy_rows: list[RowMapping],
+    terminal_rows: list[RowMapping],
 ) -> list[dict[str, int | str]]:
     """Resolve legacy terminal decisions to authority IDs before writing updates."""
     backfill_plan: list[dict[str, int | str]] = []
-    for row in legacy_rows:
-        authority_rows = (
-            conn.execute(
-                text(
-                    """
-                    SELECT authority_id
-                    FROM compiled_spec_authority
-                    WHERE spec_version_id = :spec_version_id
-                    ORDER BY authority_id
-                    """
-                ),
-                {"spec_version_id": row["spec_version_id"]},
-            )
-            .mappings()
-            .all()
-        )
-        if len(authority_rows) != 1:
-            count = len(authority_rows)
-            message = (
-                "Ambiguous legacy authority decision cannot be backfilled: "
-                f"acceptance_id={row['id']} product_id={row['product_id']} "
-                f"spec_version_id={row['spec_version_id']} matched {count} "
-                "compiled_spec_authority rows. Remediation: resolve the "
-                "legacy compiled authority so exactly one row matches this "
-                "spec version, then rerun migrations."
-            )
-            raise RuntimeError(message)
-
-        authority_id = int(authority_rows[0]["authority_id"])
+    for row in terminal_rows:
         product_id = int(row["product_id"])
         spec_version_id = int(row["spec_version_id"])
+        pending_authority_id = row["pending_authority_id"]
+        current_terminal_decision_key = row["terminal_decision_key"]
+        if pending_authority_id is None:
+            if current_terminal_decision_key is not None:
+                _raise_terminal_key_without_pending_authority(row)
+            authority_id = _legacy_authority_id_for_decision(conn, row)
+        else:
+            authority_id = int(pending_authority_id)
+
+        terminal_decision_key = f"{product_id}:{spec_version_id}:{authority_id}"
+        if current_terminal_decision_key == terminal_decision_key:
+            continue
+
         backfill_plan.append(
             {
                 "acceptance_id": int(row["id"]),
                 "authority_id": authority_id,
-                "terminal_decision_key": (
-                    f"{product_id}:{spec_version_id}:{authority_id}"
-                ),
+                "terminal_decision_key": terminal_decision_key,
             }
         )
     return backfill_plan
+
+
+def _legacy_authority_id_for_decision(conn: Connection, row: RowMapping) -> int:
+    """Return the unambiguous compiled authority ID for a legacy decision row."""
+    authority_rows = (
+        conn.execute(
+            text(
+                """
+                SELECT authority_id
+                FROM compiled_spec_authority
+                WHERE spec_version_id = :spec_version_id
+                ORDER BY authority_id
+                """
+            ),
+            {"spec_version_id": row["spec_version_id"]},
+        )
+        .mappings()
+        .all()
+    )
+    if len(authority_rows) != 1:
+        count = len(authority_rows)
+        message = (
+            "Ambiguous legacy authority decision cannot be backfilled: "
+            f"acceptance_id={row['id']} product_id={row['product_id']} "
+            f"spec_version_id={row['spec_version_id']} matched {count} "
+            "compiled_spec_authority rows. Remediation: resolve the "
+            "legacy compiled authority so exactly one row matches this "
+            "spec version, then rerun migrations."
+        )
+        raise RuntimeError(message)
+
+    return int(authority_rows[0]["authority_id"])
+
+
+def _raise_for_terminal_key_without_pending_authority(
+    terminal_rows: list[RowMapping],
+) -> None:
+    """Reject terminal keys that cannot be validated without pending authority."""
+    for row in terminal_rows:
+        if (
+            row["pending_authority_id"] is None
+            and row["terminal_decision_key"] is not None
+        ):
+            _raise_terminal_key_without_pending_authority(row)
+
+
+def _raise_terminal_key_without_pending_authority(row: RowMapping) -> None:
+    message = (
+        "Invalid partial authority decision cannot be backfilled: "
+        f"acceptance_id={row['id']} product_id={row['product_id']} "
+        f"spec_version_id={row['spec_version_id']} has terminal_decision_key "
+        "but no pending_authority_id. Remediation: clear the untrusted "
+        "terminal_decision_key or restore the matching pending_authority_id "
+        "before rerunning migrations."
+    )
+    raise RuntimeError(message)
 
 
 def _raise_for_duplicate_legacy_terminal_decision_keys(

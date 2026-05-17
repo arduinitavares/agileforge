@@ -620,6 +620,254 @@ def test_authority_decision_migration_preflights_generated_existing_key_conflict
     assert "agent_workbench_schema_versions" not in _table_names(engine)
 
 
+def test_authority_decision_migration_backfills_missing_key_with_pending_authority(
+    tmp_path: Path,
+) -> None:
+    """Backfill terminal keys directly from existing pending authority IDs."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _add_terminal_decision_key_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=8,
+        spec_version_id=12,
+        status="rejected",
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET pending_authority_id = :authority_id
+                WHERE spec_version_id = :spec_version_id
+                """
+            ),
+            {
+                "authority_id": LEGACY_AUTHORITY_ID,
+                "spec_version_id": LEGACY_SPEC_VERSION_ID,
+            },
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET pending_authority_id = 14,
+                    terminal_decision_key = 'stale-key'
+                WHERE spec_version_id = 12
+                """
+            )
+        )
+
+    before = schema_readiness.check_authority_decision_readiness(engine)
+    assert before.ok is False
+
+    migrate_spec_authority_tables(engine)
+    migrate_agent_workbench_contract_tables(engine)
+
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT pending_authority_id,
+                           terminal_decision_key,
+                           provenance_source
+                    FROM spec_authority_acceptance
+                    ORDER BY id
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert rows == [
+        {
+            "pending_authority_id": LEGACY_AUTHORITY_ID,
+            "terminal_decision_key": "7:11:13",
+            "provenance_source": "legacy_backfill",
+        },
+        {
+            "pending_authority_id": 14,
+            "terminal_decision_key": "8:12:14",
+            "provenance_source": "legacy_backfill",
+        },
+    ]
+    assert schema_readiness.check_authority_decision_readiness(engine).ok is True
+
+
+def test_authority_decision_migration_preflights_planned_key_existing_conflict(
+    tmp_path: Path,
+) -> None:
+    """Reject planned stale-key rewrites that would conflict with existing keys."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _add_terminal_decision_key_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="accepted",
+    )
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+        status="rejected",
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET pending_authority_id = :authority_id,
+                    terminal_decision_key = CASE
+                        WHEN status = 'accepted' THEN 'stale-key'
+                        ELSE '7:11:13'
+                    END
+                """
+            ),
+            {"authority_id": LEGACY_AUTHORITY_ID},
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Duplicate legacy authority terminal decision",
+    ):
+        migrate_spec_authority_tables(engine)
+
+    columns = _acceptance_columns(engine)
+    assert {"pending_authority_id", "terminal_decision_key"}.issubset(columns)
+    assert (
+        NEW_AUTHORITY_DECISION_COLUMNS
+        - {"pending_authority_id", "terminal_decision_key"}
+    ).isdisjoint(columns)
+    _assert_no_backfill_or_secondary_indexes(engine)
+    with engine.connect() as conn:
+        accepted_row = conn.execute(
+            text(
+                """
+                SELECT terminal_decision_key
+                FROM spec_authority_acceptance
+                WHERE status = 'accepted'
+                """
+            )
+        ).one()
+    assert accepted_row.terminal_decision_key == "stale-key"
+
+
+def test_authority_decision_readiness_rejects_terminal_data_invariant_violation(
+    tmp_path: Path,
+) -> None:
+    """Reject structurally ready storage with invalid terminal decision rows."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    migrate_spec_authority_tables(engine)
+    migrate_agent_workbench_contract_tables(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO spec_authority_acceptance (
+                    product_id,
+                    spec_version_id,
+                    status,
+                    policy,
+                    decided_by,
+                    decided_at,
+                    compiler_version,
+                    prompt_hash,
+                    spec_hash,
+                    pending_authority_id,
+                    terminal_decision_key
+                )
+                VALUES (
+                    7,
+                    11,
+                    'accepted',
+                    'manual',
+                    'tester',
+                    '2026-05-17 10:00:00',
+                    'compiler-v1',
+                    'prompt-hash',
+                    'spec-hash',
+                    13,
+                    NULL
+                )
+                """
+            )
+        )
+
+    result = schema_readiness.check_authority_decision_readiness(engine)
+
+    assert result.ok is False
+    assert result.missing == {
+        "spec_authority_acceptance": ["authority_decision_terminal_data"]
+    }
+
+
+def test_authority_decision_migration_rejects_key_without_pending_authority(
+    tmp_path: Path,
+) -> None:
+    """Reject terminal keys that cannot be trusted without pending authority IDs."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_pending_authority_id_column(engine)
+    _add_terminal_decision_key_column(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    _insert_compiled_authority(
+        engine,
+        authority_id=LEGACY_AUTHORITY_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE spec_authority_acceptance
+                SET terminal_decision_key = 'preexisting-key'
+                """
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="Invalid partial authority decision"):
+        migrate_spec_authority_tables(engine)
+
+    columns = _acceptance_columns(engine)
+    assert {"pending_authority_id", "terminal_decision_key"}.issubset(columns)
+    assert (
+        NEW_AUTHORITY_DECISION_COLUMNS
+        - {"pending_authority_id", "terminal_decision_key"}
+    ).isdisjoint(columns)
+    _assert_no_backfill_or_secondary_indexes(engine)
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT pending_authority_id, terminal_decision_key
+                FROM spec_authority_acceptance
+                """
+            )
+        ).one()
+    assert row.pending_authority_id is None
+    assert row.terminal_decision_key == "preexisting-key"
+    assert "agent_workbench_schema_versions" not in _table_names(engine)
+
+
 def test_authority_decision_migration_preflights_partial_schema_null_authority(
     tmp_path: Path,
 ) -> None:
