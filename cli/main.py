@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import io
 import json
 import sys
 from collections.abc import Callable, Mapping
@@ -418,6 +419,22 @@ def _wrap(command: str, result: JsonObject) -> JsonObject:
         ),
         warnings=warnings,
     )
+
+
+def _plain_text_output(args: argparse.Namespace, result: JsonObject) -> str | None:
+    """Return plain text for commands that explicitly requested text output."""
+    if (
+        getattr(args, "group", None) != "authority"
+        or getattr(args, "action", None) != "review"
+        or getattr(args, "format", None) != "text"
+        or result.get("ok") is not True
+    ):
+        return None
+    data = _as_mapping(result.get("data"))
+    if data is None:
+        return None
+    text = data.get("text")
+    return text if isinstance(text, str) else None
 
 
 def _parse_error_envelope(message: str, argv: list[str] | None) -> JsonObject:
@@ -1196,7 +1213,7 @@ def _interactive_authority_accept(
         if omission == "complete"
         else "ACCEPT INCOMPLETE AUTHORITY"
     )
-    typed = input(f'Type "{phrase}" to continue: ')
+    typed = _input_from_stderr(f'Type "{phrase}" to continue: ')
     if typed != phrase:
         return _invalid_command(
             command,
@@ -1205,7 +1222,7 @@ def _interactive_authority_accept(
         )
     rationale = None
     if omission != "complete":
-        rationale = input("Incomplete review rationale: ").strip()
+        rationale = _input_from_stderr("Incomplete review rationale: ").strip()
         if not rationale:
             return _invalid_command(
                 command,
@@ -1246,7 +1263,7 @@ def _interactive_authority_reject(
     if not isinstance(review_token, str):
         return _authority_review_required(command)
     _print_authority_review_summary(review)
-    reason = input("Rejection reason: ").strip()
+    reason = _input_from_stderr("Rejection reason: ").strip()
     if not reason:
         return _invalid_command(
             command,
@@ -1262,6 +1279,13 @@ def _interactive_authority_reject(
     except (ValidationError, ValueError) as exc:
         return _authority_validation_failure(command, exc)
     return command, application.authority_reject(request)
+
+
+def _input_from_stderr(prompt: str) -> str:
+    """Prompt interactive CLI users on stderr so stdout remains machine-owned."""
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    return input()
 
 
 def _story_show(args: argparse.Namespace, application: _Application) -> CommandResult:
@@ -1399,8 +1423,12 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
             if application is not None
             else _default_application()
         )
-        with redirect_stdout(sys.stderr):
+        with redirect_stdout(io.StringIO()):
             command, result = _dispatch(args, app)
+        plain_text = _plain_text_output(args, result)
+        if plain_text is not None:
+            sys.stdout.write(f"{plain_text}\n")
+            return 0
         envelope = _wrap(command, result)
     except Exception as exc:  # noqa: BLE001
         envelope = _exception_envelope(exc)

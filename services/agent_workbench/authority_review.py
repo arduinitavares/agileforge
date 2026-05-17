@@ -515,6 +515,12 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         authority_evidence=authority_evidence,
         classification_evidence=classification_evidence,
     )
+    artifact = _artifact_with_coverage_gaps(
+        artifact,
+        outline=outline,
+        coverage_summary=coverage_summary,
+        diagnostics=diagnostics,
+    )
     source_content_sha256 = (
         sha256_prefixed(source.text.encode("utf-8")) if content_included else None
     )
@@ -731,7 +737,12 @@ def _authority_artifact_payload(
 ) -> tuple[JsonDict, list[_AuthorityEvidence], list[_ClassificationEvidence]]:
     artifact = _load_compiled_artifact(authority)
     if artifact is None:
-        return _fallback_authority_artifact(authority), [], []
+        fallback = _fallback_authority_artifact(authority)
+        return (
+            fallback,
+            _fallback_authority_evidence(fallback),
+            _fallback_classification_evidence(fallback),
+        )
 
     source_map_by_id: dict[str, list[Any]] = {}
     for entry in artifact.source_map:
@@ -861,6 +872,67 @@ def _fallback_authority_artifact(authority: CompiledSpecAuthority) -> JsonDict:
         "assumptions": assumptions,
         "source_map": {},
     }
+
+
+def _fallback_authority_evidence(
+    artifact: Mapping[str, Any],
+) -> list[_AuthorityEvidence]:
+    """Return coverage evidence from persisted fallback authority items."""
+    evidence: list[_AuthorityEvidence] = []
+    for key in ("invariants", "eligible_feature_rules"):
+        items = artifact.get(key)
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            item_id = item.get("id")
+            if item_id is None:
+                continue
+            evidence.append(
+                _AuthorityEvidence(
+                    item_id=str(item_id),
+                    source_refs=tuple(
+                        _dedupe_sorted(_as_list(item.get("source_refs")))
+                    ),
+                    source_excerpt=(
+                        str(item["source_excerpt"])
+                        if item.get("source_excerpt") is not None
+                        else None
+                    ),
+                )
+            )
+    return evidence
+
+
+def _fallback_classification_evidence(
+    artifact: Mapping[str, Any],
+) -> list[_ClassificationEvidence]:
+    """Return coverage classification evidence from persisted fallback items."""
+    evidence: list[_ClassificationEvidence] = []
+    for key, kind in (
+        ("gaps", "gap"),
+        ("assumptions", "assumption"),
+        ("rejected_features", "rejected_feature"),
+    ):
+        items = artifact.get(key)
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            item_id = item.get("id")
+            text = item.get("text")
+            if item_id is None or text is None:
+                continue
+            evidence.append(
+                _ClassificationEvidence(
+                    item_id=str(item_id),
+                    text=str(text),
+                    kind=kind,
+                )
+            )
+    return evidence
 
 
 def _json_list(raw: str | None) -> list[Any]:
@@ -1008,6 +1080,67 @@ def _coverage_payload(
         "omission_assessment": "complete" if complete else "incomplete",
     }
     return outline, coverage_summary, diagnostics
+
+
+def _artifact_with_coverage_gaps(
+    artifact: JsonDict,
+    *,
+    outline: Sequence[Mapping[str, Any]],
+    coverage_summary: Mapping[str, Any],
+    diagnostics: Sequence[Mapping[str, Any]],
+) -> JsonDict:
+    """Add actionable review gaps when coverage proves the packet incomplete."""
+    if coverage_summary.get("omission_assessment") == "complete":
+        return artifact
+
+    gaps = list(cast("Sequence[Mapping[str, Any]]", artifact.get("gaps") or []))
+    existing_texts = {str(gap.get("text", "")) for gap in gaps}
+    if any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in existing_texts):
+        return artifact
+
+    incomplete_sections = [
+        entry
+        for entry in outline
+        if entry.get("coverage_status") in {"partial", "uncovered"}
+    ]
+    source_refs = _coverage_gap_source_refs(incomplete_sections)
+    summary_parts = [
+        f"uncovered_sections={coverage_summary.get('uncovered_sections', 0)}",
+        f"partial_sections={coverage_summary.get('partial_sections', 0)}",
+        "unclassified_content_blocks="
+        f"{coverage_summary.get('unclassified_content_blocks', 0)}",
+    ]
+    if diagnostics:
+        codes = _dedupe_sorted(diagnostic.get("code") for diagnostic in diagnostics)
+        summary_parts.append(f"diagnostics={','.join(codes)}")
+    section_summary = (
+        f" Affected sections: {', '.join(source_refs)}." if source_refs else ""
+    )
+    gap = {
+        "id": "GAP-COVERAGE-INCOMPLETE",
+        "text": (
+            "AUTHORITY_COVERAGE_INCOMPLETE: Review coverage is incomplete; "
+            f"{'; '.join(summary_parts)}.{section_summary}"
+        ),
+        "support": "inferred",
+        "source_refs": source_refs,
+        "source_excerpt": None,
+    }
+    return {**artifact, "gaps": [*gaps, gap]}
+
+
+def _coverage_gap_source_refs(
+    incomplete_sections: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    refs: list[str] = []
+    for entry in incomplete_sections[:10]:
+        heading = entry.get("heading")
+        section_id = entry.get("section_id")
+        if isinstance(heading, str) and heading.strip():
+            refs.append(heading.strip())
+        elif isinstance(section_id, str) and section_id.strip():
+            refs.append(section_id.strip())
+    return _dedupe_sorted(refs)
 
 
 def _parse_markdown_sections(text: str) -> tuple[list[_Section], list[JsonDict]]:
@@ -1278,8 +1411,9 @@ def _review_guidance() -> JsonDict:
             "Does this compiled interpretation correctly represent the spec?"
         ),
         "acceptance_statement": (
-            "Yes, this compiled interpretation correctly represents the spec. "
-            "Use it as the canonical authority for later phases."
+            "Accept only if this compiled interpretation correctly represents "
+            "the spec. Reject if invariants are invented, duplicated, "
+            "incorrectly sourced, or omit mandatory requirements."
         ),
         "checklist": [
             (

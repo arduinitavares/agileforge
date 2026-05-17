@@ -98,6 +98,7 @@ class _AuthoritySelection:
     specs: list[SpecRegistry]
     latest_spec: SpecRegistry | None
     accepted: SpecAuthorityAcceptance | None
+    rejected: SpecAuthorityAcceptance | None
     accepted_spec: SpecRegistry | None
     authority: CompiledSpecAuthority | None
     pending_authority: CompiledSpecAuthority | None
@@ -495,7 +496,15 @@ def _classify_status(
     disk_spec: JsonDict,
 ) -> _StatusClassification:
     """Return the current authority status and reason."""
-    if selection.accepted is None:
+    if (
+        selection.rejected is not None
+        and selection.latest_spec is not None
+        and selection.rejected.spec_version_id == selection.latest_spec.spec_version_id
+    ):
+        status = "rejected"
+        reason = "latest_authority_rejected"
+        stale_reason = None
+    elif selection.accepted is None:
         if not selection.specs:
             status = "missing"
             reason = "no_spec_versions"
@@ -523,18 +532,8 @@ def _classify_status(
         status = "stale"
         reason = "latest_spec_hash_mismatch"
         stale_reason = reason
-    elif disk_spec["status"] == "missing":
-        status = "stale"
-        reason = "disk_spec_missing"
-        stale_reason = reason
-    elif disk_spec["status"] == "unreadable":
-        status = "stale"
-        reason = "disk_spec_unreadable"
-        stale_reason = reason
-    elif disk_spec["matches_accepted"] is False:
-        status = "stale"
-        reason = "disk_spec_hash_mismatch"
-        stale_reason = reason
+    elif (disk_classification := _disk_stale_classification(disk_spec)) is not None:
+        return disk_classification
     else:
         status = "current"
         reason = "accepted_authority_current"
@@ -546,10 +545,25 @@ def _classify_status(
     )
 
 
+def _disk_stale_classification(disk_spec: JsonDict) -> _StatusClassification | None:
+    """Return disk-spec stale classification when disk state invalidates authority."""
+    reason: str | None = None
+    if disk_spec["status"] == "missing":
+        reason = "disk_spec_missing"
+    elif disk_spec["status"] == "unreadable":
+        reason = "disk_spec_unreadable"
+    elif disk_spec["matches_accepted"] is False:
+        reason = "disk_spec_hash_mismatch"
+    if reason is None:
+        return None
+    return _StatusClassification(status="stale", reason=reason, stale_reason=reason)
+
+
 def _status_data(context: _StatusContext) -> JsonDict:
     """Build the stable status data payload."""
     selection = context.selection
     accepted = selection.accepted
+    rejected = selection.rejected
     authority = selection.authority
     pending_authority = selection.pending_authority
     latest_spec = selection.latest_spec
@@ -570,6 +584,15 @@ def _status_data(context: _StatusContext) -> JsonDict:
         ),
         "accepted_spec_hash": accepted.spec_hash if accepted is not None else None,
         "spec_hash": accepted.spec_hash if accepted is not None else None,
+        "latest_rejected_decision_id": rejected.id if rejected is not None else None,
+        "latest_rejected_decided_at": _iso_z(rejected.decided_at) if rejected else None,
+        "rejected_spec_version_id": (
+            rejected.spec_version_id if rejected is not None else None
+        ),
+        "rejected_pending_authority_id": (
+            rejected.pending_authority_id if rejected is not None else None
+        ),
+        "rejection_reason": rejected.rationale if rejected is not None else None,
         "authority_id": authority.authority_id if authority is not None else None,
         "compiled_spec_version_id": (
             authority.spec_version_id if authority is not None else None
@@ -643,6 +666,24 @@ def _latest_accepted(
     ).first()
 
 
+def _latest_rejected(
+    session: Session,
+    project_id: int,
+) -> SpecAuthorityAcceptance | None:
+    """Return the latest rejected authority decision for a project."""
+    return session.exec(
+        select(SpecAuthorityAcceptance)
+        .where(
+            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.status == "rejected",
+        )
+        .order_by(
+            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+            cast("Any", SpecAuthorityAcceptance.id).desc(),
+        )
+    ).first()
+
+
 def _compiled_authority(
     session: Session,
     spec_version_id: int,
@@ -675,6 +716,7 @@ def _load_authority_selection(
     """Load all read-only rows needed for authority status."""
     specs = _project_specs(session, project_id)
     accepted = _latest_accepted(session, project_id)
+    rejected = _latest_rejected(session, project_id)
     accepted_spec = (
         session.get(SpecRegistry, accepted.spec_version_id)
         if accepted is not None
@@ -690,11 +732,13 @@ def _load_authority_selection(
         session=session,
         latest_spec=latest_spec,
         accepted=accepted,
+        rejected=rejected,
     )
     return _AuthoritySelection(
         specs=specs,
         latest_spec=latest_spec,
         accepted=accepted,
+        rejected=rejected,
         accepted_spec=accepted_spec,
         authority=authority,
         pending_authority=pending_authority,
@@ -706,11 +750,14 @@ def _pending_authority(
     session: Session,
     latest_spec: SpecRegistry | None,
     accepted: SpecAuthorityAcceptance | None,
+    rejected: SpecAuthorityAcceptance | None,
 ) -> CompiledSpecAuthority | None:
     """Return the latest compiled authority awaiting acceptance, if any."""
     if latest_spec is None or latest_spec.spec_version_id is None:
         return None
     if accepted is not None and accepted.spec_version_id == latest_spec.spec_version_id:
+        return None
+    if rejected is not None and rejected.spec_version_id == latest_spec.spec_version_id:
         return None
     return _compiled_authority(session, latest_spec.spec_version_id)
 

@@ -262,6 +262,7 @@ class TestCompilerOutputSchema:
         expected_id = compute_invariant_id(
             "The payload must include user_id.",
             InvariantType.REQUIRED_FIELD,
+            normalized.root.invariants[0].parameters,
         )
         assert normalized.root.invariants[0].id == expected_id
 

@@ -570,7 +570,8 @@ def _setup_workflow_next(
             },
         ]
     elif setup_status == "authority_rejected":
-        data["next_actions"] = [
+        data["next_actions"] = []
+        data["blocked_future_commands"] = [
             {
                 "command": (
                     "agileforge project spec update "
@@ -579,9 +580,17 @@ def _setup_workflow_next(
                 ),
                 "installed": False,
                 "reason": (
-                    "Spec update/recompile is required after authority rejection."
+                    "Spec update/recompile is required after authority rejection, "
+                    "but this command is not installed yet."
                 ),
             }
+        ]
+        data["manual_remediation"] = [
+            "No installed CLI command can recompile a rejected authority yet.",
+            (
+                "Revise the spec or compiler, then run the future project spec "
+                "update command when installed."
+            ),
         ]
     elif setup_status == "failed":
         data["next_valid_commands"] = [
@@ -610,6 +619,7 @@ def _setup_workflow_next(
                 "decision_actions_after_review",
                 [],
             ),
+            "manual_remediation": data.get("manual_remediation", []),
             "next_actions": data.get("next_actions", []),
         }
     )

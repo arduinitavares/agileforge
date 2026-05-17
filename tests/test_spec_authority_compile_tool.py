@@ -541,7 +541,7 @@ def test_compile_persists_compiled_artifact_and_normalized_ids(
             (e for e in parsed.root.source_map if e.invariant_id == inv.id), None
         )
         assert entry is not None
-        expected_id = compute_invariant_id(entry.excerpt, inv.type)
+        expected_id = compute_invariant_id(entry.excerpt, inv.type, inv.parameters)
         assert inv.id == expected_id
         assert entry.invariant_id == expected_id
 

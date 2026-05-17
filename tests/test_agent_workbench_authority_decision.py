@@ -428,7 +428,8 @@ def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
     assert data["setup_status"] == "authority_rejected"
     assert data["fsm_state"] == "SETUP_REQUIRED"
     assert data["reason"] == "Spec needs revision."
-    assert data["next_actions"] == [
+    assert data["next_actions"] == []
+    assert data["blocked_future_commands"] == [
         {
             "command": (
                 f"agileforge project spec update --project-id {project_id} "
@@ -436,10 +437,17 @@ def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
             ),
             "installed": False,
             "reason": (
-                "Spec update/recompile is required after rejection and is a later "
-                "workflow slice."
+                "Spec update/recompile is required after rejection, but this "
+                "command is not installed yet."
             ),
         }
+    ]
+    assert data["manual_remediation"] == [
+        "No installed CLI command can recompile a rejected authority yet.",
+        (
+            "Revise the spec or compiler, then run the future project spec "
+            "update command when installed."
+        ),
     ]
     decision = session.get(SpecAuthorityAcceptance, data["rejected_decision_id"])
     assert decision is not None
@@ -1154,7 +1162,7 @@ def test_rejected_decision_never_satisfies_accepted_authority_projection(
 ) -> None:
     engine = _engine(session)
     _make_schema_v3_ready(engine)
-    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+    project_id, _spec_version_id, authority_id, _path = _seed_pending_review_project(
         session,
         tmp_path=tmp_path,
     )
@@ -1164,6 +1172,7 @@ def test_rejected_decision_never_satisfies_accepted_authority_projection(
         _reject_request(project_id=project_id, review_token=snapshot.review_token)
     )
     assert result["ok"]
+    data = result["data"]
 
     projection = AuthorityProjectionService(engine=engine, repo_root=tmp_path).status(
         project_id=project_id
@@ -1172,4 +1181,10 @@ def test_rejected_decision_never_satisfies_accepted_authority_projection(
     assert projection["ok"] is True
     assert projection["data"]["accepted_decision_id"] is None
     assert projection["data"]["accepted_spec_version_id"] is None
-    assert projection["data"]["status"] == "pending_acceptance"
+    assert projection["data"]["status"] == "rejected"
+    assert (
+        projection["data"]["latest_rejected_decision_id"]
+        == data["rejected_decision_id"]
+    )
+    assert projection["data"]["rejection_reason"] == "Spec needs revision."
+    assert projection["data"]["rejected_pending_authority_id"] == authority_id

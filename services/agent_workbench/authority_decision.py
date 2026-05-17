@@ -1219,7 +1219,8 @@ def _response_data(
         "setup_status": "authority_rejected",
         "fsm_state": "SETUP_REQUIRED",
         "reason": row.rationale,
-        "next_actions": [
+        "next_actions": [],
+        "blocked_future_commands": [
             {
                 "command": (
                     "agileforge project spec update "
@@ -1228,10 +1229,17 @@ def _response_data(
                 ),
                 "installed": False,
                 "reason": (
-                    "Spec update/recompile is required after rejection and is a "
-                    "later workflow slice."
+                    "Spec update/recompile is required after rejection, but this "
+                    "command is not installed yet."
                 ),
             }
+        ],
+        "manual_remediation": [
+            "No installed CLI command can recompile a rejected authority yet.",
+            (
+                "Revise the spec or compiler, then run the future project spec "
+                "update command when installed."
+            ),
         ],
     }
 

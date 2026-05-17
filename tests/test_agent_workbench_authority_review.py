@@ -225,6 +225,10 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
             "reason": "Record that the pending authority must not be used.",
         },
     ]
+    guidance = data["review_guidance"]
+    assert guidance["acceptance_statement"].startswith("Accept only if")
+    assert "Reject if invariants are invented" in guidance["acceptance_statement"]
+    assert "Yes, this compiled interpretation" not in guidance["acceptance_statement"]
 
 
 def test_review_text_format_returns_ok_packet_with_human_text(
@@ -598,6 +602,43 @@ def test_review_omits_large_source_and_marks_omission_incomplete(
     assert result["data"]["guard_tokens"]["expected_omission_assessment"] == (
         "incomplete"
     )
+
+
+def test_review_incomplete_coverage_adds_actionable_review_gap(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomplete coverage creates an explicit gap instead of accept-ready output."""
+    monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
+    spec_content = (
+        "# Submission Contract\n\n"
+        "The review output must include guard tokens.\n\n"
+        "## Audit Contract\n\n"
+        "The audit trail must record every accepted or rejected authority decision.\n"
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    artifact = result["data"]["pending_authority"]["artifact"]
+    gap_texts = [str(gap["text"]) for gap in artifact["gaps"]]
+    assert result["data"]["spec"]["coverage_summary"]["omission_assessment"] == (
+        "incomplete"
+    )
+    assert any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in gap_texts)
+    assert any("Audit Contract" in text for text in gap_texts)
 
 
 def test_review_omits_large_covered_source_and_marks_omission_complete(

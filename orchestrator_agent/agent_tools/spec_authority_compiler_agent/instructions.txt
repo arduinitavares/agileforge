@@ -27,7 +27,7 @@ SUCCESS OBJECT:
   "invariants": [
     {
       "id": "INV-xxxxxxxxxxxxxxxx",
-      "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE",
+      "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE" | "RELATION_CONSTRAINT",
       "parameters": { ... }
     }
   ],
@@ -58,12 +58,18 @@ INVARIANT PARAMETER RULES:
 - FORBIDDEN_CAPABILITY => parameters: {"capability": "<token>"}
 - REQUIRED_FIELD => parameters: {"field_name": "<token>"}
 - MAX_VALUE => parameters: {"field_name": "<token>", "max_value": <number>}
+- RELATION_CONSTRAINT => parameters: {"expression": "<field_or_metric> <= <dynamic_field_or_metric>"}
+- Use MAX_VALUE only when the spec gives a literal numeric maximum.
+- Use RELATION_CONSTRAINT for dynamic comparisons such as budget_used <= budget.
+- Never convert a dynamic field relationship into a hard-coded numeric constant.
 
 INVARIANT ID RULE (DETERMINISTIC):
 - id = "INV-" + first 16 hex chars of SHA-256(
-  normalize(excerpt) + "|" + invariant_type
+  normalize(excerpt) + "|" + invariant_type + "|" + canonical parameters
 )
 - normalize(excerpt): lowercase, trim, collapse whitespace to single spaces.
+- canonical parameters: key=value pairs sorted by key and joined with "|".
+- IDs MUST be unique for distinct invariants even when they share one source excerpt.
 
 STRICTNESS:
 - Output must be valid JSON only.
@@ -83,4 +89,10 @@ NON-FATAL HASHING RULE (MANDATORY):
 - If you cannot compute prompt_hash deterministically, use a 64-hex placeholder (e.g., "000000..." 64 chars).
 - If you cannot compute invariant IDs deterministically, use a schema-valid placeholder like "INV-0000000000000000".
 - You MUST still include a valid source_map excerpt for each invariant.
+- Every source_map excerpt MUST directly support the invariant:
+  - REQUIRED_FIELD excerpts must mention the field or closely matching words.
+  - FORBIDDEN_CAPABILITY excerpts must mention the forbidden capability or closely
+    matching words.
+  - MAX_VALUE excerpts must mention the constrained field and the literal number.
+  - RELATION_CONSTRAINT excerpts must mention the fields in the expression.
 - Only return FAILURE when you cannot extract any meaningful authority content.

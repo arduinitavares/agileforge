@@ -47,6 +47,11 @@ class _AuthorityDecisionCliApplication:
         return {
             "ok": True,
             "data": {
+                **(
+                    {"text": "Authority review\nProject: 7"}
+                    if output_format == "text"
+                    else {}
+                ),
                 "project": {
                     "project_id": project_id,
                     "fsm_state": "SETUP_REQUIRED",
@@ -196,7 +201,7 @@ def test_authority_review_parser_calls_application(
 def test_authority_review_parser_passes_text_format_to_application(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify authority review accepts text format without changing stdout mode."""
+    """Verify authority review text format writes plain text to stdout."""
     app = _AuthorityDecisionCliApplication()
 
     rc = main(
@@ -211,9 +216,10 @@ def test_authority_review_parser_passes_text_format_to_application(
         application=app,
     )
 
-    payload = _stdout_payload(capsys)
+    captured = capsys.readouterr()
     assert rc == 0
-    assert payload["ok"] is True
+    assert captured.err == ""
+    assert captured.out == "Authority review\nProject: 7\n"
     assert app.calls == [
         (
             "authority_review",
@@ -445,7 +451,7 @@ def test_authority_help_shows_review_accept_reject_examples(
 def test_authority_review_keeps_stdout_json_clean_when_service_logs(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify authority review preserves one clean JSON stdout envelope."""
+    """Verify authority review suppresses lower-layer stdout noise."""
     app = _AuthorityDecisionCliApplication()
     app.noisy_review_stdout = True
 
@@ -458,7 +464,7 @@ def test_authority_review_keeps_stdout_json_clean_when_service_logs(
     assert rc == 0
     assert captured.out.startswith("{")
     assert "LiteLLM" not in captured.out
-    assert "LiteLLM" in captured.err
+    assert captured.err == ""
     payload = cast("JsonObject", json.loads(captured.out))
     assert payload["ok"] is True
     assert app.calls == [

@@ -209,6 +209,7 @@ class InvariantType(StrEnum):
     FORBIDDEN_CAPABILITY = "FORBIDDEN_CAPABILITY"
     REQUIRED_FIELD = "REQUIRED_FIELD"
     MAX_VALUE = "MAX_VALUE"
+    RELATION_CONSTRAINT = "RELATION_CONSTRAINT"
 
 
 class ForbiddenCapabilityParams(BaseModel):
@@ -248,7 +249,28 @@ class MaxValueParams(BaseModel):
     ]
 
 
-InvariantParameters = ForbiddenCapabilityParams | RequiredFieldParams | MaxValueParams
+class RelationConstraintParams(BaseModel):
+    """Parameters for dynamic relationship constraints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expression: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description=(
+                "Dynamic relationship expression, e.g. budget_used <= budget."
+            ),
+        ),
+    ]
+
+
+InvariantParameters = (
+    ForbiddenCapabilityParams
+    | RequiredFieldParams
+    | MaxValueParams
+    | RelationConstraintParams
+)
 
 
 class Invariant(BaseModel):
@@ -276,6 +298,7 @@ class Invariant(BaseModel):
             InvariantType.FORBIDDEN_CAPABILITY: ForbiddenCapabilityParams,
             InvariantType.REQUIRED_FIELD: RequiredFieldParams,
             InvariantType.MAX_VALUE: MaxValueParams,
+            InvariantType.RELATION_CONSTRAINT: RelationConstraintParams,
         }
         expected_type = type_map.get(self.type)
         if expected_type and not isinstance(self.parameters, expected_type):

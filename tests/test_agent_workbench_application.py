@@ -678,8 +678,8 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     assert result["data"]["source_fingerprint"].startswith("sha256:")
 
 
-def test_workflow_next_routes_rejected_authority_to_recompile_unavailable_action() -> None:  # noqa: E501
-    """Route rejected authority to unavailable spec update/recompile action."""
+def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation() -> None:  # noqa: E501
+    """Do not publish an uninstalled recompile command as an actionable next step."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityRejectedReadProjection(),
         authority_projection=_FakeAuthorityProjection(),
@@ -690,16 +690,26 @@ def test_workflow_next_routes_rejected_authority_to_recompile_unavailable_action
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == []
     assert result["data"]["blocked_commands"] == []
-    assert result["data"]["blocked_future_commands"] == []
-    assert result["data"]["next_actions"] == [
+    assert result["data"]["next_actions"] == []
+    assert result["data"]["blocked_future_commands"] == [
         {
             "command": (
                 "agileforge project spec update --project-id 7 "
                 "--spec-file <updated-spec-file>"
             ),
             "installed": False,
-            "reason": "Spec update/recompile is required after authority rejection.",
+            "reason": (
+                "Spec update/recompile is required after authority rejection, "
+                "but this command is not installed yet."
+            ),
         }
+    ]
+    assert result["data"]["manual_remediation"] == [
+        "No installed CLI command can recompile a rejected authority yet.",
+        (
+            "Revise the spec or compiler, then run the future project spec "
+            "update command when installed."
+        ),
     ]
 
 
@@ -770,7 +780,8 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_authority_reject
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_actions"][0]["installed"] is False
+    assert result["data"]["next_actions"] == []
+    assert result["data"]["blocked_future_commands"][0]["installed"] is False
 
 
 def test_workflow_next_routes_failed_setup_to_retry_action() -> None:

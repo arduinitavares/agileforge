@@ -67,7 +67,7 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     # ID must be derived from the source_map excerpt
     assert len(normalized.root.source_map) == 1
     sm = normalized.root.source_map[0]
-    expected_id = compute_invariant_id(sm.excerpt, inv.type)
+    expected_id = compute_invariant_id(sm.excerpt, inv.type, inv.parameters)
     assert inv.id == expected_id
     assert sm.invariant_id == expected_id
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
@@ -183,6 +183,341 @@ def test_normalizer_handles_duplicate_placeholder_invariant_ids() -> None:
     assert source_map_ids == invariant_ids, (
         f"Source map IDs {source_map_ids} must match invariant IDs {invariant_ids}"
     )
+
+
+def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> None:
+    """Different invariants from one source excerpt must still get unique IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    excerpt = (
+        "Post-round review records actual captain-aware points, oracle gap when "
+        "available, baseline comparisons, and UTC ISO-8601 timestamps."
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["post-round review"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "actual captain-aware points"},
+            },
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "oracle gap"},
+            },
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "baseline comparisons"},
+            },
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "UTC ISO-8601 timestamps"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": excerpt,
+                "location": "FR-010",
+            }
+            for _ in range(4)
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids = [invariant.id for invariant in normalized.root.invariants]
+    assert len(set(invariant_ids)) == len(invariant_ids)
+    assert {entry.invariant_id for entry in normalized.root.source_map} == set(
+        invariant_ids
+    )
+
+
+def test_normalizer_rejects_source_map_that_does_not_support_field() -> None:
+    """A direct source map must mention the field or capability it supports."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["squad constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "captain"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": (
+                    "The live squad must stay within the operator's current budget."
+                ),
+                "location": "FR-003",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
+    assert any("captain" in gap for gap in normalized.root.blocking_gaps)
+
+
+def test_normalizer_allows_forbidden_capability_safety_guard_excerpt() -> None:
+    """Explicit safety guards can support forbidden capabilities."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["submission safety"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "real authenticated Cartola submission"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": (
+                    "Any --confirm-submit invocation exits with CONTRACT_UNVERIFIED "
+                    "before reading tokens or constructing a POST request."
+                ),
+                "location": "FR-016",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.invariants[0].id != "INV-0000000000000000"
+
+
+def test_normalizer_repairs_table_row_evidence_from_source_text() -> None:
+    """Broad FR source snippets are expanded from the source spec before ID checks."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = (
+        "\n"
+        "| ID | Requirement | Acceptance Criteria | Priority |\n"
+        "| --- | --- | --- | --- |\n"
+        "| FR-002 | The live squad must satisfy Cartola roster rules. | "
+        "The selected squad contains exactly 12 rows, exactly one tecnico, "
+        "11 non-tecnico players, one non-tecnico captain, and one official "
+        "formation. | Must |\n"
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["roster constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "formation"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "FR-002 | The live squad must satisfy Cartola roster rules.",
+                "location": "6.2 Functional Requirements / FR-002",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert "official formation" in normalized.root.source_map[0].excerpt
+
+
+def test_normalizer_removes_duplicate_semantic_invariants() -> None:
+    """Exact duplicate invariants should not survive as duplicate IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "RELATION_CONSTRAINT",
+                "parameters": {"expression": "budget_used <= budget"},
+            },
+            {
+                "id": "INV-0000000000000000",
+                "type": "RELATION_CONSTRAINT",
+                "parameters": {"expression": "budget_used <= budget"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "Acceptance Criteria: budget_used <= budget.",
+                "location": "FR-003",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(normalized.root.invariants) == 1
+    assert len({inv.id for inv in normalized.root.invariants}) == 1
+
+
+def test_normalizer_rejects_max_value_when_excerpt_lacks_bound() -> None:
+    """Do not let dynamic relationships become unsupported hard constants."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "MAX_VALUE",
+                "parameters": {"field_name": "budget_used", "max_value": 100},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "Acceptance Criteria: budget_used <= budget.",
+                "location": "FR-003",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
+    assert any("100" in gap for gap in normalized.root.blocking_gaps)
+
+
+def test_normalizer_preserves_relation_constraint_for_dynamic_budget() -> None:
+    """Dynamic relationships need a non-numeric relation invariant type."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "RELATION_CONSTRAINT",
+                "parameters": {"expression": "budget_used <= budget"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "Acceptance Criteria: budget_used <= budget.",
+                "location": "FR-003",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.invariants[0].type == InvariantType.RELATION_CONSTRAINT
+
+
+def test_normalizer_rejects_relation_constraint_without_operator_evidence() -> None:
+    """A field mention alone cannot support a dynamic relation constraint."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "RELATION_CONSTRAINT",
+                "parameters": {"expression": "budget_used <= budget"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "A live run outputs budget used in recommendation metadata.",
+                "location": "FR-001",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
+    assert any("operator" in gap for gap in normalized.root.blocking_gaps)
 
 
 def test_normalizer_handles_duplicate_ids_different_types_length_mismatch() -> None:

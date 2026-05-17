@@ -8,8 +8,10 @@ import re
 from utils.spec_schemas import (
     ForbiddenCapabilityParams,
     Invariant,
+    InvariantParameters,
     InvariantType,
     MaxValueParams,
+    RelationConstraintParams,
     RequiredFieldParams,
 )
 
@@ -36,10 +38,24 @@ def compute_spec_hash(spec_content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def compute_invariant_id(excerpt: str, invariant_type: InvariantType) -> str:
-    """Compute deterministic invariant ID from excerpt and type."""
+def _canonical_parameter_seed(parameters: InvariantParameters | None) -> str:
+    """Return a stable parameter seed for invariant ID uniqueness."""
+    if parameters is None:
+        return ""
+    dumped = parameters.model_dump(mode="json")
+    parts = [f"{key}={dumped[key]}" for key in sorted(dumped)]
+    return "|".join(parts)
+
+
+def compute_invariant_id(
+    excerpt: str,
+    invariant_type: InvariantType,
+    parameters: InvariantParameters | None = None,
+) -> str:
+    """Compute deterministic invariant ID from excerpt, type, and parameters."""
     normalized_excerpt = _normalize_text(excerpt)
-    seed = f"{normalized_excerpt}|{invariant_type.value}"
+    parameter_seed = _canonical_parameter_seed(parameters)
+    seed = f"{normalized_excerpt}|{invariant_type.value}|{parameter_seed}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return f"INV-{digest[:16]}"
 
@@ -58,13 +74,16 @@ def classify_invariant_from_text(text: str) -> Invariant | None:
     )
     if forbidden_match:
         capability = _normalize_token(forbidden_match.group(1))
+        parameters = ForbiddenCapabilityParams(capability=capability)
         invariant_id = compute_invariant_id(
-            original_excerpt, InvariantType.FORBIDDEN_CAPABILITY
+            original_excerpt,
+            InvariantType.FORBIDDEN_CAPABILITY,
+            parameters,
         )
         return Invariant(
             id=invariant_id,
             type=InvariantType.FORBIDDEN_CAPABILITY,
-            parameters=ForbiddenCapabilityParams(capability=capability),
+            parameters=parameters,
         )
 
     required_match = re.search(
@@ -74,13 +93,16 @@ def classify_invariant_from_text(text: str) -> Invariant | None:
     )
     if required_match:
         field_name = _normalize_token(required_match.group(1))
+        parameters = RequiredFieldParams(field_name=field_name)
         invariant_id = compute_invariant_id(
-            original_excerpt, InvariantType.REQUIRED_FIELD
+            original_excerpt,
+            InvariantType.REQUIRED_FIELD,
+            parameters,
         )
         return Invariant(
             id=invariant_id,
             type=InvariantType.REQUIRED_FIELD,
-            parameters=RequiredFieldParams(field_name=field_name),
+            parameters=parameters,
         )
 
     max_match = re.search(
@@ -92,11 +114,35 @@ def classify_invariant_from_text(text: str) -> Invariant | None:
         field_name = _normalize_token(max_match.group("field"))
         value_raw = max_match.group("value")
         max_value = int(value_raw) if value_raw.isdigit() else float(value_raw)
-        invariant_id = compute_invariant_id(original_excerpt, InvariantType.MAX_VALUE)
+        parameters = MaxValueParams(field_name=field_name, max_value=max_value)
+        invariant_id = compute_invariant_id(
+            original_excerpt,
+            InvariantType.MAX_VALUE,
+            parameters,
+        )
         return Invariant(
             id=invariant_id,
             type=InvariantType.MAX_VALUE,
-            parameters=MaxValueParams(field_name=field_name, max_value=max_value),
+            parameters=parameters,
+        )
+
+    relation_match = re.search(
+        r"(?P<expression>[a-zA-Z0-9_\-\s]+(?:<=|>=|==|=|<|>)\s*[a-zA-Z_][a-zA-Z0-9_\-\s]*)",
+        original_excerpt,
+        flags=re.IGNORECASE,
+    )
+    if relation_match:
+        expression = " ".join(relation_match.group("expression").split())
+        parameters = RelationConstraintParams(expression=expression)
+        invariant_id = compute_invariant_id(
+            original_excerpt,
+            InvariantType.RELATION_CONSTRAINT,
+            parameters,
+        )
+        return Invariant(
+            id=invariant_id,
+            type=InvariantType.RELATION_CONSTRAINT,
+            parameters=parameters,
         )
 
     return None

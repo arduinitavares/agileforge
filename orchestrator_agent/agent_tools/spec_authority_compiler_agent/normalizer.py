@@ -2,7 +2,8 @@
 
 This enforces compiler semantics on the host side:
 - prompt_hash is anchored to SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-- invariant IDs are deterministically computed from source_map excerpt + invariant.type
+- invariant IDs are deterministically computed from source_map excerpt,
+  invariant.type, and invariant.parameters
 
 The caller MUST use the normalized output downstream.
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
@@ -25,13 +26,16 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from utils.spec_schemas import (
+    Invariant,
+    InvariantType,
+    SourceMapEntry,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerOutput,
 )
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(name=__name__)
 
 _META_POLICY_LOCATION_RE = re.compile(
     r"\b("
@@ -61,6 +65,35 @@ _META_POLICY_EXCERPT_PATTERNS = (
 _META_POLICY_ASSUMPTION = (
     "Excluded non-product policy/admin excerpts from compiled invariants."
 )
+_DUPLICATE_INVARIANT_ASSUMPTION = (
+    "Removed duplicate compiled invariant entries with identical type and parameters."
+)
+_FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
+_RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
+_SUPPORT_RATIO_THRESHOLD = 0.5
+_FORBIDDEN_SAFETY_SUPPORT_THRESHOLD = 0.25
+_FORBIDDEN_SAFETY_CUE_RE = re.compile(
+    r"\b("
+    r"must\s+not|do\s+not|never|forbidden|prohibited|disallow|deny|"
+    r"omit|suppress|exits?|contract_unverified|without"
+    r")\b|\bbefore\s+(?:reading|constructing)\b",
+    flags=re.IGNORECASE,
+)
+_FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
+    "authenticated": ("api", "post", "token", "tokens"),
+    "authentication": ("api", "post", "token", "tokens"),
+    "submission": ("post", "request", "submit"),
+    "submissions": ("post", "request", "submit"),
+    "submit": ("post", "request", "submission"),
+}
+
+
+@dataclass(frozen=True)
+class _SourceEvidenceCandidate:
+    """Candidate source evidence for an invariant."""
+
+    excerpt: str
+    location: str | None
 
 
 def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
@@ -214,11 +247,313 @@ def _filter_meta_policy_invariants(success: SpecAuthorityCompilationSuccess) -> 
     return filtered_count
 
 
-def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
+def _invariant_semantic_key(inv: Invariant) -> tuple[str, str]:
+    """Return stable semantic identity for duplicate invariant removal."""
+    return (
+        inv.type.value,
+        json.dumps(inv.parameters.model_dump(mode="json"), sort_keys=True),
+    )
+
+
+def _deduplicate_semantic_invariants(success: SpecAuthorityCompilationSuccess) -> int:
+    """Remove exact duplicate invariant objects before deterministic ID assignment."""
+    seen: set[tuple[str, str]] = set()
+    kept: list[Invariant] = []
+    removed = 0
+    for inv in success.invariants:
+        key = _invariant_semantic_key(inv)
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        kept.append(inv)
+    if not removed:
+        return 0
+    success.invariants = kept
+    if _DUPLICATE_INVARIANT_ASSUMPTION not in success.assumptions:
+        success.assumptions.append(_DUPLICATE_INVARIANT_ASSUMPTION)
+    logger.info("Removed %s duplicate semantic invariant(s)", removed)
+    return removed
+
+
+def _tokenize_support_text(text: str) -> list[str]:
+    """Return normalized support tokens for source/invariant comparisons."""
+    return [
+        token
+        for token in re.split(r"[^a-zA-Z0-9]+", text.casefold())
+        if token
+    ]
+
+
+def _support_overlap_ratio(expected: list[str], excerpt: str) -> float:
+    """Return how much expected invariant language appears in the excerpt."""
+    expected_unique = sorted(set(expected))
+    if not expected_unique:
+        return 1.0
+    excerpt_tokens = set(_tokenize_support_text(excerpt))
+    matched = sum(1 for token in expected_unique if token in excerpt_tokens)
+    return matched / len(expected_unique)
+
+
+def _forbidden_capability_support_tokens(capability: str) -> list[str]:
+    """Return capability tokens plus narrow aliases for explicit safety guards."""
+    tokens = _tokenize_support_text(capability)
+    expanded: set[str] = set(tokens)
+    for token in tokens:
+        expanded.update(_FORBIDDEN_CAPABILITY_TOKEN_ALIASES.get(token, ()))
+    return sorted(expanded)
+
+
+def _relation_operator_supported(expression: str, excerpt: str) -> bool:
+    """Return whether an excerpt preserves the relation operator semantics."""
+    text = excerpt.casefold()
+    if "<=" in expression:
+        return "<=" in excerpt or "less than or equal" in text or "at most" in text
+    if ">=" in expression:
+        return ">=" in excerpt or "greater than or equal" in text or "at least" in text
+    if "<" in expression:
+        return "<" in excerpt or "less than" in text or "before" in text
+    if ">" in expression:
+        return ">" in excerpt or "greater than" in text or "after" in text
+    if "==" in expression:
+        return "==" in excerpt or "equal" in text or "exactly" in text
+    return True
+
+
+def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
+    """Return a mismatch reason if the excerpt cannot directly support invariant."""
+    parameters = inv.parameters
+    if inv.type == InvariantType.REQUIRED_FIELD:
+        field_name = str(getattr(parameters, "field_name", "") or "")
+        tokens = _tokenize_support_text(field_name)
+        if _support_overlap_ratio(tokens, excerpt) < _FIELD_SUPPORT_RATIO_THRESHOLD:
+            return (
+                f"source_map excerpt does not mention required field '{field_name}' "
+                f"for invariant {inv.id}"
+            )
+        return None
+
+    if inv.type == InvariantType.FORBIDDEN_CAPABILITY:
+        capability = str(getattr(parameters, "capability", "") or "")
+        tokens = _tokenize_support_text(capability)
+        if _support_overlap_ratio(tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
+            safety_tokens = _forbidden_capability_support_tokens(capability)
+            if _FORBIDDEN_SAFETY_CUE_RE.search(
+                excerpt
+            ) and (
+                _support_overlap_ratio(safety_tokens, excerpt)
+                >= _FORBIDDEN_SAFETY_SUPPORT_THRESHOLD
+            ):
+                return None
+            return (
+                "source_map excerpt does not mention forbidden capability "
+                f"'{capability}' for invariant {inv.id}"
+            )
+        return None
+
+    if inv.type == InvariantType.MAX_VALUE:
+        field_name = str(getattr(parameters, "field_name", "") or "")
+        max_value = str(getattr(parameters, "max_value", "") or "")
+        field_tokens = _tokenize_support_text(field_name)
+        excerpt_tokens = set(_tokenize_support_text(excerpt))
+        if _support_overlap_ratio(field_tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
+            return (
+                f"source_map excerpt does not mention max-value field "
+                f"'{field_name}' for invariant {inv.id}"
+            )
+        if max_value and max_value.casefold() not in excerpt_tokens:
+            return (
+                f"source_map excerpt does not mention max value '{max_value}' "
+                f"for invariant {inv.id}"
+            )
+        return None
+
+    if inv.type == InvariantType.RELATION_CONSTRAINT:
+        expression = str(getattr(parameters, "expression", "") or "")
+        expression_tokens = [
+            token
+            for token in _tokenize_support_text(expression)
+            if not token.isdigit()
+        ]
+        if not _relation_operator_supported(expression, excerpt):
+            return (
+                "source_map excerpt does not preserve relation operator "
+                f"'{expression}' for invariant {inv.id}"
+            )
+        if (
+            _support_overlap_ratio(expression_tokens, excerpt)
+            < _RELATION_SUPPORT_RATIO_THRESHOLD
+        ):
+            return (
+                "source_map excerpt does not mention relation expression "
+                f"'{expression}' for invariant {inv.id}"
+            )
+        return None
+
+    return None
+
+
+def _source_map_support_score(inv: Invariant, excerpt: str) -> float:
+    """Return a ranking score for valid source evidence candidates."""
+    parameters = inv.parameters
+    if inv.type == InvariantType.REQUIRED_FIELD:
+        field_name = str(getattr(parameters, "field_name", "") or "")
+        return _support_overlap_ratio(_tokenize_support_text(field_name), excerpt)
+    if inv.type == InvariantType.FORBIDDEN_CAPABILITY:
+        capability = str(getattr(parameters, "capability", "") or "")
+        base = _support_overlap_ratio(_tokenize_support_text(capability), excerpt)
+        if _FORBIDDEN_SAFETY_CUE_RE.search(excerpt):
+            base += 0.1
+        return base
+    if inv.type == InvariantType.MAX_VALUE:
+        field_name = str(getattr(parameters, "field_name", "") or "")
+        return _support_overlap_ratio(_tokenize_support_text(field_name), excerpt)
+    if inv.type == InvariantType.RELATION_CONSTRAINT:
+        expression = str(getattr(parameters, "expression", "") or "")
+        expression_tokens = [
+            token
+            for token in _tokenize_support_text(expression)
+            if not token.isdigit()
+        ]
+        base = _support_overlap_ratio(expression_tokens, excerpt)
+        if _relation_operator_supported(expression, excerpt):
+            base += 0.1
+        return base
+    return 0.0
+
+
+def _compact_whitespace(text: str) -> str:
+    """Collapse whitespace for source-text matching."""
+    return " ".join(text.split())
+
+
+def _fr_ids_from_text(text: str) -> list[str]:
+    """Return functional requirement IDs mentioned in compiler locations/excerpts."""
+    return sorted(set(re.findall(r"\bFR-\d{3}\b", text, flags=re.IGNORECASE)))
+
+
+def _source_text_lines_for_fr(source_text: str, fr_id: str) -> list[str]:
+    """Return source lines that define a functional requirement ID."""
+    pattern = re.compile(rf"\|\s*{re.escape(fr_id)}\s*\|", flags=re.IGNORECASE)
+    return [line.strip() for line in source_text.splitlines() if pattern.search(line)]
+
+
+def _source_text_lines_containing(source_text: str, excerpt: str) -> list[str]:
+    """Return exact source lines containing a compiler-provided excerpt."""
+    needle = _compact_whitespace(excerpt).casefold()
+    if not needle:
+        return []
+    matches: list[str] = []
+    for line in source_text.splitlines():
+        compact_line = _compact_whitespace(line)
+        if needle in compact_line.casefold():
+            matches.append(line.strip())
+    return matches
+
+
+def _source_text_line_candidates(source_text: str) -> list[_SourceEvidenceCandidate]:
+    """Return every non-empty source line as fallback evidence candidates."""
+    candidates: list[_SourceEvidenceCandidate] = []
+    for line_number, line in enumerate(source_text.splitlines(), start=1):
+        compact = _compact_whitespace(line)
+        if compact:
+            candidates.append(
+                _SourceEvidenceCandidate(
+                    excerpt=compact,
+                    location=f"line {line_number}",
+                )
+            )
+    return candidates
+
+
+def _candidate_evidence_from_source_text(
+    entry: SourceMapEntry,
+    *,
+    source_text: str | None,
+) -> list[_SourceEvidenceCandidate]:
+    """Build deduplicated evidence candidates from LLM source_map plus source text."""
+    candidates: list[_SourceEvidenceCandidate] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    def append(excerpt: str, location: str | None) -> None:
+        compact = _compact_whitespace(excerpt)
+        if not compact:
+            return
+        key = (compact, location)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(_SourceEvidenceCandidate(excerpt=compact, location=location))
+
+    append(entry.excerpt, entry.location)
+    if not source_text:
+        return candidates
+
+    location_text = entry.location or ""
+    combined_hint = f"{location_text}\n{entry.excerpt}"
+    for fr_id in _fr_ids_from_text(combined_hint):
+        for line in _source_text_lines_for_fr(source_text, fr_id):
+            append(line, entry.location or fr_id)
+    for line in _source_text_lines_containing(source_text, entry.excerpt):
+        append(line, entry.location)
+    return candidates
+
+
+def _repair_source_map_from_source_text(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str | None,
+) -> bool:
+    """Replace weak LLM source maps with one supported source entry per invariant."""
+    if not source_text:
+        return False
+
+    evidence_candidates: list[_SourceEvidenceCandidate] = []
+    for entry in success.source_map:
+        evidence_candidates.extend(
+            _candidate_evidence_from_source_text(entry, source_text=source_text)
+        )
+    evidence_candidates.extend(_source_text_line_candidates(source_text))
+
+    if not evidence_candidates:
+        return False
+
+    repaired: list[SourceMapEntry] = []
+    for inv in success.invariants:
+        supported = [
+            candidate
+            for candidate in evidence_candidates
+            if _source_map_support_error(inv, candidate.excerpt) is None
+        ]
+        if not supported:
+            return False
+        matched = max(
+            supported,
+            key=lambda candidate: _source_map_support_score(inv, candidate.excerpt),
+        )
+        repaired.append(
+            SourceMapEntry(
+                invariant_id=inv.id,
+                excerpt=matched.excerpt,
+                location=matched.location,
+            )
+        )
+
+    success.source_map = repaired
+    return True
+
+
+def normalize_compiler_output(
+    raw_json: str,
+    *,
+    source_text: str | None = None,
+) -> SpecAuthorityCompilerOutput:
     """Normalize a raw agent JSON string into a deterministic compiler artifact.
 
     Args:
         raw_json: Raw JSON string emitted by the agent.
+        source_text: Optional source spec text used to repair broad/short source
+            excerpts into exact source rows or lines before deterministic ID checks.
 
     Returns:
         SpecAuthorityCompilerOutput (success or failure). On success, prompt_hash and
@@ -283,6 +618,7 @@ def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
     success: SpecAuthorityCompilationSuccess = parsed.root
 
     _filter_meta_policy_invariants(success)
+    _deduplicate_semantic_invariants(success)
 
     expected_prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
     if not success.prompt_hash or not re.match(r"^[0-9a-f]{64}$", success.prompt_hash):
@@ -304,15 +640,17 @@ def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
             blocking_gaps=["Missing source_map required for deterministic IDs"],
         )
 
+    _repair_source_map_from_source_text(success, source_text=source_text)
+
     # Snapshot original invariant IDs/types before rewriting
     original_invariants = list(success.invariants)
     # Multi-map: an original ID may appear on several invariants with
-    # different types (common LLM behaviour).  A plain dict loses all
-    # but the last type; we keep them all so source_map rewriting can
+    # different types or parameters (common LLM behaviour).  A plain dict loses
+    # all but the last invariant; we keep them all so source_map rewriting can
     # try each candidate.
-    original_id_to_types: dict[str, list[Any]] = {}
+    original_id_to_invariants: dict[str, list[Invariant]] = {}
     for _inv in original_invariants:
-        original_id_to_types.setdefault(_inv.id, []).append(_inv.type)
+        original_id_to_invariants.setdefault(_inv.id, []).append(_inv)
 
     # Check if all invariants have duplicate/placeholder IDs (common LLM behavior)
     original_ids = [inv.id for inv in original_invariants]
@@ -360,7 +698,22 @@ def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
                     f"invariant_index={idx}",
                 ],
             )
-        inv.id = compute_invariant_id(excerpt, inv.type)
+        support_error = _source_map_support_error(inv, excerpt)
+        if support_error is not None:
+            logger.error("Spec authority compiler source_map support mismatch")
+            return _failure(
+                reason="SOURCE_MAP_INVARIANT_MISMATCH",
+                blocking_gaps=[support_error],
+            )
+        inv.id = compute_invariant_id(excerpt, inv.type, inv.parameters)
+
+    normalized_ids = [inv.id for inv in success.invariants]
+    if len(set(normalized_ids)) != len(normalized_ids):
+        logger.error("Spec authority compiler produced duplicate invariant IDs")
+        return _failure(
+            reason="DUPLICATE_INVARIANT_IDS",
+            blocking_gaps=["Normalized invariant IDs must be unique"],
+        )
 
     # Build the set of already-rewritten invariant IDs so that the
     # source_map loop can disambiguate duplicate-ID / different-type cases.
@@ -378,43 +731,73 @@ def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
             )
 
         inv_type = None
+        inv_parameters = None
 
         # Prefer positional matching when IDs are duplicated/placeholder
         if use_positional_matching and entry_index < len(original_invariants):
-            inv_type = original_invariants[entry_index].type
+            matched_invariant = original_invariants[entry_index]
+            inv_type = matched_invariant.type
+            inv_parameters = matched_invariant.parameters
         elif use_positional_matching:
             # Extra source_map entry beyond invariant count.
             # Try each candidate type and pick the one whose computed ID
             # matches a known (already-rewritten) invariant.
-            candidate_types = original_id_to_types.get(entry.invariant_id, [])
-            for ctype in candidate_types:
-                if compute_invariant_id(excerpt, ctype) in normalized_inv_ids:
-                    inv_type = ctype
+            candidate_invariants = original_id_to_invariants.get(entry.invariant_id, [])
+            for candidate in candidate_invariants:
+                if _source_map_support_error(candidate, excerpt) is not None:
+                    continue
+                if (
+                    compute_invariant_id(
+                        excerpt,
+                        candidate.type,
+                        candidate.parameters,
+                    )
+                    in normalized_inv_ids
+                ):
+                    inv_type = candidate.type
+                    inv_parameters = candidate.parameters
                     break
-            if inv_type is None and candidate_types:
-                inv_type = candidate_types[0]
+            if inv_type is None and candidate_invariants:
+                candidate = candidate_invariants[0]
+                inv_type = candidate.type
+                inv_parameters = candidate.parameters
             elif inv_type is None:
                 inv_type = original_invariants[0].type
+                inv_parameters = original_invariants[0].parameters
         else:
-            candidate_types = original_id_to_types.get(entry.invariant_id, [])
-            if len(candidate_types) == 1:
-                inv_type = candidate_types[0]
-            elif len(candidate_types) > 1:
+            candidate_invariants = original_id_to_invariants.get(entry.invariant_id, [])
+            if len(candidate_invariants) == 1:
+                inv_type = candidate_invariants[0].type
+                inv_parameters = candidate_invariants[0].parameters
+            elif len(candidate_invariants) > 1:
                 # Multiple invariants share this LLM-generated ID with
-                # different types.  Try each type and pick the one whose
-                # computed ID matches a known (already-rewritten) invariant.
-                for ctype in candidate_types:
-                    if compute_invariant_id(excerpt, ctype) in normalized_inv_ids:
-                        inv_type = ctype
+                # different types/parameters. Try each candidate and pick the
+                # one whose computed ID matches a known invariant.
+                for candidate in candidate_invariants:
+                    if _source_map_support_error(candidate, excerpt) is not None:
+                        continue
+                    if (
+                        compute_invariant_id(
+                            excerpt,
+                            candidate.type,
+                            candidate.parameters,
+                        )
+                        in normalized_inv_ids
+                    ):
+                        inv_type = candidate.type
+                        inv_parameters = candidate.parameters
                         break
                 if inv_type is None:
-                    # Fallback: use the first candidate type
-                    inv_type = candidate_types[0]
+                    # Fallback: use the first candidate invariant
+                    inv_type = candidate_invariants[0].type
+                    inv_parameters = candidate_invariants[0].parameters
             # No matching invariant for this source_map entry
             elif len(success.invariants) == 1:
                 inv_type = success.invariants[0].type
+                inv_parameters = success.invariants[0].parameters
             elif len(success.source_map) == len(original_invariants):
                 inv_type = original_invariants[entry_index].type
+                inv_parameters = original_invariants[entry_index].parameters
             else:
                 logger.error("Cannot match source_map entry to invariant type")
                 return _failure(
@@ -425,7 +808,10 @@ def normalize_compiler_output(raw_json: str) -> SpecAuthorityCompilerOutput:
                     ],
                 )
 
-        entry.invariant_id = compute_invariant_id(excerpt, inv_type)
+        if inv_parameters is None:
+            candidate = original_invariants[min(entry_index, len(original_invariants) - 1)]
+            inv_parameters = candidate.parameters
+        entry.invariant_id = compute_invariant_id(excerpt, inv_type, inv_parameters)
 
     # Verify auditability: every invariant has at least one source_map entry
     normalized_ids = {inv.id for inv in success.invariants}

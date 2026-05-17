@@ -796,7 +796,7 @@ def preview_spec_authority(
             product_id=None,
             spec_version_id=None,
         )
-        normalized = normalize_compiler_output(raw_json)
+        normalized = normalize_compiler_output(raw_json, source_text=parsed.content)
 
         if isinstance(normalized.root, SpecAuthorityCompilationFailure):
             return {
@@ -893,6 +893,11 @@ def _render_invariant_summary(invariant: Invariant) -> str:
         field_name: Any | Literal[""] = getattr(invariant.parameters, "field_name", "")
         max_value: Any | Literal[""] = getattr(invariant.parameters, "max_value", "")
         return f"MAX_VALUE:{field_name}<= {max_value}"
+    if invariant.type == InvariantType.RELATION_CONSTRAINT:
+        expression: Any | Literal[""] = getattr(
+            invariant.parameters, "expression", ""
+        )
+        return f"RELATION_CONSTRAINT:{expression}"
     return f"INVARIANT:{invariant.type}"
 
 
@@ -944,7 +949,10 @@ def _extract_spec_authority_llm(
         spec_version_id=spec_version_id,
     )
 
-    normalized: SpecAuthorityCompilerOutput = normalize_compiler_output(raw_json)
+    normalized: SpecAuthorityCompilerOutput = normalize_compiler_output(
+        raw_json,
+        source_text=spec_content,
+    )
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         raise SpecAuthorityCompilationError.failed(
             normalized.root.error,
@@ -1285,7 +1293,7 @@ def _invoke_compiler_for_version(
             exception=exc,
         )
 
-    normalized = normalize_compiler_output(raw_json)
+    normalized = normalize_compiler_output(raw_json, source_text=spec_content)
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         failure_stage = (
             "invalid_json"

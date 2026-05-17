@@ -377,7 +377,7 @@ def test_cli_writes_success_json_to_stdout(
 def test_cli_redirects_application_stdout_away_from_json_envelope(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify lower-layer stdout output cannot corrupt the JSON envelope."""
+    """Verify lower-layer stdout noise is suppressed, not moved to stderr."""
     app = _FakeApplication()
 
     def noisy_project_list() -> JsonObject:
@@ -393,7 +393,7 @@ def test_cli_redirects_application_stdout_away_from_json_envelope(
     assert rc == 0
     assert captured.out.startswith("{")
     assert "LiteLLM" not in captured.out
-    assert "LiteLLM" in captured.err
+    assert captured.err == ""
     payload = cast("JsonObject", json.loads(captured.out))
     assert payload["ok"] is True
     assert app.calls == [("project_list", {})]

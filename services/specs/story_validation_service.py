@@ -297,6 +297,9 @@ def _render_invariant_summary(invariant: Invariant) -> str:
         field_name = getattr(invariant.parameters, "field_name", "")
         max_value = getattr(invariant.parameters, "max_value", "")
         return f"MAX_VALUE:{field_name}<= {max_value}"
+    if invariant.type == InvariantType.RELATION_CONSTRAINT:
+        expression = getattr(invariant.parameters, "expression", "")
+        return f"RELATION_CONSTRAINT:{expression}"
     return f"INVARIANT:{invariant.type}"
 
 
