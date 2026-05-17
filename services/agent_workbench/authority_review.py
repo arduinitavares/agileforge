@@ -597,18 +597,24 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
             {
                 "command": (
                     "agileforge authority accept --project-id "
-                    f"{snapshot.project_id} --review-token {snapshot.review_token}"
+                    f"{snapshot.project_id} --review-token {snapshot.review_token} "
+                    "--idempotency-key <idempotency_key>"
                 ),
                 "mode": "human",
+                "installed": False,
+                "requires_cli_installation": True,
                 "reason": "Record the reviewed pending authority as canonical.",
             },
             {
                 "command": (
                     "agileforge authority reject --project-id "
                     f"{snapshot.project_id} --review-token "
-                    f'{snapshot.review_token} --reason "..."'
+                    f'{snapshot.review_token} --reason "..." '
+                    "--idempotency-key <idempotency_key>"
                 ),
                 "mode": "human",
+                "installed": False,
+                "requires_cli_installation": True,
                 "reason": "Record that the pending authority must not be used.",
             },
         ],

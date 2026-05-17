@@ -191,6 +191,32 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     assert guard_tokens["review_token"].startswith(
         "agileforge.authority_review.v1:sha256:"
     )
+    assert data["next_actions"] == [
+        {
+            "command": (
+                "agileforge authority accept "
+                f"--project-id {project_id} "
+                f"--review-token {guard_tokens['review_token']} "
+                "--idempotency-key <idempotency_key>"
+            ),
+            "mode": "human",
+            "installed": False,
+            "requires_cli_installation": True,
+            "reason": "Record the reviewed pending authority as canonical.",
+        },
+        {
+            "command": (
+                "agileforge authority reject "
+                f"--project-id {project_id} "
+                f"--review-token {guard_tokens['review_token']} "
+                '--reason "..." --idempotency-key <idempotency_key>'
+            ),
+            "mode": "human",
+            "installed": False,
+            "requires_cli_installation": True,
+            "reason": "Record that the pending authority must not be used.",
+        },
+    ]
 
 
 def test_review_preserves_rejected_features_from_valid_compiled_authority(
