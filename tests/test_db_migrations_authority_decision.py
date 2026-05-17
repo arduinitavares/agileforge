@@ -157,6 +157,31 @@ def _insert_compiled_authority(
         )
 
 
+def _add_terminal_decision_key_column(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE spec_authority_acceptance
+                ADD COLUMN terminal_decision_key VARCHAR
+                """
+            )
+        )
+
+
+def _replace_terminal_index_with_malformed_index(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX uq_spec_authority_terminal_decision_key"))
+        conn.execute(
+            text(
+                """
+                CREATE INDEX uq_spec_authority_terminal_decision_key
+                ON spec_authority_acceptance (terminal_decision_key)
+                """
+            )
+        )
+
+
 def test_authority_decision_migration_adds_provenance_columns(
     tmp_path: Path,
 ) -> None:
@@ -247,6 +272,23 @@ def test_authority_decision_migration_blocks_ambiguous_legacy_acceptance(
         migrate_spec_authority_tables(engine)
 
 
+def test_authority_decision_migration_blocks_unmatched_legacy_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Reject legacy terminal decisions with no matching authority row."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _insert_legacy_acceptance(
+        engine,
+        product_id=LEGACY_PRODUCT_ID,
+        spec_version_id=LEGACY_SPEC_VERSION_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="Ambiguous legacy authority decision"):
+        migrate_spec_authority_tables(engine)
+
+
 def test_terminal_decision_unique_key_blocks_duplicate_accept_reject_rows(
     tmp_path: Path,
 ) -> None:
@@ -329,6 +371,28 @@ def test_terminal_decision_unique_key_blocks_duplicate_accept_reject_rows(
         )
 
 
+def test_authority_decision_migration_rejects_malformed_terminal_index(
+    tmp_path: Path,
+) -> None:
+    """Fail migration when the canonical index name has the wrong contract."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    _add_terminal_decision_key_column(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE INDEX uq_spec_authority_terminal_decision_key
+                ON spec_authority_acceptance (terminal_decision_key)
+                """
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="Malformed terminal decision index"):
+        migrate_spec_authority_tables(engine)
+
+
 def test_schema_readiness_requires_terminal_decision_invariant(
     tmp_path: Path,
 ) -> None:
@@ -349,3 +413,25 @@ def test_schema_readiness_requires_terminal_decision_invariant(
     after = schema_readiness.check_schema_readiness(engine, requirements)
     assert after.ok is True
     assert after.missing == {}
+
+
+def test_schema_readiness_rejects_malformed_terminal_decision_index(
+    tmp_path: Path,
+) -> None:
+    """Report not-ready when the terminal index name has the wrong contract."""
+    engine = _engine(tmp_path)
+    _create_legacy_acceptance_table(engine)
+    _create_minimal_compiled_authority_table(engine)
+    migrate_spec_authority_tables(engine)
+    migrate_agent_workbench_contract_tables(engine)
+    _replace_terminal_index_with_malformed_index(engine)
+
+    result = schema_readiness.check_schema_readiness(
+        engine,
+        schema_readiness.AUTHORITY_DECISION_REQUIREMENTS,
+    )
+
+    assert result.ok is False
+    assert result.missing == {
+        "spec_authority_acceptance": ["uq_spec_authority_terminal_decision_key"]
+    }

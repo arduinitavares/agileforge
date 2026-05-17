@@ -10,6 +10,9 @@ from sqlalchemy.sql import text
 
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
+TERMINAL_DECISION_INDEX = "uq_spec_authority_terminal_decision_key"
+TERMINAL_DECISION_INDEX_PREDICATE = "terminal_decision_key IS NOT NULL"
+
 
 @dataclass(frozen=True)
 class SchemaRequirement:
@@ -85,7 +88,7 @@ AUTHORITY_DECISION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
     SchemaRequirement(
         table="spec_authority_acceptance",
         columns=AUTHORITY_DECISION_REQUIRED_COLUMNS,
-        indexes=("uq_spec_authority_terminal_decision_key",),
+        indexes=(TERMINAL_DECISION_INDEX,),
         storage_schema_version=STORAGE_SCHEMA_VERSION,
     ),
 )
@@ -125,9 +128,10 @@ def check_schema_readiness(
         missing_elements = list(missing_columns)
 
         if requirement.indexes:
-            existing_indexes = _sqlite_index_names(engine, requirement.table)
             missing_elements.extend(
-                index for index in requirement.indexes if index not in existing_indexes
+                index
+                for index in requirement.indexes
+                if not _index_contract_ready(engine, requirement.table, index)
             )
 
         if requirement.storage_schema_version is not None:
@@ -171,11 +175,69 @@ def _missing_all(requirements: Sequence[SchemaRequirement]) -> dict[str, list[st
     }
 
 
-def _sqlite_index_names(engine: Engine, table_name: str) -> set[str]:
-    """Return SQLite index names for a table without mutating schema."""
+def _index_contract_ready(engine: Engine, table_name: str, index_name: str) -> bool:
+    """Return whether an index exists and satisfies any known contract."""
+    if (
+        table_name == "spec_authority_acceptance"
+        and index_name == TERMINAL_DECISION_INDEX
+    ):
+        return _terminal_decision_index_ready(engine)
+
     with engine.connect() as conn:
         rows = conn.execute(text(f"PRAGMA index_list('{table_name}')")).mappings()
-        return {str(row["name"]) for row in rows}
+        return any(str(row["name"]) == index_name for row in rows)
+
+
+def _terminal_decision_index_ready(engine: Engine) -> bool:
+    """Return whether the terminal decision index enforces the full invariant."""
+    with engine.connect() as conn:
+        index_rows = (
+            conn.execute(text("PRAGMA index_list('spec_authority_acceptance')"))
+            .mappings()
+            .all()
+        )
+        index_row = next(
+            (row for row in index_rows if row["name"] == TERMINAL_DECISION_INDEX),
+            None,
+        )
+        if index_row is None:
+            return False
+        if int(index_row["unique"]) != 1 or int(index_row["partial"]) != 1:
+            return False
+
+        indexed_columns = [
+            row["name"]
+            for row in conn.execute(
+                text(f"PRAGMA index_info('{TERMINAL_DECISION_INDEX}')")
+            )
+            .mappings()
+            .all()
+        ]
+        if indexed_columns != ["terminal_decision_key"]:
+            return False
+
+        sql_row = conn.execute(
+            text(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name = :index_name
+                """
+            ),
+            {"index_name": TERMINAL_DECISION_INDEX},
+        ).first()
+        index_sql = "" if sql_row is None else str(sql_row._mapping["sql"] or "")
+        return _has_terminal_decision_partial_predicate(index_sql)
+
+
+def _has_terminal_decision_partial_predicate(index_sql: str) -> bool:
+    """Return whether index SQL contains the canonical partial predicate."""
+    normalized = index_sql.lower()
+    for token in ('"', "'", "`", "[", "]", "(", ")"):
+        normalized = normalized.replace(token, " ")
+    normalized = " ".join(normalized.split())
+    expected = f"where {TERMINAL_DECISION_INDEX_PREDICATE.lower()}"
+    return expected in normalized
 
 
 def _storage_schema_version(engine: Engine) -> str | None:

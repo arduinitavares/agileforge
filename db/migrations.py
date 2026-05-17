@@ -229,6 +229,7 @@ SPEC_AUTHORITY_ACCEPTANCE_INDEXES: dict[str, list[str]] = {
 }
 
 SPEC_AUTHORITY_TERMINAL_DECISION_INDEX = "uq_spec_authority_terminal_decision_key"
+SPEC_AUTHORITY_TERMINAL_DECISION_INDEX_PREDICATE = "terminal_decision_key IS NOT NULL"
 
 
 def migrate_spec_authority_tables(engine: Engine) -> list[str]:
@@ -376,12 +377,25 @@ def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
     """Ensure terminal decision uniqueness using a partial SQLite unique index."""
     existing_indexes = _get_existing_indexes(engine, "spec_authority_acceptance")
     if SPEC_AUTHORITY_TERMINAL_DECISION_INDEX in existing_indexes:
+        is_valid, reasons = _terminal_decision_index_contract(engine)
+        if not is_valid:
+            reason_text = ", ".join(reasons)
+            message = (
+                "Malformed terminal decision index detected: "
+                f"index_name={SPEC_AUTHORITY_TERMINAL_DECISION_INDEX} "
+                "table_name=spec_authority_acceptance "
+                f"reasons=[{reason_text}]. Remediation: drop the malformed "
+                f"index `{SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}` and rerun "
+                "database migrations so the canonical partial unique index can "
+                "be created."
+            )
+            raise RuntimeError(message)
         return False
 
     create_index_sql = f"""
     CREATE UNIQUE INDEX IF NOT EXISTS {SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}
     ON spec_authority_acceptance (terminal_decision_key)
-    WHERE terminal_decision_key IS NOT NULL
+    WHERE {SPEC_AUTHORITY_TERMINAL_DECISION_INDEX_PREDICATE}
     """
     logger.info(
         "db.migration.create_index",
@@ -393,6 +407,68 @@ def _ensure_terminal_decision_unique_index(engine: Engine) -> bool:
     with engine.begin() as conn:
         conn.execute(text(create_index_sql))
     return True
+
+
+def _terminal_decision_index_contract(engine: Engine) -> tuple[bool, list[str]]:
+    """Validate the canonical terminal decision unique-index contract."""
+    reasons: list[str] = []
+    with engine.connect() as conn:
+        index_rows = (
+            conn.execute(text("PRAGMA index_list('spec_authority_acceptance')"))
+            .mappings()
+            .all()
+        )
+        index_row = next(
+            (
+                row
+                for row in index_rows
+                if row["name"] == SPEC_AUTHORITY_TERMINAL_DECISION_INDEX
+            ),
+            None,
+        )
+        if index_row is None:
+            return False, ["index is missing"]
+        if int(index_row["unique"]) != 1:
+            reasons.append("index is not unique")
+        if int(index_row["partial"]) != 1:
+            reasons.append("index is not partial")
+
+        indexed_columns = [
+            row["name"]
+            for row in conn.execute(
+                text(f"PRAGMA index_info('{SPEC_AUTHORITY_TERMINAL_DECISION_INDEX}')")
+            )
+            .mappings()
+            .all()
+        ]
+        if indexed_columns != ["terminal_decision_key"]:
+            reasons.append("index columns are not exactly [terminal_decision_key]")
+
+        sql_row = conn.execute(
+            text(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name = :index_name
+                """
+            ),
+            {"index_name": SPEC_AUTHORITY_TERMINAL_DECISION_INDEX},
+        ).first()
+        index_sql = "" if sql_row is None else str(sql_row._mapping["sql"] or "")
+        if not _has_terminal_decision_partial_predicate(index_sql):
+            reasons.append("index predicate is not terminal_decision_key IS NOT NULL")
+
+    return not reasons, reasons
+
+
+def _has_terminal_decision_partial_predicate(index_sql: str) -> bool:
+    """Return whether index SQL contains the canonical partial predicate."""
+    normalized = index_sql.lower()
+    for token in ('"', "'", "`", "[", "]", "(", ")"):
+        normalized = normalized.replace(token, " ")
+    normalized = " ".join(normalized.split())
+    expected = f"where {SPEC_AUTHORITY_TERMINAL_DECISION_INDEX_PREDICATE.lower()}"
+    return expected in normalized
 
 
 def migrate_product_spec_cache(engine: Engine) -> list[str]:
