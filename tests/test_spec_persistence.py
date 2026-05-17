@@ -289,7 +289,10 @@ class TestSaveProjectSpecification:
         assert "too large" in result["error"].lower()
 
     def test_update_existing_spec_replaces_old_spec(
-        self, db_session: Session, sample_product: Product
+        self,
+        db_session: Session,
+        sample_product: Product,
+        compile_stub: dict[str, object],
     ) -> None:
         """
         GIVEN: Project already has a spec saved.
@@ -330,6 +333,7 @@ class TestSaveProjectSpecification:
 
         # Assert
         assert result["success"] is True
+        assert "params" in compile_stub
         assert "updated" in result["message"].lower()
 
         # Verify DB has new content (not old)
