@@ -275,10 +275,32 @@
 
                             <section id="phase-section-setup"
                                 class="phase-section bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-lg p-5">
-                                <h4 class="text-base font-bold">Project Setup Required</h4>
-                                <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Project setup requires a
-                                    valid specification file path and successful authority compile before proceeding.
+                                <h4 id="setup-panel-title" class="text-base font-bold">Project Setup</h4>
+                                <p id="setup-panel-description" class="text-sm text-slate-600 dark:text-slate-400 mt-1">Project setup links the
+                                    specification file and prepares authority before Vision can begin.
                                 </p>
+                                <div id="authority-review-card" class="hidden mt-4 rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-100">
+                                    <div class="flex items-start justify-between gap-4">
+                                        <div>
+                                            <h4 class="font-bold">Pending Authority Review</h4>
+                                            <p id="authority-review-summary" class="mt-1 text-sm"></p>
+                                        </div>
+                                        <button id="btn-refresh-authority-review" onclick="loadAuthorityReview()" class="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold">
+                                            <span class="material-symbols-outlined text-sm">refresh</span> Refresh
+                                        </button>
+                                    </div>
+                                    <pre id="authority-review-preview" class="mt-4 max-h-72 overflow-auto rounded bg-white/70 p-3 text-xs dark:bg-slate-900/70"></pre>
+                                    <div class="mt-4 flex flex-wrap items-center gap-3">
+                                        <button id="btn-accept-authority" onclick="acceptAuthorityReview()" class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white">
+                                            <span class="material-symbols-outlined text-sm">verified</span> Accept Authority
+                                        </button>
+                                        <input id="authority-reject-reason" type="text" placeholder="Reason required to reject" class="min-w-[18rem] rounded-lg border px-3 py-2 text-sm dark:bg-slate-900" />
+                                        <button id="btn-reject-authority" onclick="rejectAuthorityReview()" class="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white">
+                                            <span class="material-symbols-outlined text-sm">block</span> Reject Authority
+                                        </button>
+                                    </div>
+                                    <p id="authority-review-error" class="mt-3 hidden text-sm font-semibold text-rose-700 dark:text-rose-300"></p>
+                                </div>
                             </section>
 
                             <section id="phase-section-vision"

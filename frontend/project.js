@@ -55,6 +55,7 @@ let activeFsmState = 'SETUP_REQUIRED';
 let activePhaseId = 'setup';
 let viewPhaseId = 'setup';
 let currentProjectState = { setup_status: 'failed', setup_error: null };
+let currentAuthorityReview = null;
 let savedSprints = [];
 let sprintRuntimeSummary = null;
 let currentSprintId = null;
@@ -391,11 +392,242 @@ function updateSetupStatusBanner() {
     if (currentProjectState.setup_status === 'passed') {
         banner.className = 'text-sm rounded-lg border px-4 py-3 border-emerald-200 bg-emerald-50 text-emerald-700';
         banner.innerText = 'Setup passed. Specification linked and authority compiled.';
+        updateSetupPanelCopy('Project Setup', 'Project setup is complete.');
+        renderAuthorityReviewCard(false);
+        return;
+    }
+
+    if (currentProjectState.setup_status === 'authority_pending_review') {
+        banner.className = 'text-sm rounded-lg border px-4 py-3 border-sky-200 bg-sky-50 text-sky-700';
+        banner.innerText = 'Pending Authority Review. Review the compiled authority before Vision is unlocked.';
+        updateSetupPanelCopy('Pending Authority Review', 'Review the compiled authority and either accept or reject it.');
+        renderAuthorityReviewCard(true);
+        return;
+    }
+
+    if (currentProjectState.setup_status === 'authority_rejected') {
+        banner.className = 'text-sm rounded-lg border px-4 py-3 border-rose-200 bg-rose-50 text-rose-700';
+        banner.innerText = currentProjectState.setup_error || 'Authority Rejected. Update the specification or recompile authority before continuing.';
+        updateSetupPanelCopy('Authority Rejected', 'Vision remains locked until authority is reviewed again and accepted.');
+        renderAuthorityReviewCard(false);
         return;
     }
 
     banner.className = 'text-sm rounded-lg border px-4 py-3 border-amber-200 bg-amber-50 text-amber-700';
     banner.innerText = currentProjectState.setup_error || 'Setup is required before Vision.';
+    updateSetupPanelCopy('Project Setup', 'Project setup requires a valid specification file path and successful authority compile before proceeding.');
+    renderAuthorityReviewCard(false);
+}
+
+function updateSetupPanelCopy(title, description) {
+    const titleEl = document.getElementById('setup-panel-title');
+    const descriptionEl = document.getElementById('setup-panel-description');
+    if (titleEl) titleEl.innerText = title;
+    if (descriptionEl) descriptionEl.innerText = description;
+}
+
+function renderAuthorityReviewCard(visible) {
+    const card = document.getElementById('authority-review-card');
+    if (!card) return;
+
+    if (!visible) {
+        card.classList.add('hidden');
+        return;
+    }
+
+    card.classList.remove('hidden');
+    const summary = document.getElementById('authority-review-summary');
+    const preview = document.getElementById('authority-review-preview');
+    if (!currentAuthorityReview) {
+        if (summary) summary.innerText = 'Loading authority review...';
+        if (preview) preview.innerText = '';
+        return;
+    }
+
+    const project = currentAuthorityReview.project || {};
+    const spec = currentAuthorityReview.spec || {};
+    const pending = currentAuthorityReview.pending_authority || {};
+    const authorityId = pending.authority_id || pending.pending_authority_id || 'pending';
+    const omission = spec.coverage_summary?.omission_assessment || 'unknown';
+    const path = spec.resolved_path || 'linked specification';
+    if (summary) {
+        summary.innerText = `${project.name || 'Project'} authority ${authorityId} awaits review. Coverage: ${omission}. Source: ${path}.`;
+    }
+
+    if (preview) {
+        const previewPayload = {
+            project,
+            spec: {
+                resolved_path: spec.resolved_path,
+                spec_hash: spec.spec_hash,
+                disk_sha256: spec.disk_sha256,
+                content_included: spec.content_included,
+                coverage_summary: spec.coverage_summary,
+                coverage_diagnostics: spec.coverage_diagnostics,
+            },
+            pending_authority: pending,
+        };
+        preview.innerText = JSON.stringify(previewPayload, null, 2);
+    }
+}
+
+function setAuthorityReviewError(message) {
+    const errorEl = document.getElementById('authority-review-error');
+    if (!errorEl) return;
+
+    if (!message) {
+        errorEl.innerText = '';
+        errorEl.classList.add('hidden');
+        return;
+    }
+
+    errorEl.innerText = message;
+    errorEl.classList.remove('hidden');
+}
+
+function authorityApiErrorMessage(data, fallback) {
+    const detail = data?.detail || data;
+    const errors = detail?.errors || [];
+    if (Array.isArray(errors) && errors.length > 0) {
+        const first = errors[0] || {};
+        return first.message || first.code || fallback;
+    }
+    if (typeof detail === 'string') return detail;
+    return fallback;
+}
+
+function authorityErrorCodes(data) {
+    const detail = data?.detail || data;
+    const errors = detail?.errors || [];
+    if (!Array.isArray(errors)) return [];
+    return errors.map((error) => error?.code).filter(Boolean);
+}
+
+function isStaleAuthorityError(data) {
+    const staleCodes = new Set([
+        'AUTHORITY_SOURCE_CHANGED',
+        'STALE_AUTHORITY_VERSION',
+        'STALE_ARTIFACT_FINGERPRINT',
+        'STALE_CONTEXT_FINGERPRINT',
+        'STALE_STATE',
+    ]);
+    return authorityErrorCodes(data).some((code) => staleCodes.has(code));
+}
+
+async function handleAuthorityDecisionFailure(data, fallback) {
+    if (isStaleAuthorityError(data)) {
+        await loadAuthorityReview();
+        setAuthorityReviewError('Authority review changed. Reloaded the latest review; review again before deciding.');
+        return;
+    }
+    setAuthorityReviewError(authorityApiErrorMessage(data, fallback));
+}
+
+async function loadAuthorityReview() {
+    if (!selectedProjectId) return;
+    setAuthorityReviewError('');
+    renderAuthorityReviewCard(true);
+
+    try {
+        const response = await fetch(`/api/projects/${selectedProjectId}/authority/review`);
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+            throw data;
+        }
+        currentAuthorityReview = data.data;
+        renderAuthorityReviewCard(true);
+    } catch (error) {
+        console.error('Authority review load error:', error);
+        setAuthorityReviewError(authorityApiErrorMessage(error, 'Failed to load authority review.'));
+    }
+}
+
+async function acceptAuthorityReview() {
+    if (!selectedProjectId) return;
+    const reviewToken = currentAuthorityReview?.guard_tokens?.review_token;
+    if (!reviewToken) {
+        setAuthorityReviewError('Reload the authority review before accepting.');
+        await loadAuthorityReview();
+        return;
+    }
+
+    const btn = document.getElementById('btn-accept-authority');
+    const original = btn?.innerHTML;
+    if (btn) {
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm animate-spin">progress_activity</span> Accepting...';
+        btn.disabled = true;
+    }
+
+    try {
+        const response = await fetch(`/api/projects/${selectedProjectId}/authority/accept`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ review_token: reviewToken }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+            await handleAuthorityDecisionFailure(data, 'Failed to accept authority.');
+            return;
+        }
+        currentAuthorityReview = null;
+        await fetchProjectFSMState(selectedProjectId);
+        await loadVisionHistory();
+    } catch (error) {
+        console.error('Authority accept error:', error);
+        await handleAuthorityDecisionFailure(error, 'Network error while accepting authority.');
+    } finally {
+        if (btn) {
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">verified</span> Accept Authority';
+            btn.disabled = false;
+        }
+    }
+}
+
+async function rejectAuthorityReview() {
+    if (!selectedProjectId) return;
+    const reviewToken = currentAuthorityReview?.guard_tokens?.review_token;
+    if (!reviewToken) {
+        setAuthorityReviewError('Reload the authority review before rejecting.');
+        await loadAuthorityReview();
+        return;
+    }
+
+    const reasonInput = document.getElementById('authority-reject-reason');
+    const reason = reasonInput?.value?.trim() || '';
+    if (!reason) {
+        setAuthorityReviewError('Reason is required to reject authority.');
+        return;
+    }
+
+    const btn = document.getElementById('btn-reject-authority');
+    const original = btn?.innerHTML;
+    if (btn) {
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm animate-spin">progress_activity</span> Rejecting...';
+        btn.disabled = true;
+    }
+
+    try {
+        const response = await fetch(`/api/projects/${selectedProjectId}/authority/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ review_token: reviewToken, reason }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+            await handleAuthorityDecisionFailure(data, 'Failed to reject authority.');
+            return;
+        }
+        currentAuthorityReview = null;
+        await fetchProjectFSMState(selectedProjectId);
+    } catch (error) {
+        console.error('Authority reject error:', error);
+        await handleAuthorityDecisionFailure(error, 'Network error while rejecting authority.');
+    } finally {
+        if (btn) {
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">block</span> Reject Authority';
+            btn.disabled = false;
+        }
+    }
 }
 
 function setPhaseState(fsmState, desiredViewPhase = null) {
@@ -656,6 +888,19 @@ async function fetchProjectFSMState(projectId, options = {}) {
             currentSprintId = null;
             sprintMode = null;
             showSprintPlanner = false;
+            currentAuthorityReview = null;
+            setPhaseState('SETUP_REQUIRED', 'setup');
+        } else if (currentProjectState.setup_status === 'authority_pending_review') {
+            currentSprintId = null;
+            sprintMode = null;
+            showSprintPlanner = false;
+            setPhaseState('SETUP_REQUIRED', 'setup');
+            await loadAuthorityReview();
+        } else if (currentProjectState.setup_status === 'authority_rejected') {
+            currentSprintId = null;
+            sprintMode = null;
+            showSprintPlanner = false;
+            currentAuthorityReview = null;
             setPhaseState('SETUP_REQUIRED', 'setup');
         } else if (preserveView) {
             const selectedSprint = ensureCurrentSprintSelection();
@@ -3963,6 +4208,9 @@ async function toggleTaskBrief(event, sprintId, taskId) {
 
 // Assign globally for inline onclick handlers attached in project.html
 window.retryProjectSetup = retryProjectSetup;
+window.loadAuthorityReview = loadAuthorityReview;
+window.acceptAuthorityReview = acceptAuthorityReview;
+window.rejectAuthorityReview = rejectAuthorityReview;
 window.handleNextPhase = handleNextPhase;
 window.generateVisionDraft = generateVisionDraft;
 window.saveVisionDraft = saveVisionDraft;

@@ -24,6 +24,7 @@ from typing import (
     cast,
     runtime_checkable,
 )
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -66,6 +67,11 @@ from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
 from repositories.story import StoryRepository
 from routers.sprint import register_sprint_routes
+from services.agent_workbench.application import AgentWorkbenchApplication
+from services.agent_workbench.authority_decision import (
+    AuthorityAcceptRequest,
+    AuthorityRejectRequest,
+)
 from services.backlog_runtime import run_backlog_agent_from_state
 from services.interview_runtime import (
     append_attempt,
@@ -308,6 +314,30 @@ class RetrySetupRequest(BaseModel):
     spec_file_path: str = Field(min_length=1)
 
 
+class AuthorityDecisionApiRequest(BaseModel):
+    """Dashboard authority accept request with review-token or explicit guards."""
+
+    review_token: str | None = None
+    pending_authority_id: int | None = None
+    expected_authority_fingerprint: str | None = None
+    expected_source_spec_hash: str | None = None
+    expected_disk_spec_hash: str | None = None
+    expected_resolved_spec_path: str | None = None
+    expected_state: str | None = None
+    expected_setup_status: str | None = None
+    expected_content_included: bool | None = None
+    expected_omission_assessment: str | None = None
+    expected_coverage_summary_fingerprint: str | None = None
+    allow_incomplete_review: bool = False
+    incomplete_review_rationale: str | None = None
+
+
+class AuthorityRejectApiRequest(AuthorityDecisionApiRequest):
+    """Dashboard authority rejection request."""
+
+    reason: str
+
+
 class VisionGenerateRequest(BaseModel):
     """Request body for generating product vision."""
 
@@ -415,6 +445,18 @@ FAILURE_META_FIELDS = (
     "raw_output_preview",
     "has_full_artifact",
 )
+AUTHORITY_EXPLICIT_GUARD_FIELDS: tuple[str, ...] = (
+    "pending_authority_id",
+    "expected_authority_fingerprint",
+    "expected_source_spec_hash",
+    "expected_disk_spec_hash",
+    "expected_resolved_spec_path",
+    "expected_state",
+    "expected_setup_status",
+    "expected_content_included",
+    "expected_omission_assessment",
+    "expected_coverage_summary_fingerprint",
+)
 
 
 def _now_iso() -> str:
@@ -451,6 +493,118 @@ def _failure_meta(
         "raw_output_preview": payload.get("raw_output_preview"),
         "has_full_artifact": bool(payload.get("has_full_artifact", False)),
     }
+
+
+def _workbench_application() -> AgentWorkbenchApplication:
+    """Construct the application facade used by dashboard parity routes."""
+    return AgentWorkbenchApplication()
+
+
+def _dashboard_authority_error(
+    *,
+    code: str,
+    message: str,
+    missing: list[str] | None = None,
+    status_code: int = 400,
+) -> None:
+    """Raise a dashboard-shaped authority decision validation error."""
+    detail: dict[str, Any] = {
+        "status": "error",
+        "errors": [
+            {
+                "code": code,
+                "message": message,
+                "details": {"missing": missing or []},
+            }
+        ],
+    }
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _dashboard_authority_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Convert an application envelope into the dashboard API envelope."""
+    if result.get("ok"):
+        return {
+            "status": "success",
+            "data": result.get("data", {}),
+            "warnings": result.get("warnings", []),
+        }
+
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "status": "error",
+            "data": result.get("data", {}),
+            "errors": result.get("errors", []),
+            "warnings": result.get("warnings", []),
+        },
+    )
+
+
+def _complete_authority_guard_set(req: AuthorityDecisionApiRequest) -> bool:
+    """Return true when dashboard provided every explicit freshness guard."""
+    return all(
+        getattr(req, field_name) is not None
+        for field_name in AUTHORITY_EXPLICIT_GUARD_FIELDS
+    )
+
+
+def _validate_dashboard_authority_guards(req: AuthorityDecisionApiRequest) -> None:
+    """Reject missing or fingerprint-only dashboard authority guards."""
+    if req.review_token:
+        return
+
+    if _complete_authority_guard_set(req):
+        return
+
+    missing = [
+        field_name
+        for field_name in AUTHORITY_EXPLICIT_GUARD_FIELDS
+        if getattr(req, field_name) is None
+    ]
+
+    if (
+        req.expected_authority_fingerprint is not None
+        and len(missing) == len(AUTHORITY_EXPLICIT_GUARD_FIELDS) - 1
+    ):
+        _dashboard_authority_error(
+            code="AUTHORITY_GUARD_INCOMPLETE",
+            message="Authority fingerprint alone is not a complete dashboard guard.",
+            missing=missing,
+        )
+
+    _dashboard_authority_error(
+        code="AUTHORITY_GUARD_INCOMPLETE",
+        message=(
+            "Dashboard authority decisions require a review token or the complete "
+            "explicit guard set."
+        ),
+        missing=missing,
+    )
+
+
+def _dashboard_changed_by() -> str:
+    """Return the authenticated dashboard user when available."""
+    return "dashboard-human"
+
+
+def _authority_request_kwargs(
+    *,
+    project_id: int,
+    req: AuthorityDecisionApiRequest,
+) -> dict[str, Any]:
+    """Shape dashboard authority decisions for the application service."""
+    payload = req.model_dump()
+    payload.update(
+        {
+            "project_id": project_id,
+            "policy": "dashboard_manual",
+            "actor_mode": "dashboard-human",
+            "changed_by": _dashboard_changed_by(),
+            "idempotency_key": f"dashboard-authority:{uuid4()}",
+        }
+    )
+    return payload
 
 
 def _setup_blocker(product: object) -> str | None:
@@ -1357,8 +1511,45 @@ def _effective_project_state(
     project: object, raw_state: dict[str, Any]
 ) -> dict[str, Any]:
     state = dict(raw_state)
-    blocker = _setup_blocker(project)
+    setup_status = state.get("setup_status")
+    if setup_status == "authority_pending_review":
+        state["fsm_state"] = OrchestratorState.SETUP_REQUIRED.value
+        state["setup_status"] = "authority_pending_review"
+        state["setup_error"] = None
+        state["setup_error_code"] = None
+        state["setup_failure_summary"] = None
+    elif setup_status == "authority_rejected":
+        state["fsm_state"] = OrchestratorState.SETUP_REQUIRED.value
+        state["setup_status"] = "authority_rejected"
+        state["setup_error"] = state.get("setup_error") or (
+            "Authority review was rejected. Update the specification or "
+            "recompile authority before continuing."
+        )
+        state["setup_error_code"] = state.get("setup_error_code") or (
+            "AUTHORITY_REJECTED"
+        )
+        state["setup_failure_summary"] = state["setup_error"]
+    else:
+        state = _effective_setup_or_ready_state(project, state)
+
     spec_path = getattr(project, "spec_file_path", None)
+    state.setdefault("setup_failure_artifact_id", None)
+    state.setdefault("setup_failure_stage", None)
+    state.setdefault("setup_failure_summary", state.get("setup_error"))
+    state.setdefault("setup_raw_output_preview", None)
+    state.setdefault("setup_has_full_artifact", False)
+    if spec_path:
+        state["setup_spec_file_path"] = spec_path
+
+    return state
+
+
+def _effective_setup_or_ready_state(
+    project: object,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply existing setup failure/passed classification."""
+    blocker = _setup_blocker(project)
 
     if blocker:
         state["fsm_state"] = OrchestratorState.SETUP_REQUIRED.value
@@ -1369,13 +1560,6 @@ def _effective_project_state(
         state["fsm_state"] = _normalize_shell_fsm_state(state.get("fsm_state"))
         state.setdefault("setup_status", "passed")
         state.setdefault("setup_error", None)
-    state.setdefault("setup_failure_artifact_id", None)
-    state.setdefault("setup_failure_stage", None)
-    state.setdefault("setup_failure_summary", state.get("setup_error"))
-    state.setdefault("setup_raw_output_preview", None)
-    state.setdefault("setup_has_full_artifact", False)
-    if spec_path:
-        state["setup_spec_file_path"] = spec_path
 
     return state
 
@@ -1540,6 +1724,57 @@ async def get_project_state(project_id: int) -> dict[str, object]:
     _save_session_state(session_id, effective_state)
 
     return {"status": "success", "data": effective_state}
+
+
+@app.get("/api/projects/{project_id}/authority/review")
+async def get_project_authority_review(project_id: int) -> dict[str, Any]:
+    """Return the pending authority review packet for the dashboard."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().authority_review(
+        project_id=project_id,
+        include_spec="auto",
+        output_format="json",
+    )
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/authority/accept")
+async def accept_project_authority(
+    project_id: int,
+    req: AuthorityDecisionApiRequest,
+) -> dict[str, Any]:
+    """Accept pending authority through the application service."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    _validate_dashboard_authority_guards(req)
+    request = AuthorityAcceptRequest(
+        **_authority_request_kwargs(project_id=project_id, req=req)
+    )
+    result = _workbench_application().authority_accept(request)
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/authority/reject")
+async def reject_project_authority(
+    project_id: int,
+    req: AuthorityRejectApiRequest,
+) -> dict[str, Any]:
+    """Reject pending authority through the application service."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    _validate_dashboard_authority_guards(req)
+    request = AuthorityRejectRequest(
+        **_authority_request_kwargs(project_id=project_id, req=req)
+    )
+    result = _workbench_application().authority_reject(request)
+    return _dashboard_authority_response(result)
 
 
 @app.get("/api/projects/{project_id}/debug/failures/{artifact_id}")

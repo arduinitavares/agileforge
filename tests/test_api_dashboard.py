@@ -1,6 +1,7 @@
 """API tests for deterministic setup-first dashboard endpoints."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 import api as api_module
 
 HTTP_OK = 200
+HTTP_BAD_REQUEST = 400
 HTTP_TEMP_REDIRECT = 307
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
@@ -238,6 +240,90 @@ def _build_client(
     return TestClient(api_module.app), repo, workflow
 
 
+class FakeAuthorityApplication:
+    """Application facade double for dashboard authority route tests."""
+
+    def __init__(self, workflow: DummyWorkflowService | None = None) -> None:
+        """Initialize captured request state."""
+        self.workflow = workflow
+        self.accept_requests: list[object] = []
+        self.reject_requests: list[object] = []
+
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> dict[str, object]:
+        """Return a review packet containing a dashboard review token."""
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "include_spec": include_spec,
+                "output_format": output_format,
+                "summary": {"omission_assessment": "complete"},
+                "guard_tokens": {
+                    "review_token": "agileforge.authority_review.v1:sha256:test"
+                },
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def authority_accept(self, request: object) -> dict[str, object]:
+        """Capture an authority accept request."""
+        self.accept_requests.append(request)
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "setup_status": "passed",
+                "fsm_state": "VISION_INTERVIEW",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def authority_reject(self, request: object) -> dict[str, object]:
+        """Capture an authority reject request and keep setup locked."""
+        self.reject_requests.append(request)
+        if self.workflow is not None:
+            self.workflow.update_session_status(
+                str(request.project_id),
+                {
+                    "setup_status": "authority_rejected",
+                    "fsm_state": "SETUP_REQUIRED",
+                    "setup_error": request.reason,
+                },
+            )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "setup_status": "authority_rejected",
+                "fsm_state": "SETUP_REQUIRED",
+                "reason": request.reason,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
+def _install_fake_authority_application(
+    monkeypatch: pytest.MonkeyPatch,
+    app: FakeAuthorityApplication,
+) -> None:
+    """Patch API authority routes to use a fake application facade."""
+    monkeypatch.setattr(
+        api_module,
+        "AgentWorkbenchApplication",
+        lambda: app,
+        raising=False,
+    )
+
+
 def test_get_dashboard_config_returns_setup_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -426,6 +512,137 @@ def test_get_project_state_preserves_specific_setup_error(
     assert payload["data"]["setup_failure_artifact_id"] == "setup-artifact-1"
     assert payload["data"]["setup_failure_stage"] == "output_validation"
     assert payload["data"]["setup_has_full_artifact"] is True
+
+
+def test_project_state_preserves_authority_pending_review_not_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep pending authority review as setup-required, not failed setup."""
+    client, repo, workflow = _build_client(monkeypatch)
+
+    product = repo.create("Pending Authority")
+    product.spec_file_path = __file__
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "authority_pending_review",
+    }
+
+    response = client.get(f"/api/projects/{product.product_id}/state")
+    assert response.status_code == HTTP_OK
+
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["fsm_state"] == "SETUP_REQUIRED"
+    assert payload["data"]["setup_status"] == "authority_pending_review"
+    assert payload["data"]["setup_error"] is None
+    assert payload["data"]["setup_failure_summary"] is None
+
+
+def test_dashboard_authority_review_endpoint_returns_review_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return the pending authority review token through the dashboard API."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.get(f"/api/projects/{product.product_id}/authority/review")
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["guard_tokens"]["review_token"].startswith(
+        "agileforge.authority_review.v1:sha256:"
+    )
+
+
+def test_dashboard_accept_requires_review_token_or_full_guard_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject dashboard accept requests without a token or full guards."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/accept",
+        json={},
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    assert fake_app.accept_requests == []
+    assert (
+        response.json()["detail"]["errors"][0]["code"]
+        == "AUTHORITY_GUARD_INCOMPLETE"
+    )
+
+
+def test_dashboard_accept_rejects_fingerprint_only_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject authority-fingerprint-only dashboard decision guards."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/accept",
+        json={"expected_authority_fingerprint": "sha256:test"},
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    assert fake_app.accept_requests == []
+    assert (
+        response.json()["detail"]["errors"][0]["code"]
+        == "AUTHORITY_GUARD_INCOMPLETE"
+    )
+
+
+def test_dashboard_reject_records_reason_and_keeps_vision_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send rejection reason through the app facade and keep setup locked."""
+    client, repo, workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication(workflow=workflow)
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+    reason = "The generated invariant omits the audit trail requirement."
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/reject",
+        json={
+            "review_token": "agileforge.authority_review.v1:sha256:test",
+            "reason": reason,
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    assert response.json()["data"]["reason"] == reason
+    assert len(fake_app.reject_requests) == 1
+    request = fake_app.reject_requests[0]
+    assert request.reason == reason
+    assert request.policy == "dashboard_manual"
+    assert request.actor_mode == "dashboard-human"
+    assert workflow.states[str(product.product_id)]["fsm_state"] == "SETUP_REQUIRED"
+    assert (
+        workflow.states[str(product.product_id)]["setup_status"]
+        == "authority_rejected"
+    )
+    assert workflow.states[str(product.product_id)]["setup_error"] == reason
+
+
+def test_dashboard_pending_review_copy_is_not_project_setup_required() -> None:
+    """Keep the dashboard pending review panel copy authority-specific."""
+    html = Path("frontend/project.html").read_text()
+    marker = 'id="authority-review-card"'
+
+    assert marker in html
+    review_card = html[html.index(marker) : html.index(marker) + 1200]
+    assert "Pending Authority Review" in review_card
+    assert "Project Setup Required" not in review_card
 
 
 def test_state_forces_setup_required_when_product_missing_spec(
