@@ -1,7 +1,7 @@
 # Authority Review And Decision Design
 
 **Date:** 2026-05-17
-**Status:** Draft for user review
+**Status:** In Review
 **Scope:** CLI-first pending Spec Authority review, assisted assessment, accept,
 reject, and workflow advancement
 
@@ -56,6 +56,9 @@ The current product issue has three parts:
   for human review.
 - Keep advanced fingerprint and idempotency controls available for agents and
   deterministic automation.
+- Prevent a reviewer from accepting a different authority than the one they
+  reviewed.
+- Revalidate source spec freshness before recording any decision.
 
 ## Non-Goals
 
@@ -103,11 +106,42 @@ be used as canonical. It writes a rejected `SpecAuthorityAcceptance` row with a
 required rationale and leaves the project in setup. Rejection makes the
 next action clear: update the spec or recompile in a future command slice.
 
+### Review Token
+
+The review token is a deterministic freshness receipt returned by
+`authority review`. It proves which pending authority and source spec state were
+reviewed. The token is derived from:
+
+- project id
+- pending authority id
+- pending authority fingerprint
+- source spec hash used by the compiled authority
+- current disk spec hash
+- compiler version
+- prompt hash
+- workflow `fsm_state`
+- workflow `setup_status`
+
+Human commands use the review token so humans do not manually type fingerprints
+or pending ids. Expert and agent commands may use either the review token or
+explicit guard fields.
+
+### Decision Record
+
+The existing `SpecAuthorityAcceptance` table already models decisions with
+`status="accepted"` or `status="rejected"`. This slice keeps that table and
+formalizes it as an append-only authority decision log. The implementation must
+add decision-time provenance fields for the reviewed authority fingerprint,
+review token or review fingerprint, and source spec hash.
+
+A future schema cleanup may rename the table to `SpecAuthorityDecision`, but
+that rename is not required to unblock this feature.
+
 ### Review Packet
 
 The review packet is the evidence bundle an agent or human needs before making
 a decision. It must include both the source spec evidence and the compiled
-interpretation, plus a stable fingerprint of the pending authority.
+interpretation, plus stable guard tokens for the reviewed pending authority.
 
 ## Command UX
 
@@ -136,8 +170,14 @@ never changes workflow state.
 Human mode:
 
 ```bash
-agileforge authority accept --project-id 4 --confirm-reviewed
+agileforge authority accept --project-id 4 --review-token sha256:...
+agileforge authority accept --project-id 4
 ```
+
+The first form is the non-interactive human command. The second form is allowed
+only when stdin is an interactive terminal; it displays the pending authority
+summary, fingerprint, and source spec hash, then requires an explicit typed
+confirmation before submitting the same guarded decision request internally.
 
 Expert/agent mode:
 
@@ -146,25 +186,35 @@ agileforge authority accept \
   --project-id 4 \
   --pending-authority-id 4 \
   --expected-authority-fingerprint sha256:... \
+  --expected-source-spec-hash sha256:... \
+  --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
   --idempotency-key agent-unique-key
 ```
 
-In human mode, AgileForge resolves the current pending authority, recomputes the
-current fingerprint, uses domain idempotence for already-accepted authority, and
-generates internal tracing metadata. Humans do not type idempotency keys.
+In human mode, AgileForge resolves the current pending authority, verifies the
+review token or interactive confirmation against the current pending authority,
+uses domain idempotence for already-accepted authority, and generates internal
+tracing metadata. Humans do not type idempotency keys.
 
-In expert/agent mode, the command fails if the pending authority id,
-fingerprint, or expected workflow state no longer matches what the agent
-reviewed.
+In expert/agent mode, the command fails if the review token or explicit pending
+authority id, fingerprint, source spec hash, or expected workflow state no
+longer matches what the agent reviewed.
 
 ### Reject
 
 Human mode:
 
 ```bash
-agileforge authority reject --project-id 4 --reason "It missed the token storage rule."
+agileforge authority reject \
+  --project-id 4 \
+  --review-token sha256:... \
+  --reason "It missed the token storage rule."
+agileforge authority reject --project-id 4
 ```
+
+The interactive reject form requires the user to enter a rejection rationale
+after displaying the pending authority summary.
 
 Expert/agent mode:
 
@@ -173,6 +223,8 @@ agileforge authority reject \
   --project-id 4 \
   --pending-authority-id 4 \
   --expected-authority-fingerprint sha256:... \
+  --expected-source-spec-hash sha256:... \
+  --expected-disk-spec-hash sha256:... \
   --expected-state SETUP_REQUIRED \
   --reason "It missed the token storage rule." \
   --idempotency-key agent-unique-key
@@ -198,7 +250,9 @@ Rejection requires a rationale in both modes.
     "spec_hash": "sha256...",
     "disk_status": "readable",
     "disk_sha256": "sha256...",
-    "content": "...",
+    "size_bytes": 12345,
+    "excerpt": "...",
+    "content_included": false,
     "content_truncated": false
   },
   "pending_authority": {
@@ -211,11 +265,33 @@ Rejection requires a rationale in both modes.
     "artifact": {
       "domain": {},
       "scope_themes": [],
-      "invariants": [],
+      "invariants": [
+        {
+          "id": "INV-1",
+          "text": "REQUIRED_FIELD:submission_plan.json",
+          "support": "direct | inferred",
+          "source_refs": [],
+          "source_excerpt": "..."
+        }
+      ],
       "eligible_feature_rules": [],
       "rejected_features": [],
-      "gaps": [],
-      "assumptions": [],
+      "gaps": [
+        {
+          "id": "GAP-1",
+          "text": "...",
+          "source_refs": [],
+          "source_excerpt": "..."
+        }
+      ],
+      "assumptions": [
+        {
+          "id": "ASM-1",
+          "text": "...",
+          "support": "direct | inferred",
+          "source_refs": []
+        }
+      ],
       "source_map": {}
     }
   },
@@ -243,39 +319,72 @@ Rejection requires a rationale in both modes.
   },
   "next_actions": [
     {
-      "command": "agileforge authority accept --project-id 4 --confirm-reviewed",
+      "command": "agileforge authority accept --project-id 4 --review-token sha256:...",
       "mode": "human",
       "reason": "Record the reviewed pending authority as canonical."
     },
     {
-      "command": "agileforge authority reject --project-id 4 --reason \"...\"",
+      "command": "agileforge authority reject --project-id 4 --review-token sha256:... --reason \"...\"",
       "mode": "human",
       "reason": "Record that the pending authority must not be used."
     }
   ],
   "guard_tokens": {
+    "review_token": "sha256:...",
     "pending_authority_id": 4,
     "expected_authority_fingerprint": "sha256:...",
-    "expected_state": "SETUP_REQUIRED"
+    "expected_source_spec_hash": "sha256:...",
+    "expected_disk_spec_hash": "sha256:...",
+    "expected_state": "SETUP_REQUIRED",
+    "expected_setup_status": "authority_pending_review"
   }
 }
 ```
 
-The JSON packet includes spec content by default when it is readable and within
-the configured spec size limit. Text output summarizes the source path and
-compiled fields, and can include full spec content when `--include-spec full` is
-passed.
+Default JSON output includes metadata, hashes, size, bounded source excerpts,
+compiled authority fields, and source-map evidence. It does not include the full
+source spec by default. Full source content is included only when
+`--include-spec full` is passed and the file is readable within the configured
+spec size limit.
+
+Every invariant, gap, assumption, rejected feature, and eligibility rule must
+include source-map references where available. Items without direct source
+support must be marked as `support="inferred"` so reviewers can distinguish
+source-backed facts from compiler interpretation.
 
 ## Decision Behavior
+
+Accept and reject must go through one shared authority decision service or
+runner. The CLI, API, and dashboard must not duplicate decision logic.
+
+Before recording either decision, the service must validate:
+
+- the pending authority id is still the current pending authority for the latest
+  project spec
+- the pending authority fingerprint matches the review token or explicit
+  expected fingerprint
+- the source spec hash recorded with the pending authority still matches the
+  source spec hash in the review token
+- the current disk spec hash still matches the reviewed disk spec hash
+- `fsm_state=="SETUP_REQUIRED"`
+- `setup_status=="authority_pending_review"`
+- no conflicting newer accepted or rejected decision exists for the same latest
+  spec version
+
+If any validation fails, the command returns a stale structured error and tells
+the reviewer to run `agileforge authority review --project-id <id>` again.
 
 ### Accept Success
 
 On successful acceptance:
 
 - Write an accepted decision row for the pending spec version.
+- Store the reviewed authority fingerprint, review token or review fingerprint,
+  source spec hash, actor, policy, and rationale when provided.
 - Set `setup_status="passed"`.
 - Clear setup error fields.
-- Set `fsm_state="VISION_INTERVIEW"`.
+- Advance the workflow by evaluating setup completion. In the current FSM, a
+  fully accepted setup advances to `VISION_INTERVIEW`.
 - Return `authority_id`, `accepted_decision_id`, `accepted_spec_version_id`,
   `authority_fingerprint`, and next Vision actions.
 
@@ -284,6 +393,8 @@ On successful acceptance:
 On successful rejection:
 
 - Write a rejected decision row for the pending spec version.
+- Store the reviewed authority fingerprint, review token or review fingerprint,
+  source spec hash, actor, policy, and required rationale.
 - Set `setup_status="authority_rejected"`.
 - Keep `fsm_state="SETUP_REQUIRED"`.
 - Store or expose the rejection rationale in setup/status projections.
@@ -302,14 +413,17 @@ with a structured conflict so the user can inspect current authority status.
 ## Workflow Next Behavior
 
 When authority status is `pending_acceptance`, `agileforge workflow next` must
-return authority review and decision actions before any phase-planning actions:
+return authority review as the next valid command and decision command templates
+that require a review token:
 
 ```json
 {
   "next_valid_commands": [
-    "agileforge authority review --project-id 4",
-    "agileforge authority accept --project-id 4 --confirm-reviewed",
-    "agileforge authority reject --project-id 4 --reason \"...\""
+    "agileforge authority review --project-id 4"
+  ],
+  "decision_commands_after_review": [
+    "agileforge authority accept --project-id 4 --review-token <review_token>",
+    "agileforge authority reject --project-id 4 --review-token <review_token> --reason \"...\""
   ]
 }
 ```
@@ -337,8 +451,10 @@ Required structured errors:
 - `PROJECT_NOT_FOUND`
 - `AUTHORITY_NOT_COMPILED`
 - `AUTHORITY_NOT_ACCEPTED`
+- `AUTHORITY_REVIEW_REQUIRED`
 - `STALE_STATE`
 - `STALE_ARTIFACT_FINGERPRINT`
+- `STALE_CONTEXT_FINGERPRINT`
 - `IDEMPOTENCY_KEY_REUSED`
 - `MUTATION_IN_PROGRESS`
 - `MUTATION_RECOVERY_REQUIRED`
@@ -348,7 +464,7 @@ Add these authority-specific errors:
 
 - `AUTHORITY_NOT_PENDING`
 - `AUTHORITY_ALREADY_DECIDED`
-- `AUTHORITY_REVIEW_REQUIRED`
+- `AUTHORITY_SOURCE_CHANGED`
 
 Human-mode commands must still return structured errors, but remediation must
 use simple next commands. A stale accept must return this remediation:
@@ -365,7 +481,10 @@ successful setup checkpoint:
 - Title: `Pending Authority Review`
 - Message: setup compiled successfully and needs review before Vision.
 - Show review evidence or a link/action to the authority review view.
-- Show Accept and Reject actions.
+- Show Accept and Reject actions that submit the exact review token or
+  fingerprint rendered on the page.
+- Show a stale-review message requiring reload if the authority or source spec
+  changed after the page was rendered.
 - Do not label this state as `Project Setup Required`.
 
 The dashboard must treat `setup_status=authority_rejected` as:
@@ -381,17 +500,35 @@ Tests must prove:
 - `authority review` returns full pending authority evidence for project `4`
   style states.
 - Review output includes full compiled artifact fields, source spec hash, disk
-  status, guard tokens, and assessment schema.
-- Human accept does not require `pending_authority_id`, fingerprint, or
-  idempotency key.
+  status, evidence fields, guard tokens, review token, and assessment schema.
+- Default review output omits full source content while including source
+  metadata, hashes, size, bounded excerpts, and source-map evidence.
+- Human non-interactive accept requires a review token but does not require
+  manually typing `pending_authority_id`, fingerprint, or idempotency key.
+- Human interactive accept submits the same guarded decision request after typed
+  confirmation.
 - Expert accept rejects stale pending authority fingerprints.
+- Accept and reject reject changed disk spec hashes after review.
+- Accept and reject reject changed pending authority ids after review.
 - Accept writes exactly one accepted decision and advances workflow to
   `VISION_INTERVIEW`.
 - Reject writes a rejected decision, keeps Vision locked, and changes setup
   status to `authority_rejected`.
-- `workflow next` advertises review/accept/reject while authority is pending.
+- Concurrent accept/reject attempts record exactly one winning decision.
+- `workflow next` advertises review while authority is pending and exposes
+  accept/reject templates that require review tokens.
 - Dashboard copy distinguishes pending review from setup failure.
+- Dashboard stale-review submissions fail with a reload/review-again message.
 - Existing project create behavior still ends in `authority_pending_review`.
+
+## Revision History
+
+- 2026-05-17: Initial design for authority review, accept, reject, workflow-next,
+  and dashboard states.
+- 2026-05-17: Incorporated external critique by replacing unguarded
+  `--confirm-reviewed` human accept with review-token or interactive guarded
+  decisions, adding decision-time source-spec freshness checks, evidence
+  requirements, and authority-aware workflow-next routing.
 
 ## Open Follow-Up
 
