@@ -97,7 +97,10 @@ hash, and spec hash.
 
 Acceptance is not a generic quality score. It is a canonicalization decision.
 After acceptance, downstream workflow phases can trust that authority as the
-project's current spec contract.
+project's current spec contract. In the current data model, canonical authority
+is a projection derived from an accepted decision row and the matching compiled
+authority row; this slice does not require adding a stored
+`Product.authority_id` field.
 
 ### Rejection
 
@@ -109,22 +112,37 @@ next action clear: update the spec or recompile in a future command slice.
 ### Review Token
 
 The review token is a deterministic freshness receipt returned by
-`authority review`. It proves which pending authority and source spec state were
-reviewed. The token is derived from:
+`authority review`. It binds a later decision request to a specific
+authority/spec/workflow snapshot. It does not prove that the actor read the
+review packet. The token is a non-secret guard value, not an authentication or
+authorization bearer token.
+
+The token string has this format:
+
+```text
+agileforge.authority_review.v1:sha256:<digest>
+```
+
+`<digest>` is SHA-256 over canonical JSON with sorted keys, no insignificant
+whitespace, UTF-8 encoding, and this namespaced payload:
 
 - project id
 - pending authority id
 - pending authority fingerprint
 - source spec hash used by the compiled authority
 - current disk spec hash
+- canonical resolved spec path
 - compiler version
 - prompt hash
 - workflow `fsm_state`
 - workflow `setup_status`
+- review token schema version: `agileforge.authority_review.v1`
 
 Human commands use the review token so humans do not manually type fingerprints
-or pending ids. Expert and agent commands may use either the review token or
-explicit guard fields.
+or pending ids. Expert and agent commands support either the review token or
+explicit guard fields. The dashboard must combine the review token with normal
+dashboard authentication and CSRF protections; the review token alone must never
+authorize a decision.
 
 ### Decision Record
 
@@ -132,9 +150,16 @@ The existing `SpecAuthorityAcceptance` table already models decisions with
 `status="accepted"` or `status="rejected"`. This slice keeps that table and
 formalizes it as an append-only authority decision log. The implementation must
 add decision-time provenance fields for the reviewed authority fingerprint,
-review token or review fingerprint, and source spec hash.
+review token or review fingerprint, source spec hash, disk spec hash, actor,
+and actor mode.
 
-A future schema cleanup may rename the table to `SpecAuthorityDecision`, but
+All code must read accepted authority through repository or service methods that
+filter `status="accepted"`. Direct ad hoc table reads that treat any row in
+`spec_authority_acceptance` as acceptance are forbidden. Rejected rows must
+never satisfy accepted-authority checks, never unlock Vision, and never appear
+as canonical authority in read projections.
+
+A future schema cleanup can rename the table to `SpecAuthorityDecision`, but
 that rename is not required to unblock this feature.
 
 ### Review Packet
@@ -170,7 +195,7 @@ never changes workflow state.
 Human mode:
 
 ```bash
-agileforge authority accept --project-id 4 --review-token sha256:...
+agileforge authority accept --project-id 4 --review-token agileforge.authority_review.v1:sha256:...
 agileforge authority accept --project-id 4
 ```
 
@@ -208,7 +233,7 @@ Human mode:
 ```bash
 agileforge authority reject \
   --project-id 4 \
-  --review-token sha256:... \
+  --review-token agileforge.authority_review.v1:sha256:... \
   --reason "It missed the token storage rule."
 agileforge authority reject --project-id 4
 ```
@@ -247,10 +272,27 @@ Rejection requires a rationale in both modes.
   "spec": {
     "spec_version_id": 4,
     "content_ref": "/absolute/path/to/spec.md",
+    "resolved_path": "/absolute/path/to/spec.md",
     "spec_hash": "sha256...",
     "disk_status": "readable",
     "disk_sha256": "sha256...",
     "size_bytes": 12345,
+    "source_outline": [
+      {
+        "section_id": "S1",
+        "heading": "Submission Contract",
+        "line_start": 12,
+        "line_end": 48,
+        "coverage_status": "covered | partial | uncovered",
+        "covered_by": ["INV-1", "INV-2"]
+      }
+    ],
+    "coverage_summary": {
+      "covered_sections": 8,
+      "partial_sections": 1,
+      "uncovered_sections": 0,
+      "omission_assessment": "complete | incomplete"
+    },
     "excerpt": "...",
     "content_included": false,
     "content_truncated": false
@@ -303,7 +345,7 @@ Rejection requires a rationale in both modes.
       "No authority invariant invents a requirement that is absent from the spec.",
       "Forbidden capabilities and security constraints are captured.",
       "Known gaps are real gaps, not missed requirements.",
-      "The source map points back to relevant spec sections where possible."
+      "The source map points back to directly supporting spec sections."
     ],
     "assessment_schema": {
       "recommendation": "accept | reject | needs_human",
@@ -319,18 +361,18 @@ Rejection requires a rationale in both modes.
   },
   "next_actions": [
     {
-      "command": "agileforge authority accept --project-id 4 --review-token sha256:...",
+      "command": "agileforge authority accept --project-id 4 --review-token agileforge.authority_review.v1:sha256:...",
       "mode": "human",
       "reason": "Record the reviewed pending authority as canonical."
     },
     {
-      "command": "agileforge authority reject --project-id 4 --review-token sha256:... --reason \"...\"",
+      "command": "agileforge authority reject --project-id 4 --review-token agileforge.authority_review.v1:sha256:... --reason \"...\"",
       "mode": "human",
       "reason": "Record that the pending authority must not be used."
     }
   ],
   "guard_tokens": {
-    "review_token": "sha256:...",
+    "review_token": "agileforge.authority_review.v1:sha256:...",
     "pending_authority_id": 4,
     "expected_authority_fingerprint": "sha256:...",
     "expected_source_spec_hash": "sha256:...",
@@ -341,16 +383,21 @@ Rejection requires a rationale in both modes.
 }
 ```
 
-Default JSON output includes metadata, hashes, size, bounded source excerpts,
-compiled authority fields, and source-map evidence. It does not include the full
-source spec by default. Full source content is included only when
-`--include-spec full` is passed and the file is readable within the configured
-spec size limit.
+Default JSON output includes full source content when the spec file is readable
+and within the configured default review size limit. When full source content is
+omitted because the file exceeds that limit or the caller requested a summarized
+packet, the packet must include a complete source outline, section-level
+coverage status, bounded source excerpts, compiled authority fields, and
+source-map evidence. If full source is omitted, the packet must set
+`coverage_summary.omission_assessment="incomplete"` unless the source outline
+coverage rules can prove every source section is covered or intentionally
+classified.
 
 Every invariant, gap, assumption, rejected feature, and eligibility rule must
-include source-map references where available. Items without direct source
-support must be marked as `support="inferred"` so reviewers can distinguish
-source-backed facts from compiler interpretation.
+include `support`, `source_refs`, and `source_excerpt` fields. Items without
+direct source support must use `support="inferred"`, `source_refs=[]`, and a
+source excerpt only when one exists, so reviewers can distinguish source-backed
+facts from compiler interpretation.
 
 ## Decision Behavior
 
@@ -368,11 +415,31 @@ Before recording either decision, the service must validate:
 - the current disk spec hash still matches the reviewed disk spec hash
 - `fsm_state=="SETUP_REQUIRED"`
 - `setup_status=="authority_pending_review"`
-- no conflicting newer accepted or rejected decision exists for the same latest
-  spec version
+- no terminal decision already exists for the same project id, spec version id,
+  and pending authority id
 
 If any validation fails, the command returns a stale structured error and tells
 the reviewer to run `agileforge authority review --project-id <id>` again.
+
+Decision writes must happen inside one transactional boundary that acquires a
+SQLite write lock before validation and uses conditional writes against the
+project id, spec version id, pending authority id, authority fingerprint, source
+spec hash, disk spec hash, `fsm_state`, and `setup_status`. The mutation must
+finalize exactly one terminal decision. If another process wins the terminal
+decision first, the losing command returns `AUTHORITY_ALREADY_DECIDED`.
+
+A repeated accept for the same project, spec version, pending authority,
+fingerprint, source hashes, and decision returns the original accepted decision.
+A repeated reject with the same project, spec version, pending authority,
+fingerprint, source hashes, decision, and rationale returns the original
+rejected decision. Any changed guard value or opposite terminal decision fails
+with `AUTHORITY_ALREADY_DECIDED`.
+
+If the disk spec is missing, unreadable, moved to a different canonical resolved
+path, or has a different hash at decision time, the service must fail with
+`AUTHORITY_SOURCE_CHANGED` or the more specific `SPEC_FILE_NOT_FOUND` /
+`SPEC_FILE_INVALID` code and require a fresh review. It must not accept or
+reject authority against an unverified source file.
 
 ### Accept Success
 
@@ -380,11 +447,18 @@ On successful acceptance:
 
 - Write an accepted decision row for the pending spec version.
 - Store the reviewed authority fingerprint, review token or review fingerprint,
-  source spec hash, actor, policy, and rationale when provided.
+  source spec hash, disk spec hash, actor, actor mode, policy, and rationale
+  when provided.
+- Promote the accepted authority in the canonical read projection: after commit,
+  `authority status` must return `status="current"`, `authority_id` equal to the
+  accepted compiled authority id, `accepted_spec_version_id` equal to the
+  accepted spec version, `pending_authority_id=null`, and
+  `authority_fingerprint` for the accepted authority.
 - Set `setup_status="passed"`.
 - Clear setup error fields.
 - Advance the workflow by evaluating setup completion. In the current FSM, a
-  fully accepted setup advances to `VISION_INTERVIEW`.
+  fully accepted setup advances to `VISION_INTERVIEW` only after the canonical
+  authority projection above is true.
 - Return `authority_id`, `accepted_decision_id`, `accepted_spec_version_id`,
   `authority_fingerprint`, and next Vision actions.
 
@@ -394,7 +468,8 @@ On successful rejection:
 
 - Write a rejected decision row for the pending spec version.
 - Store the reviewed authority fingerprint, review token or review fingerprint,
-  source spec hash, actor, policy, and required rationale.
+  source spec hash, disk spec hash, actor, actor mode, policy, and required
+  rationale.
 - Set `setup_status="authority_rejected"`.
 - Keep `fsm_state="SETUP_REQUIRED"`.
 - Store or expose the rejection rationale in setup/status projections.
@@ -403,12 +478,14 @@ On successful rejection:
 
 ### Already Decided
 
-If the pending authority was already accepted, `accept` returns the existing
-accepted decision instead of creating a duplicate.
+If the pending authority was already accepted with the same decision guards,
+`accept` returns the existing accepted decision instead of creating a duplicate.
+If it was already rejected, `accept` fails with `AUTHORITY_ALREADY_DECIDED`.
 
-If the latest spec version was already rejected, `reject` returns the existing
-rejection when the rationale and reviewed authority match; otherwise it fails
-with a structured conflict so the user can inspect current authority status.
+If the pending authority was already rejected with the same decision guards and
+rationale, `reject` returns the existing rejection instead of creating a
+duplicate. If it was already accepted, `reject` fails with
+`AUTHORITY_ALREADY_DECIDED`.
 
 ## Workflow Next Behavior
 
@@ -455,6 +532,8 @@ Required structured errors:
 - `STALE_STATE`
 - `STALE_ARTIFACT_FINGERPRINT`
 - `STALE_CONTEXT_FINGERPRINT`
+- `SPEC_FILE_NOT_FOUND`
+- `SPEC_FILE_INVALID`
 - `IDEMPOTENCY_KEY_REUSED`
 - `MUTATION_IN_PROGRESS`
 - `MUTATION_RECOVERY_REQUIRED`
@@ -465,6 +544,14 @@ Add these authority-specific errors:
 - `AUTHORITY_NOT_PENDING`
 - `AUTHORITY_ALREADY_DECIDED`
 - `AUTHORITY_SOURCE_CHANGED`
+
+Actor identity must be explicit in each decision response and persisted decision
+record. CLI human decisions default to the local OS username and actor mode
+`cli-human`; if the OS username cannot be resolved, the command must use
+`cli-human` as the actor value. CLI agent decisions default to `cli-agent`
+unless `--changed-by` is supplied; dashboard decisions use the authenticated
+dashboard user and actor mode `dashboard-human`; automated tests use actor mode
+`test`.
 
 Human-mode commands must still return structured errors, but remediation must
 use simple next commands. A stale accept must return this remediation:
@@ -501,19 +588,31 @@ Tests must prove:
   style states.
 - Review output includes full compiled artifact fields, source spec hash, disk
   status, evidence fields, guard tokens, review token, and assessment schema.
-- Default review output omits full source content while including source
-  metadata, hashes, size, bounded excerpts, and source-map evidence.
+- Default review output includes full source content under the configured size
+  limit.
+- Review output that omits full source content includes a complete source
+  outline, section coverage markers, bounded excerpts, and an explicit
+  `omission_assessment` value.
 - Human non-interactive accept requires a review token but does not require
   manually typing `pending_authority_id`, fingerprint, or idempotency key.
 - Human interactive accept submits the same guarded decision request after typed
   confirmation.
 - Expert accept rejects stale pending authority fingerprints.
 - Accept and reject reject changed disk spec hashes after review.
+- Accept and reject reject missing, unreadable, moved, or oversized unverified
+  disk specs at decision time.
 - Accept and reject reject changed pending authority ids after review.
+- Accept-after-reject and reject-after-accept fail with
+  `AUTHORITY_ALREADY_DECIDED`.
 - Accept writes exactly one accepted decision and advances workflow to
   `VISION_INTERVIEW`.
+- Accept promotes the canonical authority projection so `authority status`
+  returns `status="current"`, accepted `authority_id`, accepted spec version,
+  and no pending authority.
 - Reject writes a rejected decision, keeps Vision locked, and changes setup
   status to `authority_rejected`.
+- Rejected decision rows never satisfy accepted-authority reads and never unlock
+  Vision.
 - Concurrent accept/reject attempts record exactly one winning decision.
 - `workflow next` advertises review while authority is pending and exposes
   accept/reject templates that require review tokens.
@@ -529,6 +628,9 @@ Tests must prove:
   `--confirm-reviewed` human accept with review-token or interactive guarded
   decisions, adding decision-time source-spec freshness checks, evidence
   requirements, and authority-aware workflow-next routing.
+- 2026-05-17: Tightened canonical authority projection, review-token semantics,
+  source coverage requirements, terminal-decision concurrency, rejected-row
+  safety, and decision-time source-file failure behavior.
 
 ## Open Follow-Up
 
