@@ -1415,6 +1415,68 @@ def test_normalizer_rejects_max_value_when_excerpt_lacks_bound() -> None:
     assert any("100" in gap for gap in normalized.root.blocking_gaps)
 
 
+def test_normalizer_drops_max_value_from_command_example() -> None:
+    """Example command budgets are sample inputs, not global authority limits."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "## Functional Requirements",
+            "| ID | Requirement | Acceptance Criteria | Priority |",
+            "| --- | --- | --- | --- |",
+            "| FR-003 | The live squad must stay within budget. | "
+            "`budget_used <= budget` in artifacts. | Must |",
+            "## Interfaces",
+            "```bash",
+            "python scripts/run_live_round.py --budget 100",
+            "```",
+        ]
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "MAX_VALUE",
+                "parameters": {"field_name": "budget_used", "max_value": 100},
+            },
+            {
+                "id": "INV-0000000000000001",
+                "type": "RELATION_CONSTRAINT",
+                "parameters": {"expression": "budget_used <= budget"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "python scripts/run_live_round.py --budget 100",
+                "location": "Interfaces",
+            },
+            {
+                "invariant_id": "INV-0000000000000001",
+                "excerpt": "FR-003 | budget_used <= budget.",
+                "location": "FR-003",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert [inv.type for inv in normalized.root.invariants] == [
+        InvariantType.RELATION_CONSTRAINT
+    ]
+    assert any("budget_used 100" in gap for gap in normalized.root.gaps)
+
+
 def test_normalizer_rejects_zero_max_value_when_excerpt_lacks_zero_bound() -> None:
     """A zero max value must be source-supported, not treated as missing."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415

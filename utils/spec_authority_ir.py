@@ -17,6 +17,7 @@ MAX_REVIEW_SOURCE_UNITS: Final[int] = 500
 MAX_REVIEW_CANDIDATES: Final[int] = 1000
 MAX_REVIEW_FINDINGS: Final[int] = 200
 MAX_REVIEW_EXCERPT_BYTES: Final[int] = 1000
+MIN_REQUIREMENT_TABLE_CELLS: Final[int] = 3
 
 _HEADING_RE: Final[re.Pattern[str]] = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _NORMATIVE_RE: Final[re.Pattern[str]] = re.compile(
@@ -61,6 +62,10 @@ _GOAL_HEADING_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(goals?|objectives?|outcomes?)\b",
     re.IGNORECASE,
 )
+_NON_GOAL_HEADING_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(non[- ]?goals?|out of scope)\b",
+    re.IGNORECASE,
+)
 _ASSUMPTION_HEADING_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(assumptions?)\b",
     re.IGNORECASE,
@@ -95,6 +100,11 @@ _NON_REQUIREMENT_PREFIXES: Final[tuple[str, ...]] = (
     "Note:",
     "Example:",
     "Rationale:",
+)
+_NON_REQUIREMENT_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:primary local commands|current integrations|future integrations|"
+    r"primary reference files|confirmed facts|current useful capabilities include):$",
+    re.IGNORECASE,
 )
 _OPEN_QUESTION_HEADINGS: Final[frozenset[str]] = frozenset(
     {"open question", "open questions", "questions"}
@@ -732,14 +742,35 @@ def _content_block(
 
 
 def _positive_non_requirement_reason(unit: SourceUnit) -> str | None:
+    structural_reason = _positive_structural_non_requirement_reason(unit)
+    if structural_reason is not None:
+        return structural_reason
     if _has_blocker_signal(unit):
         return None
+    return _positive_context_non_requirement_reason(unit)
+
+
+def _positive_structural_non_requirement_reason(unit: SourceUnit) -> str | None:
+    if unit.kind == "table_row" and _is_table_structure_row(unit.text_excerpt):
+        return "non_requirement_table_structure"
+    if (
+        unit.kind == "fenced_block"
+        and not _is_spec_scenario_block(unit.text_excerpt)
+        and not _has_blocker_signal(unit)
+    ):
+        return "non_requirement_fenced_code"
+    return None
+
+
+def _positive_context_non_requirement_reason(unit: SourceUnit) -> str | None:
     heading_leaf = _heading_leaf(unit)
     if heading_leaf in _NON_REQUIREMENT_HEADINGS:
         return f"non_requirement_heading:{heading_leaf}"
     for prefix in _NON_REQUIREMENT_PREFIXES:
         if unit.text_excerpt.startswith(prefix):
             return f"non_requirement_marker:{prefix}"
+    if _NON_REQUIREMENT_LABEL_RE.fullmatch(_normalize_text(unit.text_excerpt)):
+        return "non_requirement_label"
     return None
 
 
@@ -757,15 +788,9 @@ def _has_blocker_signal(unit: SourceUnit) -> bool:
 
 def _candidate_classification(unit: SourceUnit) -> str:  # noqa: PLR0911
     heading_text = " ".join(unit.heading_path)
-    heading_leaf = _heading_leaf(unit)
-    if heading_leaf in _OPEN_QUESTION_HEADINGS:
-        return "open_question"
-    if _ASSUMPTION_HEADING_RE.search(heading_text):
-        return "assumption"
-    if _DEPENDENCY_HEADING_RE.search(heading_text):
-        return "dependency"
-    if _GOAL_HEADING_RE.search(heading_text):
-        return "goal"
+    heading_classification = _heading_candidate_classification(unit)
+    if heading_classification is not None:
+        return heading_classification
     if _ACCEPTANCE_MARKER_RE.search(unit.text_excerpt) or _ACCEPTANCE_MARKER_RE.search(
         heading_text
     ):
@@ -788,14 +813,27 @@ def _candidate_classification(unit: SourceUnit) -> str:  # noqa: PLR0911
     return "uncertain"
 
 
+def _heading_candidate_classification(unit: SourceUnit) -> str | None:
+    heading_text = " ".join(unit.heading_path)
+    heading_leaf = _heading_leaf(unit)
+    if heading_leaf in _OPEN_QUESTION_HEADINGS:
+        return "open_question"
+    if _NON_GOAL_HEADING_RE.search(heading_leaf):
+        return "non_goal"
+    if _ASSUMPTION_HEADING_RE.search(heading_text):
+        return "assumption"
+    if _DEPENDENCY_HEADING_RE.search(heading_text):
+        return "dependency"
+    if _GOAL_HEADING_RE.search(heading_text):
+        return "goal"
+    return None
+
+
 def _candidate_clauses(unit: SourceUnit) -> list[str]:
-    pieces = [unit.text_excerpt]
     if unit.kind == "table_row":
-        pieces = [
-            piece.strip()
-            for piece in unit.text_excerpt.strip("|").split("|")
-            if piece.strip()
-        ]
+        pieces = _table_candidate_pieces(unit)
+    else:
+        pieces = [unit.text_excerpt]
     clauses: list[str] = []
     for piece in pieces:
         for clause in re.split(r";\s+|\n(?=\s*(?:\d+\.|-|\*|\+)\s+)", piece):
@@ -808,7 +846,79 @@ def _candidate_clauses(unit: SourceUnit) -> list[str]:
 def _heading_leaf(unit: SourceUnit) -> str:
     if not unit.heading_path:
         return ""
-    return _normalize_text(unit.heading_path[-1]).casefold()
+    leaf = _normalize_text(unit.heading_path[-1]).casefold()
+    return re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", leaf).strip()
+
+
+def _table_cells(text: str) -> list[str]:
+    return [piece.strip() for piece in text.strip().strip("|").split("|")]
+
+
+def _is_table_structure_row(text: str) -> bool:
+    cells = _table_cells(text)
+    if not cells:
+        return True
+    if all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells):
+        return True
+    normalized_cells = {_normalize_text(cell).casefold() for cell in cells}
+    header_markers = {
+        "id",
+        "requirement",
+        "acceptance criteria",
+        "priority",
+        "phase",
+        "product stage",
+        "scope",
+        "exit criteria",
+        "case",
+        "required behavior",
+        "user/system impact",
+        "option",
+        "pros",
+        "cons",
+        "decision",
+        "metric",
+        "target",
+        "measurement source",
+        "question",
+        "impact",
+        "owner",
+        "status",
+        "date",
+        "version",
+        "change",
+        "author",
+    }
+    return bool(normalized_cells) and normalized_cells <= header_markers
+
+
+def _table_candidate_pieces(unit: SourceUnit) -> list[str]:
+    cells = [cell for cell in _table_cells(unit.text_excerpt) if cell]
+    if not cells:
+        return []
+    heading_leaf = _heading_leaf(unit)
+    if (
+        _REQUIREMENT_HEADING_RE.search(heading_leaf)
+        and len(cells) >= MIN_REQUIREMENT_TABLE_CELLS
+        and re.fullmatch(r"[A-Z]{1,6}-\d{1,4}", cells[0])
+    ):
+        pieces = [f"{cells[0]} requirement: {cells[1]}"]
+        if len(cells) >= MIN_REQUIREMENT_TABLE_CELLS and cells[2]:
+            pieces.append(f"{cells[0]} acceptance criterion: {cells[2]}")
+        return pieces
+    if heading_leaf in _OPEN_QUESTION_HEADINGS and len(cells) >= 2:  # noqa: PLR2004
+        return [f"open question: {cells[0]} impact: {cells[1]}"]
+    return [" | ".join(cells)]
+
+
+def _is_spec_scenario_block(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(Scenario:|Given\s+.+\bWhen\b|When\s+.+\bThen\b|Then\s+)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
 
 
 def _normalize_text(text: str) -> str:

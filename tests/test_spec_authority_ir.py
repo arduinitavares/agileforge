@@ -115,6 +115,100 @@ def test_positive_non_requirement_blocks_product_capability_text() -> None:
     assert units[0].disposition == SourceUnitDisposition.UNCERTAIN
 
 
+def test_numbered_metadata_headings_remain_positive_non_requirements() -> None:
+    """Numbered appendix headings should not turn revision rows into candidates."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Spec\n\n"
+        "## 13. Revision History\n\n"
+        "| Date | Version | Change | Author |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 2026-05-16 | 0.1 | Initial version. | Codex |\n"
+    )
+    units = source_units_from_sections(sections)
+
+    candidates = extract_requirement_candidates(units)
+
+    assert candidates == []
+    assert {unit.disposition for unit in units} == {
+        SourceUnitDisposition.NON_REQUIREMENT
+    }
+
+
+def test_functional_requirement_table_ignores_headers_and_priority_cells() -> None:
+    """Requirement tables emit requirement/criteria candidates, not all cells."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Spec\n\n"
+        "## 6.2 Functional Requirements\n\n"
+        "| ID | Requirement | Acceptance Criteria | Priority |\n"
+        "| --- | --- | --- | --- |\n"
+        "| FR-001 | The system must recommend one squad. | "
+        "A live run outputs one selected squad. | Must |\n"
+    )
+    units = source_units_from_sections(sections)
+
+    candidates = extract_requirement_candidates(units)
+
+    assert [candidate.statement for candidate in candidates] == [
+        "FR-001 requirement: The system must recommend one squad.",
+        "FR-001 acceptance criterion: A live run outputs one selected squad.",
+    ]
+    assert all(candidate.classification == "requirement" for candidate in candidates)
+    assert units[0].disposition == SourceUnitDisposition.NON_REQUIREMENT
+    assert units[1].disposition == SourceUnitDisposition.NON_REQUIREMENT
+
+
+def test_non_goal_heading_is_not_classified_as_goal() -> None:
+    """Non-goal sections describe rejected scope, not eligible goals."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Spec\n\n"
+        "### Non-Goals\n\n"
+        "- Do not enable real-money betting.\n"
+    )
+    units = source_units_from_sections(sections)
+
+    candidates = extract_requirement_candidates(units)
+
+    assert len(candidates) == 1
+    assert candidates[0].classification == "non_goal"
+
+
+def test_fenced_command_examples_are_non_requirements() -> None:
+    """Example shell commands must not become authority candidates."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Interfaces\n\n"
+        "Primary local commands:\n\n"
+        "```bash\n"
+        "python scripts/run_live_round.py --budget 100\n"
+        "```\n"
+    )
+    units = source_units_from_sections(sections)
+
+    candidates = extract_requirement_candidates(units)
+
+    assert candidates == []
+    assert units[-1].disposition == SourceUnitDisposition.NON_REQUIREMENT
+
+
+def test_gherkin_fenced_blocks_still_create_candidates() -> None:
+    """Gherkin scenarios are specification content, not ordinary code examples."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# User Scenarios\n\n"
+        "```gherkin\n"
+        "Scenario: Choose squad\n"
+        "  Given the market is open\n"
+        "  When the operator runs recommendation\n"
+        "  Then the system recommends one legal squad\n"
+        "```\n"
+    )
+    units = source_units_from_sections(sections)
+
+    candidates = extract_requirement_candidates(units)
+
+    assert len(candidates) == 1
+    assert candidates[0].classification == "acceptance_criterion"
+    assert units[0].disposition == SourceUnitDisposition.CANDIDATE_EXTRACTED
+
+
 def test_source_unit_and_candidate_excerpts_are_bounded_by_utf8_bytes() -> None:
     """Non-ASCII source excerpts are bounded by UTF-8 bytes, not characters."""
     sections, _diagnostics = parse_markdown_sections(

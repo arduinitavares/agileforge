@@ -94,6 +94,11 @@ _FORBIDDEN_SAFETY_CUE_RE = re.compile(
     r")\b|\bbefore\s+(?:reading|constructing)\b",
     flags=re.IGNORECASE,
 )
+_MAX_VALUE_CUE_RE = re.compile(
+    r"(<=|\b(?:max(?:imum)?|at most|no more than|must not exceed|"
+    r"less than or equal|cap|limit)\b)",
+    flags=re.IGNORECASE,
+)
 _FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
     "authenticated": ("api", "post", "token", "tokens"),
     "authentication": ("api", "post", "token", "tokens"),
@@ -381,7 +386,7 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
         max_value = "" if raw_max_value is None else str(raw_max_value)
         field_tokens = _tokenize_support_text(field_name)
         excerpt_tokens = set(_tokenize_support_text(excerpt))
-        if _support_overlap_ratio(field_tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
+        if _support_overlap_ratio(field_tokens, excerpt) < _FIELD_SUPPORT_RATIO_THRESHOLD:
             return (
                 f"source_map excerpt does not mention max-value field "
                 f"'{field_name}' for invariant {inv.id}"
@@ -389,6 +394,11 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
         if max_value and max_value.casefold() not in excerpt_tokens:
             return (
                 f"source_map excerpt does not mention max value '{max_value}' "
+                f"for invariant {inv.id}"
+            )
+        if not _MAX_VALUE_CUE_RE.search(excerpt):
+            return (
+                "source_map excerpt does not describe a maximum/limit "
                 f"for invariant {inv.id}"
             )
         return None
