@@ -202,13 +202,14 @@ def test_success_schema_rejects_mapping_with_missing_authority_item_id() -> None
         SpecAuthorityCompilationSuccess.model_validate(payload)
 
 
-def test_success_schema_rejects_mapping_target_kind_mismatch() -> None:
-    """Mapping target kind must match the referenced authority collection."""
+def test_success_schema_allows_mapping_target_kind_mismatch_for_review_gate() -> None:
+    """Target-kind mismatches are review findings, not schema-fatal errors."""
     payload = _compact_ir_success_payload()
     payload["authority_mappings"][0]["authority_target_kind"] = "gap"
 
-    with pytest.raises(ValidationError):
-        SpecAuthorityCompilationSuccess.model_validate(payload)
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert success.authority_mappings[0].authority_target_kind == "gap"
 
 
 def test_success_schema_accepts_rejected_feature_mapping() -> None:
@@ -478,6 +479,126 @@ def test_unrelated_source_refs_become_weak_mappings() -> None:
     assert mapping.mapping_provenance == "host_repaired_quote"
     assert mapping.mapping_provenance != "model_quote"
     assert mapping.mapping_status == "weak_mapping"
+
+
+def test_normalizer_keeps_repairable_invariants_and_drops_unsupported_ones() -> None:
+    """One unsupported invariant must not prevent review of repairable authority."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "| ID | Requirement | Acceptance Criteria |",
+            "| FR-001 | The system must recommend one live squad. | "
+            "A live run outputs exactly one selected squad, formation, and captain. |",
+            "| FR-003 | The live squad must stay within budget. | "
+            "budget_used <= budget. |",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "selected squad"},
+        },
+        {
+            "id": "INV-2222222222222222",
+            "type": "MAX_VALUE",
+            "parameters": {"field_name": "budget_used", "max_value": 0},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": "FR-001 | The system must recommend one live squad.",
+            "location": "FR-001",
+        },
+        {
+            "invariant_id": "INV-2222222222222222",
+            "excerpt": "FR-003 | budget_used <= budget.",
+            "location": "FR-003",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert [inv.type for inv in success.invariants] == [InvariantType.REQUIRED_FIELD]
+    assert success.source_map[0].excerpt.endswith(
+        "selected squad, formation, and captain. |"
+    )
+    assert any("Dropped unsupported compiler invariant" in gap for gap in success.gaps)
+    assert "0" in " ".join(success.gaps)
+
+
+def test_normalizer_treats_model_target_kind_mismatch_as_untrusted_ir_hint() -> None:
+    """Invalid model mapping hints should not make compiler invocation fail."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_quote = "- The payload must include user_id."
+    quote_hash = f"sha256:{hashlib.sha256(source_quote.encode()).hexdigest()}"
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [
+                {
+                    "unit_id": "SRC-model",
+                    "section_id": "SEC-model",
+                    "heading_path": ["Requirements"],
+                    "kind": "list_item",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "text_hash": quote_hash,
+                    "text_excerpt": source_quote,
+                    "disposition": "candidate_extracted",
+                    "disposition_reason": "model supplied",
+                }
+            ],
+            "requirement_candidates": [
+                {
+                    "candidate_id": "CAND-model",
+                    "source_unit_id": "SRC-model",
+                    "statement": source_quote,
+                    "source_quote": source_quote,
+                    "quote_hash": quote_hash,
+                    "line_start": 2,
+                    "line_end": 2,
+                    "classification": "requirement",
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": "CAND-model",
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "eligible_feature_rule",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "model kind typo",
+                    "source_quote_hash": quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text="\n".join(["# Requirements", source_quote]),
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.authority_mappings
+    assert {
+        mapping.mapping_provenance for mapping in normalized.root.authority_mappings
+    } != {"model_quote"}
 
 
 def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> None:

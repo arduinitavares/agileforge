@@ -544,6 +544,8 @@ def _repair_source_map_from_source_text(
         return False
 
     repaired: list[SourceMapEntry] = []
+    retained_invariants: list[Invariant] = []
+    dropped_invariants: list[Invariant] = []
     for inv in success.invariants:
         supported = [
             candidate
@@ -551,11 +553,13 @@ def _repair_source_map_from_source_text(
             if _source_map_support_error(inv, candidate.excerpt) is None
         ]
         if not supported:
-            return False
+            dropped_invariants.append(inv)
+            continue
         matched = max(
             supported,
             key=lambda candidate: _source_map_support_score(inv, candidate.excerpt),
         )
+        retained_invariants.append(inv)
         repaired.append(
             SourceMapEntry(
                 invariant_id=inv.id,
@@ -564,6 +568,14 @@ def _repair_source_map_from_source_text(
             )
         )
 
+    if not retained_invariants:
+        return False
+    if dropped_invariants:
+        success.invariants = retained_invariants
+        for dropped in dropped_invariants:
+            gap = f"Dropped unsupported compiler invariant: {_invariant_text(dropped)}"
+            if gap not in success.gaps:
+                success.gaps.append(gap)
     success.source_map = repaired
     return True
 

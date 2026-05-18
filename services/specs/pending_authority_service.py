@@ -55,6 +55,13 @@ class PendingAuthorityResult:
     compiler_version: str | None = None
     prompt_hash: str | None = None
     error: str | None = None
+    reason: str | None = None
+    failure_artifact_id: str | None = None
+    failure_stage: str | None = None
+    failure_summary: str | None = None
+    raw_output_preview: str | None = None
+    has_full_artifact: bool | None = None
+    blocking_gaps: list[str] | None = None
 
 
 def _result(  # noqa: PLR0913
@@ -69,6 +76,13 @@ def _result(  # noqa: PLR0913
     compiler_version: str | None = None,
     prompt_hash: str | None = None,
     error: str | None = None,
+    reason: str | None = None,
+    failure_artifact_id: str | None = None,
+    failure_stage: str | None = None,
+    failure_summary: str | None = None,
+    raw_output_preview: str | None = None,
+    has_full_artifact: bool | None = None,
+    blocking_gaps: list[str] | None = None,
 ) -> PendingAuthorityResult:
     """Build a pending authority result."""
     return PendingAuthorityResult(
@@ -82,6 +96,13 @@ def _result(  # noqa: PLR0913
         compiler_version=compiler_version,
         prompt_hash=prompt_hash,
         error=error,
+        reason=reason,
+        failure_artifact_id=failure_artifact_id,
+        failure_stage=failure_stage,
+        failure_summary=failure_summary,
+        raw_output_preview=raw_output_preview,
+        has_full_artifact=has_full_artifact,
+        blocking_gaps=blocking_gaps,
     )
 
 
@@ -212,6 +233,13 @@ def _normalize_compiler_failure(
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,
         error=str(compile_result.get("error", "Spec authority compile failed")),
+        reason=_optional_str(compile_result.get("reason")),
+        failure_artifact_id=_optional_str(compile_result.get("failure_artifact_id")),
+        failure_stage=_optional_str(compile_result.get("failure_stage")),
+        failure_summary=_optional_str(compile_result.get("failure_summary")),
+        raw_output_preview=_optional_str(compile_result.get("raw_output_preview")),
+        has_full_artifact=_optional_bool(compile_result.get("has_full_artifact")),
+        blocking_gaps=_optional_str_list(compile_result.get("blocking_gaps")),
     )
 
 
@@ -477,3 +505,17 @@ def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_bool(value: object) -> bool | None:
+    """Return value as a bool when present."""
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _optional_str_list(value: object) -> list[str] | None:
+    """Return value as a string list when possible."""
+    if not isinstance(value, list):
+        return None
+    return [str(item) for item in value]

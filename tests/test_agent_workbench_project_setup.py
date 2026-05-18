@@ -176,6 +176,8 @@ def _install_failing_compiler(
     monkeypatch: pytest.MonkeyPatch,
     *,
     error_code: str = "SPEC_COMPILE_FAILED",
+    failure_artifact_id: str | None = None,
+    blocking_gaps: list[str] | None = None,
 ) -> None:
     from services.agent_workbench import project_setup
 
@@ -190,11 +192,26 @@ def _install_failing_compiler(
     ) -> dict[str, Any]:
         del engine, spec_version_id, force_recompile, tool_context
         del lease_guard, record_progress
-        return {
+        result = {
             "success": False,
             "error_code": error_code,
             "error": "Injected compile failure.",
+            "reason": "SOURCE_MAP_INVARIANT_MISMATCH",
+            "blocking_gaps": blocking_gaps or [],
         }
+        if failure_artifact_id is not None:
+            result.update(
+                {
+                    "failure_artifact_id": failure_artifact_id,
+                    "failure_stage": "output_validation",
+                    "failure_summary": (
+                        "SPEC_COMPILATION_FAILED: SOURCE_MAP_INVARIANT_MISMATCH"
+                    ),
+                    "has_full_artifact": True,
+                    "raw_output_preview": '{"result":',
+                }
+            )
+        return result
 
     monkeypatch.setattr(
         project_setup,
@@ -450,7 +467,11 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(monkeypatch)
+    _install_failing_compiler(
+        monkeypatch,
+        failure_artifact_id="spec-authority-failure-1",
+        blocking_gaps=["source_map excerpt does not mention required field 'selected squad'"],
+    )
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
 
@@ -469,10 +490,21 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
     project_id = data["project_id"]
     assert data["setup_status"] == "failed"
     assert data["setup_failure_stage"] == "authority_compile"
-    assert data["setup_failure_summary"] == "Injected compile failure."
+    assert data["setup_failure_summary"] == (
+        "SPEC_COMPILATION_FAILED: SOURCE_MAP_INVARIANT_MISMATCH"
+    )
+    assert data["setup_failure_artifact_id"] == "spec-authority-failure-1"
+    assert data["setup_failure_first_error"] == (
+        "source_map excerpt does not mention required field 'selected squad'"
+    )
+    assert data["has_full_artifact"] is True
     assert data["next_actions"][0]["command"] == "agileforge project setup retry"
     assert "recovery_mutation_event_id" not in data["next_actions"][0]["args"]
     assert workflow.sessions[str(project_id)]["setup_status"] == "failed"
+    assert (
+        workflow.sessions[str(project_id)]["setup_failure_artifact_id"]
+        == "spec-authority-failure-1"
+    )
 
     replay = runner.create_project(
         ProjectCreateRequest(

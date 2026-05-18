@@ -585,6 +585,12 @@ class ProjectSetupMutationRunner:
                 ),
                 spec_hash=authority_result.get("spec_hash"),
                 spec_version_id=authority_result.get("spec_version_id"),
+                failure_artifact_id=authority_result.get("failure_artifact_id"),
+                failure_stage=authority_result.get("failure_stage"),
+                failure_summary=authority_result.get("failure_summary"),
+                raw_output_preview=authority_result.get("raw_output_preview"),
+                has_full_artifact=authority_result.get("has_full_artifact"),
+                blocking_gaps=authority_result.get("blocking_gaps"),
             )
 
         workflow_result = self._ensure_workflow_setup(
@@ -734,6 +740,13 @@ class ProjectSetupMutationRunner:
                 "error": result.error,
                 "spec_hash": result.spec_hash,
                 "spec_version_id": result.spec_version_id,
+                "reason": result.reason,
+                "failure_artifact_id": result.failure_artifact_id,
+                "failure_stage": result.failure_stage,
+                "failure_summary": result.failure_summary,
+                "raw_output_preview": result.raw_output_preview,
+                "has_full_artifact": result.has_full_artifact,
+                "blocking_gaps": result.blocking_gaps,
             }
         if not self._ledger.mark_step_complete(
             mutation_event_id=mutation_event_id,
@@ -975,12 +988,24 @@ class ProjectSetupMutationRunner:
         error_summary: str,
         spec_hash: object,
         spec_version_id: object,
+        failure_artifact_id: object = None,
+        failure_stage: object = None,
+        failure_summary: object = None,
+        raw_output_preview: object = None,
+        has_full_artifact: object = None,
+        blocking_gaps: object = None,
     ) -> dict[str, Any]:
+        setup_failure_summary = str(failure_summary or error_summary)
+        artifact_failure_stage = _optional_str(failure_stage)
+        setup_failure_first_error = _first_failure_error(blocking_gaps, error_summary)
         workflow_result = self._ensure_failed_workflow_setup(
             project_id=project_id,
             resolved_spec_path=resolved_spec_path,
             error_code=error_code,
-            error_summary=error_summary,
+            artifact_failure_stage=artifact_failure_stage,
+            failure_summary=setup_failure_summary,
+            failure_artifact_id=_optional_str(failure_artifact_id),
+            first_error=setup_failure_first_error,
         )
         if not workflow_result.get("ok"):
             self._mark_create_recovery_required(
@@ -1007,16 +1032,25 @@ class ProjectSetupMutationRunner:
             "fsm_state": "SETUP_REQUIRED",
             "setup_error": error_code,
             "setup_failure_stage": "authority_compile",
-            "setup_failure_summary": error_summary,
+            "setup_failure_summary": setup_failure_summary,
+            "setup_failure_artifact_id": _optional_str(failure_artifact_id),
+            "failure_artifact_stage": artifact_failure_stage,
+            "setup_failure_first_error": setup_failure_first_error,
+            "raw_output_preview": _optional_str(raw_output_preview),
+            "has_full_artifact": _optional_bool(has_full_artifact),
             "mutation_event_id": mutation_event_id,
             "next_actions": [_failed_setup_retry_action(project_id, requested_spec_file)],
         }
+        if isinstance(blocking_gaps, list):
+            data["setup_failure_blocking_gaps"] = [str(item) for item in blocking_gaps]
         response = _error(
             error_code,
             details={
                 "project_id": project_id,
                 "mutation_event_id": mutation_event_id,
                 "spec_version_id": spec_version_id,
+                "failure_artifact_id": _optional_str(failure_artifact_id),
+                "first_error": setup_failure_first_error,
             },
             remediation=[
                 "Inspect the compiler/setup error, then run agileforge project setup retry."
@@ -1042,7 +1076,10 @@ class ProjectSetupMutationRunner:
         project_id: int,
         resolved_spec_path: Path,
         error_code: str,
-        error_summary: str,
+        artifact_failure_stage: str | None,
+        failure_summary: str,
+        failure_artifact_id: str | None,
+        first_error: str | None,
     ) -> dict[str, Any]:
         session_id = str(project_id)
         try:
@@ -1055,7 +1092,10 @@ class ProjectSetupMutationRunner:
                 "setup_status": "failed",
                 "setup_error": error_code,
                 "setup_failure_stage": "authority_compile",
-                "setup_failure_summary": error_summary,
+                "setup_failure_summary": failure_summary,
+                "setup_failure_artifact_id": failure_artifact_id,
+                "failure_artifact_stage": artifact_failure_stage,
+                "setup_failure_first_error": first_error,
                 "setup_spec_file_path": str(resolved_spec_path),
             }
             merged = {**current, **required_state}
@@ -1299,6 +1339,27 @@ def _optional_int(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _optional_str(value: object) -> str | None:
+    """Return an optional string when the value is present."""
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_bool(value: object) -> bool | None:
+    """Return an optional bool when the value is present."""
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _first_failure_error(blocking_gaps: object, fallback: str) -> str | None:
+    """Return the first actionable compiler validation error."""
+    if isinstance(blocking_gaps, list) and blocking_gaps:
+        return str(blocking_gaps[0])
+    return fallback or None
 
 
 def _failed_setup_retry_action(project_id: int, spec_file: str) -> dict[str, Any]:
