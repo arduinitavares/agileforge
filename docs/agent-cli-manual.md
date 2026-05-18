@@ -275,7 +275,8 @@ agileforge project list
 agileforge project show --project-id 1
 agileforge project create --name "Project" --spec-file specs/app.md --idempotency-key create-project-001
 agileforge project create --dry-run --dry-run-id preview-project-001 --name "Project" --spec-file specs/app.md
-agileforge project setup retry --project-id 1 --spec-file specs/app.md --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --recovery-mutation-event-id 10 --idempotency-key setup-retry-001
+agileforge project setup retry --project-id 1 --spec-file specs/app.md --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --idempotency-key setup-retry-001
+agileforge project setup retry --project-id 1 --spec-file specs/app.md --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --recovery-mutation-event-id 10 --idempotency-key recovery-retry-001
 ```
 
 `project create` and `project setup retry` mutate state.
@@ -934,10 +935,24 @@ Agent rules:
 
 ## Project Setup Retry
 
-Use setup retry when `project create` recorded partial setup and returned
-`MUTATION_RECOVERY_REQUIRED`.
+Use setup retry when `project create` created the project but setup did not reach
+pending authority review.
 
-The retry command can link to the original failed create event:
+For ordinary compiler/setup failures such as `SPEC_COMPILE_FAILED`, retry does
+not need a recovery event id:
+
+```sh
+agileforge project setup retry \
+  --project-id "$PROJECT_ID" \
+  --spec-file specs/app.md \
+  --expected-state SETUP_REQUIRED \
+  --expected-context-fingerprint "$CTX" \
+  --idempotency-key "setup-retry-$PROJECT_ID-001" \
+  --changed-by codex
+```
+
+When `project create` returns `MUTATION_RECOVERY_REQUIRED`, the retry command
+must link to the original recovery event:
 
 ```sh
 agileforge project setup retry \
@@ -950,7 +965,7 @@ agileforge project setup retry \
   --changed-by codex
 ```
 
-Recommended recovery sequence:
+Recommended recovery sequence for `MUTATION_RECOVERY_REQUIRED`:
 
 1. Read the original mutation:
 

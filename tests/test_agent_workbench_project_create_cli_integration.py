@@ -184,6 +184,7 @@ def _install_compiler(
     monkeypatch: pytest.MonkeyPatch,
     *,
     success: bool,
+    error_code: str = "SPEC_COMPILE_FAILED",
 ) -> None:
     """Install a deterministic compiler seam for in-process retry tests."""
     from services.agent_workbench import project_setup
@@ -201,7 +202,7 @@ def _install_compiler(
         if not success:
             return {
                 "success": False,
-                "error_code": "SPEC_COMPILE_FAILED",
+                "error_code": error_code,
                 "error": "Injected compile failure.",
             }
         if lease_guard is not None and not lease_guard("compiled_authority_persisted"):
@@ -304,7 +305,11 @@ def test_project_setup_retry_cli_supersedes_original_create_recovery(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     app = AgentWorkbenchApplication(project_setup_runner=runner)
-    _install_compiler(monkeypatch, success=False)
+    _install_compiler(
+        monkeypatch,
+        success=False,
+        error_code="MUTATION_RECOVERY_REQUIRED",
+    )
 
     create_rc = main(
         [

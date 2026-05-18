@@ -445,6 +445,7 @@ class ProjectSetupMutationRunner:
             create_product=False,
             existing_project_id=request.project_id,
             finalize=False,
+            finalize_domain_failures=original_event_id is None,
         )
         if not setup_result["ok"]:
             if original_event_id is not None:
@@ -517,6 +518,7 @@ class ProjectSetupMutationRunner:
         create_product: bool,
         existing_project_id: int | None = None,
         finalize: bool = True,
+        finalize_domain_failures: bool = True,
     ) -> dict[str, Any]:
         completed_steps = self._completed_steps(mutation_event_id)
         project_id = existing_project_id or self._project_id_for_event(mutation_event_id)
@@ -553,18 +555,36 @@ class ProjectSetupMutationRunner:
             lease_owner=lease_owner,
         )
         if not authority_result.get("ok"):
-            self._mark_create_recovery_required(
+            error_code = str(authority_result["error_code"])
+            if (
+                _setup_failure_requires_recovery(error_code)
+                or not finalize_domain_failures
+            ):
+                self._mark_create_recovery_required(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    project_id=project_id,
+                    code=error_code,
+                    spec_file=requested_spec_file,
+                    safe_to_auto_resume=False,
+                    spec_version_id=authority_result.get("spec_version_id"),
+                )
+                return _recovery_required_response(
+                    self._must_get_ledger(mutation_event_id),
+                    requested_spec_file,
+                )
+            return self._mark_setup_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
                 project_id=project_id,
-                code=str(authority_result["error_code"]),
-                spec_file=requested_spec_file,
-                safe_to_auto_resume=False,
+                requested_spec_file=requested_spec_file,
+                resolved_spec_path=resolved_spec_path,
+                error_code=error_code,
+                error_summary=str(
+                    authority_result.get("error") or "Spec authority compile failed."
+                ),
+                spec_hash=authority_result.get("spec_hash"),
                 spec_version_id=authority_result.get("spec_version_id"),
-            )
-            return _recovery_required_response(
-                self._must_get_ledger(mutation_event_id),
-                requested_spec_file,
             )
 
         workflow_result = self._ensure_workflow_setup(
@@ -711,6 +731,8 @@ class ProjectSetupMutationRunner:
             return {
                 "ok": False,
                 "error_code": result.error_code or SPEC_COMPILE_FAILED,
+                "error": result.error,
+                "spec_hash": result.spec_hash,
                 "spec_version_id": result.spec_version_id,
             }
         if not self._ledger.mark_step_complete(
@@ -781,7 +803,7 @@ class ProjectSetupMutationRunner:
     def _validate_original_recovery_row(
         self,
         request: ProjectSetupRetryRequest,
-    ) -> CliMutationLedger | dict[str, Any]:
+    ) -> CliMutationLedger | dict[str, Any] | None:
         if request.recovery_mutation_event_id is None:
             with Session(self._engine) as session:
                 unresolved = session.exec(
@@ -800,11 +822,7 @@ class ProjectSetupMutationRunner:
                         f"{unresolved.mutation_event_id}."
                     ],
                 )
-            return _error(
-                MUTATION_RECOVERY_INVALID,
-                details={"project_id": request.project_id},
-                remediation=["Provide a recovery mutation event id."],
-            )
+            return None
         row = self._get_ledger(request.recovery_mutation_event_id)
         if (
             row is None
@@ -945,6 +963,112 @@ class ProjectSetupMutationRunner:
             now=_now(),
         )
 
+    def _mark_setup_validation_failed(
+        self,
+        *,
+        mutation_event_id: int,
+        lease_owner: str,
+        project_id: int,
+        requested_spec_file: str,
+        resolved_spec_path: Path,
+        error_code: str,
+        error_summary: str,
+        spec_hash: object,
+        spec_version_id: object,
+    ) -> dict[str, Any]:
+        workflow_result = self._ensure_failed_workflow_setup(
+            project_id=project_id,
+            resolved_spec_path=resolved_spec_path,
+            error_code=error_code,
+            error_summary=error_summary,
+        )
+        if not workflow_result.get("ok"):
+            self._mark_create_recovery_required(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                project_id=project_id,
+                code=WORKFLOW_SESSION_FAILED,
+                spec_file=requested_spec_file,
+                safe_to_auto_resume=True,
+                spec_version_id=_optional_int(spec_version_id),
+            )
+            return _recovery_required_response(
+                self._must_get_ledger(mutation_event_id),
+                requested_spec_file,
+            )
+
+        data = {
+            "project_id": project_id,
+            "name": self._project_name(project_id),
+            "resolved_spec_path": str(resolved_spec_path),
+            "spec_hash": spec_hash,
+            "spec_version_id": spec_version_id,
+            "setup_status": "failed",
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_error": error_code,
+            "setup_failure_stage": "authority_compile",
+            "setup_failure_summary": error_summary,
+            "mutation_event_id": mutation_event_id,
+            "next_actions": [_failed_setup_retry_action(project_id, requested_spec_file)],
+        }
+        response = _error(
+            error_code,
+            details={
+                "project_id": project_id,
+                "mutation_event_id": mutation_event_id,
+                "spec_version_id": spec_version_id,
+            },
+            remediation=[
+                "Inspect the compiler/setup error, then run agileforge project setup retry."
+            ],
+            data=data,
+        )
+        if not self._mark_simple_status(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            status=MutationStatus.VALIDATION_FAILED,
+            response=response,
+        ):
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT.value,
+                details={"mutation_event_id": mutation_event_id},
+                remediation=["Re-read mutation state before retrying setup."],
+            )
+        return response
+
+    def _ensure_failed_workflow_setup(
+        self,
+        *,
+        project_id: int,
+        resolved_spec_path: Path,
+        error_code: str,
+        error_summary: str,
+    ) -> dict[str, Any]:
+        session_id = str(project_id)
+        try:
+            current = self._workflow.get_session_status(session_id)
+            if current == {}:
+                self._workflow.initialize_session(session_id=session_id)
+                current = self._workflow.get_session_status(session_id)
+            required_state = {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "failed",
+                "setup_error": error_code,
+                "setup_failure_stage": "authority_compile",
+                "setup_failure_summary": error_summary,
+                "setup_spec_file_path": str(resolved_spec_path),
+            }
+            merged = {**current, **required_state}
+            if current != merged:
+                self._workflow.update_session_status(session_id, required_state)
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "state": self._workflow.get_session_status(session_id),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error_code": WORKFLOW_SESSION_FAILED, "error": str(exc)}
+
     def _mark_retry_domain_failed(
         self,
         *,
@@ -971,11 +1095,11 @@ class ProjectSetupMutationRunner:
         lease_owner: str,
         status: MutationStatus,
         response: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         now = _now()
         db_now = _db_datetime(now)
         with Session(self._engine) as session:
-            session.exec(
+            result = session.exec(
                 update(CliMutationLedger)
                 .where(_LEDGER_MUTATION_EVENT_ID == mutation_event_id)
                 .where(_LEDGER_STATUS == MutationStatus.PENDING.value)
@@ -992,6 +1116,7 @@ class ProjectSetupMutationRunner:
                 )
             )
             session.commit()
+            return result.rowcount == 1
 
     def _find_ledger(
         self,
@@ -1159,6 +1284,34 @@ def _workflow_has_required_setup_state(state: dict[str, Any], spec_path: Path) -
         and state.get("setup_error") is None
         and state.get("setup_spec_file_path") == str(spec_path)
     )
+
+
+def _setup_failure_requires_recovery(error_code: str) -> bool:
+    """Return true for mutation-fencing failures that need ledger recovery."""
+    return error_code in {MUTATION_IN_PROGRESS, MUTATION_RECOVERY_REQUIRED}
+
+
+def _optional_int(value: object) -> int | None:
+    """Return an optional integer when the value is present and numeric."""
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _failed_setup_retry_action(project_id: int, spec_file: str) -> dict[str, Any]:
+    return {
+        "command": PROJECT_SETUP_RETRY_COMMAND,
+        "args": {
+            "project_id": project_id,
+            "spec_file": spec_file,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_context_fingerprint": "<refresh-context-fingerprint>",
+        },
+        "reason": "Retry project setup after fixing the compiler/setup failure.",
+    }
 
 
 def _recovery_required_response(

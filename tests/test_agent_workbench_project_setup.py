@@ -172,6 +172,37 @@ def _install_fast_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _install_failing_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error_code: str = "SPEC_COMPILE_FAILED",
+) -> None:
+    from services.agent_workbench import project_setup
+
+    def compile_failing(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del engine, spec_version_id, force_recompile, tool_context
+        del lease_guard, record_progress
+        return {
+            "success": False,
+            "error_code": error_code,
+            "error": "Injected compile failure.",
+        }
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_failing,
+    )
+
+
 def _error_code(result: dict[str, Any]) -> str:
     return result["errors"][0]["code"]
 
@@ -410,6 +441,110 @@ def test_project_create_success_creates_authority_without_acceptance(
     assert fake_workflow.sessions[str(data["project_id"])]["setup_status"] == (
         "authority_pending_review"
     )
+
+
+def test_project_create_compile_failure_records_failed_setup_not_recovery(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+
+    failed = runner.create_project(
+        ProjectCreateRequest(
+            name="Compiler Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-fails-001",
+            changed_by="agent",
+        )
+    )
+
+    assert failed["ok"] is False
+    assert _error_code(failed) == "SPEC_COMPILE_FAILED"
+    data = failed["data"]
+    project_id = data["project_id"]
+    assert data["setup_status"] == "failed"
+    assert data["setup_failure_stage"] == "authority_compile"
+    assert data["setup_failure_summary"] == "Injected compile failure."
+    assert data["next_actions"][0]["command"] == "agileforge project setup retry"
+    assert "recovery_mutation_event_id" not in data["next_actions"][0]["args"]
+    assert workflow.sessions[str(project_id)]["setup_status"] == "failed"
+
+    replay = runner.create_project(
+        ProjectCreateRequest(
+            name="Compiler Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-fails-001",
+            changed_by="agent",
+        )
+    )
+    assert replay == failed
+
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.VALIDATION_FAILED.value
+        assert len(session.exec(select(Product)).all()) == 1
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+    listed = MutationLedgerRepository(engine=engine).list_events(status="recovery_required")
+    assert listed["data"]["items"] == []
+
+
+def test_project_setup_retry_without_recovery_link_recovers_failed_setup(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    failed = runner.create_project(
+        ProjectCreateRequest(
+            name="Recover Failed Setup Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-fails-001",
+            changed_by="agent",
+        )
+    )
+    project_id = failed["data"]["project_id"]
+
+    _install_fast_compiler(monkeypatch)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state=workflow.sessions[str(project_id)],
+    )
+    retried = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint=expected_fingerprint,
+            idempotency_key="retry-failed-setup-001",
+            changed_by="agent",
+        )
+    )
+
+    assert retried["ok"] is True
+    assert retried["data"]["setup_status"] == "authority_pending_review"
+    assert retried["data"]["recovery_mutation_event_id"] is None
+    assert workflow.sessions[str(project_id)]["setup_status"] == "authority_pending_review"
+    with Session(engine) as session:
+        create_row = session.get(CliMutationLedger, failed["data"]["mutation_event_id"])
+        retry_row = session.get(CliMutationLedger, retried["data"]["mutation_event_id"])
+        assert create_row is not None
+        assert retry_row is not None
+        assert create_row.status == MutationStatus.VALIDATION_FAILED.value
+        assert retry_row.status == MutationStatus.SUCCEEDED.value
+        assert len(session.exec(select(Product)).all()) == 1
+        assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
 
 
 def test_project_create_duplicate_replay_key_reuse_and_recovery_required(

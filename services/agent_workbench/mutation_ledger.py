@@ -53,6 +53,9 @@ class MutationStatus(StrEnum):
 REPLAYABLE_RESPONSE_STATUSES = frozenset(
     {
         MutationStatus.SUCCEEDED.value,
+        MutationStatus.VALIDATION_FAILED.value,
+        MutationStatus.GUARD_REJECTED.value,
+        MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS.value,
         MutationStatus.SUPERSEDED.value,
     }
 )
