@@ -149,3 +149,6 @@ def configure_logging(
         "sqlalchemy.pool",
     ):
         logging.getLogger(logger_name).setLevel(sqlalchemy_level)
+
+    for logger_name in ("LiteLLM", "litellm"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)

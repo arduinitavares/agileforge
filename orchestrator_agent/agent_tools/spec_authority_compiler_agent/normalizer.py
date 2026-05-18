@@ -377,7 +377,8 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
 
     if inv.type == InvariantType.MAX_VALUE:
         field_name = str(getattr(parameters, "field_name", "") or "")
-        max_value = str(getattr(parameters, "max_value", "") or "")
+        raw_max_value = getattr(parameters, "max_value", None)
+        max_value = "" if raw_max_value is None else str(raw_max_value)
         field_tokens = _tokenize_support_text(field_name)
         excerpt_tokens = set(_tokenize_support_text(excerpt))
         if _support_overlap_ratio(field_tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:

@@ -1294,6 +1294,43 @@ def test_normalizer_rejects_max_value_when_excerpt_lacks_bound() -> None:
     assert any("100" in gap for gap in normalized.root.blocking_gaps)
 
 
+def test_normalizer_rejects_zero_max_value_when_excerpt_lacks_zero_bound() -> None:
+    """A zero max value must be source-supported, not treated as missing."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["budget constraints"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "MAX_VALUE",
+                "parameters": {"field_name": "budget_used", "max_value": 0},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0000000000000000",
+                "excerpt": "Acceptance Criteria: budget_used <= budget.",
+                "location": "FR-003",
+            }
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
+    assert any("0" in gap for gap in normalized.root.blocking_gaps)
+
+
 def test_normalizer_preserves_relation_constraint_for_dynamic_budget() -> None:
     """Dynamic relationships need a non-numeric relation invariant type."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415

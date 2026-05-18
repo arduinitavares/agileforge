@@ -926,6 +926,10 @@ def _artifact_with_review_findings(
 
 
 def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
+    review_summary = _review_summary(
+        review_findings=snapshot.review_findings,
+        ir_packet_limits=snapshot.ir_packet_limits,
+    )
     spec_payload = {
         "spec_version_id": snapshot.spec_version_id,
         "content_ref": snapshot.content_ref,
@@ -967,24 +971,15 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
             "requirement_candidates": snapshot.requirement_candidates,
             "authority_mappings": snapshot.authority_mappings,
             "review_findings": snapshot.review_findings,
+            "review_summary": review_summary,
             "coverage_summary": snapshot.ir_coverage_summary,
             "ir_packet_limits": snapshot.ir_packet_limits,
         },
         "review_findings": snapshot.review_findings,
+        "review_summary": review_summary,
         "review_guidance": _review_guidance(),
         "next_actions": [
-            {
-                "command": (
-                    "agileforge authority accept --project-id "
-                    f"{snapshot.project_id} --review-token {snapshot.review_token} "
-                    "--idempotency-key <idempotency_key>"
-                ),
-                "mode": "human",
-                "installed": True,
-                "requires_cli_installation": False,
-                "requires": ["review_token", "idempotency_key"],
-                "reason": "Record the reviewed pending authority as canonical.",
-            },
+            _accept_next_action(snapshot, review_summary),
             {
                 "command": (
                     "agileforge authority reject --project-id "
@@ -1001,6 +996,75 @@ def _render_review_packet(snapshot: AuthorityReviewSnapshot) -> JsonDict:
         ],
         "guard_tokens": snapshot.guard_tokens,
     }
+
+
+def _review_summary(
+    *,
+    review_findings: Sequence[Mapping[str, Any]],
+    ir_packet_limits: Mapping[str, Any],
+) -> JsonDict:
+    """Return a compact actionable summary of review blockers."""
+    blocking = [
+        finding for finding in review_findings if finding.get("severity") == "blocking"
+    ]
+    overrideable = [
+        finding for finding in blocking if finding.get("override_allowed") is not False
+    ]
+    non_overrideable = [
+        finding for finding in blocking if finding.get("override_allowed") is False
+    ]
+    return {
+        "acceptance_status": "blocked" if blocking else "accept_ready",
+        "blocking_finding_count": len(blocking),
+        "blocking_finding_codes": sorted(
+            {str(finding.get("code") or "") for finding in blocking}
+        ),
+        "overrideable_blocking_finding_count": len(overrideable),
+        "non_overrideable_blocking_finding_count": len(non_overrideable),
+        "packet_truncated": bool(ir_packet_limits.get("truncated")),
+    }
+
+
+def _accept_next_action(
+    snapshot: AuthorityReviewSnapshot,
+    review_summary: Mapping[str, Any],
+) -> JsonDict:
+    """Return an accept action annotated with review blocking status."""
+    action: JsonDict = {
+        "command": (
+            "agileforge authority accept --project-id "
+            f"{snapshot.project_id} --review-token {snapshot.review_token} "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "mode": "human",
+        "installed": True,
+        "requires_cli_installation": False,
+        "requires": ["review_token", "idempotency_key"],
+        "reason": "Record the reviewed pending authority as canonical.",
+    }
+    if review_summary.get("acceptance_status") == "blocked":
+        codes = [
+            str(code)
+            for code in _as_list(review_summary.get("blocking_finding_codes"))
+            if str(code)
+        ]
+        action.update(
+            {
+                "blocked": True,
+                "review_summary": dict(review_summary),
+                "requires": [
+                    "review_token",
+                    "idempotency_key",
+                    "candidate_specific_overrides",
+                ],
+                "reason": (
+                    "Authority review has blocking findings; resolve them or "
+                    "provide candidate-specific overrides before accepting. "
+                    f"Blocking codes: {', '.join(codes)}."
+                ),
+            }
+        )
+    return action
 
 
 def _render_review_text(packet: JsonDict) -> str:

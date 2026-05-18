@@ -315,8 +315,14 @@ class _FakeProjectSetupRunner:
 class _FakeAuthorityReview:
     """Fake authority review service used to verify facade delegation."""
 
-    def __init__(self) -> None:
+    def __init__(self, response: dict[str, Any] | None = None) -> None:
         self.calls: list[dict[str, object]] = []
+        self.response = response or {
+            "ok": True,
+            "data": {"review_token": REVIEW_TOKEN_FIXTURE},
+            "warnings": [],
+            "errors": [],
+        }
 
     def review(
         self,
@@ -333,12 +339,7 @@ class _FakeAuthorityReview:
                 "output_format": output_format,
             }
         )
-        return {
-            "ok": True,
-            "data": {"review_token": REVIEW_TOKEN_FIXTURE},
-            "warnings": [],
-            "errors": [],
-        }
+        return self.response
 
 
 class _FakeAuthorityDecisionRunner:
@@ -632,9 +633,11 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> None:  # noqa: E501
     """Route setup pending review to authority review before decision commands."""
+    review = _FakeAuthorityReview()
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityPendingReviewReadProjection(),
         authority_projection=_FakeAuthorityProjection(),
+        authority_review=review,
     )
 
     result = app.workflow_next(project_id=PROJECT_ID)
@@ -660,6 +663,7 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
             "requires_cli_installation": False,
             "after_review": True,
             "requires": ["review_token", "idempotency_key"],
+            "reason": "Record accepted authority only after review passes.",
         },
         {
             "command": (
@@ -673,9 +677,65 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
             "requires": ["review_token", "reason", "idempotency_key"],
         },
     ]
+    assert review.calls == [
+        {
+            "project_id": PROJECT_ID,
+            "include_spec": "summary",
+            "output_format": "json",
+        }
+    ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() -> None:
+    """Pending authority accept action should reflect incomplete review gating."""
+    review = _FakeAuthorityReview(
+        response={
+            "ok": True,
+            "data": {
+                "review_summary": {
+                    "acceptance_status": "blocked",
+                    "blocking_finding_count": 2,
+                    "blocking_finding_codes": [
+                        "AUTHORITY_CANDIDATE_UNCOVERED",
+                        "AUTHORITY_REVIEW_PACKET_TRUNCATED",
+                    ],
+                    "overrideable_blocking_finding_count": 1,
+                    "non_overrideable_blocking_finding_count": 1,
+                    "packet_truncated": True,
+                }
+            },
+            "warnings": [],
+            "errors": [],
+        }
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityPendingReviewReadProjection(),
+        authority_projection=_FakeAuthorityProjection(),
+        authority_review=review,
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert review.calls == [
+        {
+            "project_id": PROJECT_ID,
+            "include_spec": "summary",
+            "output_format": "json",
+        }
+    ]
+    accept_action = result["data"]["decision_actions_after_review"][0]
+    assert accept_action["blocked"] is True
+    assert accept_action["requires"] == [
+        "review_token",
+        "idempotency_key",
+        "candidate_specific_overrides",
+    ]
+    assert accept_action["review_summary"]["acceptance_status"] == "blocked"
+    assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]
 
 
 def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation() -> None:  # noqa: E501

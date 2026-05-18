@@ -80,3 +80,14 @@ def test_console_logging_allows_sql_when_echo_is_enabled(
         logging.getLogger("sqlalchemy.engine.Engine").info("SELECT 42")
 
     assert "SELECT 42" in stream.getvalue()
+
+
+def test_configure_logging_suppresses_litellm_info_noise() -> None:
+    """Third-party LLM info logs should not pollute CLI stderr."""
+    logging.getLogger("LiteLLM").setLevel(logging.INFO)
+    logging.getLogger("litellm").setLevel(logging.INFO)
+
+    configure_logging()
+
+    assert logging.getLogger("LiteLLM").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("litellm").getEffectiveLevel() >= logging.WARNING

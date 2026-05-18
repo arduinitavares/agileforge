@@ -409,6 +409,36 @@ def test_accept_with_review_token_promotes_authority_and_advances_to_vision(
     assert workflow.get_session_status(str(project_id))["setup_error"] is None
 
 
+def test_accept_honors_summary_review_token(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A decision token from summary review mode remains a valid guard."""
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, _authority_id, _path = (
+        _seed_pending_review_project(session, tmp_path=tmp_path)
+    )
+    summary_snapshot = build_authority_review_snapshot(
+        project_id=project_id,
+        include_spec="summary",
+        engine=_engine(session),
+    )
+    assert isinstance(summary_snapshot, AuthorityReviewSnapshot)
+    assert summary_snapshot.content_included is False
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=summary_snapshot.review_token,
+        )
+    )
+
+    assert result["ok"] is True
+    decision = _terminal_rows(session)[0]
+    assert decision.review_token == summary_snapshot.review_token
+    assert decision.review_completeness == summary_snapshot.omission_assessment
+
+
 def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
     session: Session,
     tmp_path: Path,

@@ -240,11 +240,22 @@ class AgentWorkbenchApplication:
                 if setup_status != "failed"
                 else None
             )
+            review = (
+                self.authority_review(
+                    project_id=project_id,
+                    include_spec="summary",
+                    output_format="json",
+                )
+                if setup_status == "authority_pending_review"
+                and (authority is None or authority.get("ok") is True)
+                else None
+            )
             return _setup_workflow_next(
                 project_id=project_id,
                 setup_status=setup_status,
                 workflow=workflow,
                 authority=authority,
+                review=review,
             )
 
         pack = self.context_pack(project_id=project_id, phase="sprint-planning")
@@ -525,6 +536,7 @@ def _setup_workflow_next(
     setup_status: str,
     workflow: dict[str, Any],
     authority: dict[str, Any] | None,
+    review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return setup substate routing without loading sprint-planning context."""
     if authority is not None and not authority.get("ok"):
@@ -536,6 +548,7 @@ def _setup_workflow_next(
         "blocked_commands": [],
         "blocked_future_commands": [],
     }
+    review_summary = _authority_review_summary(review)
     if setup_status == "authority_pending_review":
         data["next_actions"] = [
             {
@@ -545,18 +558,42 @@ def _setup_workflow_next(
                 "reason": "Review pending authority before accepting or rejecting it.",
             }
         ]
+        accept_requires = ["review_token", "idempotency_key"]
+        accept_reason = "Record accepted authority only after review passes."
+        accept_action: dict[str, Any] = {
+            "command": (
+                f"agileforge authority accept --project-id {project_id} "
+                "--review-token <review_token> "
+                "--idempotency-key <idempotency_key>"
+            ),
+            "installed": True,
+            "requires_cli_installation": False,
+            "after_review": True,
+            "requires": accept_requires,
+        }
+        if review_summary is not None:
+            data["authority_review_summary"] = review_summary
+            if review_summary.get("acceptance_status") == "blocked":
+                codes = [
+                    str(code)
+                    for code in _as_list(review_summary.get("blocking_finding_codes"))
+                    if str(code)
+                ]
+                accept_action["blocked"] = True
+                accept_action["review_summary"] = review_summary
+                accept_action["requires"] = [
+                    "review_token",
+                    "idempotency_key",
+                    "candidate_specific_overrides",
+                ]
+                accept_reason = (
+                    "Authority review has blocking findings; resolve them or "
+                    "provide candidate-specific overrides before accepting. "
+                    f"Blocking codes: {', '.join(codes)}."
+                )
+        accept_action["reason"] = accept_reason
         data["decision_actions_after_review"] = [
-            {
-                "command": (
-                    f"agileforge authority accept --project-id {project_id} "
-                    "--review-token <review_token> "
-                    "--idempotency-key <idempotency_key>"
-                ),
-                "installed": True,
-                "requires_cli_installation": False,
-                "after_review": True,
-                "requires": ["review_token", "idempotency_key"],
-            },
+            accept_action,
             {
                 "command": (
                     f"agileforge authority reject --project-id {project_id} "
@@ -619,6 +656,7 @@ def _setup_workflow_next(
                 "decision_actions_after_review",
                 [],
             ),
+            "authority_review_summary": data.get("authority_review_summary", {}),
             "manual_remediation": data.get("manual_remediation", []),
             "next_actions": data.get("next_actions", []),
         }
@@ -641,9 +679,37 @@ def _setup_workflow_next(
                 if authority is not None
                 else []
             ),
+            *(
+                _section_warnings(
+                    section="authority_review",
+                    source="authority_review",
+                    envelope=review,
+                )
+                if review is not None
+                else []
+            ),
         ],
         "errors": [],
     }
+
+
+def _authority_review_summary(review: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a compact authority review summary from a review envelope."""
+    if review is None or review.get("ok") is not True:
+        return None
+    data = _envelope_data(review)
+    summary = data.get("review_summary")
+    return dict(summary) if isinstance(summary, dict) else None
+
+
+def _as_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(cast("list[object]", value))
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
 
 
 def _authority_spec_file_template(authority: dict[str, Any] | None) -> str:

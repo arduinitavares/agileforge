@@ -686,6 +686,17 @@ def test_review_packet_renders_derived_ir_and_findings(
     )
     assert pending["coverage_summary"]["all_candidates_covered"] is False
     assert data["review_findings"] == pending["review_findings"]
+    assert data["review_summary"] == {
+        "acceptance_status": "blocked",
+        "blocking_finding_count": 2,
+        "blocking_finding_codes": [
+            "AUTHORITY_CANDIDATE_UNCOVERED",
+            "AUTHORITY_COVERAGE_INCOMPLETE",
+        ],
+        "overrideable_blocking_finding_count": 1,
+        "non_overrideable_blocking_finding_count": 1,
+        "packet_truncated": False,
+    }
     gap_texts = [str(gap["text"]) for gap in pending["artifact"]["gaps"]]
     assert any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in gap_texts)
 

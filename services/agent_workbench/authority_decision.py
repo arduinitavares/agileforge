@@ -485,11 +485,16 @@ class AuthorityDecisionRunner:
         )
         if not isinstance(result, AuthorityReviewSnapshot):
             return _retarget_error(cast("JsonDict", result), command=command)
-        raw = _snapshot_from_review(result)
         if (
             request.review_token is not None
             and request.review_token != result.review_token
         ):
+            matching_snapshot = self._review_snapshot_for_token(
+                project_id=request.project_id,
+                review_token=request.review_token,
+            )
+            if isinstance(matching_snapshot, AuthorityReviewSnapshot):
+                return _snapshot_from_review(matching_snapshot)
             return _error(
                 command=command,
                 code=ErrorCode.STALE_ARTIFACT_FINGERPRINT,
@@ -500,7 +505,27 @@ class AuthorityDecisionRunner:
                 },
                 remediation=["Run authority review again and retry the decision."],
             )
-        return raw
+        return _snapshot_from_review(result)
+
+    def _review_snapshot_for_token(
+        self,
+        *,
+        project_id: int,
+        review_token: str,
+    ) -> AuthorityReviewSnapshot | None:
+        """Return the review snapshot whose include mode produced the token."""
+        for include_spec in ("summary", "full"):
+            result = build_authority_review_snapshot(
+                project_id=project_id,
+                include_spec=include_spec,
+                engine=self._engine,
+            )
+            if (
+                isinstance(result, AuthorityReviewSnapshot)
+                and result.review_token == review_token
+            ):
+                return result
+        return None
 
     def _validate_guards(
         self,

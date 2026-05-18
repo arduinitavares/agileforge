@@ -641,6 +641,9 @@ Important review packet fields:
 - `review_findings`: host-derived findings. Findings with
   `severity: "blocking"` must stop acceptance unless each overrideable
   candidate/finding pair is explicitly overridden by a human.
+- `review_summary`: compact decision status for agents and UI. If
+  `acceptance_status` is `blocked`, treat the accept command as blocked unless
+  the blocking findings are fixed or explicitly overridden per candidate.
 - `pending_authority.coverage_summary`: candidate-level coverage counts and
   whether all candidates are covered.
 - `pending_authority.ir_packet_limits`: render limits and `truncated` status.
@@ -664,6 +667,10 @@ review_token="$(
 
 python -c 'import json; g=json.load(open("review.json"))["data"]["guard_tokens"]; print({k: g[k] for k in sorted(g)})'
 ```
+
+`--include-spec summary`, `auto`, and `full` review modes all produce valid
+review tokens. The token binds the exact reviewed mode and guard snapshot; do
+not mix guard fields from one review packet with a token from another packet.
 
 Ask an AI reviewer this exact question, using the review packet as evidence:
 
