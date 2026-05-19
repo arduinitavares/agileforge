@@ -600,42 +600,85 @@ def test_accept_ignores_legacy_candidate_findings(
     assert _terminal_rows(session)[0].status == "accepted"
 
 
-def test_accept_blocks_current_ir_candidate_findings(
+def test_accept_ignores_candidate_and_coverage_findings_defensively(
     session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Candidate findings block accept when paired with current coverage marker."""
+    """Removed host semantic findings do not block human authority acceptance."""
     _make_schema_v3_ready(_engine(session))
+    spec_content = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    )
     project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
         session,
         tmp_path=tmp_path,
+        spec_content=spec_content,
+        spec_filename="spec.json",
     )
     snapshot = _snapshot(session, project_id)
-    candidate_finding = {
-        "finding_id": "AUTHORITY_CANDIDATE_UNCOVERED:REQ-1",
+    findings = [
+        {
+            "finding_id": "AUTHORITY_CANDIDATE_UNCOVERED:REQ-1",
+            "severity": "blocking",
+            "code": "AUTHORITY_CANDIDATE_UNCOVERED",
+            "message": "Removed host semantic candidate finding.",
+            "candidate_ids": ["REQ-1"],
+            "source_unit_ids": [],
+            "override_allowed": True,
+        },
+        {
+            "finding_id": "AUTHORITY_COVERAGE_INCOMPLETE:REQ-1",
+            "severity": "blocking",
+            "code": "AUTHORITY_COVERAGE_INCOMPLETE",
+            "message": "Removed host semantic coverage finding.",
+            "candidate_ids": ["REQ-1"],
+            "source_unit_ids": [],
+            "override_allowed": False,
+        },
+    ]
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=findings),
+    )
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
+
+
+def test_accept_blocks_invalid_source_ref_finding(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structural source-ref findings still block accept."""
+    _make_schema_v3_ready(_engine(session))
+    spec_content = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_content=spec_content,
+        spec_filename="spec.json",
+    )
+    snapshot = _snapshot(session, project_id)
+    invalid_source_ref = {
+        "finding_id": "SOURCE_REF_INVALID",
         "severity": "blocking",
-        "code": "AUTHORITY_CANDIDATE_UNCOVERED",
-        "message": "Current uncovered candidate.",
-        "candidate_ids": ["REQ-1"],
-        "source_unit_ids": [],
-        "override_allowed": True,
-    }
-    coverage_marker = {
-        "finding_id": "AUTHORITY_COVERAGE_INCOMPLETE:REQ-1",
-        "severity": "blocking",
-        "code": "AUTHORITY_COVERAGE_INCOMPLETE",
-        "message": "Current coverage is incomplete.",
-        "candidate_ids": ["REQ-1"],
+        "code": "SOURCE_REF_INVALID",
+        "message": "Compiled authority source_map references unknown spec item IDs.",
+        "candidate_ids": [],
         "source_unit_ids": [],
         "override_allowed": False,
     }
     monkeypatch.setattr(
         "services.agent_workbench.authority_decision.build_authority_review_snapshot",
-        lambda **_kwargs: replace(
-            snapshot,
-            review_findings=[candidate_finding, coverage_marker],
-        ),
+        lambda **_kwargs: replace(snapshot, review_findings=[invalid_source_ref]),
     )
 
     result = _runner(session, _workflow_for(project_id)).accept(
@@ -644,11 +687,9 @@ def test_accept_blocks_current_ir_candidate_findings(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
-    blocking_codes = {
-        finding["code"]
-        for finding in result["errors"][0]["details"]["blocking_findings"]
-    }
-    assert blocking_codes == {"AUTHORITY_CANDIDATE_UNCOVERED"}
+    assert result["errors"][0]["details"]["blocking_findings"][0]["code"] == (
+        "SOURCE_REF_INVALID"
+    )
 
 
 def _first_overrideable_blocking_override(

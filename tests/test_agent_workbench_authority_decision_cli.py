@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from cli.main import main
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from services.agent_workbench.authority_decision import AuthorityAcceptRequest
 
 type JsonObject = dict[str, object]
 
@@ -330,6 +335,68 @@ def test_authority_accept_forwards_broad_incomplete_review_fields(
     request = app.calls[0][1]
     assert request["allow_incomplete_review"] is True
     assert request["incomplete_review_rationale"] == "Reviewed manually."
+
+
+def test_authority_accept_without_token_uses_latest_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Human CLI can accept with project id only when latest review is fresh."""
+    _ = tmp_path
+    expected_project_id = 42
+    latest_review_value = "review-" "token-123"
+    captured_requests: list[AuthorityAcceptRequest] = []
+
+    class FakeApplication:
+        """Fake default application facade for tokenless accept routing."""
+
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str,
+            output_format: str,
+        ) -> dict[str, Any]:
+            """Return the latest fresh review for a project."""
+            assert project_id == expected_project_id
+            assert include_spec == "auto"
+            assert output_format == "json"
+            return {
+                "ok": True,
+                "data": {
+                    "review_token": latest_review_value,
+                    "review_summary": {"acceptance_status": "accept_ready"},
+                },
+                "errors": [],
+                "warnings": [],
+            }
+
+        def authority_accept(
+            self,
+            request: AuthorityAcceptRequest,
+        ) -> dict[str, Any]:
+            """Record the accept request built by CLI tokenless accept."""
+            captured_requests.append(request)
+            return {
+                "ok": True,
+                "data": {"accepted_decision_id": 7},
+                "errors": [],
+                "warnings": [],
+            }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.application.AgentWorkbenchApplication",
+        lambda **_kwargs: FakeApplication(),
+    )
+
+    exit_code = main(["authority", "accept", "--project-id", str(expected_project_id)])
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert captured_requests[0].review_token == latest_review_value
+    assert captured_requests[0].idempotency_key.startswith("authority-accept-42-")
 
 
 def test_authority_accept_without_token_non_tty_requires_review(
