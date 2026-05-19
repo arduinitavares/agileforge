@@ -217,14 +217,13 @@ class SpecAuthorityCompilerInput(BaseModel):
         Field(default=None, description="Optional spec version identifier."),
     ]
     spec_source_format: Annotated[
-        Literal["agileforge.spec.v1", "agileforge.spec_legacy_markdown.v1"],
+        Literal["agileforge.spec.v1"],
         Field(
             description=(
-                "Input format: agileforge.spec.v1 or "
-                "agileforge.spec_legacy_markdown.v1."
+                "Input format: canonical agileforge.spec.v1 JSON."
             )
         ),
-    ] = "agileforge.spec_legacy_markdown.v1"
+    ] = "agileforge.spec.v1"
 
     @model_validator(mode="after")
     def validate_exactly_one_source(self) -> SpecAuthorityCompilerInput:

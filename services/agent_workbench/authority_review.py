@@ -518,6 +518,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     artifact, authority_evidence, classification_evidence = (
         _authority_artifact_payload(authority)
     )
+    artifact_shape_findings = _compiled_artifact_shape_findings(authority)
     structured_artifact = _structured_artifact_from_text(source.text)
     if structured_artifact is not None:
         outline: list[JsonDict] = []
@@ -540,6 +541,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         diagnostics=diagnostics,
         artifact=artifact,
         structured_artifact=structured_artifact,
+        artifact_shape_findings=artifact_shape_findings,
     )
     if structured_artifact is None:
         artifact = _artifact_with_coverage_gaps(
@@ -619,6 +621,7 @@ def _authority_ir_payload(
     diagnostics: Sequence[Mapping[str, Any]],
     artifact: Mapping[str, Any],
     structured_artifact: TechnicalSpecArtifact | None,
+    artifact_shape_findings: Sequence[Mapping[str, Any]],
 ) -> JsonDict:
     """Build public review metadata without host semantic candidate coverage."""
     diagnostic_findings = _diagnostic_review_findings(diagnostics)
@@ -628,6 +631,7 @@ def _authority_ir_payload(
     )
     rendered_findings = [
         *[_finding_payload(finding) for finding in diagnostic_findings],
+        *[dict(finding) for finding in artifact_shape_findings],
         *source_ref_findings,
     ]
     return {
@@ -1163,6 +1167,40 @@ def _load_compiled_artifact(
     if isinstance(parsed.root, SpecAuthorityCompilationFailure):
         return None
     return parsed.root
+
+
+def _compiled_artifact_shape_findings(
+    authority: CompiledSpecAuthority,
+) -> list[JsonDict]:
+    """Return non-overrideable findings for malformed compiler artifacts."""
+    artifact_json = getattr(authority, "compiled_artifact_json", None)
+    reason = ""
+    if not artifact_json:
+        reason = "compiled_artifact_json is missing."
+    else:
+        try:
+            parsed = SpecAuthorityCompilerOutput.model_validate_json(artifact_json)
+        except (ValidationError, ValueError):
+            reason = "compiled_artifact_json failed schema validation."
+        else:
+            if isinstance(parsed.root, SpecAuthorityCompilationFailure):
+                reason = "compiled_artifact_json contains a compiler failure object."
+
+    if not reason:
+        return []
+
+    return [
+        {
+            "finding_id": "COMPILED_AUTHORITY_INVALID",
+            "severity": "blocking",
+            "code": "COMPILED_AUTHORITY_INVALID",
+            "message": "Compiled authority artifact is not a valid success object.",
+            "candidate_ids": [],
+            "source_unit_ids": [],
+            "override_allowed": False,
+            "details": {"reason": reason},
+        }
+    ]
 
 
 def _authority_artifact_payload(

@@ -38,7 +38,7 @@ from utils.spec_schemas import (
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 
-SpecSourceFormat = Literal["agileforge.spec.v1", "agileforge.spec_legacy_markdown.v1"]
+SpecSourceFormat = Literal["agileforge.spec.v1", "plain_text"]
 
 _META_POLICY_LOCATION_RE = re.compile(
     r"\b("
@@ -185,17 +185,17 @@ def _summarize_validation_error(label: str, exc: ValidationError) -> str:
 def _detect_source_format(source_text: str | None) -> SpecSourceFormat:
     """Detect whether the source is canonical AgileForge profile JSON."""
     if not source_text:
-        return "agileforge.spec_legacy_markdown.v1"
+        return "plain_text"
     try:
         parsed = json.loads(source_text)
     except json.JSONDecodeError:
-        return "agileforge.spec_legacy_markdown.v1"
+        return "plain_text"
     if (
         isinstance(parsed, dict)
         and parsed.get("schema_version") == "agileforge.spec.v1"
     ):
         return "agileforge.spec.v1"
-    return "agileforge.spec_legacy_markdown.v1"
+    return "plain_text"
 
 
 def _default_missing_source_map_for_success_payload(payload: object) -> None:

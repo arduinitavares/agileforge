@@ -411,11 +411,11 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
     ]
 
 
-def test_review_malformed_artifact_fallback_preserves_persisted_authority_fields(
+def test_review_malformed_compiled_artifact_blocks_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Malformed compiler artifacts fall back to persisted authority fields."""
+    """Malformed compiler artifacts are structural blockers."""
     project_id, _spec_version_id, authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -481,6 +481,17 @@ def test_review_malformed_artifact_fallback_preserves_persisted_authority_fields
     )
 
     assert result["ok"] is True
+    summary = result["data"]["review_summary"]
+    assert summary["acceptance_status"] == "blocked"
+    assert "COMPILED_AUTHORITY_INVALID" in summary["blocking_finding_codes"]
+    findings = result["data"]["review_findings"]
+    invalid = next(
+        finding
+        for finding in findings
+        if finding["code"] == "COMPILED_AUTHORITY_INVALID"
+    )
+    assert invalid["severity"] == "blocking"
+    assert invalid["override_allowed"] is False
     artifact = result["data"]["pending_authority"]["artifact"]
     assert artifact["eligible_feature_rules"] == [
         {

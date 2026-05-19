@@ -536,31 +536,22 @@ details live in item statements and tags, not in parser code.
 - JSON Schema should be generated from the application model or kept in lockstep
   by tests.
 - Authority compiler versions must declare which item types they support.
-- Existing free-form specs may need migration, regeneration, or a legacy path.
-- Legacy Markdown compatibility must be behind a named compatibility mode:
-  `agileforge.spec_legacy_markdown.v1`.
+- Existing free-form specs must be migrated or regenerated into
+  `agileforge.spec.v1` before authority compilation.
 
 ## 10. Rollout, Migration, And Compatibility
 
-This profile should be introduced as an optional v1 authoring target before it
-becomes required.
+This profile is the required authority input contract.
 
 Compatibility rules:
 
-- Existing Markdown specs remain readable legacy inputs.
-- New LLM-generated specs should produce both `spec.json` and rendered
-  `spec.md`.
-- Authority compilation should prefer `spec.json` when present.
-- Legacy Markdown authority compilation may continue temporarily, but without
-  deterministic semantic candidate blockers.
-- Legacy Markdown inputs may create pending authority for review, but only
-  `agileforge.spec.v1` artifacts are eligible for the structured spec compiler
-  path.
-- The legacy path is eligible for removal after the multi-domain fixture suite
-  can generate valid `agileforge.spec.v1` artifacts and compile them without
-  using Markdown candidate extraction.
-- A future migration can convert legacy specs into the profile with human
-  review before acceptance.
+- New LLM-generated specs should produce canonical `spec.json` plus rendered
+  `spec.md` for human review.
+- `spec.json` is the only authority compiler input.
+- Markdown specs are review/render artifacts only. They cannot create pending
+  authority and must be regenerated into `agileforge.spec.v1` JSON first.
+- Migration tooling may convert older Markdown specs into the profile with
+  human review before authority acceptance.
 
 ## 11. Success Metrics
 

@@ -162,10 +162,14 @@ The CLI may auto-use the latest fresh review token when it can prove freshness. 
 agileforge authority accept --project-id 2 --review-token <token>
 ```
 
-Reject should also be simple:
+Reject remains explicitly guarded:
 
 ```bash
-agileforge authority reject --project-id 2 --reason "Compiled authority misses budget rule."
+agileforge authority reject \
+  --project-id 2 \
+  --review-token <token> \
+  --idempotency-key authority-reject-2-001 \
+  --reason "Compiled authority misses budget rule."
 ```
 
 ## Removal Scope

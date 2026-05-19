@@ -56,7 +56,7 @@ def test_compiler_instructions_do_not_require_candidate_manifest() -> None:
 
 
 def test_compiler_instructions_document_structured_spec_support_matrix() -> None:
-    """Compiler prompt must document structured and legacy source handling."""
+    """Compiler prompt must document structured source handling."""
     instructions = _compiler_instructions()
 
     assert "agileforge.spec.v1" in instructions
@@ -66,7 +66,7 @@ def test_compiler_instructions_document_structured_spec_support_matrix() -> None
         in instructions
     )
     assert "Unsupported normative items become gaps" in instructions
-    assert "agileforge.spec_legacy_markdown.v1" in instructions
+    assert "agileforge.spec_legacy_markdown.v1" not in instructions
 
 
 def test_compiler_instructions_document_host_semantic_ids() -> None:
@@ -140,6 +140,18 @@ class TestSpecAuthorityCompilerInput:
                     "product_id": None,
                     "spec_version_id": None,
                     "spec_source_format": "not-a-real-format",
+                }
+            )
+
+        with pytest.raises(ValidationError):
+            SpecAuthorityCompilerInput.model_validate(
+                {
+                    "spec_source": "Raw spec text",
+                    "spec_content_ref": None,
+                    "domain_hint": None,
+                    "product_id": None,
+                    "spec_version_id": None,
+                    "spec_source_format": "agileforge.spec_legacy_markdown.v1",
                 }
             )
 

@@ -519,7 +519,7 @@ def test_preview_spec_authority_returns_success_and_updates_cache(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Auth required."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=tool_context,
     )
 
@@ -543,7 +543,7 @@ def test_preview_spec_authority_returns_failure_envelope(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Missing scope."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=make_tool_context(),
     )
 
@@ -589,10 +589,10 @@ def test_preview_spec_authority_returns_unexpected_exception_error(
     )
 
 
-def test_preview_spec_authority_honors_legacy_tool_compiler_monkeypatch(
+def test_preview_spec_authority_honors_tool_compiler_monkeypatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify preview spec authority honors legacy tool compiler monkeypatch."""
+    """Verify preview spec authority honors tool compiler monkeypatch."""
     from services.specs import compiler_service  # noqa: PLC0415
     from tools import spec_tools  # noqa: PLC0415
 
@@ -604,7 +604,7 @@ def test_preview_spec_authority_honors_legacy_tool_compiler_monkeypatch(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Auth required."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=tool_context,
     )
 
@@ -651,10 +651,10 @@ def test_resolve_engine_prefers_patched_spec_tools_get_engine_over_stale_engine(
     assert resolved is preferred_engine
 
 
-def test_default_compiler_invocation_does_not_send_host_candidate_manifest(
+def test_default_compiler_invocation_rejects_unstructured_spec_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compiler input should contain source text, not host semantic candidates."""
+    """Compiler invocation requires canonical agileforge.spec.v1 JSON."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     captured: list[SpecAuthorityCompilerInput] = []
@@ -668,16 +668,16 @@ def test_default_compiler_invocation_does_not_send_host_candidate_manifest(
         fake_invoke,
     )
 
-    compiler_service._default_invoke_spec_authority_compiler(
-        spec_content="# Spec\n\nThe system must record audit evidence.",
-        content_ref=None,
-        product_id=4,
-        spec_version_id=9,
-    )
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        compiler_service._default_invoke_spec_authority_compiler(
+            spec_content="# Spec\n\nThe system must record audit evidence.",
+            content_ref=None,
+            product_id=4,
+            spec_version_id=9,
+        )
 
-    assert len(captured) == 1
-    assert not hasattr(captured[0], "candidate_manifest")
-    assert captured[0].spec_source_format == "agileforge.spec_legacy_markdown.v1"
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert captured == []
 
 
 def test_default_compiler_invocation_marks_structured_spec_source_format(

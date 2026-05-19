@@ -36,6 +36,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer imp
 )
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.profile_content import (
+    STRUCTURED_SPEC_FORMAT,
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
@@ -755,18 +756,10 @@ def _default_invoke_spec_authority_compiler(
 
 def _detect_spec_source_format(
     spec_content: str,
-) -> Literal["agileforge.spec.v1", "agileforge.spec_legacy_markdown.v1"]:
+) -> Literal["agileforge.spec.v1"]:
     """Return the source format marker for compiler input."""
-    try:
-        parsed = json.loads(spec_content)
-    except json.JSONDecodeError:
-        return "agileforge.spec_legacy_markdown.v1"
-    if (
-        isinstance(parsed, dict)
-        and parsed.get("schema_version") == "agileforge.spec.v1"
-    ):
-        return "agileforge.spec.v1"
-    return "agileforge.spec_legacy_markdown.v1"
+    normalize_spec_content_for_registry(spec_content)
+    return cast("Literal['agileforge.spec.v1']", STRUCTURED_SPEC_FORMAT)
 
 
 def _resolve_compiler_invoker() -> Callable[..., str]:

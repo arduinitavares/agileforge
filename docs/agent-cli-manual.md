@@ -652,9 +652,8 @@ python -m json.tool review.json >/dev/null
 
 Important review packet fields:
 
-- `pending_authority.ir_provenance`: `model_emitted`, `mixed`,
-  `host_parsed`, or `legacy_absent`. Treat `host_parsed` and
-  `legacy_absent` as review evidence quality signals, not acceptance proof.
+- `pending_authority.ir_provenance`: `not_applicable` for structured
+  AgileForge specs. Candidate IR is not part of the acceptance gate.
 - `review_summary`: compact decision status for agents and UI.
 - `pending_authority.ir_packet_limits`: render limits and `truncated` status.
 
