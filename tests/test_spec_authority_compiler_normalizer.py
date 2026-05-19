@@ -803,6 +803,72 @@ def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None
     assert success.authority_mappings[0].mapping_status == "weak_mapping"
 
 
+def test_structured_profile_allows_missing_source_map() -> None:
+    """Structured authority no longer requires source_map for acceptance-critical IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["source_map"] = []
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map == []
+    assert normalized.root.requirement_candidates == []
+    assert normalized.root.authority_mappings == []
+    assert normalized.root.invariants[0].id.startswith("INV-")
+
+
+def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> None:
+    """Structured mode does not reject semantically weak source excerpts."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "This sentence is review evidence only."
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert (
+        normalized.root.source_map[0].location
+        == "REQ.audit-evidence.statement"
+    )
+    assert normalized.root.requirement_candidates == []
+    assert normalized.root.authority_mappings == []
+
+
+def test_structured_profile_invalid_source_ref_is_review_finding_not_compile_failure() -> None:
+    """Normalizer preserves invalid source refs so review can block structurally."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["location"] = "REQ.missing.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].location == "REQ.missing.statement"
+
+
 def test_model_emitted_manifest_mapping_does_not_require_source_units() -> None:
     """Model candidate/mapping hints can bind to host source units by exact quote."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
