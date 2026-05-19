@@ -98,8 +98,57 @@ def _business_engine(path: Path) -> Engine:
     )
 
 
-def _write_spec(caller_dir: Path) -> Path:
-    """Write a small project spec in the simulated caller repository."""
+def _structured_spec_payload(*, title: str = "Outside Repo Project") -> dict[str, Any]:
+    """Build a minimal valid agileforge.spec.v1 fixture."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.outside-repo",
+        "title": title,
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Create a project from a structured authority spec.",
+        "problem_statement": (
+            "Operators need project setup to persist authority evidence."
+        ),
+        "items": [
+            {
+                "id": "REQ.outside-repo.audit",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Project setup evidence",
+                "statement": "The system MUST persist project setup evidence.",
+                "verification": "system-test",
+                "acceptance": [
+                    "Project setup evidence is stored for each create request."
+                ],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+
+
+def _write_structured_spec(caller_dir: Path) -> Path:
+    """Write a structured project spec in the simulated caller repository."""
+    spec_file = caller_dir / "specs" / "spec.json"
+    spec_file.parent.mkdir(parents=True, exist_ok=True)
+    spec_file.write_text(
+        json.dumps(_structured_spec_payload()),
+        encoding="utf-8",
+    )
+    return spec_file
+
+
+def _write_markdown_spec(caller_dir: Path) -> Path:
+    """Write unsupported Markdown authority input for rejection tests."""
     spec_file = caller_dir / "specs" / "app.md"
     spec_file.parent.mkdir(parents=True, exist_ok=True)
     spec_file.write_text(
@@ -263,7 +312,7 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
     repo_root = Path(__file__).resolve().parents[1]
     caller_dir = tmp_path / "caller"
     caller_dir.mkdir()
-    spec_file = _write_spec(caller_dir)
+    spec_file = _write_structured_spec(caller_dir)
     _write_sitecustomize_compiler_patch(caller_dir)
     business_db_path = tmp_path / "business.sqlite3"
     session_db_path = tmp_path / "sessions.sqlite3"
@@ -284,7 +333,7 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
             "--name",
             "Outside Repo Project",
             "--spec-file",
-            "specs/app.md",
+            "specs/spec.json",
             "--idempotency-key",
             "outside-repo-project-001",
         ],
@@ -341,9 +390,13 @@ def test_project_create_cli_returns_error_envelope_for_invalid_structured_spec(
     assert create_rc == INVALID_COMMAND_EXIT_CODE
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "SPEC_FILE_INVALID"
-    first_error = payload["data"]["setup_failure_first_error"]
-    assert first_error
-    assert "Invalid agileforge.spec.v1 content" in first_error
+    assert payload["data"] is None
+    assert (
+        "Invalid agileforge.spec.v1 content"
+        in payload["errors"][0]["details"]["reason"]
+    )
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
 
 
 def test_project_create_rejects_markdown_spec_source(
@@ -359,7 +412,7 @@ def test_project_create_rejects_markdown_spec_source(
     app = AgentWorkbenchApplication(project_setup_runner=runner)
     caller_dir = tmp_path / "caller"
     caller_dir.mkdir()
-    spec_file = _write_spec(caller_dir)
+    spec_file = _write_markdown_spec(caller_dir)
     monkeypatch.chdir(caller_dir)
 
     exit_code = main(
@@ -394,7 +447,7 @@ def test_project_setup_retry_cli_supersedes_original_create_recovery(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    spec_file = _write_spec(tmp_path)
+    spec_file = _write_structured_spec(tmp_path)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     app = AgentWorkbenchApplication(project_setup_runner=runner)
