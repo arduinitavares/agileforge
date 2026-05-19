@@ -849,6 +849,39 @@ def test_review_accepts_structured_source_ref_with_dotted_item_id(
     assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
 
 
+def test_review_treats_non_structured_dotted_source_ref_as_missing(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Non-structured dotted source refs are missing evidence, not invalid IDs."""
+    spec_content = _agileforge_spec_profile_payload()
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens.",
+                source_location="spec.line.1",
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    findings = result["data"]["review_findings"]
+    codes = {finding["code"] for finding in findings}
+    assert "SOURCE_REFS_MISSING" in codes
+    assert "SOURCE_REF_INVALID" not in codes
+    missing = next(f for f in findings if f["code"] == "SOURCE_REFS_MISSING")
+    assert missing["override_allowed"] is True
+    assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
+
+
 def test_review_warns_when_structured_source_refs_are_missing(
     session: Session,
     tmp_path: Path,

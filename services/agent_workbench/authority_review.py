@@ -66,6 +66,20 @@ AUTHORITY_REVIEW_COMMAND: Final[str] = "agileforge authority review"
 REVIEW_TOKEN_SCHEMA: Final[str] = "agileforge.authority_review.v1"  # noqa: S105
 COVERAGE_SCHEMA: Final[str] = "agileforge.authority_coverage_summary.v1"
 DEFAULT_REVIEW_SOURCE_LIMIT_BYTES: Final[int] = 262_144
+STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
+    "GOAL.",
+    "NON_GOAL.",
+    "REQ.",
+    "QUALITY.",
+    "CONSTRAINT.",
+    "INTERFACE.",
+    "DATA.",
+    "DECISION.",
+    "ASSUMPTION.",
+    "RISK.",
+    "EXAMPLE.",
+    "OPEN_QUESTION.",
+)
 
 
 @dataclass(frozen=True)
@@ -759,25 +773,11 @@ def _source_ref_item_id(
             candidate = candidate.rsplit(".", maxsplit=1)[0]
             if candidate in known_item_ids:
                 return candidate
-    prefix = value.rsplit(".", maxsplit=1)[0]
-    if prefix.startswith(
-        (
-            "GOAL.",
-            "NON_GOAL.",
-            "REQ.",
-            "QUALITY.",
-            "CONSTRAINT.",
-            "INTERFACE.",
-            "DATA.",
-            "DECISION.",
-            "ASSUMPTION.",
-            "RISK.",
-            "EXAMPLE.",
-            "OPEN_QUESTION.",
-        )
-    ):
-        return prefix
-    return value if "." in value else None
+    if not value.startswith(STRUCTURED_SPEC_ITEM_PREFIXES):
+        return None
+
+    candidate = value.rsplit(".", maxsplit=1)[0]
+    return candidate if "." in candidate else value
 
 
 def _source_map_entries(source_map: object) -> list[Mapping[str, Any]] | None:
