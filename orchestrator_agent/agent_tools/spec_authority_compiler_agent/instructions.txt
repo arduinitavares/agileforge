@@ -105,6 +105,7 @@ STRICTNESS:
 NOTE:
 - Host-side normalization is the final authority for prompt_hash and invariant IDs.
 - You MUST still output a prompt_hash string that matches the required hex format.
+- source_map is review evidence. It should point to supporting agileforge.spec.v1 item IDs when possible, but host validation does not use it to prove semantic coverage.
 
 NON-FATAL HASHING RULE (MANDATORY):
 - Hashing and deterministic IDs are enforced by the host normalizer. Do NOT fail if you cannot compute them.

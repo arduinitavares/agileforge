@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (
     classify_invariant_from_text,
     compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
     compute_spec_hash,
 )
@@ -51,6 +52,7 @@ def test_compiler_instructions_do_not_require_candidate_manifest() -> None:
     assert "authority_mappings" not in instructions
     assert "agileforge.spec.v1" in instructions
     assert "Do not infer authority from Markdown narrative" in instructions
+    assert "source_map is review evidence" in instructions
 
 
 def test_compiler_instructions_document_structured_spec_support_matrix() -> None:
@@ -330,8 +332,7 @@ class TestCompilerOutputSchema:
         expected_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
         assert normalized.root.prompt_hash == expected_hash
 
-        expected_id = compute_invariant_id(
-            "The payload must include user_id.",
+        expected_id = compute_invariant_id_from_payload(
             InvariantType.REQUIRED_FIELD,
             normalized.root.invariants[0].parameters,
         )
@@ -476,7 +477,7 @@ class TestSpecAuthorityCompilerAgentIntegration:
 
         Assertions limited to deterministic contracts (after normalization):
         - prompt_hash == compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
-        - invariant.id == compute_invariant_id(source_map.excerpt, invariant.type)
+        - invariant.id == compute_invariant_id_from_payload(invariant.type)
         - source_map ties invariant_id to excerpt
         """
         from google.adk.runners import Runner  # noqa: PLC0415
@@ -566,6 +567,6 @@ class TestSpecAuthorityCompilerAgentIntegration:
         assert sm_entry is not None, "No source_map entry found for invariant"
         assert sm_entry.excerpt
 
-        expected_id = compute_invariant_id(sm_entry.excerpt, inv.type)
+        expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
         assert inv.id == expected_id
         assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)

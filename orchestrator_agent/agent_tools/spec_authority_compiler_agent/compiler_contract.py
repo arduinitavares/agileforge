@@ -60,6 +60,17 @@ def compute_invariant_id(
     return f"INV-{digest[:16]}"
 
 
+def compute_invariant_id_from_payload(
+    invariant_type: InvariantType,
+    parameters: InvariantParameters | None = None,
+) -> str:
+    """Compute deterministic invariant ID from invariant semantics only."""
+    parameter_seed = _canonical_parameter_seed(parameters)
+    seed = f"{invariant_type.value}|{parameter_seed}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"INV-{digest[:16]}"
+
+
 def classify_invariant_from_text(text: str) -> Invariant | None:
     """Classify a single invariant from a spec sentence using deterministic rules."""
     if not text or not text.strip():
