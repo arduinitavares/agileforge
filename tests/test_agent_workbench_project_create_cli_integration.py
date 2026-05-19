@@ -295,6 +295,52 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
+def test_project_create_rejects_markdown_spec_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Project create refuses Markdown authority input before setup mutation."""
+    business_db = tmp_path / "business.db"
+    engine = _business_engine(business_db)
+    workflow = FakeWorkflowPort()
+    monkeypatch.setattr(
+        "cli.main.AgentWorkbenchApplication",
+        lambda **_kwargs: AgentWorkbenchApplication(
+            business_engine=engine,
+            workflow=workflow,
+        ),
+    )
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    spec_file = _write_spec(caller_dir)
+    monkeypatch.chdir(caller_dir)
+
+    exit_code = main(
+        [
+            "project",
+            "create",
+            "--name",
+            "Markdown Project",
+            "--spec-file",
+            str(spec_file),
+            "--idempotency-key",
+            "markdown-project-create-001",
+        ]
+    )
+
+    payload = _captured_payload(capsys)
+    assert exit_code == 2
+    assert payload["ok"] is False
+    assert payload["errors"][0]["code"] == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert payload["errors"][0]["remediation"] == [
+        "Generate specs/spec.json as agileforge.spec.v1 JSON.",
+        "Retry project create with --spec-file specs/spec.json.",
+    ]
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+
+
 def test_project_setup_retry_cli_supersedes_original_create_recovery(
     engine: Engine,
     tmp_path: Path,

@@ -18,6 +18,10 @@ from agile_sqlmodel import (
     SpecRegistry,
 )
 from db.migrations import ensure_schema_current
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 from tests.typing_helpers import make_tool_context, require_id
 from utils import failure_artifacts
 from utils.failure_artifacts import AgentInvocationError
@@ -87,6 +91,28 @@ def _raw_compiler_output_json() -> str:
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+
+
+def test_normalize_markdown_spec_content_rejects_authority_input() -> None:
+    """Authority compilation requires canonical agileforge.spec.v1 JSON."""
+    raw_markdown = "# Spec\n\nThe system must record audit evidence.\n"
+
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        normalize_spec_content_for_registry(raw_markdown)
+
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert "Expected agileforge.spec.v1 JSON" in str(exc_info.value)
+
+
+def test_normalize_arbitrary_json_rejects_authority_input() -> None:
+    """JSON without the AgileForge profile marker is not compiler input."""
+    raw_json = json.dumps({"title": "Loose JSON spec"})
+
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        normalize_spec_content_for_registry(raw_json)
+
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert "schema_version" in str(exc_info.value)
 
 
 def _raw_compiler_failure_json() -> str:
