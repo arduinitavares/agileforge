@@ -804,7 +804,7 @@ def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None
 
 
 def test_structured_profile_allows_missing_source_map() -> None:
-    """Structured authority no longer requires source_map for acceptance-critical IDs."""
+    """Structured authority no longer requires source_map for IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -854,7 +854,7 @@ def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> N
     assert normalized.root.authority_mappings == []
 
 
-def test_structured_profile_invalid_source_ref_is_review_finding_not_compile_failure() -> None:
+def test_structured_profile_invalid_source_ref_is_review_finding_not_compile_failure() -> None:  # noqa: E501
     """Normalizer preserves invalid source refs so review can block structurally."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
