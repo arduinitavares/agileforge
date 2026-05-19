@@ -11,8 +11,6 @@ import pytest
 from cli.main import main
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from services.agent_workbench.authority_decision import AuthorityAcceptRequest
 
 type JsonObject = dict[str, object]
@@ -338,14 +336,12 @@ def test_authority_accept_forwards_broad_incomplete_review_fields(
 
 
 def test_authority_accept_without_token_uses_latest_review(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Human CLI can accept with project id only when latest review is fresh."""
-    _ = tmp_path
     expected_project_id = 42
-    latest_review_value = "review-" "token-123"
+    latest_review_value = "review-token-123"
     captured_requests: list[AuthorityAcceptRequest] = []
 
     class FakeApplication:
@@ -365,7 +361,7 @@ def test_authority_accept_without_token_uses_latest_review(
             return {
                 "ok": True,
                 "data": {
-                    "review_token": latest_review_value,
+                    "guard_tokens": {"review_token": latest_review_value},
                     "review_summary": {"acceptance_status": "accept_ready"},
                 },
                 "errors": [],
@@ -399,21 +395,80 @@ def test_authority_accept_without_token_uses_latest_review(
     assert captured_requests[0].idempotency_key.startswith("authority-accept-42-")
 
 
-def test_authority_accept_without_token_non_tty_requires_review(
+def test_authority_accept_without_token_requires_latest_review_token(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify non-interactive accept requires a review token."""
-    app = _AuthorityDecisionCliApplication()
+    """Verify tokenless accept fails when latest review has no review token."""
+    expected_project_id = PROJECT_ID
+    calls: list[tuple[str, object]] = []
+
+    class FakeApplication:
+        """Fake default application facade for missing-token review routing."""
+
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str,
+            output_format: str,
+        ) -> dict[str, Any]:
+            """Return a latest review packet without a guard review token."""
+            calls.append(
+                (
+                    "authority_review",
+                    {
+                        "project_id": project_id,
+                        "include_spec": include_spec,
+                        "output_format": output_format,
+                    },
+                )
+            )
+            return {
+                "ok": True,
+                "data": {
+                    "guard_tokens": {},
+                    "review_summary": {"acceptance_status": "accept_ready"},
+                },
+                "errors": [],
+                "warnings": [],
+            }
+
+        def authority_accept(
+            self,
+            request: AuthorityAcceptRequest,
+        ) -> dict[str, Any]:
+            """Record any unexpected accept request."""
+            calls.append(("authority_accept", request))
+            return {
+                "ok": True,
+                "data": {"accepted_decision_id": 7},
+                "errors": [],
+                "warnings": [],
+            }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.application.AgentWorkbenchApplication",
+        lambda **_kwargs: FakeApplication(),
+    )
 
     rc = main(
-        ["authority", "accept", "--project-id", str(PROJECT_ID)],
-        application=app,
+        ["authority", "accept", "--project-id", str(expected_project_id)],
     )
 
     payload = _stdout_payload(capsys)
     assert rc == AUTHORITY_REVIEW_REQUIRED_EXIT_CODE
     assert _first_error(payload)["code"] == "AUTHORITY_REVIEW_REQUIRED"
-    assert app.calls == []
+    assert calls == [
+        (
+            "authority_review",
+            {
+                "project_id": expected_project_id,
+                "include_spec": "auto",
+                "output_format": "json",
+            },
+        )
+    ]
 
 
 def test_authority_accept_explicit_agent_mode_requires_idempotency_key(
