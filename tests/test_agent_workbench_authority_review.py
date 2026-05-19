@@ -779,32 +779,22 @@ def test_review_includes_structured_spec_metadata_for_agileforge_profile_json(
     assert spec["spec_hash"].startswith("sha256:")
 
 
-def test_review_blocks_structured_spec_when_profile_ir_has_uncovered_items(
+def test_review_does_not_block_structured_spec_on_candidate_coverage(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Structured spec review must use profile IR findings, not blob coverage."""
-    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
-        normalize_compiler_output,
-    )
-
+    """Structured spec review does not expose host candidate coverage blockers."""
     spec_content = _agileforge_spec_profile_payload()
-    normalized = normalize_compiler_output(
-        _compiled_success_json(
-            source_excerpt="The review output must include guard tokens.",
-            source_location="REQ.guard-tokens.statement",
-        ),
-        source_text=spec_content,
-        source_format="agileforge.spec.v1",
-    )
-    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=spec_content,
             spec_filename="spec.json",
-            artifact_json=normalized.model_dump_json(),
+            artifact_json=_compiled_success_json(
+                source_excerpt="This sentence is review evidence only.",
+                source_location="REQ.guard-tokens.statement",
+            ),
         )
     )
 
@@ -812,14 +802,73 @@ def test_review_blocks_structured_spec_when_profile_ir_has_uncovered_items(
         project_id=project_id
     )
 
-    pending = result["data"]["pending_authority"]
-    spec = result["data"]["spec"]
-    codes = {finding["code"] for finding in pending["review_findings"]}
-    assert spec["source_units"]
-    assert pending["authority_mappings"]
-    assert "AUTHORITY_CANDIDATE_UNCOVERED" in codes
+    assert result["ok"] is True
+    data = result["data"]
+    pending = data["pending_authority"]
+    codes = {finding["code"] for finding in data["review_findings"]}
+    assert "requirement_candidates" not in pending
+    assert pending["authority_mappings"] == []
+    assert "AUTHORITY_CANDIDATE_UNCOVERED" not in codes
+    assert "AUTHORITY_COVERAGE_INCOMPLETE" not in codes
+    assert data["review_summary"]["acceptance_status"] == "accept_ready"
+
+
+def test_review_warns_when_structured_source_refs_are_missing(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Missing source refs are visible but not acceptance blockers."""
+    artifact = json.loads(_compiled_success_json(source_excerpt=""))
+    artifact["source_map"] = []
+    spec_content = _agileforge_spec_profile_payload()
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=json.dumps(artifact),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    findings = result["data"]["review_findings"]
+    assert any(finding["code"] == "SOURCE_REFS_MISSING" for finding in findings)
+    missing = next(f for f in findings if f["code"] == "SOURCE_REFS_MISSING")
+    assert missing["severity"] == "warning"
+    assert missing["override_allowed"] is True
+    assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
+
+
+def test_review_blocks_structured_invalid_source_ref(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Source refs pointing at missing spec item IDs are structural blockers."""
+    spec_content = _agileforge_spec_profile_payload()
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens.",
+                source_location="REQ.missing.statement",
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    codes = {finding["code"] for finding in result["data"]["review_findings"]}
+    assert "SOURCE_REF_INVALID" in codes
     assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
-    assert result["data"]["review_summary"]["blocking_finding_count"] > 0
 
 
 def test_review_accepts_pretty_structured_spec_when_registry_hash_is_canonical(
