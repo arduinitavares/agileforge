@@ -355,13 +355,8 @@ def test_project_create_rejects_markdown_spec_source(
     business_db = tmp_path / "business.db"
     engine = _business_engine(business_db)
     workflow = FakeWorkflowPort()
-    monkeypatch.setattr(
-        "cli.main.AgentWorkbenchApplication",
-        lambda **_kwargs: AgentWorkbenchApplication(
-            business_engine=engine,
-            workflow=workflow,
-        ),
-    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    app = AgentWorkbenchApplication(project_setup_runner=runner)
     caller_dir = tmp_path / "caller"
     caller_dir.mkdir()
     spec_file = _write_spec(caller_dir)
@@ -377,7 +372,8 @@ def test_project_create_rejects_markdown_spec_source(
             str(spec_file),
             "--idempotency-key",
             "markdown-project-create-001",
-        ]
+        ],
+        application=app,
     )
 
     payload = _captured_payload(capsys)
