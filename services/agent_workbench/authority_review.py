@@ -1051,15 +1051,11 @@ def _accept_next_action(
 ) -> JsonDict:
     """Return an accept action annotated with review blocking status."""
     action: JsonDict = {
-        "command": (
-            "agileforge authority accept --project-id "
-            f"{snapshot.project_id} --review-token {snapshot.review_token} "
-            "--idempotency-key <idempotency_key>"
-        ),
+        "command": f"agileforge authority accept --project-id {snapshot.project_id}",
         "mode": "human",
         "installed": True,
         "requires_cli_installation": False,
-        "requires": ["review_token", "idempotency_key"],
+        "requires": [],
         "reason": "Record the reviewed pending authority as canonical.",
     }
     if review_summary.get("acceptance_status") == "blocked":
@@ -1072,11 +1068,7 @@ def _accept_next_action(
             {
                 "blocked": True,
                 "review_summary": dict(review_summary),
-                "requires": [
-                    "review_token",
-                    "idempotency_key",
-                    "fatal_review_resolution",
-                ],
+                "requires": ["fatal_review_resolution"],
                 "reason": (
                     "Authority review has blocking findings; resolve them or "
                     "rerun review before accepting. "

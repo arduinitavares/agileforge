@@ -239,7 +239,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=False,
         phase="phase_2c",
         input_required=("project_id",),
-        input_optional=("include_spec", "format"),
+        input_optional=("include_spec", "format", "open"),
         errors=(
             ErrorCode.SCHEMA_NOT_READY.value,
             ErrorCode.PROJECT_NOT_FOUND.value,
@@ -254,10 +254,10 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         phase="phase_2c",
         guard_policy=_AUTHORITY_DECISION_GUARDS,
         accepts_expected_state=True,
-        requires_idempotency_key=True,
-        idempotency_policy=_AUTHORITY_DECISION_IDEMPOTENCY_POLICY,
-        input_required=("project_id", "idempotency_key"),
+        requires_idempotency_key=False,
+        input_required=("project_id",),
         input_optional=(
+            "idempotency_key",
             *_AUTHORITY_DECISION_GUARDS,
             "allow_incomplete_review",
             "incomplete_review_rationale",

@@ -430,7 +430,7 @@ def test_project_create_rejects_markdown_spec_source(
     )
 
     payload = _captured_payload(capsys)
-    assert exit_code == 2
+    assert exit_code == INVALID_COMMAND_EXIT_CODE
     assert payload["ok"] is False
     assert payload["errors"][0]["code"] == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
     assert payload["errors"][0]["remediation"] == [

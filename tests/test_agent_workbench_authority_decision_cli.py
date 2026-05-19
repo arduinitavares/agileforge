@@ -177,6 +177,7 @@ def test_authority_review_parser_calls_application(
             str(PROJECT_ID),
             "--include-spec",
             "full",
+            "--open",
             "--format",
             "json",
         ],
@@ -536,6 +537,32 @@ def test_authority_reject_requires_reason(
     assert app.calls == []
 
 
+def test_authority_reject_requires_idempotency_key_in_token_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify guarded reject mode requires explicit idempotency."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            str(_guard_payload()["review_token"]),
+            "--reason",
+            "Spec needs revision.",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
 def test_authority_reject_without_token_non_tty_requires_review(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -604,13 +631,10 @@ def test_authority_help_shows_review_accept_reject_examples(
     captured = capsys.readouterr()
     assert top_level.value.code == 0
     assert "agileforge authority review --project-id 1" in captured.out
-    assert (
-        "agileforge authority accept --project-id 1 --review-token <review_token>"
-        in captured.out
-    )
+    assert "agileforge authority accept --project-id 1" in captured.out
     assert (
         'agileforge authority reject --project-id 1 --review-token <review_token> '
-        '--reason "..."'
+        '--reason "..." --idempotency-key reject-001'
     ) in captured.out
 
     with pytest.raises(SystemExit) as authority:

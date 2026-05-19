@@ -644,35 +644,41 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
 
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == []
-    assert result["data"]["next_actions"] == [
-        {
-            "command": "agileforge authority review --project-id 7 --open",
-            "installed": True,
-            "requires_cli_installation": False,
-            "reason": "Review pending authority before accepting or rejecting it.",
-        }
-    ]
-    assert result["data"]["decision_actions_after_review"] == [
-        {
-            "command": "agileforge authority accept --project-id 7",
-            "installed": True,
-            "requires_cli_installation": False,
-            "after_review": True,
-            "requires": ["review_token", "idempotency_key"],
-            "reason": "Record accepted authority only after review passes.",
-        },
-        {
-            "command": (
-                "agileforge authority reject --project-id 7 "
-                "--review-token <review_token> "
-                "--reason <reason> --idempotency-key <idempotency_key>"
-            ),
-            "installed": True,
-            "requires_cli_installation": False,
-            "after_review": True,
-            "requires": ["review_token", "reason", "idempotency_key"],
-        },
-    ]
+    assert len(result["data"]["next_actions"]) == 1
+    command_text = result["data"]["next_actions"][0]["command"]
+    assert "agileforge authority review --project-id 7 --open" in command_text
+    assert result["data"]["next_actions"][0]["installed"] is True
+    assert result["data"]["next_actions"][0]["requires_cli_installation"] is False
+    assert (
+        result["data"]["next_actions"][0]["reason"]
+        == "Review pending authority before accepting or rejecting it."
+    )
+
+    decision_actions = result["data"]["decision_actions_after_review"]
+    accept_action, reject_action = decision_actions
+    command_text = accept_action["command"]
+    assert "agileforge authority accept --project-id 7" in command_text
+    assert "--review-token" not in command_text
+    assert "--idempotency-key" not in command_text
+    assert accept_action["installed"] is True
+    assert accept_action["requires_cli_installation"] is False
+    assert accept_action["after_review"] is True
+    assert accept_action["requires"] == []
+    assert (
+        accept_action["reason"]
+        == "Record accepted authority only after review passes."
+    )
+    assert reject_action == {
+        "command": (
+            "agileforge authority reject --project-id 7 "
+            "--review-token <review_token> "
+            "--reason <reason> --idempotency-key <idempotency_key>"
+        ),
+        "installed": True,
+        "requires_cli_installation": False,
+        "after_review": True,
+        "requires": ["review_token", "reason", "idempotency_key"],
+    }
     assert review.calls == [
         {
             "project_id": PROJECT_ID,
@@ -725,11 +731,7 @@ def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() 
     ]
     accept_action = result["data"]["decision_actions_after_review"][0]
     assert accept_action["blocked"] is True
-    assert accept_action["requires"] == [
-        "review_token",
-        "idempotency_key",
-        "fatal_review_resolution",
-    ]
+    assert accept_action["requires"] == ["fatal_review_resolution"]
     assert accept_action["review_summary"]["acceptance_status"] == "blocked"
     assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]
 

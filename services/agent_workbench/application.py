@@ -560,14 +560,13 @@ def _setup_workflow_next(
                 "reason": "Review pending authority before accepting or rejecting it.",
             }
         ]
-        accept_requires = ["review_token", "idempotency_key"]
         accept_reason = "Record accepted authority only after review passes."
         accept_action: dict[str, Any] = {
             "command": f"agileforge authority accept --project-id {project_id}",
             "installed": True,
             "requires_cli_installation": False,
             "after_review": True,
-            "requires": accept_requires,
+            "requires": [],
         }
         if review_summary is not None:
             data["authority_review_summary"] = review_summary
@@ -579,11 +578,7 @@ def _setup_workflow_next(
                 ]
                 accept_action["blocked"] = True
                 accept_action["review_summary"] = review_summary
-                accept_action["requires"] = [
-                    "review_token",
-                    "idempotency_key",
-                    "fatal_review_resolution",
-                ]
+                accept_action["requires"] = ["fatal_review_resolution"]
                 accept_reason = (
                     "Authority review has fatal blocking findings; resolve them "
                     "and run authority review again before accepting. "

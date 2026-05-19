@@ -51,9 +51,9 @@ Examples:
   agileforge workflow state --project-id 1
   agileforge authority status --project-id 1
   agileforge authority review --project-id 1
-  agileforge authority accept --project-id 1 --review-token <review_token>
+  agileforge authority accept --project-id 1
   agileforge authority reject --project-id 1 --review-token <review_token> """
-    """--reason "..."
+    """--reason "..." --idempotency-key reject-001
   agileforge sprint candidates --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
@@ -607,6 +607,11 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         "--include-spec",
         choices=("auto", "full", "summary"),
         default="auto",
+    )
+    authority_review.add_argument(
+        "--open",
+        action="store_true",
+        help="Acknowledge that the review packet should be opened for human review.",
     )
     authority_review.add_argument("--format", choices=("json", "text"), default="json")
     authority_review.set_defaults(command_handler=_authority_review)
@@ -1274,6 +1279,12 @@ def _authority_reject(  # noqa: PLR0911
                 command,
                 "--reason is required for authority reject.",
                 details={"missing": ["reason"]},
+            )
+        if not args.idempotency_key:
+            return _invalid_command(
+                command,
+                "Authority reject requires --idempotency-key.",
+                details={"missing": ["idempotency_key"]},
             )
         try:
             request = AuthorityRejectRequest(

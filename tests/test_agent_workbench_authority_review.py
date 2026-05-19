@@ -259,16 +259,11 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     )
     assert data["next_actions"] == [
         {
-            "command": (
-                "agileforge authority accept "
-                f"--project-id {project_id} "
-                f"--review-token {guard_tokens['review_token']} "
-                "--idempotency-key <idempotency_key>"
-            ),
+            "command": f"agileforge authority accept --project-id {project_id}",
             "mode": "human",
             "installed": True,
             "requires_cli_installation": False,
-            "requires": ["review_token", "idempotency_key"],
+            "requires": [],
             "reason": "Record the reviewed pending authority as canonical.",
         },
         {
