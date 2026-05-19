@@ -291,6 +291,57 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     assert "Yes, this compiled interpretation" not in guidance["acceptance_statement"]
 
 
+def test_review_missing_project_returns_project_not_found(
+    session: Session,
+) -> None:
+    """Missing projects return the stable project lookup error."""
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=999_999
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "PROJECT_NOT_FOUND"
+
+
+def test_review_project_without_pending_authority_returns_not_pending(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Projects with an approved spec but no compiled authority are not pending."""
+    spec_content = _base_spec()
+    spec_path = tmp_path / "approved-spec.json"
+    spec_path.write_text(spec_content, encoding="utf-8")
+    product = Product(
+        name="Authority Review Without Pending Authority",
+        description="Seeded project without compiled authority",
+        spec_file_path=str(spec_path),
+    )
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    project_id = require_id(product.product_id, "product_id")
+    session.add(
+        SpecRegistry(
+            product_id=project_id,
+            spec_hash=sha256_prefixed(spec_content.encode("utf-8")),
+            content=spec_content,
+            content_ref=str(spec_path),
+            status="approved",
+            approved_at=datetime(2026, 5, 17, 12, tzinfo=UTC),
+            approved_by="review-test",
+            approval_notes="Approved but not compiled.",
+        )
+    )
+    session.commit()
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_NOT_PENDING"
+
+
 def test_review_text_format_returns_ok_packet_with_human_text(
     session: Session,
     tmp_path: Path,
