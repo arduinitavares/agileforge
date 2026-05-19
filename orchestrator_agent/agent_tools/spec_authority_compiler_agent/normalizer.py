@@ -736,10 +736,30 @@ def _repair_source_map_from_source_text(
     if not evidence_candidates:
         return False
 
-    repaired: list[SourceMapEntry] = []
+    original_source_map = list(success.source_map)
+    original_invariants = list(success.invariants)
+    original_id_counts: dict[str, int] = {}
+    for invariant in original_invariants:
+        original_id_counts[invariant.id] = original_id_counts.get(invariant.id, 0) + 1
+
+    repaired_by_entry_index: dict[int, SourceMapEntry] = {}
+    appended_repaired: list[SourceMapEntry] = []
     retained_invariants: list[Invariant] = []
+    retained_invariant_indexes: set[int] = set()
     dropped_invariants: list[Invariant] = []
-    for inv in success.invariants:
+    used_entry_indexes: set[int] = set()
+
+    def primary_entry_index_for_invariant(invariant: Invariant, index: int) -> int | None:
+        for entry_index, entry in enumerate(original_source_map):
+            if entry_index in used_entry_indexes:
+                continue
+            if entry.invariant_id == invariant.id:
+                return entry_index
+        if index < len(original_source_map) and index not in used_entry_indexes:
+            return index
+        return None
+
+    for inv_index, inv in enumerate(success.invariants):
         supported = [
             candidate
             for candidate in evidence_candidates
@@ -753,13 +773,18 @@ def _repair_source_map_from_source_text(
             key=lambda candidate: _source_map_support_score(inv, candidate.excerpt),
         )
         retained_invariants.append(inv)
-        repaired.append(
-            SourceMapEntry(
-                invariant_id=inv.id,
-                excerpt=matched.excerpt,
-                location=matched.location,
-            )
+        retained_invariant_indexes.add(inv_index)
+        repaired_entry = SourceMapEntry(
+            invariant_id=inv.id,
+            excerpt=matched.excerpt,
+            location=matched.location,
         )
+        entry_index = primary_entry_index_for_invariant(inv, inv_index)
+        if entry_index is None:
+            appended_repaired.append(repaired_entry)
+        else:
+            used_entry_indexes.add(entry_index)
+            repaired_by_entry_index[entry_index] = repaired_entry
 
     if not retained_invariants:
         return False
@@ -769,7 +794,27 @@ def _repair_source_map_from_source_text(
             gap = f"Dropped unsupported compiler invariant: {_invariant_text(dropped)}"
             if gap not in success.gaps:
                 success.gaps.append(gap)
-    success.source_map = repaired
+
+    retained_id_counts: dict[str, int] = {}
+    for invariant in retained_invariants:
+        retained_id_counts[invariant.id] = retained_id_counts.get(invariant.id, 0) + 1
+
+    def preserve_original_entry(entry_index: int, entry: SourceMapEntry) -> bool:
+        original_id_count = original_id_counts.get(entry.invariant_id, 0)
+        if original_id_count == 1:
+            return entry.invariant_id in retained_id_counts
+        if entry_index < len(original_invariants):
+            return entry_index in retained_invariant_indexes
+        return retained_id_counts.get(entry.invariant_id, 0) == original_id_count
+
+    repaired_source_map: list[SourceMapEntry] = []
+    for entry_index, entry in enumerate(original_source_map):
+        if entry_index in repaired_by_entry_index:
+            repaired_source_map.append(repaired_by_entry_index[entry_index])
+        elif preserve_original_entry(entry_index, entry):
+            repaired_source_map.append(entry)
+    repaired_source_map.extend(appended_repaired)
+    success.source_map = repaired_source_map
     return True
 
 

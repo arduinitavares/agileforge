@@ -550,6 +550,47 @@ def test_unrelated_source_refs_become_weak_mappings() -> None:
     assert mapping.mapping_status == "weak_mapping"
 
 
+def test_source_text_repair_preserves_extra_source_map_review_evidence() -> None:
+    """Source-text repair keeps extra review evidence for the same invariant."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "# Requirements",
+            "- The payload must include user_id.",
+            "- Review evidence was checked during source-map audit.",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": "- The payload must include account_id.",
+            "location": "spec:line:2",
+        },
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": "- Review evidence was checked during source-map audit.",
+            "location": "spec:line:3",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids = {invariant.id for invariant in normalized.root.invariants}
+    assert len(normalized.root.source_map) == 2  # noqa: PLR2004
+    assert (
+        normalized.root.source_map[0].excerpt
+        == "- The payload must include user_id."
+    )
+    assert all(
+        entry.invariant_id in invariant_ids for entry in normalized.root.source_map
+    )
+
+
 def test_normalizer_keeps_repairable_invariants_and_drops_unsupported_ones() -> None:
     """One unsupported invariant must not prevent review of repairable authority."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
