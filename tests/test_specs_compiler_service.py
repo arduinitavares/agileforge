@@ -127,6 +127,14 @@ def _agileforge_spec_profile_payload() -> dict[str, object]:
     }
 
 
+def _agileforge_spec_profile_json() -> str:
+    return json.dumps(_agileforge_spec_profile_payload())
+
+
+def _canonical_agileforge_spec_profile_json() -> str:
+    return normalize_spec_content_for_registry(_agileforge_spec_profile_json()).content
+
+
 def test_normalize_structured_spec_content_canonicalizes_json() -> None:
     """Structured spec profile content is stored in canonical JSON form."""
     raw_json = json.dumps(_agileforge_spec_profile_payload(), indent=2)
@@ -202,8 +210,10 @@ def _create_spec_version(
     session: Session,
     *,
     product_id: int,
-    content: str = "Spec A",
+    content: str | None = None,
 ) -> SpecRegistry:
+    if content is None:
+        content = _canonical_agileforge_spec_profile_json()
     spec_row = SpecRegistry(
         product_id=product_id,
         spec_hash=f"{product_id:064d}"[-64:],
@@ -1094,8 +1104,8 @@ def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
         lambda **_: _raw_compiler_output_json(),
     )
 
-    spec_path = tmp_path / "spec.md"
-    spec_path.write_text("Spec from file", encoding="utf-8")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(_agileforge_spec_profile_json(), encoding="utf-8")
     spec_row = _create_spec_version(
         session,
         product_id=require_id(sample_product.product_id, "product_id"),
@@ -1496,10 +1506,11 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1515,7 +1526,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
 
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
-    assert spec_row.content == "Spec A"
+    assert spec_row.content == _canonical_agileforge_spec_profile_json()
     assert spec_row.status == "approved"
     assert spec_row.approved_by == "implicit"
 
@@ -1587,10 +1598,11 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1678,10 +1690,11 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
         fake_tool_ensure,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1709,8 +1722,9 @@ def test_update_spec_and_compile_authority_loads_content_ref(
         session.get_bind,
     )
 
-    spec_path = tmp_path / "service_spec.md"
-    spec_path.write_text("Spec from file", encoding="utf-8")
+    spec_path = tmp_path / "service_spec.json"
+    spec_content = _agileforge_spec_profile_json()
+    spec_path.write_text(spec_content, encoding="utf-8")
 
     def fake_compile(
         *, spec_version_id: int, force_recompile: bool, tool_context: object
@@ -1767,7 +1781,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
 
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
-    assert spec_row.content == "Spec from file"
+    assert spec_row.content == _canonical_agileforge_spec_profile_json()
     assert spec_row.content_ref == str(spec_path)
 
 
@@ -1845,17 +1859,18 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     first = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
     second = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1936,10 +1951,11 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
             "recompile": None,
         },
         tool_context=None,
