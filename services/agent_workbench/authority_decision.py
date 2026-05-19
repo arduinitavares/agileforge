@@ -1261,20 +1261,19 @@ def _accept_incomplete_error(
 
 
 def _blocking_review_findings(findings: list[JsonDict]) -> list[JsonDict]:
-    has_current_coverage_marker = any(
-        finding.get("severity") == "blocking"
-        and finding.get("code") == "AUTHORITY_COVERAGE_INCOMPLETE"
-        for finding in findings
-    )
+    removed_host_semantic_codes = {
+        "AUTHORITY_COVERAGE_INCOMPLETE",
+        "AUTHORITY_CANDIDATE_UNCOVERED",
+        "AUTHORITY_CANDIDATE_WEAK_MAPPING",
+        "AUTHORITY_CANDIDATE_INTENTIONALLY_CLASSIFIED",
+        "AUTHORITY_CANDIDATE_PARTIAL",
+        "AUTHORITY_CANDIDATE_UNCERTAIN",
+    }
     return [
         finding
         for finding in findings
         if finding.get("severity") == "blocking"
-        and finding.get("code") != "AUTHORITY_COVERAGE_INCOMPLETE"
-        and (
-            has_current_coverage_marker
-            or not str(finding.get("code") or "").startswith("AUTHORITY_CANDIDATE_")
-        )
+        and str(finding.get("code") or "") not in removed_host_semantic_codes
     ]
 
 

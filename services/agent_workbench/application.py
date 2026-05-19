@@ -552,7 +552,9 @@ def _setup_workflow_next(
     if setup_status == "authority_pending_review":
         data["next_actions"] = [
             {
-                "command": f"agileforge authority review --project-id {project_id}",
+                "command": (
+                    f"agileforge authority review --project-id {project_id} --open"
+                ),
                 "installed": True,
                 "requires_cli_installation": False,
                 "reason": "Review pending authority before accepting or rejecting it.",
@@ -561,11 +563,7 @@ def _setup_workflow_next(
         accept_requires = ["review_token", "idempotency_key"]
         accept_reason = "Record accepted authority only after review passes."
         accept_action: dict[str, Any] = {
-            "command": (
-                f"agileforge authority accept --project-id {project_id} "
-                "--review-token <review_token> "
-                "--idempotency-key <idempotency_key>"
-            ),
+            "command": f"agileforge authority accept --project-id {project_id}",
             "installed": True,
             "requires_cli_installation": False,
             "after_review": True,

@@ -646,7 +646,7 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     assert result["data"]["next_valid_commands"] == []
     assert result["data"]["next_actions"] == [
         {
-            "command": "agileforge authority review --project-id 7",
+            "command": "agileforge authority review --project-id 7 --open",
             "installed": True,
             "requires_cli_installation": False,
             "reason": "Review pending authority before accepting or rejecting it.",
@@ -654,11 +654,7 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     ]
     assert result["data"]["decision_actions_after_review"] == [
         {
-            "command": (
-                "agileforge authority accept --project-id 7 "
-                "--review-token <review_token> "
-                "--idempotency-key <idempotency_key>"
-            ),
+            "command": "agileforge authority accept --project-id 7",
             "installed": True,
             "requires_cli_installation": False,
             "after_review": True,
@@ -798,7 +794,7 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_setup_pending_re
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == []
     assert result["data"]["next_actions"][0]["command"] == (
-        "agileforge authority review --project-id 7"
+        "agileforge authority review --project-id 7 --open"
     )
 
 

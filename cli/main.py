@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import io
 import json
@@ -943,6 +944,14 @@ def _has_explicit_authority_args(args: argparse.Namespace) -> bool:
     )
 
 
+def _has_explicit_authority_guard_args(args: argparse.Namespace) -> bool:
+    """Return whether explicit authority guard fields were passed."""
+    return any(
+        getattr(args, field_name) is not None
+        for field_name in AUTHORITY_ALL_GUARD_FIELDS
+    )
+
+
 def _missing_authority_guards(
     args: argparse.Namespace,
     *,
@@ -974,6 +983,17 @@ def _decision_idempotency_key(args: argparse.Namespace) -> str | None:
     if args.review_token:
         return f"human-token:{uuid4()}"
     return None
+
+
+def _auto_authority_idempotency_key(
+    *,
+    action: str,
+    project_id: int,
+    review_token: str,
+) -> str:
+    """Return a deterministic idempotency key for simple authority decisions."""
+    digest = hashlib.sha256(review_token.encode("utf-8")).hexdigest()[:16]
+    return f"authority-{action}-{project_id}-{digest}"
 
 
 def _authority_request_kwargs(args: argparse.Namespace) -> _AuthorityRequestKwargs:
@@ -1102,6 +1122,79 @@ def _validate_authority_explicit_args(
     return None
 
 
+def _review_token_from_latest_review(result: JsonObject) -> str | None:
+    """Return the latest review token from current or legacy review packets."""
+    data = _review_data(result)
+    if data is None:
+        return None
+    guards = _as_mapping(data.get("guard_tokens"))
+    review_token = guards.get("review_token") if guards is not None else None
+    if isinstance(review_token, str) and review_token.strip():
+        return review_token
+    legacy_token = data.get("review_token")
+    if isinstance(legacy_token, str) and legacy_token.strip():
+        return legacy_token
+    return None
+
+
+def _latest_authority_review_token(
+    *,
+    command: str,
+    project_id: int,
+    application: _Application,
+) -> str | CommandResult:
+    """Fetch the latest accept-ready authority review token for simple accept."""
+    review = application.authority_review(
+        project_id=project_id,
+        include_spec="auto",
+        output_format="json",
+    )
+    if review.get("ok") is not True:
+        return command, review
+    review_token = _review_token_from_latest_review(review)
+    if review_token is None:
+        return _authority_review_required(command)
+    data = _review_data(review) or {}
+    review_summary = _as_mapping(data.get("review_summary"))
+    if (
+        review_summary is not None
+        and review_summary.get("acceptance_status") == "blocked"
+    ):
+        return _mutation_arg_error(
+            command,
+            workbench_error(
+                ErrorCode.AUTHORITY_REVIEW_INCOMPLETE,
+                message="Latest authority review has blocking findings.",
+                details={
+                    "review_summary": {
+                        str(key): value for key, value in review_summary.items()
+                    }
+                },
+                remediation=[
+                    "Resolve fatal authority review findings and run authority "
+                    "review again."
+                ],
+            ),
+        )
+    return review_token
+
+
+def _args_with_latest_review_token(
+    args: argparse.Namespace,
+    *,
+    review_token: str,
+) -> argparse.Namespace:
+    """Return accept args populated with a fetched review token."""
+    values = vars(args).copy()
+    values["review_token"] = review_token
+    values["idempotency_key"] = args.idempotency_key or _auto_authority_idempotency_key(
+        action="accept",
+        project_id=cast("int", args.project_id),
+        review_token=review_token,
+    )
+    return argparse.Namespace(**values)
+
+
 def _authority_accept(  # noqa: PLR0911
     args: argparse.Namespace,
     application: _Application,
@@ -1126,7 +1219,7 @@ def _authority_accept(  # noqa: PLR0911
             return _authority_validation_failure(command, exc)
         return command, application.authority_accept(request)
 
-    if _has_explicit_authority_args(args):
+    if _has_explicit_authority_guard_args(args):
         validation_error = _validate_authority_explicit_args(
             args,
             command=command,
@@ -1147,10 +1240,26 @@ def _authority_accept(  # noqa: PLR0911
             return _authority_validation_failure(command, exc)
         return command, application.authority_accept(request)
 
-    if not sys.stdin.isatty():
-        return _authority_review_required(command)
-
-    return _interactive_authority_accept(args, application)
+    latest_token = _latest_authority_review_token(
+        command=command,
+        project_id=cast("int", args.project_id),
+        application=application,
+    )
+    if not isinstance(latest_token, str):
+        return latest_token
+    token_args = _args_with_latest_review_token(args, review_token=latest_token)
+    try:
+        request = AuthorityAcceptRequest(
+            **_authority_request_kwargs(token_args),
+            allow_incomplete_review=token_args.allow_incomplete_review,
+            incomplete_review_rationale=token_args.incomplete_review_rationale,
+            incomplete_review_overrides=_parse_incomplete_review_overrides(
+                cast("list[str]", token_args.incomplete_review_override or [])
+            ),
+        )
+    except (ValidationError, ValueError) as exc:
+        return _authority_validation_failure(command, exc)
+    return command, application.authority_accept(request)
 
 
 def _authority_reject(  # noqa: PLR0911
