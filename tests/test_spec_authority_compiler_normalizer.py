@@ -809,8 +809,8 @@ def test_structured_profile_allows_missing_source_map() -> None:
         normalize_compiler_output,
     )
 
-    raw = _legacy_success_payload()
-    raw["source_map"] = []
+    raw = _compact_ir_success_payload()
+    del raw["source_map"]
 
     normalized = normalize_compiler_output(
         json.dumps(raw),
@@ -820,9 +820,62 @@ def test_structured_profile_allows_missing_source_map() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     assert normalized.root.source_map == []
+    assert normalized.root.ir_schema_version is None
+    assert normalized.root.ir_provenance is None
+    assert normalized.root.source_units == []
     assert normalized.root.requirement_candidates == []
     assert normalized.root.authority_mappings == []
+    assert normalized.root.ir_packet_limits is None
     assert normalized.root.invariants[0].id.startswith("INV-")
+
+
+def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_position() -> (
+    None
+):
+    """Duplicate original source-map IDs preserve positional invariant evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "audit_evidence"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "review_token"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST record audit evidence.",
+            "location": "REQ.audit-evidence.statement",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST include review token evidence.",
+            "location": "REQ.review-token.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_invariant_ids = [inv.id for inv in normalized.root.invariants]
+    source_map_ids = [entry.invariant_id for entry in normalized.root.source_map]
+    assert len(source_map_ids) == 2  # noqa: PLR2004
+    assert source_map_ids == normalized_invariant_ids
+    assert len(set(source_map_ids)) == 2  # noqa: PLR2004
 
 
 def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> None:

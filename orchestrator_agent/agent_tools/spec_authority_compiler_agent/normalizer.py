@@ -94,6 +94,17 @@ _FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
     "submissions": ("post", "request", "submit"),
     "submit": ("post", "request", "submission"),
 }
+_SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
+    {
+        "scope_themes",
+        "invariants",
+        "eligible_feature_rules",
+        "gaps",
+        "assumptions",
+        "compiler_version",
+        "prompt_hash",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -171,6 +182,21 @@ def _detect_source_format(source_text: str | None) -> SpecSourceFormat:
     ):
         return "agileforge.spec.v1"
     return "agileforge.spec_legacy_markdown.v1"
+
+
+def _default_missing_source_map_for_success_payload(payload: object) -> None:
+    """Default omitted source_map only for otherwise success-shaped payloads."""
+    if not isinstance(payload, dict):
+        return
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        _default_missing_source_map_for_success_payload(result)
+
+    if "source_map" in payload or "error" in payload:
+        return
+    if _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
+        payload["source_map"] = []
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:
@@ -615,6 +641,42 @@ def _clear_compact_ir(success: SpecAuthorityCompilationSuccess) -> None:
     success.ir_packet_limits = None
 
 
+def _rewrite_source_map_invariant_ids(
+    success: SpecAuthorityCompilationSuccess,
+    original_invariants: list[Invariant],
+) -> None:
+    """Rewrite source-map IDs without collapsing duplicate original placeholders."""
+    normalized_ids = {inv.id for inv in success.invariants}
+    original_id_counts: dict[str, int] = {}
+    for original in original_invariants:
+        original_id_counts[original.id] = original_id_counts.get(original.id, 0) + 1
+
+    original_id_to_new_id: dict[str, str] = {}
+    for original, normalized in zip(
+        original_invariants,
+        success.invariants,
+        strict=False,
+    ):
+        if original_id_counts[original.id] == 1:
+            original_id_to_new_id[original.id] = normalized.id
+
+    for index, entry in enumerate(success.source_map):
+        original_id_count = original_id_counts.get(entry.invariant_id, 0)
+        if entry.invariant_id in normalized_ids:
+            continue
+        if original_id_count > 1:
+            if index < len(success.invariants):
+                entry.invariant_id = success.invariants[index].id
+        elif entry.invariant_id in original_id_to_new_id:
+            entry.invariant_id = original_id_to_new_id[entry.invariant_id]
+        elif index < len(success.invariants):
+            entry.invariant_id = success.invariants[index].id
+
+    success.source_map = [
+        entry for entry in success.source_map if entry.invariant_id in normalized_ids
+    ]
+
+
 def normalize_compiler_output(
     raw_json: str,
     *,
@@ -650,6 +712,7 @@ def normalize_compiler_output(
 
     parsed: SpecAuthorityCompilerOutput | None = None
     validation_gaps: list[str] = []
+    _default_missing_source_map_for_success_payload(payload)
 
     try:
         parsed = SpecAuthorityCompilerOutput.model_validate(payload)
@@ -734,23 +797,8 @@ def normalize_compiler_output(
             blocking_gaps=["Normalized invariant IDs must be unique"],
         )
 
-    normalized_ids = {inv.id for inv in success.invariants}
     if success.source_map:
-        original_id_to_new_id: dict[str, str] = {}
-        for original, normalized in zip(
-            original_invariants,
-            success.invariants,
-            strict=False,
-        ):
-            original_id_to_new_id[original.id] = normalized.id
-        for index, entry in enumerate(success.source_map):
-            if entry.invariant_id in original_id_to_new_id:
-                entry.invariant_id = original_id_to_new_id[entry.invariant_id]
-            elif index < len(success.invariants):
-                entry.invariant_id = success.invariants[index].id
-        success.source_map = [
-            entry for entry in success.source_map if entry.invariant_id in normalized_ids
-        ]
+        _rewrite_source_map_invariant_ids(success, original_invariants)
 
     _clear_compact_ir(success)
 
