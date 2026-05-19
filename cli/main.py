@@ -9,6 +9,7 @@ import json
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
+from pathlib import Path
 from typing import NoReturn, Protocol, TypedDict, cast
 from uuid import uuid4
 
@@ -26,6 +27,13 @@ from services.agent_workbench.envelope import (
     success_envelope,
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_hash,
+    export_agileforge_spec_schema,
+    render_markdown,
+    rendered_markdown_hash,
+)
 from utils.logging_config import configure_logging
 
 DEFAULT_CONTEXT_PHASE: str = "overview"
@@ -687,6 +695,31 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     schema_check = schema_sub.add_parser("check", help="Check storage schema.")
     schema_check.set_defaults(command_handler=_schema_check)
 
+    spec = subparsers.add_parser("spec", help="Inspect AgileForge spec artifacts.")
+    spec_sub = spec.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    spec_profile = spec_sub.add_parser("profile", help="Inspect spec profile data.")
+    spec_profile_sub = spec_profile.add_subparsers(
+        dest="profile_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    spec_profile_schema = spec_profile_sub.add_parser(
+        "schema",
+        help="Export the AgileForge spec profile JSON Schema.",
+    )
+    spec_profile_schema.set_defaults(command_handler=_spec_profile_schema)
+    spec_profile_validate = spec_profile_sub.add_parser(
+        "validate",
+        help="Validate an AgileForge spec profile JSON file.",
+    )
+    spec_profile_validate.add_argument("--spec-file", required=True)
+    spec_profile_validate.add_argument("--render-md")
+    spec_profile_validate.set_defaults(command_handler=_spec_profile_validate)
+
     command = subparsers.add_parser("command", help="Inspect command contracts.")
     command_sub = command.add_subparsers(
         dest="action",
@@ -1003,23 +1036,17 @@ def _authority_validation_failure(
 def _validate_incomplete_override(args: argparse.Namespace) -> CommandResult | None:
     """Validate incomplete review override arguments."""
     overrides = cast("list[str]", args.incomplete_review_override or [])
-    if overrides:
-        try:
-            _parse_incomplete_review_overrides(overrides)
-        except ValueError as exc:
-            return _invalid_command(
-                "agileforge authority accept",
-                str(exc),
-                details={"field": "incomplete_review_override"},
-            )
+    if not overrides:
         return None
-    if not args.allow_incomplete_review and not args.incomplete_review_rationale:
-        return None
-    return _invalid_command(
-        "agileforge authority accept",
-        "Incomplete review acceptance requires candidate-specific overrides.",
-        details={"missing": ["incomplete_review_overrides"]},
-    )
+    try:
+        _parse_incomplete_review_overrides(overrides)
+    except ValueError as exc:
+        return _invalid_command(
+            "agileforge authority accept",
+            str(exc),
+            details={"field": "incomplete_review_override"},
+        )
+    return None
 
 
 def _parse_incomplete_review_overrides(
@@ -1375,6 +1402,128 @@ def _schema_check(
 ) -> CommandResult:
     """Route schema check diagnostics to the application facade."""
     return "agileforge schema check", application.schema_check()
+
+
+def _spec_profile_schema(
+    _args: argparse.Namespace,
+    _application: _Application,
+) -> CommandResult:
+    """Return the AgileForge spec profile JSON Schema."""
+    return (
+        "agileforge spec profile schema",
+        {
+            "ok": True,
+            "data": {"schema": export_agileforge_spec_schema()},
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+
+def _spec_profile_validate(
+    args: argparse.Namespace,
+    _application: _Application,
+) -> CommandResult:
+    """Validate a spec profile JSON file and optionally render Markdown."""
+    command = "agileforge spec profile validate"
+    spec_path = Path(str(args.spec_file)).expanduser().resolve()
+    try:
+        raw_spec = spec_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_NOT_FOUND,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass an existing AgileForge spec profile JSON file."],
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_INVALID,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass a readable UTF-8 AgileForge spec profile JSON file."],
+        )
+
+    try:
+        artifact = TechnicalSpecArtifact.model_validate_json(raw_spec)
+    except ValidationError as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_INVALID,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass a valid AgileForge spec profile JSON file."],
+        )
+
+    markdown = render_markdown(artifact)
+    render_md = getattr(args, "render_md", None)
+    if render_md:
+        render_path = Path(str(render_md)).expanduser().resolve()
+        try:
+            render_path.write_text(markdown, encoding="utf-8")
+        except OSError as exc:
+            return _spec_profile_error(
+                command,
+                ErrorCode.INVALID_COMMAND,
+                str(exc),
+                details={
+                    "exception_type": type(exc).__name__,
+                    "render_md": str(render_path),
+                },
+                remediation=["Choose a writable Markdown output path for --render-md."],
+            )
+
+    return (
+        command,
+        {
+            "ok": True,
+            "data": {
+                "format": "agileforge.spec.v1",
+                "spec_sha256": canonical_spec_hash(artifact),
+                "rendered_markdown_sha256": rendered_markdown_hash(markdown),
+            },
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+
+def _spec_profile_error(
+    command: str,
+    code: ErrorCode,
+    message: str,
+    *,
+    details: dict[str, object],
+    remediation: list[str],
+) -> CommandResult:
+    """Return a structured spec profile command failure."""
+    return (
+        command,
+        {
+            "ok": False,
+            "data": None,
+            "warnings": [],
+            "errors": [
+                workbench_error(
+                    code,
+                    message=message,
+                    details=details,
+                    remediation=remediation,
+                ).to_dict()
+            ],
+        },
+    )
 
 
 def _capabilities(

@@ -732,7 +732,7 @@ def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() 
     assert accept_action["requires"] == [
         "review_token",
         "idempotency_key",
-        "candidate_specific_overrides",
+        "fatal_review_resolution",
     ]
     assert accept_action["review_summary"]["acceptance_status"] == "blocked"
     assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]

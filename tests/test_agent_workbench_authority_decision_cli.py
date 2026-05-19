@@ -302,10 +302,10 @@ def test_authority_accept_repeated_incomplete_review_override_flag(
     ]
 
 
-def test_authority_accept_rejects_broad_incomplete_review_override_flag(
+def test_authority_accept_forwards_broad_incomplete_review_fields(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The legacy broad override flags alone are rejected at the CLI boundary."""
+    """The legacy broad override flags still reach the service."""
     app = _AuthorityDecisionCliApplication()
 
     rc = main(
@@ -324,9 +324,12 @@ def test_authority_accept_rejects_broad_incomplete_review_override_flag(
     )
 
     payload = _stdout_payload(capsys)
-    assert rc == INVALID_COMMAND_EXIT_CODE
-    assert _first_error(payload)["code"] == "INVALID_COMMAND"
-    assert app.calls == []
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls[0][0] == "authority_accept"
+    request = app.calls[0][1]
+    assert request["allow_incomplete_review"] is True
+    assert request["incomplete_review_rationale"] == "Reviewed manually."
 
 
 def test_authority_accept_without_token_non_tty_requires_review(

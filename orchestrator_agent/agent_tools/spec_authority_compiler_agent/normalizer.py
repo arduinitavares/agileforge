@@ -15,6 +15,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -26,11 +27,19 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
+from utils.agileforge_spec_profile import (
+    AgileForgeSpecStatus,
+    AgileForgeSpecType,
+    SpecItem,
+    TechnicalSpecArtifact,
+)
 from utils.spec_authority_ir import (
     AuthorityTargetKind,
     IrProvenance,
     MappingProvenance,
     RequirementCandidate,
+    SourceUnit,
+    SourceUnitDisposition,
     build_authority_mappings,
     extract_requirement_candidates,
     parse_markdown_sections,
@@ -51,6 +60,8 @@ from utils.spec_schemas import (
 )
 
 logger: logging.Logger = logging.getLogger(name=__name__)
+
+SpecSourceFormat = Literal["agileforge.spec.v1", "agileforge.spec_legacy_markdown.v1"]
 
 _META_POLICY_LOCATION_RE = re.compile(
     r"\b("
@@ -125,6 +136,17 @@ class _CompactIrModelHints:
     mappings: list[SpecAuthorityMapping]
 
 
+@dataclass(frozen=True)
+class _ProfileSourceFragment:
+    """One explicit source fragment from an AgileForge profile item."""
+
+    item: SpecItem
+    location: str
+    text: str
+    classification: str | None
+    requirement_bearing: bool
+
+
 def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
     return SpecAuthorityCompilerOutput(
         root=SpecAuthorityCompilationFailure(
@@ -176,6 +198,185 @@ def _summarize_validation_error(label: str, exc: ValidationError) -> str:
             return f"{label}: {loc}: {msg}"
         return f"{label}: {msg}"
     return f"{label}: {exc}"
+
+
+def _detect_source_format(source_text: str | None) -> SpecSourceFormat:
+    """Detect whether the source is canonical AgileForge profile JSON."""
+    if not source_text:
+        return "agileforge.spec_legacy_markdown.v1"
+    try:
+        parsed = json.loads(source_text)
+    except json.JSONDecodeError:
+        return "agileforge.spec_legacy_markdown.v1"
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("schema_version") == "agileforge.spec.v1"
+    ):
+        return "agileforge.spec.v1"
+    return "agileforge.spec_legacy_markdown.v1"
+
+
+def _profile_artifact(source_text: str | None) -> TechnicalSpecArtifact | None:
+    """Parse a structured AgileForge spec profile source if available."""
+    if not source_text:
+        return None
+    try:
+        return TechnicalSpecArtifact.model_validate_json(source_text)
+    except ValidationError:
+        return None
+
+
+def _bounded_compact_ir_text(text: str, *, limit: int = 2_000) -> str:
+    """Return text bounded to compact IR excerpt limits."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _profile_item_classification(item: SpecItem) -> str | None:
+    """Return the compact IR candidate classification for a typed profile item."""
+    item_type = item.type
+    if item_type in {
+        AgileForgeSpecType.REQ,
+        AgileForgeSpecType.DATA,
+        AgileForgeSpecType.INTERFACE,
+    }:
+        return "requirement"
+    if item_type == AgileForgeSpecType.QUALITY:
+        return "quality_attribute"
+    if item_type == AgileForgeSpecType.CONSTRAINT:
+        return "constraint"
+    if item_type == AgileForgeSpecType.GOAL:
+        return "goal"
+    if item_type == AgileForgeSpecType.NON_GOAL:
+        return "non_goal"
+    if item_type == AgileForgeSpecType.ASSUMPTION:
+        return "assumption"
+    if item_type == AgileForgeSpecType.OPEN_QUESTION:
+        return "open_question"
+    return None
+
+
+def _profile_item_is_active(item: SpecItem) -> bool:
+    """Return whether a profile item is active review input."""
+    return item.status not in {
+        AgileForgeSpecStatus.REJECTED,
+        AgileForgeSpecStatus.SUPERSEDED,
+    }
+
+
+def _profile_source_fragments(
+    artifact: TechnicalSpecArtifact,
+) -> list[_ProfileSourceFragment]:
+    """Return explicit profile item fragments used for evidence and IR."""
+    fragments: list[_ProfileSourceFragment] = []
+    for item in artifact.items:
+        classification = _profile_item_classification(item)
+        active = _profile_item_is_active(item)
+        requirement_bearing = active and classification is not None
+        fragments.append(
+            _ProfileSourceFragment(
+                item=item,
+                location=f"{item.id}.statement",
+                text=item.statement,
+                classification=classification,
+                requirement_bearing=requirement_bearing,
+            )
+        )
+        if not active or item.type == AgileForgeSpecType.EXAMPLE:
+            continue
+        for index, acceptance in enumerate(item.acceptance, start=1):
+            fragments.append(
+                _ProfileSourceFragment(
+                    item=item,
+                    location=f"{item.id}.acceptance[{index}]",
+                    text=acceptance,
+                    classification="acceptance_criterion",
+                    requirement_bearing=classification is not None,
+                )
+            )
+    return fragments
+
+
+def _profile_evidence_candidates(
+    source_text: str | None,
+) -> list[_SourceEvidenceCandidate]:
+    """Return source evidence candidates from structured spec items."""
+    artifact = _profile_artifact(source_text)
+    if artifact is None:
+        return []
+    return [
+        _SourceEvidenceCandidate(
+            excerpt=_compact_whitespace(fragment.text),
+            location=fragment.location,
+        )
+        for fragment in _profile_source_fragments(artifact)
+        if _compact_whitespace(fragment.text)
+    ]
+
+
+def _profile_source_units_and_candidates(
+    source_text: str | None,
+) -> tuple[list[SourceUnit], list[RequirementCandidate]] | None:
+    """Build compact IR source units from typed AgileForge profile items."""
+    artifact = _profile_artifact(source_text)
+    if artifact is None:
+        return None
+
+    units: list[SourceUnit] = []
+    candidates: list[RequirementCandidate] = []
+    for index, fragment in enumerate(_profile_source_fragments(artifact), start=1):
+        normalized_location = _compact_whitespace(fragment.location).casefold()
+        location_hash = hashlib.sha256(
+            normalized_location.encode("utf-8")
+        ).hexdigest()[:12]
+        source_quote = _compact_whitespace(fragment.text)
+        text_hash = _source_quote_hash(source_quote)
+        unit_id = f"SRC-AF-{location_hash}"
+        if not _profile_item_is_active(fragment.item):
+            disposition = SourceUnitDisposition.NON_REQUIREMENT
+            disposition_reason = "profile item status is not active"
+        elif fragment.requirement_bearing:
+            disposition = SourceUnitDisposition.CANDIDATE_EXTRACTED
+            disposition_reason = None
+        else:
+            disposition = SourceUnitDisposition.INTENTIONALLY_CLASSIFIED
+            disposition_reason = "profile item type is non-normative context"
+
+        units.append(
+            SourceUnit(
+                unit_id=unit_id,
+                section_id=fragment.item.id,
+                heading_path=(fragment.item.type.value, fragment.item.id),
+                kind=f"agileforge_profile_{fragment.location.rsplit('.', 1)[-1]}",
+                line_start=index,
+                line_end=index,
+                text_hash=text_hash,
+                text_excerpt=_bounded_compact_ir_text(source_quote),
+                requirement_bearing=fragment.requirement_bearing,
+                disposition=disposition,
+                disposition_reason=disposition_reason,
+            )
+        )
+        if not fragment.requirement_bearing or fragment.classification is None:
+            continue
+        candidate_hash = hashlib.sha256(
+            f"{fragment.location}|{text_hash}".encode()
+        ).hexdigest()[:16]
+        candidates.append(
+            RequirementCandidate(
+                candidate_id=f"CAND-{candidate_hash}",
+                source_unit_id=unit_id,
+                statement=source_quote,
+                source_quote=_bounded_compact_ir_text(source_quote),
+                quote_hash=text_hash,
+                line_start=index,
+                line_end=index,
+                classification=fragment.classification,
+            )
+        )
+    return units, candidates
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:
@@ -538,17 +739,21 @@ def _repair_source_map_from_source_text(
     success: SpecAuthorityCompilationSuccess,
     *,
     source_text: str | None,
+    source_format: SpecSourceFormat,
 ) -> bool:
     """Replace weak LLM source maps with one supported source entry per invariant."""
     if not source_text:
         return False
 
     evidence_candidates: list[_SourceEvidenceCandidate] = []
-    for entry in success.source_map:
-        evidence_candidates.extend(
-            _candidate_evidence_from_source_text(entry, source_text=source_text)
-        )
-    evidence_candidates.extend(_source_text_line_candidates(source_text))
+    if source_format == "agileforge.spec.v1":
+        evidence_candidates.extend(_profile_evidence_candidates(source_text))
+    else:
+        for entry in success.source_map:
+            evidence_candidates.extend(
+                _candidate_evidence_from_source_text(entry, source_text=source_text)
+            )
+        evidence_candidates.extend(_source_text_line_candidates(source_text))
 
     if not evidence_candidates:
         return False
@@ -666,6 +871,33 @@ def _legacy_mapping_provenance(
     return MappingProvenance.HOST_REPAIRED_QUOTE
 
 
+def _source_entry_mapping_provenance(
+    entry: SourceMapEntry,
+    entry_index: int,
+    original_source_map: list[SourceMapEntry],
+    candidate: RequirementCandidate,
+    *,
+    source_format: SpecSourceFormat,
+) -> MappingProvenance:
+    """Classify provenance for a normalized source-map to candidate mapping."""
+    if entry_index >= len(original_source_map):
+        return MappingProvenance.HOST_REPAIRED_QUOTE
+    original = original_source_map[entry_index]
+    original_excerpt_matches = _compact_whitespace(
+        original.excerpt
+    ) == _compact_whitespace(candidate.source_quote)
+    normalized_excerpt_matches = _compact_whitespace(
+        entry.excerpt
+    ) == _compact_whitespace(candidate.source_quote)
+    if (
+        source_format == "agileforge.spec.v1"
+        and original_excerpt_matches
+        and normalized_excerpt_matches
+    ):
+        return MappingProvenance.MODEL_QUOTE
+    return _legacy_mapping_provenance(entry, entry_index, original_source_map)
+
+
 def _source_quote_hash(text: str) -> str:
     """Return the canonical hash for exact source quote bytes."""
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
@@ -679,6 +911,7 @@ def _model_to_host_candidate_ids(
     """Return model candidate IDs that exactly match one host candidate quote."""
     if model_ir_provenance not in {IrProvenance.MODEL_EMITTED, IrProvenance.MIXED}:
         return {}
+    host_by_id = {candidate.candidate_id: candidate for candidate in host_candidates}
     host_by_quote_hash: dict[str, list[RequirementCandidate]] = {}
     for candidate in host_candidates:
         host_by_quote_hash.setdefault(candidate.quote_hash, []).append(candidate)
@@ -688,6 +921,14 @@ def _model_to_host_candidate_ids(
         if candidate.provenance != IrProvenance.MODEL_EMITTED:
             continue
         if _source_quote_hash(candidate.source_quote) != candidate.quote_hash:
+            continue
+        direct_host = host_by_id.get(candidate.candidate_id)
+        if (
+            direct_host is not None
+            and direct_host.quote_hash == candidate.quote_hash
+            and direct_host.source_quote == candidate.source_quote
+        ):
+            model_to_host[candidate.candidate_id] = direct_host.candidate_id
             continue
         matching_hosts = [
             host
@@ -712,6 +953,7 @@ def _model_quote_mapping_keys(
         model_candidates,
         host_candidates,
     )
+    host_candidate_ids = {candidate.candidate_id for candidate in host_candidates}
     host_quote_hash_by_id = {
         candidate.candidate_id: candidate.quote_hash for candidate in host_candidates
     }
@@ -727,6 +969,11 @@ def _model_quote_mapping_keys(
         if mapping.authority_target_kind != AuthorityTargetKind.INVARIANT:
             continue
         host_candidate_id = model_to_host_candidate_id.get(mapping.candidate_id)
+        if (
+            host_candidate_id is None
+            and mapping.candidate_id in host_candidate_ids
+        ):
+            host_candidate_id = mapping.candidate_id
         if host_candidate_id is None:
             continue
         host_quote_hash = host_quote_hash_by_id[host_candidate_id]
@@ -759,10 +1006,11 @@ def _authority_id_aliases(
     return aliases
 
 
-def _mapping_entries_for_compact_ir(
+def _mapping_entries_for_compact_ir(  # noqa: PLR0913
     success: SpecAuthorityCompilationSuccess,
     candidates: list[RequirementCandidate],
     *,
+    source_format: SpecSourceFormat,
     model_hints: _CompactIrModelHints,
     original_source_map: list[SourceMapEntry],
     original_invariant_ids: list[str],
@@ -782,10 +1030,12 @@ def _mapping_entries_for_compact_ir(
         candidate = _candidate_for_source_entry(source_entry, invariant, candidates)
         if candidate is None:
             continue
-        provenance = _legacy_mapping_provenance(
+        provenance = _source_entry_mapping_provenance(
             source_entry,
             entry_index,
             original_source_map,
+            candidate,
+            source_format=source_format,
         )
         if (
             candidate.candidate_id,
@@ -805,10 +1055,11 @@ def _mapping_entries_for_compact_ir(
     return entries
 
 
-def _set_compact_ir(
+def _set_compact_ir(  # noqa: PLR0913
     success: SpecAuthorityCompilationSuccess,
     *,
     source_text: str | None,
+    source_format: SpecSourceFormat,
     original_source_map: list[SourceMapEntry],
     original_invariant_ids: list[str],
     model_hints: _CompactIrModelHints,
@@ -823,11 +1074,19 @@ def _set_compact_ir(
         success.ir_packet_limits = None
         return
 
-    sections, diagnostics = parse_markdown_sections(source_text)
-    if diagnostics:
-        logger.info("Spec authority IR parser diagnostics: %s", diagnostics)
-    source_units = source_units_from_sections(sections)
-    candidates = extract_requirement_candidates(source_units)
+    if source_format == "agileforge.spec.v1":
+        profile_ir = _profile_source_units_and_candidates(source_text)
+        if profile_ir is None:
+            source_units = []
+            candidates = []
+        else:
+            source_units, candidates = profile_ir
+    else:
+        sections, diagnostics = parse_markdown_sections(source_text)
+        if diagnostics:
+            logger.info("Spec authority IR parser diagnostics: %s", diagnostics)
+        source_units = source_units_from_sections(sections)
+        candidates = extract_requirement_candidates(source_units)
     model_host_candidate_ids = set(
         _model_to_host_candidate_ids(
             model_hints.ir_provenance,
@@ -844,6 +1103,7 @@ def _set_compact_ir(
     mapping_entries = _mapping_entries_for_compact_ir(
         success,
         candidates,
+        source_format=source_format,
         model_hints=model_hints,
         original_source_map=original_source_map,
         original_invariant_ids=original_invariant_ids,
@@ -918,6 +1178,7 @@ def normalize_compiler_output(
     raw_json: str,
     *,
     source_text: str | None = None,
+    source_format: SpecSourceFormat | None = None,
 ) -> SpecAuthorityCompilerOutput:
     """Normalize a raw agent JSON string into a deterministic compiler artifact.
 
@@ -925,12 +1186,15 @@ def normalize_compiler_output(
         raw_json: Raw JSON string emitted by the agent.
         source_text: Optional source spec text used to repair broad/short source
             excerpts into exact source rows or lines before deterministic ID checks.
+        source_format: Optional explicit source format. When omitted, it is detected
+            from source_text.
 
     Returns:
         SpecAuthorityCompilerOutput (success or failure). On success, prompt_hash and
         invariant/source_map IDs are rewritten deterministically.
     """
     logger.info("Normalizing spec authority compiler output")
+    source_format = source_format or _detect_source_format(source_text)
 
     raw_json = _extract_json_candidate(raw_json)
 
@@ -1010,6 +1274,7 @@ def normalize_compiler_output(
         _set_compact_ir(
             success,
             source_text=source_text,
+            source_format=source_format,
             original_source_map=list(success.source_map),
             original_invariant_ids=[],
             model_hints=model_hints,
@@ -1024,7 +1289,11 @@ def normalize_compiler_output(
         )
 
     original_source_map = list(success.source_map)
-    _repair_source_map_from_source_text(success, source_text=source_text)
+    _repair_source_map_from_source_text(
+        success,
+        source_text=source_text,
+        source_format=source_format,
+    )
 
     # Snapshot original invariant IDs/types before rewriting
     original_invariants = list(success.invariants)
@@ -1212,6 +1481,7 @@ def normalize_compiler_output(
     _set_compact_ir(
         success,
         source_text=source_text,
+        source_format=source_format,
         original_source_map=original_source_map,
         original_invariant_ids=original_invariant_ids,
         model_hints=model_hints,

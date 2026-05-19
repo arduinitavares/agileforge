@@ -597,18 +597,7 @@ def _validate_dashboard_authority_guards(req: AuthorityDecisionApiRequest) -> No
 def _validate_dashboard_incomplete_review_override(
     req: AuthorityDecisionApiRequest,
 ) -> None:
-    """Reject legacy broad incomplete-review overrides without candidates."""
-    if req.incomplete_review_overrides:
-        return
-    if not req.allow_incomplete_review and req.incomplete_review_rationale is None:
-        return
-    _dashboard_authority_error(
-        code="INVALID_COMMAND",
-        message=(
-            "Incomplete review acceptance requires candidate-specific overrides."
-        ),
-        missing=["incomplete_review_overrides"],
-    )
+    """Accept legacy broad incomplete-review fields for service compatibility."""
 
 
 def _dashboard_changed_by() -> str:

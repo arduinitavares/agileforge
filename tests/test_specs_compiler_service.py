@@ -32,6 +32,7 @@ from utils.spec_schemas import (
     SourceMapEntry,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
 )
 
@@ -93,6 +94,51 @@ def _raw_compiler_output_json() -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
+def _agileforge_spec_profile_payload() -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.test",
+        "title": "Test Spec",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Test summary.",
+        "problem_statement": "Test problem.",
+        "items": [
+            {
+                "id": "REQ.test.audit",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Audit evidence",
+                "statement": "The system MUST record audit evidence.",
+                "verification": "system-test",
+                "acceptance": ["Audit evidence is stored for each operation."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+
+
+def test_normalize_structured_spec_content_canonicalizes_json() -> None:
+    """Structured spec profile content is stored in canonical JSON form."""
+    raw_json = json.dumps(_agileforge_spec_profile_payload(), indent=2)
+
+    normalized = normalize_spec_content_for_registry(raw_json)
+
+    assert normalized.format == "agileforge.spec.v1"
+    assert normalized.spec_hash.startswith("sha256:")
+    assert "\n" not in normalized.content
+    assert json.loads(normalized.content)["schema_version"] == "agileforge.spec.v1"
+
+
 def test_normalize_markdown_spec_content_rejects_authority_input() -> None:
     """Authority compilation requires canonical agileforge.spec.v1 JSON."""
     raw_markdown = "# Spec\n\nThe system must record audit evidence.\n"
@@ -113,6 +159,34 @@ def test_normalize_arbitrary_json_rejects_authority_input() -> None:
 
     assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
     assert "schema_version" in str(exc_info.value)
+
+
+def test_update_spec_and_compile_authority_returns_error_for_invalid_structured_spec(
+    sample_product: Product,
+) -> None:
+    """Invalid structured spec JSON returns a structured compile/update error."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    result = compiler_service.update_spec_and_compile_authority(
+        {
+            "product_id": require_id(sample_product.product_id, "product_id"),
+            "spec_content": json.dumps(
+                {
+                    "schema_version": "agileforge.spec.v1",
+                    "artifact_id": "SPEC.invalid",
+                }
+            ),
+        },
+        tool_context=None,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "SPEC_FILE_INVALID"
+    assert "Invalid agileforge.spec.v1 content" in result["error"]
+
+
+def _success_payload_json() -> str:
+    return _raw_compiler_output_json()
 
 
 def _raw_compiler_failure_json() -> str:
@@ -565,6 +639,63 @@ def test_resolve_engine_prefers_patched_spec_tools_get_engine_over_stale_engine(
     resolved = compiler_service._resolve_engine()
 
     assert resolved is preferred_engine
+
+
+def test_default_compiler_invocation_does_not_send_host_candidate_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler input should contain source text, not host semantic candidates."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    captured: list[SpecAuthorityCompilerInput] = []
+
+    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+        captured.append(payload)
+        return _success_payload_json()
+
+    monkeypatch.setattr(
+        "services.specs.compiler_service._invoke_spec_authority_compiler_async",
+        fake_invoke,
+    )
+
+    compiler_service._default_invoke_spec_authority_compiler(
+        spec_content="# Spec\n\nThe system must record audit evidence.",
+        content_ref=None,
+        product_id=4,
+        spec_version_id=9,
+    )
+
+    assert len(captured) == 1
+    assert not hasattr(captured[0], "candidate_manifest")
+    assert captured[0].spec_source_format == "agileforge.spec_legacy_markdown.v1"
+
+
+def test_default_compiler_invocation_marks_structured_spec_source_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler input should identify canonical structured AgileForge spec JSON."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    captured: list[SpecAuthorityCompilerInput] = []
+
+    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+        captured.append(payload)
+        return _success_payload_json()
+
+    monkeypatch.setattr(
+        "services.specs.compiler_service._invoke_spec_authority_compiler_async",
+        fake_invoke,
+    )
+
+    compiler_service._default_invoke_spec_authority_compiler(
+        spec_content=json.dumps(_agileforge_spec_profile_payload()),
+        content_ref=None,
+        product_id=4,
+        spec_version_id=9,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].spec_source_format == "agileforge.spec.v1"
 
 
 def test_compile_spec_authority_for_version_persists_authority(

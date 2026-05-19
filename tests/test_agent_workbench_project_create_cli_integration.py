@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine, select
 
-from cli.main import main
+from cli.main import INVALID_COMMAND_EXIT_CODE, main
 from models.agent_workbench import CliMutationLedger
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
@@ -105,6 +105,22 @@ def _write_spec(caller_dir: Path) -> Path:
     spec_file.write_text(
         "# Outside Repo Project\n\n"
         "The project must include name. The total must be <= 10.\n",
+        encoding="utf-8",
+    )
+    return spec_file
+
+
+def _write_invalid_structured_spec(caller_dir: Path) -> Path:
+    """Write an invalid structured spec profile in the simulated caller repo."""
+    spec_file = caller_dir / "specs" / "invalid-spec.json"
+    spec_file.parent.mkdir(parents=True, exist_ok=True)
+    spec_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.invalid",
+            }
+        ),
         encoding="utf-8",
     )
     return spec_file
@@ -293,6 +309,41 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         assert project is not None
         assert project.name == "Outside Repo Project"
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
+
+
+def test_project_create_cli_returns_error_envelope_for_invalid_structured_spec(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spec_file = _write_invalid_structured_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    app = AgentWorkbenchApplication(project_setup_runner=runner)
+    _install_compiler(monkeypatch, success=True)
+
+    create_rc = main(
+        [
+            "project",
+            "create",
+            "--name",
+            "Invalid Spec Project",
+            "--spec-file",
+            str(spec_file),
+            "--idempotency-key",
+            "invalid-structured-spec-project-001",
+        ],
+        application=app,
+    )
+    payload = _captured_payload(capsys)
+
+    assert create_rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert payload["errors"][0]["code"] == "SPEC_FILE_INVALID"
+    first_error = payload["data"]["setup_failure_first_error"]
+    assert first_error
+    assert "Invalid agileforge.spec.v1 content" in first_error
 
 
 def test_project_create_rejects_markdown_spec_source(

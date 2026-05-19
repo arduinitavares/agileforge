@@ -18,7 +18,11 @@ from services.agent_workbench.authority_review import (
     sha256_prefixed,
 )
 from tests.typing_helpers import require_id
-from utils.spec_authority_ir import MAX_REVIEW_CANDIDATES
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_hash,
+    canonical_spec_json,
+)
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -149,6 +153,55 @@ def _base_spec() -> str:
         "## Background\n\n"
         "This section is descriptive background.\n"
     )
+
+
+def _agileforge_spec_profile_payload() -> str:
+    """Return minimal canonical AgileForge spec JSON for review tests."""
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.authority-review",
+            "title": "Authority Review Spec",
+            "status": "draft",
+            "version": "0.1.0",
+            "created_at": "2026-05-17T12:00:00Z",
+            "updated_at": "2026-05-17T12:00:00Z",
+            "summary": "Review packets expose deterministic authority evidence.",
+            "problem_statement": (
+                "Reviewers need structured metadata for canonical spec artifacts."
+            ),
+            "items": [
+                {
+                    "id": "GOAL.review-evidence",
+                    "type": "GOAL",
+                    "status": "draft",
+                    "title": "Expose review evidence",
+                    "statement": "Reviewers can identify the exact spec artifact.",
+                },
+                {
+                    "id": "REQ.guard-tokens",
+                    "type": "REQ",
+                    "status": "draft",
+                    "title": "Guard token packet evidence",
+                    "statement": "The review output must include guard tokens.",
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "The authority review packet includes guard token evidence."
+                    ],
+                },
+            ],
+            "relations": [
+                {
+                    "from": "REQ.guard-tokens",
+                    "type": "satisfies",
+                    "to": "GOAL.review-evidence",
+                    "rationale": "Guard tokens identify reviewed authority input.",
+                }
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
 
 
 def test_review_returns_pending_authority_packet_with_guard_tokens(
@@ -645,16 +698,18 @@ def test_review_incomplete_coverage_adds_actionable_review_gap(
     assert any("Audit Contract" in text for text in gap_texts)
 
 
-def test_review_packet_renders_derived_ir_and_findings(
+def test_review_packet_metadata_does_not_become_public_candidate_blocker(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Review packet includes host-derived IR and blocking findings."""
+    """Document metadata is not promoted into public requirement blockers."""
     spec_content = (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "## Audit Contract\n\n"
-        "The audit trail must record every accepted or rejected authority decision.\n"
+        "# Product Spec\n\n"
+        "**Status:** Draft\n"
+        "**Version:** 0.1\n"
+        "**Owner:** Operator\n\n"
+        "## Requirements\n\n"
+        "The system must include audit evidence.\n"
     )
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
@@ -662,7 +717,7 @@ def test_review_packet_renders_derived_ir_and_findings(
             tmp_path=tmp_path,
             spec_content=spec_content,
             artifact_json=_compiled_success_json(
-                source_excerpt="The review output must include guard tokens."
+                source_excerpt="The system must include audit evidence."
             ),
         )
     )
@@ -675,49 +730,37 @@ def test_review_packet_renders_derived_ir_and_findings(
     data = result["data"]
     spec = data["spec"]
     pending = data["pending_authority"]
-    assert spec["source_units"]
-    assert pending["requirement_candidates"]
-    assert pending["authority_mappings"]
+    assert spec["source_outline"]
+    assert "requirement_candidates" not in pending
+    assert pending["authority_mappings"] == []
     assert pending["ir_provenance"] in {"host_parsed", "mixed", "model_emitted"}
-    assert pending["review_findings"]
-    assert any(
-        finding["code"] == "AUTHORITY_CANDIDATE_UNCOVERED"
+    assert all(
+        not str(finding["code"]).startswith("AUTHORITY_CANDIDATE_")
         for finding in pending["review_findings"]
     )
-    assert pending["coverage_summary"]["all_candidates_covered"] is False
     assert data["review_findings"] == pending["review_findings"]
-    assert data["review_summary"] == {
-        "acceptance_status": "blocked",
-        "blocking_finding_count": 2,
-        "blocking_finding_codes": [
-            "AUTHORITY_CANDIDATE_UNCOVERED",
-            "AUTHORITY_COVERAGE_INCOMPLETE",
-        ],
-        "overrideable_blocking_finding_count": 1,
-        "non_overrideable_blocking_finding_count": 1,
-        "packet_truncated": False,
-    }
-    gap_texts = [str(gap["text"]) for gap in pending["artifact"]["gaps"]]
-    assert any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in gap_texts)
+    assert data["review_summary"]["acceptance_status"] == "accept_ready"
+    assert data["review_summary"]["compiler_gap_count"] == 0
+    assert data["review_summary"]["compiler_assumption_count"] == 0
+    assert data["review_summary"]["compiler_invariant_count"] == 1
 
 
-def test_review_packet_truncation_creates_non_overrideable_blocking_finding(
+def test_review_includes_structured_spec_metadata_for_agileforge_profile_json(
     session: Session,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Truncated rendered IR packets are never overrideable at accept time."""
-    monkeypatch.setattr("utils.spec_authority_ir.MAX_REVIEW_CANDIDATES", 1)
-    spec_content = "# Submission Contract\n\n" + "\n".join(
-        f"- The runner must record audit field {index}."
-        for index in range(MAX_REVIEW_CANDIDATES + 2)
-    )
+    """Canonical AgileForge spec JSON adds structured spec metadata."""
+    spec_content = _agileforge_spec_profile_payload()
+    artifact = TechnicalSpecArtifact.model_validate_json(spec_content)
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated"),
+            spec_filename="spec.json",
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
         )
     )
 
@@ -725,10 +768,149 @@ def test_review_packet_truncation_creates_non_overrideable_blocking_finding(
         project_id=project_id
     )
 
-    findings = result["data"]["pending_authority"]["review_findings"]
-    assert findings[0]["code"] == "AUTHORITY_REVIEW_PACKET_TRUNCATED"
-    assert findings[0]["severity"] == "blocking"
-    assert findings[0]["override_allowed"] is False
+    spec = result["data"]["spec"]
+    assert spec["format"] == "agileforge.spec.v1"
+    assert spec["artifact_id"] == "SPEC.authority-review"
+    assert spec["canonical_spec_sha256"].startswith("sha256:")
+    assert spec["render_profile"] == "agileforge.spec_markdown.v1"
+    assert spec["rendered_markdown_sha256"].startswith("sha256:")
+    assert spec["item_count"] == len(artifact.items)
+    assert spec["relation_count"] == len(artifact.relations)
+    assert spec["spec_hash"].startswith("sha256:")
+
+
+def test_review_blocks_structured_spec_when_profile_ir_has_uncovered_items(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Structured spec review must use profile IR findings, not blob coverage."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    spec_content = _agileforge_spec_profile_payload()
+    normalized = normalize_compiler_output(
+        _compiled_success_json(
+            source_excerpt="The review output must include guard tokens.",
+            source_location="REQ.guard-tokens.statement",
+        ),
+        source_text=spec_content,
+        source_format="agileforge.spec.v1",
+    )
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=normalized.model_dump_json(),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    pending = result["data"]["pending_authority"]
+    spec = result["data"]["spec"]
+    codes = {finding["code"] for finding in pending["review_findings"]}
+    assert spec["source_units"]
+    assert pending["authority_mappings"]
+    assert "AUTHORITY_CANDIDATE_UNCOVERED" in codes
+    assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
+    assert result["data"]["review_summary"]["blocking_finding_count"] > 0
+
+
+def test_review_accepts_pretty_structured_spec_when_registry_hash_is_canonical(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review freshness canonicalizes structured JSON before comparing hashes."""
+    spec_content = _agileforge_spec_profile_payload()
+    artifact = TechnicalSpecArtifact.model_validate_json(spec_content)
+    pretty_spec = json.dumps(json.loads(spec_content), indent=2)
+    project_id, spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_bytes=pretty_spec.encode("utf-8"),
+            spec_filename="spec.json",
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
+        )
+    )
+    spec_row = session.get(SpecRegistry, spec_version_id)
+    assert spec_row is not None
+    spec_row.spec_hash = canonical_spec_hash(artifact)
+    spec_row.content = spec_content
+    session.add(spec_row)
+    session.commit()
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    spec = result["data"]["spec"]
+    assert spec["format"] == "agileforge.spec.v1"
+    assert spec["disk_sha256"] == canonical_spec_hash(artifact)
+
+
+def test_review_summary_counts_compiler_artifact_evidence(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review summary is driven by compiler artifact counts, not candidates."""
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority review"],
+        domain="agent workbench",
+        invariants=[
+            Invariant(
+                id=INVARIANT_ID,
+                type=InvariantType.REQUIRED_FIELD,
+                parameters=RequiredFieldParams(field_name="audit_evidence"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=["Clarify retention policy."],
+        assumptions=["Audit evidence is stored with each decision."],
+        source_map=[
+            SourceMapEntry(
+                invariant_id=INVARIANT_ID,
+                excerpt="The system must include audit evidence.",
+                location="Requirements",
+            )
+        ],
+        compiler_version=COMPILER_VERSION,
+        prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
+    )
+    spec_content = "# Product Spec\n\nThe system must include audit evidence.\n"
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=SpecAuthorityCompilerOutput(
+                root=success
+            ).model_dump_json(),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    summary = result["data"]["review_summary"]
+    assert summary["acceptance_status"] == "accept_ready"
+    assert summary["compiler_gap_count"] == 1
+    assert summary["compiler_assumption_count"] == 1
+    assert summary["compiler_invariant_count"] == 1
 
 
 def test_review_omits_large_covered_source_and_marks_omission_complete(

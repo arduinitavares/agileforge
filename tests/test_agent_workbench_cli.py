@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from cli.main import main
+from services.agent_workbench.error_codes import ErrorCode
 
 type JsonObject = dict[str, object]
 PROJECT_ID = 7
@@ -356,6 +357,56 @@ def _first_mapping(value: object) -> JsonObject:
     return cast("JsonObject", first)
 
 
+def _agileforge_spec_profile_payload() -> dict[str, object]:
+    """Return a minimal valid AgileForge spec profile payload."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.test",
+        "title": "Test Spec",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Exercise the spec profile CLI.",
+        "problem_statement": "Agents need a structured spec profile smoke test.",
+        "items": [
+            {
+                "id": "GOAL.test.profile-cli",
+                "type": "GOAL",
+                "status": "proposed",
+                "title": "Profile CLI",
+                "statement": "Expose spec profile utilities through the CLI.",
+            },
+            {
+                "id": "REQ.test.render-markdown",
+                "type": "REQ",
+                "status": "proposed",
+                "title": "Render markdown",
+                "statement": "The CLI MUST render deterministic Markdown.",
+                "level": "MUST",
+                "verification": "unit-test",
+                "acceptance": [
+                    "Given a valid spec profile, when validation renders Markdown, "
+                    "then the target file starts with the spec title."
+                ],
+            },
+        ],
+        "relations": [
+            {
+                "from": "REQ.test.render-markdown",
+                "type": "satisfies",
+                "to": "GOAL.test.profile-cli",
+            }
+        ],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+
+
 def test_cli_writes_success_json_to_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -372,6 +423,144 @@ def test_cli_writes_success_json_to_stdout(
     assert payload["errors"] == []
     assert _mapping(payload["meta"])["command"] == "agileforge project list"
     assert app.calls == [("project_list", {})]
+
+
+def test_spec_profile_schema_command_outputs_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose the AgileForge spec profile JSON Schema through the CLI."""
+    rc = main(["spec", "profile", "schema"], application=_FakeApplication())
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    schema_id = _mapping(_mapping(payload["data"])["schema"])["$id"]
+    assert isinstance(schema_id, str)
+    assert schema_id.endswith("agileforge.spec.v1.json")
+    assert _mapping(payload["meta"])["command"] == "agileforge spec profile schema"
+
+
+def test_spec_profile_validate_can_render_markdown(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Validate a spec profile JSON file and write its Markdown rendering."""
+    spec_path = tmp_path / "spec.json"
+    render_path = tmp_path / "spec.md"
+    spec_path.write_text(
+        json.dumps(_agileforge_spec_profile_payload()),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "spec",
+            "profile",
+            "validate",
+            "--spec-file",
+            str(spec_path),
+            "--render-md",
+            str(render_path),
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    data = _mapping(payload["data"])
+    assert rc == 0
+    assert payload["ok"] is True
+    assert data["format"] == "agileforge.spec.v1"
+    assert str(data["spec_sha256"]).startswith("sha256:")
+    assert str(data["rendered_markdown_sha256"]).startswith("sha256:")
+    assert render_path.read_text(encoding="utf-8").startswith("# Test Spec")
+    assert _mapping(payload["meta"])["command"] == "agileforge spec profile validate"
+
+
+def test_spec_profile_validate_missing_spec_file_returns_registered_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Return a registered error code when the profile input file is missing."""
+    missing_spec_path = tmp_path / "missing-spec.json"
+
+    rc = main(
+        [
+            "spec",
+            "profile",
+            "validate",
+            "--spec-file",
+            str(missing_spec_path),
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.SPEC_FILE_NOT_FOUND.value
+    assert _mapping(error["details"])["spec_file"] == str(missing_spec_path.resolve())
+
+
+def test_spec_profile_validate_invalid_spec_file_returns_registered_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Return a registered error code when profile JSON validation fails."""
+    spec_path = tmp_path / "invalid-spec.json"
+    spec_path.write_text('{"schema_version": "agileforge.spec.v1"}', encoding="utf-8")
+
+    rc = main(
+        [
+            "spec",
+            "profile",
+            "validate",
+            "--spec-file",
+            str(spec_path),
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.SPEC_FILE_INVALID.value
+    assert _mapping(error["details"])["spec_file"] == str(spec_path.resolve())
+
+
+def test_spec_profile_validate_render_write_failure_returns_invalid_command(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report Markdown render write failures separately from input validation."""
+    spec_path = tmp_path / "spec.json"
+    render_path = tmp_path / "render-target"
+    render_path.mkdir()
+    spec_path.write_text(
+        json.dumps(_agileforge_spec_profile_payload()),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "spec",
+            "profile",
+            "validate",
+            "--spec-file",
+            str(spec_path),
+            "--render-md",
+            str(render_path),
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.INVALID_COMMAND.value
+    assert _mapping(error["details"])["render_md"] == str(render_path.resolve())
 
 
 def test_cli_redirects_application_stdout_away_from_json_envelope(

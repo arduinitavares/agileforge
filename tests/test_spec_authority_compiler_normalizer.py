@@ -21,6 +21,55 @@ from utils.spec_schemas import (
 )
 
 
+def _structured_spec_source() -> str:
+    """Return canonical AgileForge profile JSON with two normative items."""
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.normalizer",
+            "title": "Normalizer Structured Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-19",
+            "updated_at": "2026-05-19",
+            "summary": "Exercise structured spec authority normalization.",
+            "problem_statement": "Structured specs need profile-aware traceability.",
+            "items": [
+                {
+                    "id": "REQ.audit-evidence",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Audit evidence",
+                    "statement": "The system MUST record audit evidence.",
+                    "level": "MUST",
+                    "verification": "system-test",
+                    "acceptance": [
+                        "Audit evidence is stored for each operation."
+                    ],
+                },
+                {
+                    "id": "REQ.review-token",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Review token",
+                    "statement": "The system MUST include review token evidence.",
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "Review packets include review token evidence."
+                    ],
+                },
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
+
+
 def _legacy_success_payload() -> dict[str, Any]:
     return {
         "scope_themes": ["payload validation"],
@@ -182,6 +231,18 @@ def test_success_schema_rejects_mapping_with_missing_candidate_id() -> None:
 
     with pytest.raises(ValidationError):
         SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_schema_accepts_manifest_mapping_without_repeated_candidate() -> None:
+    """Raw model hints may point at host manifest candidates not repeated in output."""
+    payload = _compact_ir_success_payload()
+    payload["source_units"] = []
+    payload["requirement_candidates"] = []
+    payload["authority_mappings"][0]["candidate_id"] = "REQ-host-manifest"
+
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert success.authority_mappings[0].candidate_id == "REQ-host-manifest"
 
 
 def test_success_schema_rejects_candidate_with_missing_source_unit_id() -> None:
@@ -405,8 +466,8 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
 
 
-def test_legacy_ir_provenance_does_not_create_accept_ready_packet() -> None:
-    """Host-parsed legacy artifacts expose incomplete IR, not trusted coverage."""
+def test_exact_legacy_source_map_quote_stays_host_inferred() -> None:
+    """Legacy source_map quotes do not become trusted model IR by themselves."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -431,8 +492,16 @@ def test_legacy_ir_provenance_does_not_create_accept_ready_packet() -> None:
     assert {mapping.mapping_provenance for mapping in success.authority_mappings} == {
         "host_inferred"
     }
-    assert all(
-        mapping.mapping_status != "covered" for mapping in success.authority_mappings
+    assert {mapping.mapping_status for mapping in success.authority_mappings} == {
+        "weak_mapping"
+    }
+    mapped_candidate_ids = {
+        mapping.candidate_id for mapping in success.authority_mappings
+    }
+    assert len(mapped_candidate_ids) == 1
+    assert any(
+        candidate.candidate_id not in mapped_candidate_ids
+        for candidate in success.requirement_candidates
     )
 
 
@@ -673,6 +742,175 @@ def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> Non
     assert mapping.authority_item_id == success.invariants[0].id
     assert mapping.mapping_provenance == "model_quote"
     assert mapping.mapping_status == "covered"
+
+
+def test_structured_profile_ir_uses_typed_items_not_canonical_json_blob() -> None:
+    """Profile JSON should become item-level IR, not one legacy Markdown blob."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _structured_spec_source()
+    source_quote = "The system MUST record audit evidence."
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert len(success.source_units) > 1
+    assert len(success.requirement_candidates) > 1
+    assert all(
+        not candidate.source_quote.lstrip().startswith("{")
+        for candidate in success.requirement_candidates
+    )
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].location == "REQ.audit-evidence.statement"
+    assert success.authority_mappings[0].mapping_provenance == "model_quote"
+    assert success.authority_mappings[0].mapping_status == "covered"
+
+
+def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None:
+    """A model JSON-blob citation is repaired to profile evidence but stays weak."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _structured_spec_source()
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = source_text
+    raw["source_map"][0]["location"] = "spec.json"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.source_map[0].excerpt == "The system MUST record audit evidence."
+    assert not success.source_map[0].excerpt.lstrip().startswith("{")
+    assert success.authority_mappings[0].mapping_provenance == "host_repaired_quote"
+    assert success.authority_mappings[0].mapping_status == "weak_mapping"
+
+
+def test_model_emitted_manifest_mapping_does_not_require_source_units() -> None:
+    """Model candidate/mapping hints can bind to host source units by exact quote."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.spec_authority_ir import (  # noqa: PLC0415
+        extract_requirement_candidates,
+        parse_markdown_sections,
+        source_units_from_sections,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    sections, _diagnostics = parse_markdown_sections(source_text)
+    host_candidates = extract_requirement_candidates(
+        source_units_from_sections(sections)
+    )
+    candidate = host_candidates[0]
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "requirement_candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "source_unit_id": candidate.source_unit_id,
+                    "statement": candidate.statement,
+                    "source_quote": candidate.source_quote,
+                    "quote_hash": candidate.quote_hash,
+                    "line_start": candidate.line_start,
+                    "line_end": candidate.line_end,
+                    "classification": candidate.classification,
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Exact manifest candidate maps to invariant.",
+                    "source_quote_hash": candidate.quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.ir_provenance == "mixed"
+    assert success.source_units
+    assert success.requirement_candidates[0].provenance == "model_emitted"
+    assert success.authority_mappings[0].mapping_provenance == "model_quote"
+    assert success.authority_mappings[0].mapping_status == "covered"
+
+
+def test_model_mapping_can_reference_host_manifest_candidate_directly() -> None:
+    """Model mapping hints can use host candidate IDs without repeating candidates."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.spec_authority_ir import (  # noqa: PLC0415
+        extract_requirement_candidates,
+        parse_markdown_sections,
+        source_units_from_sections,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    sections, _diagnostics = parse_markdown_sections(source_text)
+    host_candidates = extract_requirement_candidates(
+        source_units_from_sections(sections)
+    )
+    candidate = host_candidates[0]
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "payload must include user_id"
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [],
+            "requirement_candidates": [],
+            "authority_mappings": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Exact manifest candidate maps to invariant.",
+                    "source_quote_hash": candidate.quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    assert success.authority_mappings[0].mapping_provenance == "model_quote"
+    assert success.authority_mappings[0].mapping_status == "covered"
 
 
 def test_model_emitted_candidate_without_mapping_marks_root_mixed() -> None:

@@ -584,11 +584,11 @@ def _setup_workflow_next(
                 accept_action["requires"] = [
                     "review_token",
                     "idempotency_key",
-                    "candidate_specific_overrides",
+                    "fatal_review_resolution",
                 ]
                 accept_reason = (
-                    "Authority review has blocking findings; resolve them or "
-                    "provide candidate-specific overrides before accepting. "
+                    "Authority review has fatal blocking findings; resolve them "
+                    "and run authority review again before accepting. "
                     f"Blocking codes: {', '.join(codes)}."
                 )
         accept_action["reason"] = accept_reason

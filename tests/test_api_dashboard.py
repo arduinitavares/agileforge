@@ -635,10 +635,10 @@ def test_dashboard_accept_passes_candidate_scoped_incomplete_review_overrides(
     )
 
 
-def test_dashboard_accept_rejects_broad_incomplete_review_override(
+def test_dashboard_accept_passes_broad_incomplete_review_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dashboard boundary rejects legacy broad override payloads alone."""
+    """Dashboard accept forwards legacy broad override fields."""
     client, repo, _workflow = _build_client(monkeypatch)
     fake_app = FakeAuthorityApplication()
     _install_fake_authority_application(monkeypatch, fake_app)
@@ -653,9 +653,12 @@ def test_dashboard_accept_rejects_broad_incomplete_review_override(
         },
     )
 
-    assert response.status_code == HTTP_BAD_REQUEST
-    assert response.json()["detail"]["errors"][0]["code"] == "INVALID_COMMAND"
-    assert fake_app.accept_requests == []
+    assert response.status_code == HTTP_OK
+    assert len(fake_app.accept_requests) == 1
+    assert fake_app.accept_requests[0].allow_incomplete_review is True
+    assert fake_app.accept_requests[0].incomplete_review_rationale == (
+        "Reviewed manually."
+    )
 
 
 def test_dashboard_reject_records_reason_and_keeps_vision_locked(

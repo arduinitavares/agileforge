@@ -322,6 +322,27 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge spec profile schema",
+        mutates=False,
+        phase="phase_2e",
+    ),
+    CommandMetadata(
+        name="agileforge spec profile validate",
+        mutates=False,
+        phase="phase_2e",
+        input_required=("spec_file",),
+        input_optional=("render_md",),
+        errors=(
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+)
+
+
 def command_contracts() -> tuple[CommandMetadata, ...]:
     """Return discoverable command contracts for the current workbench phase."""
     return (
@@ -329,6 +350,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2A_COMMANDS,
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
+        *_PHASE_2E_COMMANDS,
     )
 
 

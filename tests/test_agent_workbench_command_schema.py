@@ -48,6 +48,11 @@ EXPECTED_PHASE_2C_COMMAND_NAMES = {
     "agileforge authority reject",
 }
 
+EXPECTED_PHASE_2E_COMMAND_NAMES = {
+    "agileforge spec profile schema",
+    "agileforge spec profile validate",
+}
+
 EXPECTED_PHASE_1_INPUTS = {
     "agileforge status": (["project_id"], []),
     "agileforge project list": ([], []),
@@ -337,3 +342,28 @@ def test_phase_2c_authority_commands_are_registered_and_available() -> None:
         assert command_is_available(command_name) is True
         assert command_name in capabilities
         assert capabilities[command_name]["installed"] is True
+
+
+def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:
+    """Publish spec profile schema and validation command contracts."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert EXPECTED_PHASE_2E_COMMAND_NAMES.issubset(names)
+    for command_name in EXPECTED_PHASE_2E_COMMAND_NAMES:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    schema = command_schema_payload("agileforge spec profile schema")
+    validate = command_schema_payload("agileforge spec profile validate")
+
+    assert schema["mutates"] is False
+    assert schema["input"]["required"] == []
+    assert schema["input"]["optional"] == []
+    assert validate["mutates"] is False
+    assert validate["input"]["required"] == ["spec_file"]
+    assert validate["input"]["optional"] == ["render_md"]
+    assert ErrorCode.SPEC_FILE_NOT_FOUND.value in validate["errors"]
+    assert ErrorCode.SPEC_FILE_INVALID.value in validate["errors"]
+    assert ErrorCode.INVALID_COMMAND.value in validate["errors"]
