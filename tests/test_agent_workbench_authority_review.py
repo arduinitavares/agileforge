@@ -52,7 +52,7 @@ def _engine(session: Session) -> Engine:
 def _compiled_success_json(
     *,
     source_excerpt: str,
-    source_location: str | None = "Submission Contract",
+    source_location: str | None = "REQ.guard-tokens.statement",
 ) -> str:
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Authority review"],
@@ -90,7 +90,7 @@ def _seed_pending_review_project(  # noqa: PLR0913
     spec_content: str,
     artifact_json: str | None = None,
     spec_bytes: bytes | None = None,
-    spec_filename: str = "spec.md",
+    spec_filename: str = "spec.json",
 ) -> tuple[int, int, int, Path]:
     spec_path = tmp_path / spec_filename
     raw_bytes = spec_bytes if spec_bytes is not None else spec_content.encode("utf-8")
@@ -147,26 +147,31 @@ def _seed_pending_review_project(  # noqa: PLR0913
 
 
 def _base_spec() -> str:
-    return (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "## Background\n\n"
-        "This section is descriptive background.\n"
-    )
+    return _agileforge_spec_profile_payload()
 
 
-def _agileforge_spec_profile_payload() -> str:
+def _agileforge_spec_profile_payload(
+    *,
+    artifact_id: str = "SPEC.authority-review",
+    title: str = "Authority Review Spec",
+    summary: str = "Review packets expose deterministic authority evidence.",
+    requirement_statement: str = "The review output must include guard tokens.",
+    acceptance: list[str] | None = None,
+) -> str:
     """Return minimal canonical AgileForge spec JSON for review tests."""
+    requirement_acceptance = acceptance or [
+        "The authority review packet includes guard token evidence."
+    ]
     artifact = TechnicalSpecArtifact.model_validate(
         {
             "schema_version": "agileforge.spec.v1",
-            "artifact_id": "SPEC.authority-review",
-            "title": "Authority Review Spec",
+            "artifact_id": artifact_id,
+            "title": title,
             "status": "draft",
             "version": "0.1.0",
             "created_at": "2026-05-17T12:00:00Z",
             "updated_at": "2026-05-17T12:00:00Z",
-            "summary": "Review packets expose deterministic authority evidence.",
+            "summary": summary,
             "problem_statement": (
                 "Reviewers need structured metadata for canonical spec artifacts."
             ),
@@ -183,12 +188,10 @@ def _agileforge_spec_profile_payload() -> str:
                     "type": "REQ",
                     "status": "draft",
                     "title": "Guard token packet evidence",
-                    "statement": "The review output must include guard tokens.",
+                    "statement": requirement_statement,
                     "level": "MUST",
                     "verification": "inspection",
-                    "acceptance": [
-                        "The authority review packet includes guard token evidence."
-                    ],
+                    "acceptance": requirement_acceptance,
                 },
             ],
             "relations": [
@@ -362,11 +365,11 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
     ]
 
 
-def test_review_fallback_preserves_persisted_authority_fields(
+def test_review_malformed_artifact_fallback_preserves_persisted_authority_fields(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Fallback review rendering preserves normalized persisted authority fields."""
+    """Malformed compiler artifacts fall back to persisted authority fields."""
     project_id, _spec_version_id, authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -379,7 +382,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
                             "id": "ASM-7",
                             "text": "Review assumes CLI output is JSON.",
                             "support": "direct",
-                            "source_refs": ["Submission Contract"],
+                            "source_refs": ["REQ.guard-tokens.statement"],
                             "source_excerpt": (
                                 "The review output must include guard tokens."
                             ),
@@ -397,7 +400,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
                 "id": "ELIG-2",
                 "text": "Allow read-only packet rendering.",
                 "support": "direct",
-                "source_refs": ["Submission Contract"],
+                "source_refs": ["REQ.guard-tokens.statement"],
                 "source_excerpt": "The review output must include guard tokens.",
             }
         ]
@@ -408,7 +411,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
                 "id": "REJ-9",
                 "text": "Reject automatic authority acceptance.",
                 "support": "direct",
-                "source_refs": ["Manual Checkpoint"],
+                "source_refs": ["REQ.guard-tokens.acceptance.0"],
                 "source_excerpt": "Humans must approve authority before use.",
             }
         ]
@@ -431,13 +434,14 @@ def test_review_fallback_preserves_persisted_authority_fields(
         project_id=project_id
     )
 
+    assert result["ok"] is True
     artifact = result["data"]["pending_authority"]["artifact"]
     assert artifact["eligible_feature_rules"] == [
         {
             "id": "ELIG-2",
             "text": "Allow read-only packet rendering.",
             "support": "direct",
-            "source_refs": ["Submission Contract"],
+            "source_refs": ["REQ.guard-tokens.statement"],
             "source_excerpt": "The review output must include guard tokens.",
         }
     ]
@@ -446,7 +450,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
             "id": "REJ-9",
             "text": "Reject automatic authority acceptance.",
             "support": "direct",
-            "source_refs": ["Manual Checkpoint"],
+            "source_refs": ["REQ.guard-tokens.acceptance.0"],
             "source_excerpt": "Humans must approve authority before use.",
         }
     ]
@@ -464,7 +468,7 @@ def test_review_fallback_preserves_persisted_authority_fields(
             "id": "ASM-7",
             "text": "Review assumes CLI output is JSON.",
             "support": "direct",
-            "source_refs": ["Submission Contract"],
+            "source_refs": ["REQ.guard-tokens.statement"],
             "source_excerpt": "The review output must include guard tokens.",
         }
     ]
@@ -500,16 +504,22 @@ def test_review_uses_latest_spec_content_ref_instead_of_product_path(
 ) -> None:
     """Review reads and hashes the latest SpecRegistry content_ref path only."""
     spec_a = _base_spec()
-    spec_b = "# Submission Contract\n\nThis product path must not be read.\n"
+    spec_b = _agileforge_spec_profile_payload(
+        artifact_id="SPEC.product-path",
+        title="Product Path Spec",
+        summary="This product path must not be read.",
+        requirement_statement="This product path must not be read.",
+        acceptance=["The registry content_ref remains authoritative."],
+    )
     project_id, spec_version_id, _authority_id, spec_path_a = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=spec_a,
-            spec_filename="spec-a.md",
+            spec_filename="spec-a.json",
         )
     )
-    spec_path_b = tmp_path / "spec-b.md"
+    spec_path_b = tmp_path / "spec-b.json"
     spec_path_b.write_text(spec_b, encoding="utf-8")
     product = session.get(Product, project_id)
     assert product is not None
@@ -570,7 +580,11 @@ def test_review_blocks_stale_registry_hash_without_leaking_source(
             spec_content=original,
         )
     )
-    changed = "# Submission Contract\n\nThis stale file must not be disclosed.\n"
+    changed = _agileforge_spec_profile_payload(
+        summary="This stale file must not be disclosed.",
+        requirement_statement="This stale file must not be disclosed.",
+        acceptance=["The stale source remains undisclosed."],
+    )
     spec_path.write_text(changed, encoding="utf-8")
 
     result = AuthorityReviewService(engine=_engine(session)).review(
@@ -595,19 +609,23 @@ def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
 ) -> None:
     """Symlink paths report resolved targets and block mismatched content."""
     original = _base_spec()
-    target_path = tmp_path / "target.md"
+    target_path = tmp_path / "target.json"
     target_path.write_text(
-        "# Submission Contract\n\nThis symlink target must not leak.\n",
+        _agileforge_spec_profile_payload(
+            summary="This symlink target must not leak.",
+            requirement_statement="This symlink target must not leak.",
+            acceptance=["The mismatched symlink target remains undisclosed."],
+        ),
         encoding="utf-8",
     )
-    symlink_path = tmp_path / "linked.md"
+    symlink_path = tmp_path / "linked.json"
     symlink_path.symlink_to(target_path)
     project_id, spec_version_id, authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=original,
-            spec_filename="registry.md",
+            spec_filename="registry.json",
         )
     )
     spec = session.get(SpecRegistry, spec_version_id)
@@ -628,16 +646,14 @@ def test_review_resolves_symlink_and_blocks_mismatched_target_hash(
     )
 
 
-def test_review_omits_large_source_and_marks_omission_incomplete(
+def test_review_omits_large_structured_source_and_marks_omission_complete(
     session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Large source is omitted in auto mode and keeps the review incomplete."""
+    """Large structured source is omitted in auto mode without coverage blockers."""
     monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
-    spec_content = _base_spec() + "\n".join(
-        f"- Requirement {index} must be reviewed." for index in range(20)
-    )
+    spec_content = _base_spec()
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -655,32 +671,26 @@ def test_review_omits_large_source_and_marks_omission_incomplete(
     assert spec["content_truncated"] is True
     assert spec["source_content"] is None
     assert spec["source_content_sha256"] is None
-    assert spec["coverage_summary"]["omission_assessment"] == "incomplete"
+    assert spec["coverage_summary"]["omission_assessment"] == "complete"
     assert result["data"]["guard_tokens"]["expected_omission_assessment"] == (
-        "incomplete"
+        "complete"
     )
 
 
-def test_review_incomplete_coverage_adds_actionable_review_gap(
+def test_review_invalid_structured_source_ref_adds_actionable_review_gap(
     session: Session,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Incomplete coverage creates an explicit gap instead of accept-ready output."""
-    monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
-    spec_content = (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "## Audit Contract\n\n"
-        "The audit trail must record every accepted or rejected authority decision.\n"
-    )
+    """Invalid structured source refs create blocking findings and action guards."""
+    spec_content = _base_spec()
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=spec_content,
             artifact_json=_compiled_success_json(
-                source_excerpt="The review output must include guard tokens."
+                source_excerpt="The review output must include guard tokens.",
+                source_location="REQ.missing.statement",
             ),
         )
     )
@@ -691,25 +701,26 @@ def test_review_incomplete_coverage_adds_actionable_review_gap(
 
     artifact = result["data"]["pending_authority"]["artifact"]
     gap_texts = [str(gap["text"]) for gap in artifact["gaps"]]
+    findings = result["data"]["review_findings"]
+    codes = {finding["code"] for finding in findings}
     assert result["data"]["spec"]["coverage_summary"]["omission_assessment"] == (
-        "incomplete"
+        "complete"
     )
-    assert any("AUTHORITY_COVERAGE_INCOMPLETE" in text for text in gap_texts)
-    assert any("Audit Contract" in text for text in gap_texts)
+    assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
+    assert result["data"]["next_actions"][0]["blocked"] is True
+    assert "fatal_review_resolution" in result["data"]["next_actions"][0]["requires"]
+    assert "SOURCE_REF_INVALID" in codes
+    assert any("SOURCE_REF_INVALID" in text for text in gap_texts)
 
 
-def test_review_packet_metadata_does_not_become_public_candidate_blocker(
+def test_structured_review_does_not_emit_public_candidate_blockers(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Document metadata is not promoted into public requirement blockers."""
-    spec_content = (
-        "# Product Spec\n\n"
-        "**Status:** Draft\n"
-        "**Version:** 0.1\n"
-        "**Owner:** Operator\n\n"
-        "## Requirements\n\n"
-        "The system must include audit evidence.\n"
+    """Structured review exposes source-ref findings, not host candidate blockers."""
+    spec_content = _agileforge_spec_profile_payload(
+        requirement_statement="The system must include audit evidence.",
+        acceptance=["The authority packet exposes audit evidence."],
     )
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
@@ -717,7 +728,8 @@ def test_review_packet_metadata_does_not_become_public_candidate_blocker(
             tmp_path=tmp_path,
             spec_content=spec_content,
             artifact_json=_compiled_success_json(
-                source_excerpt="The system must include audit evidence."
+                source_excerpt="The system must include audit evidence.",
+                source_location="REQ.guard-tokens.statement",
             ),
         )
     )
@@ -730,10 +742,11 @@ def test_review_packet_metadata_does_not_become_public_candidate_blocker(
     data = result["data"]
     spec = data["spec"]
     pending = data["pending_authority"]
-    assert spec["source_outline"]
+    assert spec["format"] == "agileforge.spec.v1"
+    assert spec["source_outline"] == []
     assert "requirement_candidates" not in pending
     assert pending["authority_mappings"] == []
-    assert pending["ir_provenance"] in {"host_parsed", "mixed", "model_emitted"}
+    assert pending["ir_provenance"] == "not_applicable"
     assert all(
         not str(finding["code"]).startswith("AUTHORITY_CANDIDATE_")
         for finding in pending["review_findings"]
@@ -1000,7 +1013,7 @@ def test_review_summary_counts_compiler_artifact_evidence(
             SourceMapEntry(
                 invariant_id=INVARIANT_ID,
                 excerpt="The system must include audit evidence.",
-                location="Requirements",
+                location="REQ.guard-tokens.statement",
             )
         ],
         compiler_version=COMPILER_VERSION,
@@ -1008,7 +1021,10 @@ def test_review_summary_counts_compiler_artifact_evidence(
         ir_schema_version=None,
         ir_provenance=None,
     )
-    spec_content = "# Product Spec\n\nThe system must include audit evidence.\n"
+    spec_content = _agileforge_spec_profile_payload(
+        requirement_statement="The system must include audit evidence.",
+        acceptance=["The authority packet exposes audit evidence."],
+    )
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -1031,37 +1047,50 @@ def test_review_summary_counts_compiler_artifact_evidence(
     assert summary["compiler_invariant_count"] == 1
 
 
-def test_review_omits_large_covered_source_and_marks_omission_complete(
+def test_review_full_include_spec_includes_large_structured_source(
     session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Omitted source may be complete when outline coverage proves complete."""
+    """Full include mode includes structured source even when it exceeds the limit."""
     monkeypatch.setenv("AGILEFORGE_AUTHORITY_REVIEW_SOURCE_LIMIT_BYTES", "96")
-    covered_requirement = (
-        "The review output must include guard tokens, review tokens, source "
-        "evidence, compiled authority evidence, coverage summaries, and "
-        "deterministic guard fields for every pending authority packet."
+    spec_content = _agileforge_spec_profile_payload(
+        summary=(
+            "Review packets expose deterministic authority evidence, source "
+            "evidence, compiled authority evidence, and guard fields."
+        ),
+        requirement_statement=(
+            "The review output must include guard tokens, review tokens, source "
+            "evidence, compiled authority evidence, coverage summaries, and "
+            "deterministic guard fields for every pending authority packet."
+        ),
     )
-    spec_content = "# Submission Contract\n\n" + covered_requirement
-    artifact_json = _compiled_success_json(source_excerpt=covered_requirement)
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=spec_content,
-            artifact_json=artifact_json,
+            artifact_json=_compiled_success_json(
+                source_excerpt=(
+                    "The review output must include guard tokens, review tokens, "
+                    "source evidence, compiled authority evidence, coverage "
+                    "summaries, and deterministic guard fields for every pending "
+                    "authority packet."
+                ),
+            ),
         )
     )
 
     result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
+        project_id=project_id,
+        include_spec="full",
     )
 
     spec = result["data"]["spec"]
-    assert spec["content_included"] is False
-    assert spec["content_truncated"] is True
-    assert spec["coverage_summary"]["covered_sections"] == 1
+    assert spec["content_included"] is True
+    assert spec["content_truncated"] is False
+    assert spec["source_content"] == spec_content
+    assert spec["source_content_sha256"] == sha256_prefixed(spec_content.encode())
     assert spec["coverage_summary"]["omission_assessment"] == "complete"
 
 
@@ -1080,11 +1109,18 @@ def test_review_token_changes_when_disk_hash_changes(
     service = AuthorityReviewService(engine=_engine(session))
 
     first = service.review(project_id=project_id)["data"]["guard_tokens"]
-    changed = _base_spec().replace("guard tokens", "fresh guard tokens")
+    changed = _agileforge_spec_profile_payload(
+        requirement_statement="The review output must include fresh guard tokens.",
+        acceptance=[
+            "The authority review packet includes fresh guard token evidence."
+        ],
+    )
     spec_path.write_text(changed, encoding="utf-8")
     spec = session.get(SpecRegistry, _spec_version_id)
     assert spec is not None
-    spec.spec_hash = sha256_prefixed(changed.encode("utf-8"))
+    spec.spec_hash = canonical_spec_hash(
+        TechnicalSpecArtifact.model_validate_json(changed)
+    )
     session.add(spec)
     session.commit()
     second = service.review(project_id=project_id)["data"]["guard_tokens"]
@@ -1129,7 +1165,7 @@ def test_coverage_fingerprint_sorts_nested_covered_by_and_source_refs() -> None:
     first = {
         "schema": "agileforge.authority_coverage_summary.v1",
         "spec_version_id": 1,
-        "resolved_spec_path": "/example/spec.md",
+        "resolved_spec_path": "/example/spec.json",
         "source_content_sha256": "sha256:abc",
         "content_included": True,
         "content_truncated": False,
@@ -1168,267 +1204,6 @@ def test_coverage_fingerprint_sorts_nested_covered_by_and_source_refs() -> None:
     }
 
     assert coverage_summary_fingerprint(first) == coverage_summary_fingerprint(second)
-
-
-def test_malformed_markdown_emits_diagnostic_instead_of_failing(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """Malformed Markdown produces coverage diagnostics without failing review."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "```json\n"
-        '{"field": "unterminated fenced code must be diagnosed"}\n'
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    assert result["ok"] is True
-    spec = result["data"]["spec"]
-    assert spec["coverage_summary"]["omission_assessment"] == "incomplete"
-    assert spec["coverage_diagnostics"] == [
-        {
-            "section_id": "S1",
-            "code": "MARKDOWN_FENCE_UNCLOSED",
-            "message": "Fenced code block was not closed before end of file.",
-        }
-    ]
-    findings = result["data"]["pending_authority"]["review_findings"]
-    diagnostic_findings = [
-        finding
-        for finding in findings
-        if finding["code"] == "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC"
-    ]
-    assert diagnostic_findings == [
-        {
-            "finding_id": (
-                "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC:MARKDOWN_FENCE_UNCLOSED:S1"
-            ),
-            "severity": "blocking",
-            "code": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC",
-            "message": (
-                "Source parser diagnostic MARKDOWN_FENCE_UNCLOSED: "
-                "Fenced code block was not closed before end of file."
-            ),
-            "candidate_ids": [],
-            "source_unit_ids": ["S1"],
-            "override_allowed": False,
-        }
-    ]
-
-
-def test_review_ignores_markdown_headings_inside_fenced_code(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """Heading-looking fenced code lines stay inside the nearest section."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "```markdown\n"
-        "# Not A Heading\n"
-        "The fenced example must stay in this section.\n"
-        "```\n\n"
-        "## Background\n\n"
-        "Descriptive text.\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    headings = [entry["heading"] for entry in result["data"]["spec"]["source_outline"]]
-    assert headings == ["Submission Contract", "Background"]
-
-
-def test_review_counts_fenced_code_as_one_content_block(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """A fenced code block contributes one requirement-bearing content block."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "```json\n"
-        '{"field_a": "must exist"}\n'
-        '{"field_b": "must exist"}\n'
-        "```\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    summary = result["data"]["spec"]["coverage_summary"]
-    assert summary["uncovered_sections"] == 1
-    assert summary["unclassified_content_blocks"] == 1
-
-
-def test_review_tilde_fenced_code_ignores_headings_and_counts_one_block(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """Tilde fenced code behaves like backtick fenced code."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "~~~markdown\n"
-        "# Not A Heading\n"
-        "The fenced example must stay in one block.\n"
-        "This line must not become a second block.\n"
-        "~~~\n\n"
-        "## Background\n\n"
-        "Descriptive text.\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    spec = result["data"]["spec"]
-    headings = [entry["heading"] for entry in spec["source_outline"]]
-    assert headings == ["Submission Contract", "Background"]
-    assert spec["coverage_summary"]["uncovered_sections"] == 1
-    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
-
-
-def test_review_tilde_fence_does_not_close_on_backticks(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """A tilde fence ignores backtick fence markers inside the block."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "~~~markdown\n"
-        "```\n"
-        "# Not A Heading\n"
-        "The fenced example must remain one block.\n"
-        "```\n"
-        "~~~\n\n"
-        "## Background\n\n"
-        "Descriptive text.\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    spec = result["data"]["spec"]
-    headings = [entry["heading"] for entry in spec["source_outline"]]
-    assert headings == ["Submission Contract", "Background"]
-    assert spec["coverage_summary"]["uncovered_sections"] == 1
-    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
-
-
-def test_review_backtick_fence_does_not_close_on_tildes(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """A backtick fence ignores tilde fence markers inside the block."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "```markdown\n"
-        "~~~\n"
-        "# Not A Heading\n"
-        "The fenced example must remain one block.\n"
-        "~~~\n"
-        "```\n\n"
-        "## Background\n\n"
-        "Descriptive text.\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    spec = result["data"]["spec"]
-    headings = [entry["heading"] for entry in spec["source_outline"]]
-    assert headings == ["Submission Contract", "Background"]
-    assert spec["coverage_summary"]["uncovered_sections"] == 1
-    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
-
-
-def test_review_long_backtick_fence_requires_matching_close_length(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    """A longer backtick opener ignores shorter backtick fences inside it."""
-    spec_content = (
-        "# Submission Contract\n\n"
-        "````markdown\n"
-        "```\n"
-        "# Not A Heading\n"
-        "The fenced example must remain one block.\n"
-        "```\n"
-        "````\n\n"
-        "## Background\n\n"
-        "Descriptive text.\n"
-    )
-    project_id, _spec_version_id, _authority_id, _spec_path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            artifact_json=_compiled_success_json(source_excerpt="unrelated source"),
-        )
-    )
-
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-
-    spec = result["data"]["spec"]
-    headings = [entry["heading"] for entry in spec["source_outline"]]
-    assert headings == ["Submission Contract", "Background"]
-    assert spec["coverage_summary"]["uncovered_sections"] == 1
-    assert spec["coverage_summary"]["unclassified_content_blocks"] == 1
 
 
 def test_missing_spec_file_returns_spec_file_not_found(
