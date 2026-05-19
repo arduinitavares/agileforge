@@ -1753,7 +1753,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
     except SpecContentNormalizationError as exc:
         return {
             "success": False,
-            "error_code": "SPEC_FILE_INVALID",
+            "error_code": exc.error_code,
             "error": str(exc),
         }
     spec_content = normalized_spec.content

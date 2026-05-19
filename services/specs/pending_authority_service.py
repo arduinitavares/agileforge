@@ -329,7 +329,7 @@ def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0
             ok=False,
             product_id=product_id,
             spec_path=resolved_path,
-            error_code="SPEC_FILE_INVALID",
+            error_code=exc.error_code,
             spec_hash=spec_hash,
             error=str(exc),
         )

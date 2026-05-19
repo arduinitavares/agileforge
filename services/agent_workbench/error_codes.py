@@ -30,6 +30,7 @@ class ErrorCode(StrEnum):
     SPEC_VERSION_NOT_FOUND = "SPEC_VERSION_NOT_FOUND"
     SPEC_FILE_NOT_FOUND = "SPEC_FILE_NOT_FOUND"
     SPEC_FILE_INVALID = "SPEC_FILE_INVALID"
+    SPEC_SOURCE_FORMAT_UNSUPPORTED = "SPEC_SOURCE_FORMAT_UNSUPPORTED"
     SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
     AUTHORITY_NOT_ACCEPTED = "AUTHORITY_NOT_ACCEPTED"
     AUTHORITY_NOT_COMPILED = "AUTHORITY_NOT_COMPILED"
@@ -120,6 +121,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="The requested spec file is invalid.",
+    ),
+    ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED: ErrorMetadata(
+        code=ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value,
+        default_exit_code=2,
+        retryable=False,
+        description="The requested spec source format is not supported.",
     ),
     ErrorCode.SPEC_COMPILE_FAILED: ErrorMetadata(
         code=ErrorCode.SPEC_COMPILE_FAILED.value,
