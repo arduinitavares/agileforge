@@ -744,8 +744,8 @@ def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> Non
     assert mapping.mapping_status == "covered"
 
 
-def test_structured_profile_ir_uses_typed_items_not_canonical_json_blob() -> None:
-    """Profile JSON should become item-level IR, not one legacy Markdown blob."""
+def test_structured_profile_clears_compact_ir_and_preserves_item_evidence() -> None:
+    """Profile JSON preserves source evidence without legacy compact IR."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -765,20 +765,15 @@ def test_structured_profile_ir_uses_typed_items_not_canonical_json_blob() -> Non
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     success = normalized.root
-    assert len(success.source_units) > 1
-    assert len(success.requirement_candidates) > 1
-    assert all(
-        not candidate.source_quote.lstrip().startswith("{")
-        for candidate in success.requirement_candidates
-    )
     assert success.source_map[0].excerpt == source_quote
     assert success.source_map[0].location == "REQ.audit-evidence.statement"
-    assert success.authority_mappings[0].mapping_provenance == "model_quote"
-    assert success.authority_mappings[0].mapping_status == "covered"
+    assert success.source_units == []
+    assert success.requirement_candidates == []
+    assert success.authority_mappings == []
 
 
 def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None:
-    """A model JSON-blob citation is repaired to profile evidence but stays weak."""
+    """A model JSON-blob citation is repaired to profile evidence only."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -787,7 +782,7 @@ def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None
     raw = _legacy_success_payload()
     raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
     raw["source_map"][0]["excerpt"] = source_text
-    raw["source_map"][0]["location"] = "spec.json"
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
 
     normalized = normalize_compiler_output(
         json.dumps(raw),
@@ -799,8 +794,9 @@ def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None
     success = normalized.root
     assert success.source_map[0].excerpt == "The system MUST record audit evidence."
     assert not success.source_map[0].excerpt.lstrip().startswith("{")
-    assert success.authority_mappings[0].mapping_provenance == "host_repaired_quote"
-    assert success.authority_mappings[0].mapping_status == "weak_mapping"
+    assert success.source_map[0].location == "REQ.audit-evidence.statement"
+    assert success.requirement_candidates == []
+    assert success.authority_mappings == []
 
 
 def test_structured_profile_allows_missing_source_map() -> None:
@@ -876,6 +872,55 @@ def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_positio
     assert len(source_map_ids) == 2  # noqa: PLR2004
     assert source_map_ids == normalized_invariant_ids
     assert len(set(source_map_ids)) == 2  # noqa: PLR2004
+
+
+def test_duplicate_placeholder_source_map_preserves_extra_review_evidence() -> None:
+    """Extra duplicate-placeholder source_map entries are preserved after ID rewrite."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "user_id"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "account_id"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The payload must include user_id.",
+            "location": "spec:line:1",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The payload must include account_id.",
+            "location": "spec:line:2",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "Review evidence mentions user_id again.",
+            "location": "spec:line:3",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_invariant_ids = {inv.id for inv in normalized.root.invariants}
+    assert len(normalized.root.invariants) == 2  # noqa: PLR2004
+    assert len(normalized.root.source_map) == 3  # noqa: PLR2004
+    assert {
+        entry.invariant_id for entry in normalized.root.source_map
+    } <= normalized_invariant_ids
 
 
 def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> None:

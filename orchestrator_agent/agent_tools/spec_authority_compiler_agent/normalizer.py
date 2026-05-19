@@ -113,6 +113,7 @@ class _SourceEvidenceCandidate:
 
     excerpt: str
     location: str | None
+    priority: int = 0
 
 
 def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
@@ -517,8 +518,75 @@ def _source_text_line_candidates(source_text: str) -> list[_SourceEvidenceCandid
                 _SourceEvidenceCandidate(
                     excerpt=compact,
                     location=f"line {line_number}",
+                    priority=1,
                 )
             )
+    return candidates
+
+
+def _structured_profile_source_candidates(
+    source_text: str,
+    *,
+    location_hint: str | None = None,
+) -> list[_SourceEvidenceCandidate]:
+    """Return item-field evidence candidates from canonical profile JSON."""
+    try:
+        parsed = json.loads(source_text)
+    except json.JSONDecodeError:
+        return []
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("schema_version") != "agileforge.spec.v1"
+    ):
+        return []
+
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return []
+
+    candidates: list[_SourceEvidenceCandidate] = []
+    seen: set[tuple[str, str | None]] = set()
+    normalized_hint = (location_hint or "").strip()
+
+    def append(excerpt: object, location: str | None) -> None:
+        if not isinstance(excerpt, str):
+            return
+        compact = _compact_whitespace(excerpt)
+        if not compact:
+            return
+        key = (compact, location)
+        if key in seen:
+            return
+        seen.add(key)
+        priority = 3 if normalized_hint and normalized_hint == location else 2
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact,
+                location=location,
+                priority=priority,
+            )
+        )
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+
+        for field_name in ("statement", "title", "rationale"):
+            append(item.get(field_name), f"{item_id}.{field_name}")
+
+        acceptance_items = item.get("acceptance")
+        if isinstance(acceptance_items, list):
+            for index, acceptance in enumerate(acceptance_items):
+                append(acceptance, f"{item_id}.acceptance[{index}]")
+
+        source_notes = item.get("source_notes")
+        if isinstance(source_notes, list):
+            for index, source_note in enumerate(source_notes):
+                append(source_note, f"{item_id}.source_notes[{index}]")
+
     return candidates
 
 
@@ -529,17 +597,23 @@ def _candidate_evidence_from_source_text(
 ) -> list[_SourceEvidenceCandidate]:
     """Build deduplicated evidence candidates from LLM source_map plus source text."""
     candidates: list[_SourceEvidenceCandidate] = []
-    seen: set[tuple[str, str | None]] = set()
+    seen: set[tuple[str, str | None, int]] = set()
 
-    def append(excerpt: str, location: str | None) -> None:
+    def append(excerpt: str, location: str | None, *, priority: int = 0) -> None:
         compact = _compact_whitespace(excerpt)
         if not compact:
             return
-        key = (compact, location)
+        key = (compact, location, priority)
         if key in seen:
             return
         seen.add(key)
-        candidates.append(_SourceEvidenceCandidate(excerpt=compact, location=location))
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact,
+                location=location,
+                priority=priority,
+            )
+        )
 
     append(entry.excerpt, entry.location)
     if not source_text:
@@ -549,10 +623,92 @@ def _candidate_evidence_from_source_text(
     combined_hint = f"{location_text}\n{entry.excerpt}"
     for fr_id in _fr_ids_from_text(combined_hint):
         for line in _source_text_lines_for_fr(source_text, fr_id):
-            append(line, entry.location or fr_id)
+            append(line, entry.location or fr_id, priority=1)
     for line in _source_text_lines_containing(source_text, entry.excerpt):
-        append(line, entry.location)
+        append(line, entry.location, priority=1)
     return candidates
+
+
+def _entry_invariant_for_source_map(
+    success: SpecAuthorityCompilationSuccess,
+    entry: SourceMapEntry,
+    entry_index: int,
+) -> Invariant | None:
+    """Return the invariant most likely referenced by a source_map entry."""
+    matching_invariants = [
+        invariant
+        for invariant in success.invariants
+        if invariant.id == entry.invariant_id
+    ]
+    if len(matching_invariants) == 1:
+        return matching_invariants[0]
+    if entry_index < len(success.invariants):
+        return success.invariants[entry_index]
+    return None
+
+
+def _best_supported_source_candidate(
+    invariant: Invariant,
+    candidates: list[_SourceEvidenceCandidate],
+) -> _SourceEvidenceCandidate | None:
+    """Select the most specific source-text candidate supporting an invariant."""
+    supported = [
+        candidate
+        for candidate in candidates
+        if _source_map_support_error(invariant, candidate.excerpt) is None
+    ]
+    if not supported:
+        return None
+    return max(
+        supported,
+        key=lambda candidate: (
+            candidate.priority,
+            _source_map_support_score(invariant, candidate.excerpt),
+            -len(candidate.excerpt),
+            candidate.location or "",
+            candidate.excerpt,
+        ),
+    )
+
+
+def _repair_structured_source_map_from_source_text(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> bool:
+    """Repair profile JSON source_map excerpts without rejecting weak evidence."""
+    repaired: list[SourceMapEntry] = []
+    changed = False
+
+    for index, entry in enumerate(success.source_map):
+        invariant = _entry_invariant_for_source_map(success, entry, index)
+        if invariant is None:
+            repaired.append(entry)
+            continue
+
+        candidates = _candidate_evidence_from_source_text(entry, source_text=source_text)
+        candidates.extend(
+            _structured_profile_source_candidates(
+                source_text,
+                location_hint=entry.location,
+            )
+        )
+        candidates.extend(_source_text_line_candidates(source_text))
+        matched = _best_supported_source_candidate(invariant, candidates)
+        if matched is None:
+            repaired.append(entry)
+            continue
+
+        repaired_entry = SourceMapEntry(
+            invariant_id=entry.invariant_id,
+            excerpt=matched.excerpt,
+            location=matched.location,
+        )
+        repaired.append(repaired_entry)
+        changed = changed or repaired_entry != entry
+
+    success.source_map = repaired
+    return changed
 
 
 def _repair_source_map_from_source_text(
@@ -561,11 +717,14 @@ def _repair_source_map_from_source_text(
     source_text: str | None,
     source_format: SpecSourceFormat,
 ) -> bool:
-    """Replace weak LLM source maps with one supported source entry per invariant."""
+    """Repair weak LLM source maps from the current source text."""
     if not source_text:
         return False
     if source_format == "agileforge.spec.v1":
-        return False
+        return _repair_structured_source_map_from_source_text(
+            success,
+            source_text=source_text,
+        )
 
     evidence_candidates: list[_SourceEvidenceCandidate] = []
     for entry in success.source_map:
@@ -660,17 +819,41 @@ def _rewrite_source_map_invariant_ids(
         if original_id_counts[original.id] == 1:
             original_id_to_new_id[original.id] = normalized.id
 
+    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
+        if index < len(success.invariants):
+            return success.invariants[index].id
+        supported = [
+            invariant
+            for invariant in success.invariants
+            if _source_map_support_error(invariant, entry.excerpt) is None
+        ]
+        if supported:
+            matched = max(
+                supported,
+                key=lambda invariant: _source_map_support_score(
+                    invariant,
+                    entry.excerpt,
+                ),
+            )
+            return matched.id
+        if success.invariants:
+            return success.invariants[index % len(success.invariants)].id
+        return None
+
     for index, entry in enumerate(success.source_map):
         original_id_count = original_id_counts.get(entry.invariant_id, 0)
         if entry.invariant_id in normalized_ids:
             continue
         if original_id_count > 1:
-            if index < len(success.invariants):
-                entry.invariant_id = success.invariants[index].id
+            fallback_id = fallback_normalized_id(entry, index)
+            if fallback_id is not None:
+                entry.invariant_id = fallback_id
         elif entry.invariant_id in original_id_to_new_id:
             entry.invariant_id = original_id_to_new_id[entry.invariant_id]
-        elif index < len(success.invariants):
-            entry.invariant_id = success.invariants[index].id
+        else:
+            fallback_id = fallback_normalized_id(entry, index)
+            if fallback_id is not None:
+                entry.invariant_id = fallback_id
 
     success.source_map = [
         entry for entry in success.source_map if entry.invariant_id in normalized_ids
