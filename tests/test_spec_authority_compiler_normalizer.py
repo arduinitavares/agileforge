@@ -846,6 +846,10 @@ def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> N
         normalized.root.source_map[0].location
         == "REQ.audit-evidence.statement"
     )
+    assert (
+        normalized.root.source_map[0].excerpt
+        == "This sentence is review evidence only."
+    )
     assert normalized.root.requirement_candidates == []
     assert normalized.root.authority_mappings == []
 
