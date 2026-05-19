@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from json import JSONDecodeError
 from pathlib import Path
@@ -743,10 +743,22 @@ def _structured_spec_snapshot(spec_content: str) -> JsonDict | None:
     }
 
 
-def _source_ref_item_id(location: object) -> str | None:
+def _source_ref_item_id(
+    location: object,
+    *,
+    known_item_ids: Set[str] | None = None,
+) -> str | None:
     if not isinstance(location, str) or not location.strip():
         return None
     value = location.strip()
+    if known_item_ids is not None:
+        if value in known_item_ids:
+            return value
+        candidate = value
+        while "." in candidate:
+            candidate = candidate.rsplit(".", maxsplit=1)[0]
+            if candidate in known_item_ids:
+                return candidate
     prefix = value.rsplit(".", maxsplit=1)[0]
     if prefix.startswith(
         (
@@ -815,7 +827,10 @@ def _structured_source_ref_findings(
     invalid_locations: list[str] = []
     usable_locations = 0
     for entry in source_entries:
-        item_id = _source_ref_item_id(entry.get("location"))
+        item_id = _source_ref_item_id(
+            entry.get("location"),
+            known_item_ids=item_ids,
+        )
         if item_id is None:
             continue
         usable_locations += 1

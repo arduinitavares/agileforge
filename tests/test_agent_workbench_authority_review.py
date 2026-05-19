@@ -813,6 +813,42 @@ def test_review_does_not_block_structured_spec_on_candidate_coverage(
     assert data["review_summary"]["acceptance_status"] == "accept_ready"
 
 
+def test_review_accepts_structured_source_ref_with_dotted_item_id(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Structured source refs may point directly at item IDs containing dots."""
+    payload = json.loads(_agileforge_spec_profile_payload())
+    for item in payload["items"]:
+        if item["id"] == "REQ.guard-tokens":
+            item["id"] = "REQ.guard.tokens"
+    for relation in payload["relations"]:
+        if relation["from"] == "REQ.guard-tokens":
+            relation["from"] = "REQ.guard.tokens"
+    spec_content = canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=_compiled_success_json(
+                source_excerpt="The review output must include guard tokens.",
+                source_location="REQ.guard.tokens",
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    codes = {finding["code"] for finding in result["data"]["review_findings"]}
+    assert "SOURCE_REF_INVALID" not in codes
+    assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
+
+
 def test_review_warns_when_structured_source_refs_are_missing(
     session: Session,
     tmp_path: Path,
