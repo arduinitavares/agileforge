@@ -504,21 +504,36 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     artifact, authority_evidence, classification_evidence = (
         _authority_artifact_payload(authority)
     )
-    outline, coverage_summary, diagnostics = _coverage_payload(
-        text=source.text,
-        authority_evidence=authority_evidence,
-        classification_evidence=classification_evidence,
-    )
+    structured_artifact = _structured_artifact_from_text(source.text)
+    if structured_artifact is not None:
+        outline: list[JsonDict] = []
+        coverage_summary: JsonDict = {
+            "covered_sections": 0,
+            "partial_sections": 0,
+            "uncovered_sections": 0,
+            "intentionally_classified_sections": 0,
+            "unclassified_content_blocks": 0,
+            "omission_assessment": "complete",
+        }
+        diagnostics: list[JsonDict] = []
+    else:
+        outline, coverage_summary, diagnostics = _coverage_payload(
+            text=source.text,
+            authority_evidence=authority_evidence,
+            classification_evidence=classification_evidence,
+        )
     ir_payload = _authority_ir_payload(
-        authority=authority,
         diagnostics=diagnostics,
+        artifact=artifact,
+        structured_artifact=structured_artifact,
     )
-    artifact = _artifact_with_coverage_gaps(
-        artifact,
-        outline=outline,
-        coverage_summary=coverage_summary,
-        diagnostics=diagnostics,
-    )
+    if structured_artifact is None:
+        artifact = _artifact_with_coverage_gaps(
+            artifact,
+            outline=outline,
+            coverage_summary=coverage_summary,
+            diagnostics=diagnostics,
+        )
     artifact = _artifact_with_review_findings(
         artifact,
         review_findings=ir_payload["review_findings"],
@@ -587,78 +602,42 @@ def build_authority_review_snapshot(  # noqa: PLR0913
 
 def _authority_ir_payload(
     *,
-    authority: CompiledSpecAuthority,
     diagnostics: Sequence[Mapping[str, Any]],
+    artifact: Mapping[str, Any],
+    structured_artifact: TechnicalSpecArtifact | None,
 ) -> JsonDict:
-    """Build public review metadata from compiler-owned compact IR."""
-    success = _load_compiled_artifact(authority)
-    ir_provenance = (
-        success.ir_provenance
-        if success is not None and success.ir_provenance is not None
-        else authority_ir.IrProvenance.HOST_PARSED
-    )
+    """Build public review metadata without host semantic candidate coverage."""
     diagnostic_findings = _diagnostic_review_findings(diagnostics)
-    ir_findings: list[authority_ir.AuthorityReviewFinding] = []
-    source_units: list[authority_ir.SourceUnit] = []
-    candidates: list[authority_ir.RequirementCandidate] = []
-    mappings: list[authority_ir.AuthorityMapping] = []
-    if success is not None and (
-        success.source_units
-        or success.requirement_candidates
-        or success.authority_mappings
-    ):
-        source_units = [_ir_source_unit(unit) for unit in success.source_units]
-        candidates = [
-            _ir_requirement_candidate(candidate)
-            for candidate in success.requirement_candidates
-        ]
-        mappings = [
-            _ir_authority_mapping(mapping)
-            for mapping in success.authority_mappings
-        ]
-        ir_findings = authority_ir.derive_review_findings(
-            source_units,
-            candidates,
-            mappings,
-            ir_provenance,
-        )
-    findings = [*diagnostic_findings, *ir_findings]
-    rendered_findings = [_finding_payload(finding) for finding in findings]
-    truncated = len(rendered_findings) > authority_ir.MAX_REVIEW_FINDINGS
-    if truncated:
-        rendered_findings = [
-            *rendered_findings[: authority_ir.MAX_REVIEW_FINDINGS - 1],
-            _finding_payload(
-                authority_ir.AuthorityReviewFinding(
-                    finding_id="AUTHORITY_REVIEW_PACKET_TRUNCATED",
-                    severity="blocking",
-                    code="AUTHORITY_REVIEW_PACKET_TRUNCATED",
-                    message="Authority review findings were truncated.",
-                    candidate_ids=[],
-                    source_unit_ids=[],
-                    override_allowed=False,
-                )
-            ),
-        ]
+    source_ref_findings = _structured_source_ref_findings(
+        artifact=artifact,
+        spec_artifact=structured_artifact,
+    )
+    rendered_findings = [
+        *[_finding_payload(finding) for finding in diagnostic_findings],
+        *source_ref_findings,
+    ]
     return {
-        "source_units": [
-            unit.model_dump(mode="json")
-            for unit in (success.source_units if success else [])
-        ],
-        "authority_mappings": [
-            mapping.model_dump(mode="json")
-            for mapping in (success.authority_mappings if success else [])
-        ],
+        "source_units": [],
+        "authority_mappings": [],
         "review_findings": rendered_findings,
-        "ir_provenance": str(ir_provenance),
-        "coverage_summary": authority_ir.coverage_summary_from_findings(
-            findings,
-            mappings,
-        ),
+        "ir_provenance": "not_applicable",
+        "coverage_summary": {
+            "blocking_finding_count": sum(
+                1
+                for finding in rendered_findings
+                if finding.get("severity") == "blocking"
+            ),
+            "mapping_count": 0,
+            "covered_mapping_count": 0,
+            "weak_mapping_count": 0,
+            "intentionally_classified_mapping_count": 0,
+            "partial_mapping_count": 0,
+            "has_incomplete_coverage": False,
+        },
         "coverage_diagnostics": diagnostics,
         "ir_packet_limits": {
             "max_findings": authority_ir.MAX_REVIEW_FINDINGS,
-            "truncated": truncated,
+            "truncated": False,
         },
     }
 
@@ -739,15 +718,17 @@ def _finding_payload(finding: authority_ir.AuthorityReviewFinding) -> JsonDict:
     return asdict(finding)
 
 
+def _structured_artifact_from_text(text: str) -> TechnicalSpecArtifact | None:
+    try:
+        return TechnicalSpecArtifact.model_validate_json(text)
+    except (ValueError, ValidationError):
+        return None
+
+
 def _structured_spec_snapshot(spec_content: str) -> JsonDict | None:
     """Return metadata for canonical AgileForge spec JSON, if present."""
-    try:
-        payload = json.loads(spec_content)
-    except JSONDecodeError:
-        return None
-    try:
-        artifact = TechnicalSpecArtifact.model_validate(payload)
-    except ValidationError:
+    artifact = _structured_artifact_from_text(spec_content)
+    if artifact is None:
         return None
 
     rendered_markdown = render_markdown(artifact)
@@ -760,6 +741,117 @@ def _structured_spec_snapshot(spec_content: str) -> JsonDict | None:
         "item_count": len(artifact.items),
         "relation_count": len(artifact.relations),
     }
+
+
+def _source_ref_item_id(location: object) -> str | None:
+    if not isinstance(location, str) or not location.strip():
+        return None
+    value = location.strip()
+    prefix = value.rsplit(".", maxsplit=1)[0]
+    if prefix.startswith(
+        (
+            "GOAL.",
+            "NON_GOAL.",
+            "REQ.",
+            "QUALITY.",
+            "CONSTRAINT.",
+            "INTERFACE.",
+            "DATA.",
+            "DECISION.",
+            "ASSUMPTION.",
+            "RISK.",
+            "EXAMPLE.",
+            "OPEN_QUESTION.",
+        )
+    ):
+        return prefix
+    return value if "." in value else None
+
+
+def _source_map_entries(source_map: object) -> list[Mapping[str, Any]] | None:
+    if isinstance(source_map, Sequence) and not isinstance(
+        source_map,
+        (str, bytes, bytearray),
+    ):
+        return [entry for entry in source_map if isinstance(entry, Mapping)]
+    if isinstance(source_map, Mapping):
+        entries: list[Mapping[str, Any]] = []
+        for value in source_map.values():
+            if isinstance(value, Mapping):
+                entries.append(value)
+            elif isinstance(value, Sequence) and not isinstance(
+                value,
+                (str, bytes, bytearray),
+            ):
+                entries.extend(
+                    entry for entry in value if isinstance(entry, Mapping)
+                )
+        return entries
+    return None
+
+
+def _structured_source_ref_findings(
+    *,
+    artifact: Mapping[str, Any],
+    spec_artifact: TechnicalSpecArtifact | None,
+) -> list[JsonDict]:
+    if spec_artifact is None:
+        return []
+    source_map = artifact.get("source_map")
+    source_entries = _source_map_entries(source_map)
+    if source_entries is None:
+        return [
+            {
+                "finding_id": "SOURCE_REFS_MISSING",
+                "severity": "warning",
+                "code": "SOURCE_REFS_MISSING",
+                "message": "Compiled authority has no source_map review evidence.",
+                "candidate_ids": [],
+                "source_unit_ids": [],
+                "override_allowed": True,
+            }
+        ]
+    item_ids = {item.id for item in spec_artifact.items}
+    invalid_locations: list[str] = []
+    usable_locations = 0
+    for entry in source_entries:
+        item_id = _source_ref_item_id(entry.get("location"))
+        if item_id is None:
+            continue
+        usable_locations += 1
+        if item_id not in item_ids:
+            invalid_locations.append(str(entry.get("location")))
+    if invalid_locations:
+        return [
+            {
+                "finding_id": "SOURCE_REF_INVALID",
+                "severity": "blocking",
+                "code": "SOURCE_REF_INVALID",
+                "message": (
+                    "Compiled authority source_map references unknown spec item IDs."
+                ),
+                "candidate_ids": [],
+                "source_unit_ids": [],
+                "override_allowed": False,
+                "details": {"invalid_locations": sorted(set(invalid_locations))},
+            }
+        ]
+    if usable_locations == 0:
+        return [
+            {
+                "finding_id": "SOURCE_REFS_MISSING",
+                "severity": "warning",
+                "code": "SOURCE_REFS_MISSING",
+                "message": (
+                    "Compiled authority source_map has no structured spec item "
+                    "references."
+                ),
+                "candidate_ids": [],
+                "source_unit_ids": [],
+                "override_allowed": True,
+            }
+        ]
+    return []
 
 
 def _artifact_with_review_findings(
