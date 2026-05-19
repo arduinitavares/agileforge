@@ -35,5 +35,8 @@ artifacts/exports/*.html
 # Local coverage and workspace artifacts
 .coverage
 .coverage.*
+.codegraph/
+agileforge.spec.v1.schema.json
+agileforge.spec.v1.schema.pretty.json
 entities.json
 mempalace.yaml
