@@ -892,32 +892,46 @@ def _rewrite_source_map_invariant_ids(
         if original_id_counts[original.id] == 1:
             original_id_to_new_id[original.id] = normalized.id
 
-    def support_matched_normalized_id(entry: SourceMapEntry) -> str | None:
-        supported = [
-            invariant
-            for invariant in success.invariants
-            if _source_map_support_error(invariant, entry.excerpt) is None
-        ]
-        if supported:
-            matched = max(
-                supported,
-                key=lambda invariant: _source_map_support_score(
-                    invariant,
-                    entry.excerpt,
-                ),
-            )
-            return matched.id
-        return None
-
-    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
-        supported_id = support_matched_normalized_id(entry)
-        if supported_id is not None:
-            return supported_id
+    def positional_normalized_id(index: int) -> str | None:
         if index < len(success.invariants):
             return success.invariants[index].id
         if success.invariants:
             return success.invariants[index % len(success.invariants)].id
         return None
+
+    def support_matched_normalized_id(
+        entry: SourceMapEntry,
+        positional_id: str | None,
+    ) -> str | None:
+        scored: list[tuple[Invariant, float]] = []
+        positional_score: float | None = None
+        for invariant in success.invariants:
+            if _source_map_support_error(invariant, entry.excerpt) is not None:
+                continue
+            score = _source_map_support_score(invariant, entry.excerpt)
+            scored.append((invariant, score))
+            if invariant.id == positional_id:
+                positional_score = score
+
+        if not scored:
+            return None
+
+        best_score = max(score for _, score in scored)
+        best_matches = [
+            invariant for invariant, score in scored if score == best_score
+        ]
+        if positional_score is not None and positional_score >= best_score:
+            return None
+        if len(best_matches) != 1:
+            return None
+        return best_matches[0].id
+
+    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
+        positional_id = positional_normalized_id(index)
+        supported_id = support_matched_normalized_id(entry, positional_id)
+        if supported_id is not None:
+            return supported_id
+        return positional_id
 
     for index, entry in enumerate(success.source_map):
         original_id_count = original_id_counts.get(entry.invariant_id, 0)

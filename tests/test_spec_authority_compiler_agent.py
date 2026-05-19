@@ -69,6 +69,17 @@ def test_compiler_instructions_document_structured_spec_support_matrix() -> None
     assert "agileforge.spec_legacy_markdown.v1" in instructions
 
 
+def test_compiler_instructions_document_host_semantic_ids() -> None:
+    """Compiler prompt must align with host semantic-only invariant IDs."""
+    instructions = _compiler_instructions()
+
+    assert (
+        "semantic-only IDs from invariant type and canonical parameters"
+        in instructions
+    )
+    assert "normalize(excerpt)" not in instructions
+
+
 class TestSpecAuthorityCompilerInput:
     """Validate input schema rules (exactly one source field)."""
 

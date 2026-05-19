@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (  # noqa: E501
-    compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
 from utils.spec_schemas import (
@@ -457,10 +457,10 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert isinstance(inv.parameters, RequiredFieldParams)
     assert inv.parameters.field_name == "user_id"
 
-    # ID must be derived from the source_map excerpt
+    # ID must be derived from invariant semantics only
     assert len(normalized.root.source_map) == 1
     sm = normalized.root.source_map[0]
-    expected_id = compute_invariant_id(sm.excerpt, inv.type, inv.parameters)
+    expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
     assert inv.id == expected_id
     assert sm.invariant_id == expected_id
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
@@ -1742,6 +1742,11 @@ def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> Non
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     invariant_ids = [invariant.id for invariant in normalized.root.invariants]
+    expected_ids = [
+        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        for invariant in normalized.root.invariants
+    ]
+    assert invariant_ids == expected_ids
     assert len(set(invariant_ids)) == len(invariant_ids)
     assert {entry.invariant_id for entry in normalized.root.source_map} == set(
         invariant_ids

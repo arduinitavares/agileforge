@@ -86,12 +86,12 @@ INVARIANT PARAMETER RULES:
 - Use FORBIDDEN_CAPABILITY only when the spec explicitly forbids a capability, technology, behavior, or scope.
 
 INVARIANT ID RULE (DETERMINISTIC):
+- Host-side normalization computes semantic-only IDs from invariant type and canonical parameters.
 - id = "INV-" + first 16 hex chars of SHA-256(
-  normalize(excerpt) + "|" + invariant_type + "|" + canonical parameters
+  invariant_type + "|" + canonical parameters
 )
-- normalize(excerpt): lowercase, trim, collapse whitespace to single spaces.
 - canonical parameters: key=value pairs sorted by key and joined with "|".
-- IDs MUST be unique for distinct invariants even when they share one source excerpt.
+- IDs MUST be unique for distinct invariants because their parameters differ; do not use source_map excerpts to make IDs unique.
 
 STRICTNESS:
 - Output must be valid JSON only.
