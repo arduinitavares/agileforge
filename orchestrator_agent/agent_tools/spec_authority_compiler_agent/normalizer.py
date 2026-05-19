@@ -75,6 +75,9 @@ _FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
 _RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
 _SUPPORT_RATIO_THRESHOLD = 0.5
 _FORBIDDEN_SAFETY_SUPPORT_THRESHOLD = 0.25
+_STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY = 3
+_STRUCTURED_ENTRY_EXCERPT_MATCH_PRIORITY = 4
+_STRUCTURED_ENTRY_LOCATION_MATCH_PRIORITY = 5
 _FORBIDDEN_SAFETY_CUE_RE = re.compile(
     r"\b("
     r"must\s+not|do\s+not|never|forbidden|prohibited|disallow|deny|"
@@ -661,6 +664,8 @@ def _entry_invariant_for_source_map(
     success: SpecAuthorityCompilationSuccess,
     entry: SourceMapEntry,
     entry_index: int,
+    *,
+    evidence_candidates: list[_SourceEvidenceCandidate] | None = None,
 ) -> Invariant | None:
     """Return the invariant most likely referenced by a source_map entry."""
     matching_invariants = [
@@ -670,9 +675,47 @@ def _entry_invariant_for_source_map(
     ]
     if len(matching_invariants) == 1:
         return matching_invariants[0]
+    if evidence_candidates:
+        supported_match = _support_matched_source_map_invariant(
+            matching_invariants or success.invariants,
+            evidence_candidates,
+        )
+        if supported_match is not None:
+            return supported_match
     if entry_index < len(success.invariants):
         return success.invariants[entry_index]
     return None
+
+
+def _support_matched_source_map_invariant(
+    invariants: list[Invariant],
+    evidence_candidates: list[_SourceEvidenceCandidate],
+) -> Invariant | None:
+    """Return a unique invariant match from entry-local evidence, if clear."""
+    scored: list[tuple[Invariant, tuple[int, float]]] = []
+    for invariant in invariants:
+        matched = _best_supported_source_candidate(invariant, evidence_candidates)
+        if matched is None:
+            continue
+        scored.append(
+            (
+                invariant,
+                (
+                    matched.priority,
+                    _source_map_support_score(invariant, matched.excerpt),
+                ),
+            )
+        )
+    if not scored:
+        return None
+
+    best_score = max(score for _, score in scored)
+    best_matches = [
+        invariant for invariant, score in scored if score == best_score
+    ]
+    if len(best_matches) != 1:
+        return None
+    return best_matches[0]
 
 
 def _best_supported_source_candidate(
@@ -699,6 +742,38 @@ def _best_supported_source_candidate(
     )
 
 
+def _structured_entry_match_candidates(
+    entry: SourceMapEntry,
+    *,
+    source_text: str,
+) -> list[_SourceEvidenceCandidate]:
+    """Return entry-local evidence used to disambiguate duplicate IDs."""
+    candidates: list[_SourceEvidenceCandidate] = []
+    compact_excerpt = _compact_whitespace(entry.excerpt)
+    if compact_excerpt:
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact_excerpt,
+                location=entry.location,
+                priority=_STRUCTURED_ENTRY_EXCERPT_MATCH_PRIORITY,
+            )
+        )
+
+    candidates.extend(
+        _SourceEvidenceCandidate(
+            excerpt=candidate.excerpt,
+            location=candidate.location,
+            priority=_STRUCTURED_ENTRY_LOCATION_MATCH_PRIORITY,
+        )
+        for candidate in _structured_profile_source_candidates(
+            source_text,
+            location_hint=entry.location,
+        )
+        if candidate.priority == _STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY
+    )
+    return candidates
+
+
 def _repair_structured_source_map_from_source_text(
     success: SpecAuthorityCompilationSuccess,
     *,
@@ -709,11 +784,6 @@ def _repair_structured_source_map_from_source_text(
     changed = False
 
     for index, entry in enumerate(success.source_map):
-        invariant = _entry_invariant_for_source_map(success, entry, index)
-        if invariant is None:
-            repaired.append(entry)
-            continue
-
         candidates = _candidate_evidence_from_source_text(entry, source_text=source_text)
         candidates.extend(
             _structured_profile_source_candidates(
@@ -722,6 +792,19 @@ def _repair_structured_source_map_from_source_text(
             )
         )
         candidates.extend(_source_text_line_candidates(source_text))
+        invariant = _entry_invariant_for_source_map(
+            success,
+            entry,
+            index,
+            evidence_candidates=_structured_entry_match_candidates(
+                entry,
+                source_text=source_text,
+            ),
+        )
+        if invariant is None:
+            repaired.append(entry)
+            continue
+
         matched = _best_supported_source_candidate(invariant, candidates)
         if matched is None:
             repaired.append(entry)
