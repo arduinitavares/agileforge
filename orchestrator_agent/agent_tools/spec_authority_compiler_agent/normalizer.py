@@ -105,6 +105,16 @@ _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
         "prompt_hash",
     }
 )
+_DEPRECATED_COMPACT_IR_KEYS = frozenset(
+    {
+        "ir_schema_version",
+        "ir_provenance",
+        "source_units",
+        "requirement_candidates",
+        "authority_mappings",
+        "ir_packet_limits",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -198,6 +208,24 @@ def _default_missing_source_map_for_success_payload(payload: object) -> None:
         return
     if _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
         payload["source_map"] = []
+
+
+def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
+    """Drop legacy compact IR before validating success-shaped payloads."""
+    if not isinstance(payload, dict):
+        return
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        _drop_deprecated_compact_ir_for_success_payload(result)
+
+    if "error" in payload:
+        return
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
+        return
+
+    for key in _DEPRECATED_COMPACT_IR_KEYS:
+        payload.pop(key, None)
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:
@@ -864,9 +892,7 @@ def _rewrite_source_map_invariant_ids(
         if original_id_counts[original.id] == 1:
             original_id_to_new_id[original.id] = normalized.id
 
-    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
-        if index < len(success.invariants):
-            return success.invariants[index].id
+    def support_matched_normalized_id(entry: SourceMapEntry) -> str | None:
         supported = [
             invariant
             for invariant in success.invariants
@@ -881,6 +907,14 @@ def _rewrite_source_map_invariant_ids(
                 ),
             )
             return matched.id
+        return None
+
+    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
+        supported_id = support_matched_normalized_id(entry)
+        if supported_id is not None:
+            return supported_id
+        if index < len(success.invariants):
+            return success.invariants[index].id
         if success.invariants:
             return success.invariants[index % len(success.invariants)].id
         return None
@@ -940,6 +974,7 @@ def normalize_compiler_output(
 
     parsed: SpecAuthorityCompilerOutput | None = None
     validation_gaps: list[str] = []
+    _drop_deprecated_compact_ir_for_success_payload(payload)
     _default_missing_source_map_for_success_payload(payload)
 
     try:

@@ -866,6 +866,42 @@ def test_structured_profile_allows_missing_source_map() -> None:
     assert normalized.root.invariants[0].id.startswith("INV-")
 
 
+def test_structured_profile_drops_malformed_deprecated_compact_ir() -> None:
+    """Malformed legacy compact IR is discarded before structured validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = "The system MUST record audit evidence."
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+    raw.update(
+        {
+            "ir_schema_version": {"malformed": True},
+            "ir_provenance": 123,
+            "source_units": [{"unit_id": 123, "text_excerpt": "x" * 2_001}],
+            "requirement_candidates": {"candidate_id": "REQ-not-a-list"},
+            "authority_mappings": "not-a-list",
+            "ir_packet_limits": {"max_text_excerpt_chars": "not-an-int"},
+        }
+    )
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.ir_schema_version is None
+    assert normalized.root.ir_provenance is None
+    assert normalized.root.source_units == []
+    assert normalized.root.requirement_candidates == []
+    assert normalized.root.authority_mappings == []
+    assert normalized.root.ir_packet_limits is None
+
+
 def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_position() -> (
     None
 ):
@@ -913,6 +949,59 @@ def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_positio
     assert len(source_map_ids) == 2  # noqa: PLR2004
     assert source_map_ids == normalized_invariant_ids
     assert len(set(source_map_ids)) == 2  # noqa: PLR2004
+
+
+def test_duplicate_placeholder_source_map_prefers_excerpt_support_over_position() -> (
+    None
+):
+    """Duplicate placeholder IDs map by clear excerpt support before position."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "audit_evidence"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "review_token"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST include review token evidence.",
+            "location": "REQ.review-token.statement",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST record audit evidence.",
+            "location": "REQ.audit-evidence.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_ids_by_field = {
+        inv.parameters.field_name: inv.id for inv in normalized.root.invariants
+    }
+    source_map_ids_by_location = {
+        entry.location: entry.invariant_id for entry in normalized.root.source_map
+    }
+    assert source_map_ids_by_location["REQ.review-token.statement"] == (
+        normalized_ids_by_field["review_token"]
+    )
+    assert source_map_ids_by_location["REQ.audit-evidence.statement"] == (
+        normalized_ids_by_field["audit_evidence"]
+    )
+    assert len(set(source_map_ids_by_location.values())) == 2  # noqa: PLR2004
 
 
 def test_duplicate_placeholder_source_map_preserves_extra_review_evidence() -> None:
