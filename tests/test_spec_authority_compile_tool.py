@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import CompiledSpecAuthority, Product
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (  # noqa: E501
-    compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501
@@ -541,7 +541,7 @@ def test_compile_persists_compiled_artifact_and_normalized_ids(
             (e for e in parsed.root.source_map if e.invariant_id == inv.id), None
         )
         assert entry is not None
-        expected_id = compute_invariant_id(entry.excerpt, inv.type, inv.parameters)
+        expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
         assert inv.id == expected_id
         assert entry.invariant_id == expected_id
 
