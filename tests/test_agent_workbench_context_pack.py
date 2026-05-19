@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from services.agent_workbench.context_pack import ContextPackService
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.project_setup_fingerprints import (
     PROJECT_SETUP_RETRY_COMMAND,
+    setup_spec_hash,
 )
 
 if TYPE_CHECKING:
@@ -17,6 +19,40 @@ PROJECT_ID = 7
 WORKFLOW_FINGERPRINT = "sha256:" + "1" * 64
 CANDIDATES_FINGERPRINT = "sha256:" + "2" * 64
 AUTHORITY_FINGERPRINT = "sha256:" + "3" * 64
+
+
+def _structured_spec_payload() -> dict[str, Any]:
+    """Build a minimal valid agileforge.spec.v1 fixture."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.context-pack",
+        "title": "Context Pack App",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Create a project from a structured authority spec.",
+        "problem_statement": "Operators need setup retry guard evidence.",
+        "items": [
+            {
+                "id": "REQ.context-pack.audit",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Setup retry guard",
+                "statement": "The system MUST publish setup retry guard tokens.",
+                "verification": "system-test",
+                "acceptance": ["Setup retry guard token is available."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
 
 
 class _FakeReadProjection:
@@ -235,10 +271,9 @@ def test_context_pack_publishes_project_setup_retry_guard_token(
     tmp_path: Path,
 ) -> None:
     """Verify agents can read the exact context token required by setup retry."""
-    spec_path = tmp_path / "specs" / "app.md"
+    spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
-    spec_content = "# App\n\nBuild the app.\n"
-    spec_path.write_text(spec_content, encoding="utf-8")
+    spec_path.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
     workflow_state = {"fsm_state": "SETUP_REQUIRED"}
     service = ContextPackService(
         read_projection=_SetupRequiredReadProjection(),
@@ -253,11 +288,29 @@ def test_context_pack_publishes_project_setup_retry_guard_token(
             "command": PROJECT_SETUP_RETRY_COMMAND,
             "project_id": PROJECT_ID,
             "resolved_spec_path": str(spec_path.resolve()),
-            "spec_hash": canonical_hash(spec_content),
+            "spec_hash": setup_spec_hash(spec_path),
             "workflow_state": workflow_state,
         }
     )
     assert result["data"]["guard_tokens"]["expected_context_fingerprint"] == expected
+
+
+def test_context_pack_omits_project_setup_retry_guard_token_for_markdown_spec(
+    tmp_path: Path,
+) -> None:
+    """Verify unsupported readable specs do not crash context pack composition."""
+    spec_path = tmp_path / "specs" / "app.md"
+    spec_path.parent.mkdir()
+    spec_path.write_text("# App\n\nBuild the app.\n", encoding="utf-8")
+    service = ContextPackService(
+        read_projection=_SetupRequiredReadProjection(),
+        authority_projection=_ReadableDiskSpecAuthorityProjection(spec_path),
+    )
+
+    result = service.pack(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["guard_tokens"] == {}
 
 
 def test_overview_pack_omits_sprint_phase_data() -> None:
