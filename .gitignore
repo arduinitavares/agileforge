@@ -36,6 +36,7 @@ artifacts/exports/*.html
 .coverage
 .coverage.*
 .codegraph/
+.agileforge/
 agileforge.spec.v1.schema.json
 agileforge.spec.v1.schema.pretty.json
 entities.json

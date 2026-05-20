@@ -54,9 +54,11 @@ def build_source_meta(  # noqa: PLR0913
     normalization_tool_version: str,
     normalization_notes: str,
     license_note: str,
+    immutable_source_url: str | None = None,
+    upstream_commit: str | None = None,
 ) -> JsonObject:
     """Build source metadata for a normalized benchmark fixture source."""
-    return {
+    meta: JsonObject = {
         "source_url": source_url,
         "fetched_at": fetched_at,
         "raw_artifact": raw_artifact,
@@ -71,6 +73,11 @@ def build_source_meta(  # noqa: PLR0913
         },
         "license_note": license_note,
     }
+    if immutable_source_url:
+        meta["immutable_source_url"] = immutable_source_url
+    if upstream_commit:
+        meta["upstream_commit"] = upstream_commit
+    return meta
 
 
 def sanitize_review_packet(packet: JsonObject) -> JsonObject:
@@ -214,6 +221,8 @@ def _cmd_init_source(args: argparse.Namespace) -> int:
         normalization_tool_version=args.normalization_tool_version,
         normalization_notes=args.normalization_notes,
         license_note=args.license_note,
+        immutable_source_url=args.immutable_source_url,
+        upstream_commit=args.upstream_commit,
     )
     write_json(fixture_dir / "source/source.meta.json", meta)
     return 0
@@ -242,6 +251,8 @@ def _build_parser() -> argparse.ArgumentParser:
     init_source = subparsers.add_parser("init-source")
     init_source.add_argument("--fixture-dir", required=True)
     init_source.add_argument("--source-url", required=True)
+    init_source.add_argument("--immutable-source-url")
+    init_source.add_argument("--upstream-commit")
     init_source.add_argument("--raw-input", required=True)
     init_source.add_argument("--raw-artifact-name", required=True)
     init_source.add_argument("--fetched-at", required=True)

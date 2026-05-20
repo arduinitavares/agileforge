@@ -58,9 +58,13 @@ def test_build_source_meta_records_hashes_and_license_note() -> None:
         normalization_tool_version="n/a",
         normalization_notes="Line endings normalized to LF.",
         license_note="Public fixture retained for benchmark review.",
+        immutable_source_url="https://example.test/source@abc123.md",
+        upstream_commit="abc123",
     )
 
     assert meta["source_url"] == "https://example.test/source"
+    assert meta["immutable_source_url"] == "https://example.test/source@abc123.md"
+    assert meta["upstream_commit"] == "abc123"
     assert meta["fetched_at"] == "2026-05-20T12:00:00Z"
     assert meta["raw_artifact"] == "source/raw/source.raw.md"
     assert meta["raw_sha256"] == sha256_text(raw)
@@ -310,6 +314,10 @@ def test_init_source_command_writes_normalized_source_and_metadata(
             str(fixture_dir),
             "--source-url",
             "https://example.test/source.md",
+            "--immutable-source-url",
+            "https://example.test/source/abc123/source.md",
+            "--upstream-commit",
+            "abc123",
             "--raw-input",
             str(raw_path),
             "--raw-artifact-name",
@@ -339,6 +347,8 @@ def test_init_source_command_writes_normalized_source_and_metadata(
     ).startswith("sha256:")
     meta = json.loads((fixture_dir / "source/source.meta.json").read_text())
     assert meta["source_url"] == "https://example.test/source.md"
+    assert meta["immutable_source_url"] == "https://example.test/source/abc123/source.md"
+    assert meta["upstream_commit"] == "abc123"
 
 
 def test_extract_review_command_writes_compiled_authority_and_summary(
@@ -401,3 +411,10 @@ def test_oracle_notes_warn_against_reviewer_leakage() -> None:
         ).read_text(encoding="utf-8")
         assert "Do not provide these notes" in notes
         assert "external LLM reviewers" in notes
+
+
+def test_local_benchmark_run_artifacts_are_gitignored() -> None:
+    """Local benchmark run artifacts stay out of committed benchmark fixtures."""
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert ".agileforge/" in gitignore
