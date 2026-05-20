@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib
 import json
 import logging
@@ -36,6 +35,11 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer imp
     normalize_compiler_output,
 )
 from services.specs._engine_resolution import resolve_spec_engine
+from services.specs.profile_content import (
+    STRUCTURED_SPEC_FORMAT,
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 from utils.adk_runner import get_agent_model_info, invoke_agent_to_text
 from utils.failure_artifacts import (
     AgentInvocationError,
@@ -738,14 +742,24 @@ def _default_invoke_spec_authority_compiler(
 ) -> str:
     """Invoke the compiler agent from sync code and return raw JSON text."""
     del content_ref
+    spec_source_format = _detect_spec_source_format(spec_content)
     input_payload = SpecAuthorityCompilerInput(
         spec_source=spec_content,
         spec_content_ref=None,
         domain_hint=None,
         product_id=product_id,
         spec_version_id=spec_version_id,
+        spec_source_format=spec_source_format,
     )
     return _run_async_task(_invoke_spec_authority_compiler_async(input_payload))
+
+
+def _detect_spec_source_format(
+    spec_content: str,
+) -> Literal["agileforge.spec.v1"]:
+    """Return the source format marker for compiler input."""
+    normalize_spec_content_for_registry(spec_content)
+    return cast("Literal['agileforge.spec.v1']", STRUCTURED_SPEC_FORMAT)
 
 
 def _resolve_compiler_invoker() -> Callable[..., str]:
@@ -796,7 +810,11 @@ def preview_spec_authority(
             product_id=None,
             spec_version_id=None,
         )
-        normalized = normalize_compiler_output(raw_json, source_text=parsed.content)
+        normalized = normalize_compiler_output(
+            raw_json,
+            source_text=parsed.content,
+            source_format=_detect_spec_source_format(parsed.content),
+        )
 
         if isinstance(normalized.root, SpecAuthorityCompilationFailure):
             return {
@@ -952,6 +970,7 @@ def _extract_spec_authority_llm(
     normalized: SpecAuthorityCompilerOutput = normalize_compiler_output(
         raw_json,
         source_text=spec_content,
+        source_format=_detect_spec_source_format(spec_content),
     )
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         raise SpecAuthorityCompilationError.failed(
@@ -1293,7 +1312,11 @@ def _invoke_compiler_for_version(
             exception=exc,
         )
 
-    normalized = normalize_compiler_output(raw_json, source_text=spec_content)
+    normalized = normalize_compiler_output(
+        raw_json,
+        source_text=spec_content,
+        source_format=_detect_spec_source_format(spec_content),
+    )
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         failure_stage = (
             "invalid_json"
@@ -1703,7 +1726,7 @@ def _compiled_authority_metrics(
     )
 
 
-def update_spec_and_compile_authority(
+def update_spec_and_compile_authority(  # noqa: PLR0911
     params: dict[str, Any] | UpdateSpecAndCompileAuthorityInput,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
@@ -1718,7 +1741,16 @@ def update_spec_and_compile_authority(
         return spec_content_result
     spec_content = spec_content_result
 
-    spec_hash = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
+    try:
+        normalized_spec = normalize_spec_content_for_registry(spec_content)
+    except SpecContentNormalizationError as exc:
+        return {
+            "success": False,
+            "error_code": exc.error_code,
+            "error": str(exc),
+        }
+    spec_content = normalized_spec.content
+    spec_hash = normalized_spec.spec_hash
 
     with Session(_resolve_engine()) as session:
         spec_version_result = _resolve_or_create_spec_version(

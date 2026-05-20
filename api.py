@@ -347,6 +347,7 @@ class AuthorityRejectApiRequest(AuthorityDecisionApiRequest):
     """Dashboard authority rejection request."""
 
     reason: str = Field(min_length=1)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class VisionGenerateRequest(BaseModel):
@@ -597,17 +598,19 @@ def _validate_dashboard_authority_guards(req: AuthorityDecisionApiRequest) -> No
 def _validate_dashboard_incomplete_review_override(
     req: AuthorityDecisionApiRequest,
 ) -> None:
-    """Reject legacy broad incomplete-review overrides without candidates."""
-    if req.incomplete_review_overrides:
-        return
-    if not req.allow_incomplete_review and req.incomplete_review_rationale is None:
+    """Leave incomplete-review policy enforcement to the authority service."""
+
+
+def _validate_dashboard_reject_idempotency(
+    req: AuthorityRejectApiRequest,
+) -> None:
+    """Require caller-provided idempotency for dashboard rejection."""
+    if isinstance(req.idempotency_key, str) and req.idempotency_key.strip():
         return
     _dashboard_authority_error(
-        code="INVALID_COMMAND",
-        message=(
-            "Incomplete review acceptance requires candidate-specific overrides."
-        ),
-        missing=["incomplete_review_overrides"],
+        code="AUTHORITY_GUARD_INCOMPLETE",
+        message="Dashboard authority reject requires an explicit idempotency key.",
+        missing=["idempotency_key"],
     )
 
 
@@ -629,7 +632,8 @@ def _authority_request_kwargs(
             "policy": "dashboard_manual",
             "actor_mode": "dashboard-human",
             "changed_by": _dashboard_changed_by(),
-            "idempotency_key": f"dashboard-authority:{uuid4()}",
+            "idempotency_key": payload.get("idempotency_key")
+            or f"dashboard-authority:{uuid4()}",
         }
     )
     return payload
@@ -1799,6 +1803,7 @@ async def reject_project_authority(
         raise HTTPException(status_code=404, detail="Project not found")
 
     _validate_dashboard_authority_guards(req)
+    _validate_dashboard_reject_idempotency(req)
     request = AuthorityRejectRequest(
         **_authority_request_kwargs(project_id=project_id, req=req)
     )

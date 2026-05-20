@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (
     classify_invariant_from_text,
     compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
     compute_spec_hash,
 )
@@ -38,33 +39,45 @@ from utils.spec_schemas import (
 )
 
 
-def test_compiler_instructions_define_ir_hints_without_trusting_model_coverage() -> None:
-    """Verify compiler prompt keeps coverage truth host-owned while allowing IR hints."""
-    instructions = SPEC_AUTHORITY_COMPILER_INSTRUCTIONS.lower()
+def _compiler_instructions() -> str:
+    return SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
 
-    assert "host code owns" in instructions
-    assert "coverage truth" in instructions
-    assert "optional authority ir hint fields may also be included" in instructions
-    assert "requirement_candidates" in instructions
-    assert "authority_mappings" in instructions
-    assert "hints" in instructions
-    assert "exact source_quote" in instructions
-    assert "source_unit_id when known" in instructions
+
+def test_compiler_instructions_do_not_require_candidate_manifest() -> None:
+    """Compiler prompt must not depend on host candidate extraction."""
+    instructions = _compiler_instructions()
+
+    assert "candidate_manifest" not in instructions
+    assert "requirement_candidates" not in instructions
+    assert "authority_mappings" not in instructions
+    assert "agileforge.spec.v1" in instructions
+    assert "Do not infer authority from Markdown narrative" in instructions
+    assert "source_map is review evidence" in instructions
+
+
+def test_compiler_instructions_document_structured_spec_support_matrix() -> None:
+    """Compiler prompt must document structured source handling."""
+    instructions = _compiler_instructions()
+
+    assert "agileforge.spec.v1" in instructions
+    assert "AgileForge authority support matrix" in instructions
     assert (
-        "authority_mappings hint must use only schema fields: candidate_id, "
-        "authority_item_id, authority_target_kind, mapping_status, "
-        "mapping_rationale, source_quote_hash, and mapping_provenance"
-    ) in instructions
-    assert "mapping_rationale" in instructions
-    assert "do not emit final review_findings" in instructions
-    assert "do not emit final review_findings or assert coverage completeness" in (
-        instructions
+        "REQ/DATA/INTERFACE become REQUIRED_FIELD or RELATION_CONSTRAINT"
+        in instructions
     )
-    assert "uncertain" in instructions
-    assert "rather than ignoring" in instructions
-    assert "known omission" in instructions
-    assert "gap or uncertain candidate hint" in instructions
-    assert "source_quote or source_unit_id" not in instructions
+    assert "Unsupported normative items become gaps" in instructions
+    assert "agileforge.spec_legacy_markdown.v1" not in instructions
+
+
+def test_compiler_instructions_document_host_semantic_ids() -> None:
+    """Compiler prompt must align with host semantic-only invariant IDs."""
+    instructions = _compiler_instructions()
+
+    assert (
+        "semantic-only IDs from invariant type and canonical parameters"
+        in instructions
+    )
+    assert "normalize(excerpt)" not in instructions
 
 
 class TestSpecAuthorityCompilerInput:
@@ -101,6 +114,60 @@ class TestSpecAuthorityCompilerInput:
         )
         assert payload.spec_source == "Raw spec text"
         assert payload.spec_content_ref is None
+
+    def test_accepts_spec_source_format_with_spec_source(self) -> None:
+        """Verify compiler input carries source format metadata."""
+        payload = SpecAuthorityCompilerInput(
+            spec_source="The payload must include user_id.",
+            spec_content_ref=None,
+            domain_hint=None,
+            product_id=None,
+            spec_version_id=None,
+            spec_source_format="agileforge.spec.v1",
+        )
+
+        assert payload.spec_source_format == "agileforge.spec.v1"
+        assert not hasattr(payload, "candidate_manifest")
+
+    def test_rejects_unknown_spec_source_format(self) -> None:
+        """Verify compiler input only allows known source formats."""
+        with pytest.raises(ValidationError):
+            SpecAuthorityCompilerInput.model_validate(
+                {
+                    "spec_source": "Raw spec text",
+                    "spec_content_ref": None,
+                    "domain_hint": None,
+                    "product_id": None,
+                    "spec_version_id": None,
+                    "spec_source_format": "not-a-real-format",
+                }
+            )
+
+        with pytest.raises(ValidationError):
+            SpecAuthorityCompilerInput.model_validate(
+                {
+                    "spec_source": "Raw spec text",
+                    "spec_content_ref": None,
+                    "domain_hint": None,
+                    "product_id": None,
+                    "spec_version_id": None,
+                    "spec_source_format": "agileforge.spec_legacy_markdown.v1",
+                }
+            )
+
+    def test_rejects_stale_candidate_manifest_key(self) -> None:
+        """Verify stale host candidate manifest keys are not accepted."""
+        with pytest.raises(ValidationError):
+            SpecAuthorityCompilerInput.model_validate(
+                {
+                    "spec_source": "Raw spec text",
+                    "spec_content_ref": None,
+                    "domain_hint": None,
+                    "product_id": None,
+                    "spec_version_id": None,
+                    "candidate_manifest": [],
+                }
+            )
 
     def test_accepts_spec_content_ref_only(self) -> None:
         """Verify accepts spec content ref only."""
@@ -288,8 +355,7 @@ class TestCompilerOutputSchema:
         expected_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
         assert normalized.root.prompt_hash == expected_hash
 
-        expected_id = compute_invariant_id(
-            "The payload must include user_id.",
+        expected_id = compute_invariant_id_from_payload(
             InvariantType.REQUIRED_FIELD,
             normalized.root.invariants[0].parameters,
         )
@@ -434,7 +500,7 @@ class TestSpecAuthorityCompilerAgentIntegration:
 
         Assertions limited to deterministic contracts (after normalization):
         - prompt_hash == compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
-        - invariant.id == compute_invariant_id(source_map.excerpt, invariant.type)
+        - invariant.id == compute_invariant_id_from_payload(invariant.type)
         - source_map ties invariant_id to excerpt
         """
         from google.adk.runners import Runner  # noqa: PLC0415
@@ -524,6 +590,6 @@ class TestSpecAuthorityCompilerAgentIntegration:
         assert sm_entry is not None, "No source_map entry found for invariant"
         assert sm_entry.excerpt
 
-        expected_id = compute_invariant_id(sm_entry.excerpt, inv.type)
+        expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
         assert inv.id == expected_id
         assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)

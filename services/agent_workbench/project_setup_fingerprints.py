@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from services.agent_workbench.fingerprints import canonical_hash
+from services.specs.profile_content import normalize_spec_content_for_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,5 +32,6 @@ def setup_retry_context_fingerprint(
 
 
 def setup_spec_hash(path: Path) -> str:
-    """Return the setup contract hash for a spec file."""
-    return canonical_hash(path.read_text(encoding="utf-8"))
+    """Return the setup contract hash for a structured spec file."""
+    normalized = normalize_spec_content_for_registry(path.read_text(encoding="utf-8"))
+    return canonical_hash(normalized.content)

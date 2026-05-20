@@ -18,6 +18,10 @@ from agile_sqlmodel import (
     SpecRegistry,
 )
 from db.migrations import ensure_schema_current
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 from tests.typing_helpers import make_tool_context, require_id
 from utils import failure_artifacts
 from utils.failure_artifacts import AgentInvocationError
@@ -28,6 +32,7 @@ from utils.spec_schemas import (
     SourceMapEntry,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
 )
 
@@ -89,6 +94,109 @@ def _raw_compiler_output_json() -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
+def _agileforge_spec_profile_payload() -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.test",
+        "title": "Test Spec",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Test summary.",
+        "problem_statement": "Test problem.",
+        "items": [
+            {
+                "id": "REQ.test.audit",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Audit evidence",
+                "statement": "The system MUST record audit evidence.",
+                "verification": "system-test",
+                "acceptance": ["Audit evidence is stored for each operation."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+
+
+def _agileforge_spec_profile_json() -> str:
+    return json.dumps(_agileforge_spec_profile_payload())
+
+
+def _canonical_agileforge_spec_profile_json() -> str:
+    return normalize_spec_content_for_registry(_agileforge_spec_profile_json()).content
+
+
+def test_normalize_structured_spec_content_canonicalizes_json() -> None:
+    """Structured spec profile content is stored in canonical JSON form."""
+    raw_json = json.dumps(_agileforge_spec_profile_payload(), indent=2)
+
+    normalized = normalize_spec_content_for_registry(raw_json)
+
+    assert normalized.format == "agileforge.spec.v1"
+    assert normalized.spec_hash.startswith("sha256:")
+    assert "\n" not in normalized.content
+    assert json.loads(normalized.content)["schema_version"] == "agileforge.spec.v1"
+
+
+def test_normalize_markdown_spec_content_rejects_authority_input() -> None:
+    """Authority compilation requires canonical agileforge.spec.v1 JSON."""
+    raw_markdown = "# Spec\n\nThe system must record audit evidence.\n"
+
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        normalize_spec_content_for_registry(raw_markdown)
+
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert "Expected agileforge.spec.v1 JSON" in str(exc_info.value)
+
+
+def test_normalize_arbitrary_json_rejects_authority_input() -> None:
+    """JSON without the AgileForge profile marker is not compiler input."""
+    raw_json = json.dumps({"title": "Loose JSON spec"})
+
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        normalize_spec_content_for_registry(raw_json)
+
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert "schema_version" in str(exc_info.value)
+
+
+def test_update_spec_and_compile_authority_returns_error_for_invalid_structured_spec(
+    sample_product: Product,
+) -> None:
+    """Invalid structured spec JSON returns a structured compile/update error."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    result = compiler_service.update_spec_and_compile_authority(
+        {
+            "product_id": require_id(sample_product.product_id, "product_id"),
+            "spec_content": json.dumps(
+                {
+                    "schema_version": "agileforge.spec.v1",
+                    "artifact_id": "SPEC.invalid",
+                }
+            ),
+        },
+        tool_context=None,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "SPEC_FILE_INVALID"
+    assert "Invalid agileforge.spec.v1 content" in result["error"]
+
+
+def _success_payload_json() -> str:
+    return _raw_compiler_output_json()
+
+
 def _raw_compiler_failure_json() -> str:
     failure = SpecAuthorityCompilationFailure(
         error="COMPILATION_FAILED",
@@ -102,8 +210,10 @@ def _create_spec_version(
     session: Session,
     *,
     product_id: int,
-    content: str = "Spec A",
+    content: str | None = None,
 ) -> SpecRegistry:
+    if content is None:
+        content = _canonical_agileforge_spec_profile_json()
     spec_row = SpecRegistry(
         product_id=product_id,
         spec_hash=f"{product_id:064d}"[-64:],
@@ -409,7 +519,7 @@ def test_preview_spec_authority_returns_success_and_updates_cache(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Auth required."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=tool_context,
     )
 
@@ -433,7 +543,7 @@ def test_preview_spec_authority_returns_failure_envelope(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Missing scope."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=make_tool_context(),
     )
 
@@ -479,10 +589,10 @@ def test_preview_spec_authority_returns_unexpected_exception_error(
     )
 
 
-def test_preview_spec_authority_honors_legacy_tool_compiler_monkeypatch(
+def test_preview_spec_authority_honors_tool_compiler_monkeypatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify preview spec authority honors legacy tool compiler monkeypatch."""
+    """Verify preview spec authority honors tool compiler monkeypatch."""
     from services.specs import compiler_service  # noqa: PLC0415
     from tools import spec_tools  # noqa: PLC0415
 
@@ -494,7 +604,7 @@ def test_preview_spec_authority_honors_legacy_tool_compiler_monkeypatch(
     )
 
     result = compiler_service.preview_spec_authority(
-        {"content": "# Spec\n\n## Invariants\n- Auth required."},
+        {"content": _canonical_agileforge_spec_profile_json()},
         tool_context=tool_context,
     )
 
@@ -539,6 +649,63 @@ def test_resolve_engine_prefers_patched_spec_tools_get_engine_over_stale_engine(
     resolved = compiler_service._resolve_engine()
 
     assert resolved is preferred_engine
+
+
+def test_default_compiler_invocation_rejects_unstructured_spec_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler invocation requires canonical agileforge.spec.v1 JSON."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    captured: list[SpecAuthorityCompilerInput] = []
+
+    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+        captured.append(payload)
+        return _success_payload_json()
+
+    monkeypatch.setattr(
+        "services.specs.compiler_service._invoke_spec_authority_compiler_async",
+        fake_invoke,
+    )
+
+    with pytest.raises(SpecContentNormalizationError) as exc_info:
+        compiler_service._default_invoke_spec_authority_compiler(
+            spec_content="# Spec\n\nThe system must record audit evidence.",
+            content_ref=None,
+            product_id=4,
+            spec_version_id=9,
+        )
+
+    assert exc_info.value.error_code == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
+    assert captured == []
+
+
+def test_default_compiler_invocation_marks_structured_spec_source_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler input should identify canonical structured AgileForge spec JSON."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    captured: list[SpecAuthorityCompilerInput] = []
+
+    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+        captured.append(payload)
+        return _success_payload_json()
+
+    monkeypatch.setattr(
+        "services.specs.compiler_service._invoke_spec_authority_compiler_async",
+        fake_invoke,
+    )
+
+    compiler_service._default_invoke_spec_authority_compiler(
+        spec_content=json.dumps(_agileforge_spec_profile_payload()),
+        content_ref=None,
+        product_id=4,
+        spec_version_id=9,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].spec_source_format == "agileforge.spec.v1"
 
 
 def test_compile_spec_authority_for_version_persists_authority(
@@ -937,8 +1104,8 @@ def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
         lambda **_: _raw_compiler_output_json(),
     )
 
-    spec_path = tmp_path / "spec.md"
-    spec_path.write_text("Spec from file", encoding="utf-8")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(_agileforge_spec_profile_json(), encoding="utf-8")
     spec_row = _create_spec_version(
         session,
         product_id=require_id(sample_product.product_id, "product_id"),
@@ -1339,10 +1506,11 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1358,7 +1526,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
 
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
-    assert spec_row.content == "Spec A"
+    assert spec_row.content == _canonical_agileforge_spec_profile_json()
     assert spec_row.status == "approved"
     assert spec_row.approved_by == "implicit"
 
@@ -1430,10 +1598,11 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1521,10 +1690,11 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
         fake_tool_ensure,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1552,8 +1722,9 @@ def test_update_spec_and_compile_authority_loads_content_ref(
         session.get_bind,
     )
 
-    spec_path = tmp_path / "service_spec.md"
-    spec_path.write_text("Spec from file", encoding="utf-8")
+    spec_path = tmp_path / "service_spec.json"
+    spec_content = _agileforge_spec_profile_json()
+    spec_path.write_text(spec_content, encoding="utf-8")
 
     def fake_compile(
         *, spec_version_id: int, force_recompile: bool, tool_context: object
@@ -1610,7 +1781,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
 
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
-    assert spec_row.content == "Spec from file"
+    assert spec_row.content == _canonical_agileforge_spec_profile_json()
     assert spec_row.content_ref == str(spec_path)
 
 
@@ -1688,17 +1859,18 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     first = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
     second = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
         },
         tool_context=None,
     )
@@ -1779,10 +1951,11 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
         raising=False,
     )
 
+    spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
-            "spec_content": "Spec A",
+            "spec_content": spec_content,
             "recompile": None,
         },
         tool_context=None,

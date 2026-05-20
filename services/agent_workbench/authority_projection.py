@@ -30,6 +30,10 @@ from services.agent_workbench.schema_readiness import (
     SchemaRequirement,
     check_schema_readiness,
 )
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -528,7 +532,9 @@ def _classify_status(
         status = "stale"
         reason = "accepted_compiler_prompt_mismatch"
         stale_reason = reason
-    elif selection.latest_spec.spec_hash != selection.accepted.spec_hash:
+    elif _normalize_hash(selection.latest_spec.spec_hash) != _normalize_hash(
+        selection.accepted.spec_hash
+    ):
         status = "stale"
         reason = "latest_spec_hash_mismatch"
         stale_reason = reason
@@ -855,8 +861,33 @@ class AuthorityProjectionService:
             )
 
         try:
-            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            raw_bytes = resolved.read_bytes()
         except OSError as exc:
+            payload = _disk_spec_payload(
+                value,
+                resolved,
+                None,
+                accepted_hash,
+                status="unreadable",
+            )
+            payload["error"] = str(exc)
+            return payload
+        try:
+            raw_content = raw_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            payload = _disk_spec_payload(
+                value,
+                resolved,
+                None,
+                accepted_hash,
+                status="unreadable",
+            )
+            payload["error"] = str(exc)
+            return payload
+        raw_digest = _legacy_sha256(raw_bytes)
+        try:
+            normalized = normalize_spec_content_for_registry(raw_content)
+        except SpecContentNormalizationError as exc:
             payload = _disk_spec_payload(
                 value,
                 resolved,
@@ -869,7 +900,10 @@ class AuthorityProjectionService:
         return _disk_spec_payload(
             value,
             resolved,
-            digest,
+            _display_disk_hash(
+                raw_digest=raw_digest,
+                normalized_hash=normalized.spec_hash,
+            ),
             accepted_hash,
             status="readable",
         )
@@ -972,10 +1006,34 @@ def _disk_spec_payload(
         "status": status,
         "sha256": digest,
         "matches_accepted": (
-            digest == accepted_hash if digest is not None and accepted_hash else None
+            _normalize_hash(digest) == _normalize_hash(accepted_hash)
+            if digest is not None and accepted_hash
+            else None
         ),
         "error": None,
     }
+
+
+def _normalize_hash(value: str | None) -> str | None:
+    """Normalize legacy and prefixed SHA-256 values for comparison."""
+    if value is None:
+        return None
+    stripped = value.strip().lower()
+    if stripped.startswith("sha256:"):
+        return f"sha256:{stripped.removeprefix('sha256:')}"
+    return f"sha256:{stripped}"
+
+
+def _legacy_sha256(data: bytes) -> str:
+    """Return the legacy unprefixed disk SHA-256 digest."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _display_disk_hash(*, raw_digest: str, normalized_hash: str) -> str:
+    """Preserve legacy disk hash shape unless structured canonicalization differs."""
+    if _normalize_hash(raw_digest) == _normalize_hash(normalized_hash):
+        return raw_digest
+    return _normalize_hash(normalized_hash) or normalized_hash
 
 
 def _invariants_success(

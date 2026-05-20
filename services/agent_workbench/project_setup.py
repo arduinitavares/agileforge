@@ -41,6 +41,10 @@ from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
     setup_spec_hash,
 )
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 from services.specs.pending_authority_service import (
     compile_pending_authority_for_project,
 )
@@ -1288,7 +1292,7 @@ def _spec_hash(path: Path) -> str:
 
 
 def _spec_hash_or_error(path: Path) -> str | dict[str, Any]:
-    """Return a setup spec hash or a structured spec-file contract error."""
+    """Return canonical structured spec hash or a structured spec-file error."""
     if not path.exists():
         return _error(
             ErrorCode.SPEC_FILE_NOT_FOUND.value,
@@ -1299,21 +1303,33 @@ def _spec_hash_or_error(path: Path) -> str | dict[str, Any]:
         return _error(
             ErrorCode.SPEC_FILE_INVALID.value,
             details={"spec_file": str(path), "reason": "not_a_file"},
-            remediation=["Pass a readable Markdown specification file."],
+            remediation=["Pass a readable agileforge.spec.v1 JSON file."],
         )
     try:
-        return _spec_hash(path)
+        raw_content = path.read_text(encoding="utf-8")
+        normalized = normalize_spec_content_for_registry(raw_content)
+        return normalized.spec_hash
+    except SpecContentNormalizationError as exc:
+        remediation = [
+            "Generate specs/spec.json as agileforge.spec.v1 JSON.",
+            "Retry project create with --spec-file specs/spec.json.",
+        ]
+        return _error(
+            exc.error_code,
+            details={"spec_file": str(path), "reason": str(exc)},
+            remediation=remediation,
+        )
     except UnicodeDecodeError as exc:
         return _error(
             ErrorCode.SPEC_FILE_INVALID.value,
             details={"spec_file": str(path), "reason": str(exc)},
-            remediation=["Save the specification file as UTF-8 text."],
+            remediation=["Save the specification file as UTF-8 JSON."],
         )
     except OSError as exc:
         return _error(
             ErrorCode.SPEC_FILE_INVALID.value,
             details={"spec_file": str(path), "reason": str(exc)},
-            remediation=["Pass a readable Markdown specification file."],
+            remediation=["Pass a readable agileforge.spec.v1 JSON file."],
         )
 
 

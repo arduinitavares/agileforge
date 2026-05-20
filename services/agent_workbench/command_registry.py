@@ -168,6 +168,7 @@ _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.PROJECT_ALREADY_EXISTS.value,
             ErrorCode.SPEC_FILE_NOT_FOUND.value,
             ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value,
             ErrorCode.SPEC_COMPILE_FAILED.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
@@ -203,6 +204,7 @@ _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.SPEC_FILE_NOT_FOUND.value,
             ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value,
             ErrorCode.SPEC_COMPILE_FAILED.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
@@ -237,7 +239,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=False,
         phase="phase_2c",
         input_required=("project_id",),
-        input_optional=("include_spec", "format"),
+        input_optional=("include_spec", "format", "open"),
         errors=(
             ErrorCode.SCHEMA_NOT_READY.value,
             ErrorCode.PROJECT_NOT_FOUND.value,
@@ -252,10 +254,10 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         phase="phase_2c",
         guard_policy=_AUTHORITY_DECISION_GUARDS,
         accepts_expected_state=True,
-        requires_idempotency_key=True,
-        idempotency_policy=_AUTHORITY_DECISION_IDEMPOTENCY_POLICY,
-        input_required=("project_id", "idempotency_key"),
+        requires_idempotency_key=False,
+        input_required=("project_id",),
         input_optional=(
+            "idempotency_key",
             *_AUTHORITY_DECISION_GUARDS,
             "allow_incomplete_review",
             "incomplete_review_rationale",
@@ -322,6 +324,27 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge spec profile schema",
+        mutates=False,
+        phase="phase_2e",
+    ),
+    CommandMetadata(
+        name="agileforge spec profile validate",
+        mutates=False,
+        phase="phase_2e",
+        input_required=("spec_file",),
+        input_optional=("render_md",),
+        errors=(
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+)
+
+
 def command_contracts() -> tuple[CommandMetadata, ...]:
     """Return discoverable command contracts for the current workbench phase."""
     return (
@@ -329,6 +352,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2A_COMMANDS,
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
+        *_PHASE_2E_COMMANDS,
     )
 
 

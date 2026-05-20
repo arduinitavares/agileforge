@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -22,7 +23,6 @@ from models.specs import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
     MUTATION_RESUME_CONFLICT,
     MutationLedgerRepository,
@@ -34,6 +34,9 @@ from services.agent_workbench.project_setup import (
     ProjectCreateRequest,
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
+)
+from services.agent_workbench.project_setup_fingerprints import (
+    setup_retry_context_fingerprint,
 )
 
 
@@ -106,10 +109,60 @@ class FakeWorkflowPort:
         return {"ok": True, "session_id": session_id, "state": self.get_session_status(session_id)}
 
 
-def _write_spec(tmp_path: Path, text: str = "# App Spec\n") -> Path:
-    spec_file = tmp_path / "specs" / "app.md"
+def _structured_spec_payload(
+    *,
+    title: str = "App Spec",
+    requirement_statement: str = "The system MUST record audit evidence.",
+) -> dict[str, Any]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.app",
+        "title": title,
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-05-18",
+        "updated_at": "2026-05-18",
+        "summary": "Create a project from a structured authority spec.",
+        "problem_statement": "Operators need project setup to persist authority evidence.",
+        "items": [
+            {
+                "id": "REQ.app.audit",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Audit evidence",
+                "statement": requirement_statement,
+                "verification": "system-test",
+                "acceptance": ["Audit evidence is stored for each setup operation."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+
+
+def _write_spec(
+    tmp_path: Path,
+    *,
+    title: str = "App Spec",
+    requirement_statement: str = "The system MUST record audit evidence.",
+) -> Path:
+    spec_file = tmp_path / "specs" / "spec.json"
     spec_file.parent.mkdir(parents=True, exist_ok=True)
-    spec_file.write_text(text, encoding="utf-8")
+    spec_file.write_text(
+        json.dumps(
+            _structured_spec_payload(
+                title=title,
+                requirement_statement=requirement_statement,
+            )
+        ),
+        encoding="utf-8",
+    )
     return spec_file
 
 
@@ -230,15 +283,10 @@ def _retry_fingerprint(
     spec_file: Path,
     workflow_state: dict[str, Any],
 ) -> str:
-    spec_hash = canonical_hash(spec_file.read_text(encoding="utf-8"))
-    return canonical_hash(
-        {
-            "command": "agileforge project setup retry",
-            "project_id": project_id,
-            "resolved_spec_path": str(spec_file.resolve()),
-            "spec_hash": spec_hash,
-            "workflow_state": workflow_state,
-        }
+    return setup_retry_context_fingerprint(
+        project_id=project_id,
+        resolved_spec_path=spec_file.resolve(),
+        workflow_state=workflow_state,
     )
 
 
@@ -288,9 +336,7 @@ def test_project_create_dry_run_resolves_spec_from_caller_cwd_without_writes(
     ensure_schema_current(engine)
     caller = tmp_path / "caller"
     caller.mkdir()
-    spec_file = caller / "specs" / "app.md"
-    spec_file.parent.mkdir()
-    spec_file.write_text("# App Spec\n", encoding="utf-8")
+    spec_file = _write_spec(caller)
 
     monkeypatch.chdir(caller)
     runner = ProjectSetupMutationRunner(engine=engine)
@@ -298,7 +344,7 @@ def test_project_create_dry_run_resolves_spec_from_caller_cwd_without_writes(
     result = runner.create_project(
         ProjectCreateRequest(
             name="CLI Project",
-            spec_file="specs/app.md",
+            spec_file="specs/spec.json",
             dry_run=True,
             dry_run_id="dry-run-project-001",
             changed_by="agent",
@@ -625,7 +671,11 @@ def test_project_create_duplicate_replay_key_reuse_and_recovery_required(
     )
     assert _error_code(reused_name) == "IDEMPOTENCY_KEY_REUSED"
 
-    changed_spec = _write_spec(tmp_path, text="# Changed App Spec\n")
+    changed_spec = _write_spec(
+        tmp_path,
+        title="Changed App Spec",
+        requirement_statement="The changed system MUST record updated audit evidence.",
+    )
     reused_spec = runner.create_project(
         ProjectCreateRequest(
             name="CLI Project",

@@ -78,7 +78,7 @@ exec uv run --project /Users/aaat/projects/agileforge python -m cli.main "$@"
 This design means:
 
 - Agents can call `agileforge` from any caller repository.
-- Relative user inputs such as `--spec-file specs/app.md` resolve relative to
+- Relative user inputs such as `--spec-file specs/spec.json` resolve relative to
   the caller's current working directory.
 - AgileForge code, dependencies, `.env`, and storage settings resolve through
   the central repository.
@@ -98,7 +98,7 @@ cd /path/to/caller-project
 agileforge project create --dry-run \
   --dry-run-id preview-project-001 \
   --name "Preview Project" \
-  --spec-file specs/app.md
+  --spec-file specs/spec.json
 ```
 
 ## Environment Expectations
@@ -157,7 +157,7 @@ Failure shape:
       "code": "SPEC_FILE_NOT_FOUND",
       "message": "The requested spec file was not found.",
       "details": {
-        "spec_file": "specs/app.md"
+        "spec_file": "specs/spec.json"
       },
       "remediation": [
         "Create the spec file or pass the correct caller-relative path."
@@ -273,10 +273,10 @@ Use these before and during agent workflows.
 ```sh
 agileforge project list
 agileforge project show --project-id 1
-agileforge project create --name "Project" --spec-file specs/app.md --idempotency-key create-project-001
-agileforge project create --dry-run --dry-run-id preview-project-001 --name "Project" --spec-file specs/app.md
-agileforge project setup retry --project-id 1 --spec-file specs/app.md --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --idempotency-key setup-retry-001
-agileforge project setup retry --project-id 1 --spec-file specs/app.md --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --recovery-mutation-event-id 10 --idempotency-key recovery-retry-001
+agileforge project create --name "Project" --spec-file specs/spec.json --idempotency-key create-project-001
+agileforge project create --dry-run --dry-run-id preview-project-001 --name "Project" --spec-file specs/spec.json
+agileforge project setup retry --project-id 1 --spec-file specs/spec.json --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --idempotency-key setup-retry-001
+agileforge project setup retry --project-id 1 --spec-file specs/spec.json --expected-state SETUP_REQUIRED --expected-context-fingerprint sha256:... --recovery-mutation-event-id 10 --idempotency-key recovery-retry-001
 ```
 
 `project create` and `project setup retry` mutate state.
@@ -297,15 +297,15 @@ installed next commands.
 agileforge authority status --project-id 1
 agileforge authority review --project-id 1
 agileforge authority review --project-id 1 --include-spec full
-agileforge authority accept --project-id 1 --review-token <review_token>
-agileforge authority reject --project-id 1 --review-token <review_token> --reason "..."
+agileforge authority accept --project-id 1
+agileforge authority reject --project-id 1 --review-token <review_token> --reason "..." --idempotency-key reject-001
 agileforge authority invariants --project-id 1
 agileforge authority invariants --project-id 1 --spec-version-id 3
 ```
 
-Use `authority review` before any decision. Normal human review-token mode hides
-machine guard fields; explicit agent mode supplies the full guard tuple and an
-idempotency key.
+Use `authority review` before any decision. The normal accept path uses the
+reviewed pending authority for the project and does not require agents to pass
+review tokens or idempotency keys in the command text.
 
 ### Story Commands
 
@@ -456,7 +456,7 @@ agileforge project create \
   --dry-run \
   --dry-run-id preview-cartola-001 \
   --name "caRtola" \
-  --spec-file specs/app.md
+  --spec-file specs/spec.json
 ```
 
 Expected success data includes:
@@ -472,7 +472,7 @@ agileforge project setup retry \
   --dry-run \
   --dry-run-id preview-setup-retry-001 \
   --project-id 1 \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --expected-state SETUP_REQUIRED \
   --expected-context-fingerprint sha256:... \
   --recovery-mutation-event-id 10
@@ -510,7 +510,7 @@ From the caller project:
 
 ```sh
 cd /path/to/caller-project
-test -f specs/app.md
+test -f specs/spec.json
 ```
 
 Preview:
@@ -520,7 +520,7 @@ agileforge project create \
   --dry-run \
   --dry-run-id preview-cartola-001 \
   --name "caRtola" \
-  --spec-file specs/app.md
+  --spec-file specs/spec.json
 ```
 
 Execute:
@@ -528,7 +528,7 @@ Execute:
 ```sh
 agileforge project create \
   --name "caRtola" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --idempotency-key create-cartola-20260516-001 \
   --changed-by codex
 ```
@@ -538,7 +538,7 @@ Parse project id:
 ```sh
 payload="$(agileforge project create \
   --name "caRtola" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --idempotency-key create-cartola-20260516-001 \
   --changed-by codex)"
 
@@ -593,6 +593,28 @@ initially show `status: pending_acceptance`, `authority_id: null`, and a
 populated `pending_authority_id`. It is usable for review, but it is not
 canonical until accepted.
 
+### Structured Spec Authority Flow
+
+Authority compilation accepts only `agileforge.spec.v1` JSON.
+
+Use:
+
+```bash
+agileforge project create \
+  --name "Project Name" \
+  --spec-file specs/spec.json \
+  --idempotency-key create-project-001
+agileforge authority review --project-id <project_id> --open
+agileforge authority accept --project-id <project_id>
+```
+
+Markdown specs are render views or source material for a separate
+structured-spec generation step. They are not accepted by `project create`.
+
+Host validation checks schema, freshness, compiled artifact shape, and
+source-reference item IDs. It does not block acceptance based on generated
+requirement candidates or inferred semantic coverage.
+
 Detect pending review with all three projections:
 
 ```sh
@@ -604,7 +626,7 @@ agileforge workflow next --project-id "$PROJECT_ID"
 `workflow next` should advertise:
 
 ```text
-agileforge authority review --project-id <id>
+agileforge authority review --project-id <id> --open
 ```
 
 Important `authority status` fields:
@@ -624,71 +646,37 @@ Important `authority status` fields:
 Retrieve the review packet:
 
 ```sh
-agileforge authority review --project-id "$PROJECT_ID" > review.json
+agileforge authority review --project-id "$PROJECT_ID" --open > review.json
 python -m json.tool review.json >/dev/null
 ```
 
 Important review packet fields:
 
-- `pending_authority.ir_provenance`: `model_emitted`, `mixed`,
-  `host_parsed`, or `legacy_absent`. Treat `host_parsed` and
-  `legacy_absent` as review evidence quality signals, not acceptance proof.
-- `pending_authority.requirement_candidates`: atomic source requirements with
-  stable `candidate_id` values. Candidate IDs are the handles used for
-  incomplete-review overrides.
-- `pending_authority.authority_mappings`: candidate-to-authority mappings.
-  `weak_mapping` means the source evidence or target kind is not strong enough
-  to count as accepted coverage without candidate-specific human review.
-- `review_findings`: host-derived findings. Findings with
-  `severity: "blocking"` must stop acceptance unless each overrideable
-  candidate/finding pair is explicitly overridden by a human.
-- `review_summary`: compact decision status for agents and UI. If
-  `acceptance_status` is `blocked`, treat the accept command as blocked unless
-  the blocking findings are fixed or explicitly overridden per candidate.
-- `pending_authority.coverage_summary`: candidate-level coverage counts and
-  whether all candidates are covered.
+- `pending_authority.ir_provenance`: `not_applicable` for structured
+  AgileForge specs. Candidate IR is not part of the acceptance gate.
+- `review_summary`: compact decision status for agents and UI.
 - `pending_authority.ir_packet_limits`: render limits and `truncated` status.
 
 Agent review rule:
 
-- Never recommend acceptance while any blocking `review_findings` entry exists.
-- Do not treat `gaps: []` inside the compiled artifact as sufficient; host code
-  derives review findings from current source, candidate coverage, mapping
-  provenance, parser diagnostics, and packet limits.
-- `AUTHORITY_REVIEW_PACKET_TRUNCATED` is blocking and non-overrideable in this
-  phase. Rerun review after reducing packet size or improving the spec/compiler;
-  do not attempt to accept a truncated review packet.
-
-Extract the token and guard tuple:
-
-```sh
-review_token="$(
-  python -c 'import json; print(json.load(open("review.json"))["data"]["guard_tokens"]["review_token"])'
-)"
-
-python -c 'import json; g=json.load(open("review.json"))["data"]["guard_tokens"]; print({k: g[k] for k in sorted(g)})'
-```
-
-`--include-spec summary`, `auto`, and `full` review modes all produce valid
-review tokens. The token binds the exact reviewed mode and guard snapshot; do
-not mix guard fields from one review packet with a token from another packet.
-
-Ask an AI reviewer this exact question, using the review packet as evidence:
+- Ask an AI reviewer this exact question, using the review packet as evidence:
 
 ```text
 Does this compiled interpretation correctly represent the spec?
 ```
 
-The reviewer should compare source requirements, `pending_authority.artifact`,
-`spec.source_outline`, source-map evidence, gaps, assumptions, and rejected
-features. Stop on uncertainty; do not accept just because the packet exists.
+- The reviewer should compare source requirements, `pending_authority.artifact`,
+  `spec.source_outline`, source-map evidence, gaps, assumptions, and rejected
+  features.
+- Stop on uncertainty. Do not accept just because the packet exists.
+- If host structural validation returns `AUTHORITY_REVIEW_INCOMPLETE`, fix the
+  source or compiler output and rerun review before deciding.
 
 Accept after a positive review:
 
 ```sh
 agileforge authority accept \
-  --project-id "$PROJECT_ID" \
-  --review-token "$review_token" > accept.json
+  --project-id "$PROJECT_ID" > accept.json
 
 python -m json.tool accept.json >/dev/null
 ```
@@ -696,118 +684,17 @@ python -m json.tool accept.json >/dev/null
 Reject when the compiled authority is wrong or unreviewable:
 
 ```sh
+review_token="$(
+  python -c 'import json; print(json.load(open("review.json"))["data"]["guard_tokens"]["review_token"])'
+)"
+
 agileforge authority reject \
   --project-id "$PROJECT_ID" \
   --review-token "$review_token" \
+  --idempotency-key "authority-reject-$PROJECT_ID-001" \
   --reason "Compiled authority omits the dashboard requirement." > reject.json
 
 python -m json.tool reject.json >/dev/null
-```
-
-Human review-token mode hides the idempotency key. The CLI generates an internal
-`human-token:<uuid>` retry key when `--review-token` is supplied without
-`--idempotency-key`. Non-interactive agent mutations should pass their own
-caller-generated idempotency key so an identical retry can replay the same
-ledger row after a timeout.
-
-Explicit agent mode is for automation that stores guard values from
-`guard_tokens`. Include the complete guard tuple and an idempotency key:
-
-```sh
-agileforge authority accept \
-  --project-id "$PROJECT_ID" \
-  --pending-authority-id "$pending_authority_id" \
-  --expected-authority-fingerprint "$expected_authority_fingerprint" \
-  --expected-source-spec-hash "$expected_source_spec_hash" \
-  --expected-disk-spec-hash "$expected_disk_spec_hash" \
-  --expected-resolved-spec-path "$expected_resolved_spec_path" \
-  --expected-state SETUP_REQUIRED \
-  --expected-setup-status authority_pending_review \
-  --expected-content-included true \
-  --expected-omission-assessment complete \
-  --expected-coverage-summary-fingerprint "$expected_coverage_summary_fingerprint" \
-  --idempotency-key "authority-accept-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
-  --changed-by codex
-```
-
-The complete explicit guard tuple is:
-
-- `pending_authority_id`
-- `expected_authority_fingerprint`
-- `expected_source_spec_hash`
-- `expected_disk_spec_hash`
-- `expected_resolved_spec_path`
-- `expected_state`
-- `expected_setup_status`
-- `expected_content_included`
-- `expected_omission_assessment`
-- `expected_coverage_summary_fingerprint`
-
-Reject explicit mode uses the same guards, plus `--reason`.
-
-If accept returns `AUTHORITY_REVIEW_INCOMPLETE`, do not force the same token
-through normal accept. First inspect `review_findings`:
-
-```sh
-agileforge authority review --project-id "$PROJECT_ID" --include-spec full > review.json
-python -m json.tool review.json >/dev/null
-
-python - <<'PY'
-import json
-p=json.load(open("review.json"))
-for f in p["data"].get("review_findings", []):
-    if f.get("severity") == "blocking":
-        print(f["code"], f.get("candidate_ids"), f.get("override_allowed"))
-PY
-```
-
-If a human reviewed the affected source out of band and still approves, use
-candidate-specific override flags. Broad legacy flags are invalid without
-candidate IDs. Repeat `--incomplete-review-override` once per blocking
-candidate/finding pair:
-
-```sh
-agileforge authority accept \
-  --project-id "$PROJECT_ID" \
-  --review-token "$review_token" \
-  --allow-incomplete-review \
-  --incomplete-review-override "REQ-abc123:AUTHORITY_CANDIDATE_UNCOVERED:Human reviewer inspected this source requirement directly." \
-  --idempotency-key "authority-accept-incomplete-$PROJECT_ID-$(date +%Y%m%d%H%M%S)"
-```
-
-The override format is:
-
-```text
-<candidate_id>:<finding_code>:<rationale>
-```
-
-Rules:
-
-- `candidate_id` must be present in the current blocking finding.
-- `finding_code` must match that current blocking finding.
-- `rationale` must be non-empty and specific to that candidate.
-- Overrides for non-blocking candidates are rejected.
-- Overrides for `AUTHORITY_REVIEW_PACKET_TRUNCATED` or other
-  `override_allowed: false` findings are rejected.
-- `--allow-incomplete-review --incomplete-review-rationale ...` without at
-  least one `--incomplete-review-override` is rejected by the CLI, API,
-  dashboard route, and service.
-- Interactive CLI accept uses the same candidate-specific override model as
-  non-interactive CLI, API, and dashboard flows.
-
-Dashboard/API acceptance uses the same request shape:
-
-```json
-{
-  "review_token": "agileforge.authority_review.v1:sha256:...",
-  "incomplete_review_overrides": [
-    {
-      "candidate_id": "REQ-abc123",
-      "finding_code": "AUTHORITY_CANDIDATE_UNCOVERED",
-      "rationale": "Human reviewer inspected this source requirement directly."
-    }
-  ]
-}
 ```
 
 If the source spec is missing or unreadable at decision time, accept/reject
@@ -826,8 +713,9 @@ Expected outcomes:
 
 Dashboard behavior mirrors the CLI service. Pending projects render as
 `Pending Authority Review`, fetch the same review packet, and submit decisions
-using the review token. The dashboard must not accept fingerprint-only
-mutations; stale pages should refresh after source or workflow guards change.
+through the same guarded service path. The dashboard must not accept
+fingerprint-only mutations; stale pages should refresh after source or workflow
+guards change.
 
 Read invariants only after acceptance:
 
@@ -855,10 +743,9 @@ agileforge authority reject
 - `--expected-state`
 - `--expected-context-fingerprint`
 
-Authority decision explicit mode requires the full `guard_tokens` tuple from
-`agileforge authority review --project-id "$PROJECT_ID"` plus
-`--idempotency-key`. Review-token mode supplies those guards through
-`--review-token`.
+Authority decision commands use the reviewed pending authority for the project.
+Explicit guard mode remains available for non-interactive integrations that
+store the full `guard_tokens` tuple, but it is not the recommended CLI path.
 
 Get current state:
 
@@ -944,7 +831,7 @@ not need a recovery event id:
 ```sh
 agileforge project setup retry \
   --project-id "$PROJECT_ID" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --expected-state SETUP_REQUIRED \
   --expected-context-fingerprint "$CTX" \
   --idempotency-key "setup-retry-$PROJECT_ID-001" \
@@ -957,7 +844,7 @@ must link to the original recovery event:
 ```sh
 agileforge project setup retry \
   --project-id "$PROJECT_ID" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --expected-state SETUP_REQUIRED \
   --expected-context-fingerprint "$CTX" \
   --recovery-mutation-event-id "$RECOVERY_EVENT_ID" \
@@ -994,7 +881,7 @@ Recommended recovery sequence for `MUTATION_RECOVERY_REQUIRED`:
    ```sh
    agileforge project setup retry \
      --project-id "$PROJECT_ID" \
-     --spec-file specs/app.md \
+     --spec-file specs/spec.json \
      --expected-state SETUP_REQUIRED \
      --expected-context-fingerprint "$CTX" \
      --recovery-mutation-event-id "$RECOVERY_EVENT_ID" \
@@ -1048,15 +935,16 @@ Registered CLI error codes include:
 | `SPEC_VERSION_NOT_FOUND` | Spec version does not exist. | Refresh authority status. |
 | `SPEC_FILE_NOT_FOUND` | Spec path cannot be found. | Fix caller-relative path. |
 | `SPEC_FILE_INVALID` | Spec path exists but is invalid. | Fix spec file content/path. |
+| `SPEC_SOURCE_FORMAT_UNSUPPORTED` | Spec source is not `agileforge.spec.v1` JSON. | Generate `specs/spec.json` and retry with that file. |
 | `SPEC_COMPILE_FAILED` | Authority compilation failed. | Inspect error details, retry only when cause is fixed. |
-| `AUTHORITY_REVIEW_REQUIRED` | A non-interactive authority decision did not include review evidence. | Run `authority review` and pass `--review-token` or explicit guards. |
+| `AUTHORITY_REVIEW_REQUIRED` | An authority decision was attempted before review evidence was available. | Run `authority review`, then retry the decision from current project state. |
 | `AUTHORITY_NOT_ACCEPTED` | No accepted authority exists. | Stop or request manual authority review. |
 | `AUTHORITY_NOT_COMPILED` | Selected spec has no compiled authority. | Re-read authority status. |
 | `AUTHORITY_NOT_PENDING` | There is no pending authority decision for this project. | Re-read `authority status` and `workflow next`. |
 | `AUTHORITY_ALREADY_DECIDED` | The pending authority already has a terminal decision. | Replay the same idempotency key or refresh status. |
 | `AUTHORITY_SOURCE_CHANGED` | The source spec or authority snapshot changed after review. | Rerun `authority review` and decide from the new packet. |
 | `AUTHORITY_SOURCE_UNAVAILABLE` | The source spec cannot be read at decision time. | Restore the readable source file, then rerun `authority review`. |
-| `AUTHORITY_REVIEW_INCOMPLETE` | Review packet has blocking findings, weak mappings, parser diagnostics, or incomplete source coverage. | Inspect `review_findings`; fix the spec/compiler, or use candidate-specific overrides only for overrideable findings. |
+| `AUTHORITY_REVIEW_INCOMPLETE` | Host structural validation found stale, malformed, or incomplete authority data. | Fix the structured spec or compiler output, then rerun `authority review`. |
 | `AUTHORITY_GUARD_INCOMPLETE` | Explicit authority decision mode omitted required guards. | Pass every field from `guard_tokens` and an idempotency key. |
 | `AUTHORITY_ACCEPTANCE_MISMATCH` | Accepted authority provenance drifted. | Stop and surface. |
 | `AUTHORITY_INVARIANTS_INVALID` | Stored invariant JSON is invalid. | Stop and surface storage issue. |
@@ -1102,12 +990,12 @@ agileforge project create \
   --dry-run \
   --dry-run-id preview-my-project-001 \
   --name "My Project" \
-  --spec-file specs/app.md
+  --spec-file specs/spec.json
 
 payload="$(
   agileforge project create \
     --name "My Project" \
-    --spec-file specs/app.md \
+    --spec-file specs/spec.json \
     --idempotency-key create-my-project-20260516-001 \
     --changed-by codex
 )"
@@ -1132,18 +1020,13 @@ python -c 'import json,sys; p=json.load(sys.stdin); print(p["data"].get("next_va
 ### Review And Accept Authority
 
 ```sh
-agileforge authority review --project-id "$PROJECT_ID" > review.json
+agileforge authority review --project-id "$PROJECT_ID" --open > review.json
 python -m json.tool review.json >/dev/null
-
-review_token="$(
-  python -c 'import json; print(json.load(open("review.json"))["data"]["guard_tokens"]["review_token"])'
-)"
 
 # Ask: Does this compiled interpretation correctly represent the spec?
 
 agileforge authority accept \
-  --project-id "$PROJECT_ID" \
-  --review-token "$review_token" > accept.json
+  --project-id "$PROJECT_ID" > accept.json
 python -m json.tool accept.json >/dev/null
 
 agileforge authority status --project-id "$PROJECT_ID" |
@@ -1164,7 +1047,7 @@ CTX="$(
 
 agileforge project setup retry \
   --project-id "$PROJECT_ID" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --expected-state SETUP_REQUIRED \
   --expected-context-fingerprint "$CTX" \
   --recovery-mutation-event-id "$RECOVERY_EVENT_ID" \
@@ -1180,7 +1063,7 @@ run the exact same command again with the exact same idempotency key:
 ```sh
 agileforge project create \
   --name "My Project" \
-  --spec-file specs/app.md \
+  --spec-file specs/spec.json \
   --idempotency-key create-my-project-20260516-001 \
   --changed-by codex
 ```

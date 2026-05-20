@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
@@ -30,7 +31,6 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_review import (
-    AuthorityReviewService,
     AuthorityReviewSnapshot,
     build_authority_review_snapshot,
     sha256_prefixed,
@@ -38,6 +38,7 @@ from services.agent_workbench.authority_review import (
 from services.agent_workbench.mutation_ledger import MutationStatus, _json_load
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from tests.typing_helpers import require_id
+from utils.agileforge_spec_profile import TechnicalSpecArtifact, canonical_spec_json
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -52,6 +53,51 @@ _ACCEPTANCE_STATUS: Any = SpecAuthorityAcceptance.status
 PROMPT_HASH: Final[str] = "a" * 64
 COMPILER_VERSION: Final[str] = "1.0.0"
 INVARIANT_ID: Final[str] = "INV-0123456789abcdef"
+
+
+def _agileforge_spec_profile_payload(
+    *,
+    summary: str = "Authority decisions preserve structured spec hashes.",
+    requirement_statement: str = "The review output must include guard tokens.",
+) -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.authority-decision",
+        "title": "Authority Decision Spec",
+        "status": "draft",
+        "version": "0.1.0",
+        "created_at": "2026-05-17T12:00:00Z",
+        "updated_at": "2026-05-17T12:00:00Z",
+        "summary": summary,
+        "problem_statement": "Accepted authority needs stable structured spec hashes.",
+        "items": [
+            {
+                "id": "REQ.guard-tokens",
+                "type": "REQ",
+                "status": "draft",
+                "title": "Guard token packet evidence",
+                "statement": requirement_statement,
+                "level": "MUST",
+                "verification": "inspection",
+                "acceptance": [
+                    "The authority review packet includes guard token evidence."
+                ],
+            },
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+    }
+
+
+def _agileforge_spec_profile_json(
+    **overrides: object,
+) -> str:
+    return canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            _agileforge_spec_profile_payload(**cast("Any", overrides))
+        )
+    )
 
 
 class FakeWorkflowPort:
@@ -126,7 +172,7 @@ def _make_schema_v3_ready(engine: Engine) -> None:
 def _compiled_success_json(
     *,
     source_excerpt: str,
-    source_location: str | None = "Submission Contract",
+    source_location: str | None = "REQ.guard-tokens",
 ) -> str:
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Authority review"],
@@ -163,7 +209,7 @@ def _seed_pending_review_project(
     tmp_path: Path,
     spec_content: str | None = None,
     source_excerpt: str | None = None,
-    spec_filename: str = "spec.md",
+    spec_filename: str = "spec.json",
 ) -> tuple[int, int, int, Path]:
     content = spec_content or _complete_spec()
     spec_path = tmp_path / spec_filename
@@ -221,21 +267,7 @@ def _seed_pending_review_project(
 
 
 def _complete_spec() -> str:
-    return (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "## Background\n\n"
-        "This section is descriptive background.\n"
-    )
-
-
-def _incomplete_spec() -> str:
-    return (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "## Mandatory Additional Rules\n\n"
-        "The runner must record exactly one terminal decision.\n"
-    )
+    return _agileforge_spec_profile_json()
 
 
 def _workflow_for(project_id: int) -> FakeWorkflowPort:
@@ -409,6 +441,41 @@ def test_accept_with_review_token_promotes_authority_and_advances_to_vision(
     assert workflow.get_session_status(str(project_id))["setup_error"] is None
 
 
+def test_accept_structured_spec_persists_prefixed_hash_for_projection(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    spec_content = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_content=spec_content,
+        spec_filename="spec.json",
+    )
+    snapshot = _snapshot(session, project_id)
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is True
+    decision = session.get(
+        SpecAuthorityAcceptance,
+        result["data"]["accepted_decision_id"],
+    )
+    assert decision is not None
+    assert decision.spec_hash == snapshot.source_spec_hash
+    projection = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+    assert projection["data"]["status"] == "current"
+    assert projection["data"]["reason"] == "accepted_authority_current"
+
+
 def test_accept_honors_summary_review_token(
     session: Session,
     tmp_path: Path,
@@ -498,20 +565,120 @@ def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
     assert state["setup_error"] == "Spec needs revision."
 
 
-def test_accept_fails_when_review_is_incomplete_without_override(
+def test_accept_ignores_removed_candidate_findings(
     session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Removed host semantic candidate findings no longer block accept."""
     _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=_incomplete_spec(),
-            source_excerpt="The review output must include guard tokens.",
-        )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
     )
     snapshot = _snapshot(session, project_id)
+    candidate_finding = {
+        "finding_id": "AUTHORITY_CANDIDATE_UNCOVERED:REQ-1",
+        "severity": "blocking",
+        "code": "AUTHORITY_CANDIDATE_UNCOVERED",
+        "message": "Removed uncovered candidate.",
+        "candidate_ids": ["REQ-1"],
+        "source_unit_ids": [],
+        "override_allowed": True,
+    }
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=[candidate_finding]),
+    )
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
+
+
+def test_accept_ignores_candidate_and_coverage_findings_defensively(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removed host semantic findings do not block human authority acceptance."""
+    _make_schema_v3_ready(_engine(session))
+    spec_content = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_content=spec_content,
+        spec_filename="spec.json",
+    )
+    snapshot = _snapshot(session, project_id)
+    findings = [
+        {
+            "finding_id": "AUTHORITY_CANDIDATE_UNCOVERED:REQ-1",
+            "severity": "blocking",
+            "code": "AUTHORITY_CANDIDATE_UNCOVERED",
+            "message": "Removed host semantic candidate finding.",
+            "candidate_ids": ["REQ-1"],
+            "source_unit_ids": [],
+            "override_allowed": True,
+        },
+        {
+            "finding_id": "AUTHORITY_COVERAGE_INCOMPLETE:REQ-1",
+            "severity": "blocking",
+            "code": "AUTHORITY_COVERAGE_INCOMPLETE",
+            "message": "Removed host semantic coverage finding.",
+            "candidate_ids": ["REQ-1"],
+            "source_unit_ids": [],
+            "override_allowed": False,
+        },
+    ]
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=findings),
+    )
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is True
+    assert _terminal_rows(session)[0].status == "accepted"
+
+
+def test_accept_blocks_invalid_source_ref_finding(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structural source-ref findings still block accept."""
+    _make_schema_v3_ready(_engine(session))
+    spec_content = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_content=spec_content,
+        spec_filename="spec.json",
+    )
+    snapshot = _snapshot(session, project_id)
+    invalid_source_ref = {
+        "finding_id": "SOURCE_REF_INVALID",
+        "severity": "blocking",
+        "code": "SOURCE_REF_INVALID",
+        "message": "Compiled authority source_map references unknown spec item IDs.",
+        "candidate_ids": [],
+        "source_unit_ids": [],
+        "override_allowed": False,
+    }
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=[invalid_source_ref]),
+    )
 
     result = _runner(session, _workflow_for(project_id)).accept(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
@@ -519,206 +686,46 @@ def test_accept_fails_when_review_is_incomplete_without_override(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
-    assert _terminal_rows(session) == []
-
-
-def _first_overrideable_blocking_override(
-    session: Session,
-    project_id: int,
-    *,
-    rationale: str = "Reviewed this candidate manually.",
-) -> dict[str, str]:
-    result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
-    )
-    assert result["ok"] is True
-    findings = result["data"]["pending_authority"]["review_findings"]
-    for finding in findings:
-        if finding["severity"] != "blocking" or not finding["override_allowed"]:
-            continue
-        candidate_ids = finding["candidate_ids"]
-        if candidate_ids:
-            return {
-                "candidate_id": candidate_ids[0],
-                "finding_code": finding["code"],
-                "rationale": rationale,
-            }
-    raise AssertionError("No overrideable blocking finding found.")
-
-
-def test_accept_rejects_broad_incomplete_review_override_without_candidates(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=_incomplete_spec(),
-            source_excerpt="The review output must include guard tokens.",
-        )
-    )
-    snapshot = _snapshot(session, project_id)
-
-    result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(
-            project_id=project_id,
-            review_token=snapshot.review_token,
-            allow_incomplete_review=True,
-            incomplete_review_rationale="Reviewed uncovered rule manually.",
-            policy="manual",
-            actor_mode="human",
-        )
+    assert result["errors"][0]["details"]["blocking_findings"][0]["code"] == (
+        "SOURCE_REF_INVALID"
     )
 
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "INVALID_COMMAND"
-    assert _terminal_rows(session) == []
 
-
-def test_accept_rejects_broad_incomplete_review_override_for_complete_review(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(session, tmp_path=tmp_path)
-    )
-    snapshot = _snapshot(session, project_id)
-
-    result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(
-            project_id=project_id,
-            review_token=snapshot.review_token,
-            allow_incomplete_review=True,
-            incomplete_review_rationale="No override should be needed.",
-            policy="manual",
-            actor_mode="human",
-        )
-    )
-
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "INVALID_COMMAND"
-    assert _terminal_rows(session) == []
-
-
-def test_accept_override_persists_candidate_scoped_payload_policy_and_actor_mode(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=_incomplete_spec(),
-            source_excerpt="The review output must include guard tokens.",
-        )
-    )
-    snapshot = _snapshot(session, project_id)
-    override = _first_overrideable_blocking_override(session, project_id)
-
-    result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(
-            project_id=project_id,
-            review_token=snapshot.review_token,
-            allow_incomplete_review=True,
-            incomplete_review_rationale="Reviewed uncovered rule manually.",
-            incomplete_review_overrides=[override],
-            policy="manual",
-            actor_mode="human",
-        )
-    )
-
-    assert result["ok"] is True
-    decision = session.get(
-        SpecAuthorityAcceptance,
-        result["data"]["accepted_decision_id"],
-    )
-    assert decision is not None
-    assert decision.policy == "manual"
-    assert decision.actor_mode == "human"
-    assert decision.review_completeness == "incomplete"
-    assert decision.incomplete_review_override is True
-    assert decision.incomplete_review_rationale == (
-        "Reviewed uncovered rule manually."
-    )
-    assert decision.incomplete_review_overrides_json is not None
-    persisted = json.loads(decision.incomplete_review_overrides_json)
-    assert persisted == [
-        {
-            **override,
-            "actor": "human",
-            "recorded_at": persisted[0]["recorded_at"],
-            "review_token": snapshot.review_token,
-        }
-    ]
-
-
-def test_accept_rejects_override_for_nonblocking_candidate(
-    session: Session,
-    tmp_path: Path,
-) -> None:
-    _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(session, tmp_path=tmp_path)
-    )
-    snapshot = _snapshot(session, project_id)
-
-    result = _runner(session, _workflow_for(project_id)).accept(
-        _accept_request(
-            project_id=project_id,
-            review_token=snapshot.review_token,
-            incomplete_review_overrides=[
-                {
-                    "candidate_id": "REQ-not-blocking",
-                    "finding_code": "AUTHORITY_CANDIDATE_UNCOVERED",
-                    "rationale": "Reviewed.",
-                }
-            ],
-        )
-    )
-
-    assert result["ok"] is False
-    assert result["errors"][0]["code"] == "INVALID_COMMAND"
-
-
-def test_packet_truncation_finding_cannot_be_overridden(
+def test_fatal_non_candidate_finding_blocks_accept(
     session: Session,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("utils.spec_authority_ir.MAX_REVIEW_CANDIDATES", 1)
     _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content="# Contract\n\n"
-            "- The payload must include account_id.\n"
-            "- The payload must include user_id.\n",
-            source_excerpt="unrelated",
-        )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
     )
     snapshot = _snapshot(session, project_id)
+    fatal_finding = {
+        "finding_id": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC:MARKDOWN_FENCE_UNCLOSED:S1",
+        "severity": "blocking",
+        "code": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC",
+        "message": "Source parser diagnostic MARKDOWN_FENCE_UNCLOSED.",
+        "candidate_ids": [],
+        "source_unit_ids": ["S1"],
+        "override_allowed": False,
+    }
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=[fatal_finding]),
+    )
 
     result = _runner(session, _workflow_for(project_id)).accept(
         _accept_request(
             project_id=project_id,
             review_token=snapshot.review_token,
-            incomplete_review_overrides=[
-                {
-                    "candidate_id": "REQ-any",
-                    "finding_code": "AUTHORITY_REVIEW_PACKET_TRUNCATED",
-                    "rationale": "Reviewed.",
-                }
-            ],
         )
     )
 
     assert result["ok"] is False
-    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
+    assert result["errors"][0]["details"]["blocking_findings"] == [fatal_finding]
 
 
 def test_explicit_accept_missing_completeness_guards_fails(
@@ -913,20 +920,30 @@ def test_same_idempotency_key_after_validation_failure_replays_error(
     assert _terminal_rows(session) == []
 
 
-def test_same_idempotency_key_after_incomplete_review_replays_error(
+def test_same_idempotency_key_after_fatal_review_finding_replays_error(
     session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _make_schema_v3_ready(_engine(session))
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=_incomplete_spec(),
-            source_excerpt="The review output must include guard tokens.",
-        )
+    project_id, _spec_version_id, _authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
     )
     snapshot = _snapshot(session, project_id)
+    fatal_finding = {
+        "finding_id": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC:MARKDOWN_FENCE_UNCLOSED:S1",
+        "severity": "blocking",
+        "code": "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC",
+        "message": "Source parser diagnostic MARKDOWN_FENCE_UNCLOSED.",
+        "candidate_ids": [],
+        "source_unit_ids": ["S1"],
+        "override_allowed": False,
+    }
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_decision.build_authority_review_snapshot",
+        lambda **_kwargs: replace(snapshot, review_findings=[fatal_finding]),
+    )
     runner = _runner(session, _workflow_for(project_id))
     request = _accept_request(project_id=project_id, review_token=snapshot.review_token)
 
@@ -1020,7 +1037,12 @@ def test_changed_disk_hash_after_review_fails_authority_source_changed(
         _seed_pending_review_project(session, tmp_path=tmp_path)
     )
     snapshot = _snapshot(session, project_id)
-    spec_path.write_text(_complete_spec() + "\nchanged\n", encoding="utf-8")
+    spec_path.write_text(
+        _agileforge_spec_profile_json(
+            summary="Authority decisions reject stale structured spec hashes."
+        ),
+        encoding="utf-8",
+    )
 
     result = _runner(session, _workflow_for(project_id)).accept(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
@@ -1049,35 +1071,23 @@ def test_missing_disk_spec_at_decision_fails_specific_error(
     assert result["errors"][0]["code"] == "AUTHORITY_SOURCE_UNAVAILABLE"
 
 
-def test_parser_diagnostic_at_decision_blocks_acceptance(
+def test_invalid_structured_spec_at_decision_blocks_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
     _make_schema_v3_ready(_engine(session))
-    spec_content = (
-        "# Submission Contract\n\n"
-        "The review output must include guard tokens.\n\n"
-        "```json\n"
-    )
-    project_id, _spec_version_id, _authority_id, _path = (
-        _seed_pending_review_project(
-            session,
-            tmp_path=tmp_path,
-            spec_content=spec_content,
-            source_excerpt="The review output must include guard tokens.",
-        )
+    project_id, _spec_version_id, _authority_id, spec_path = (
+        _seed_pending_review_project(session, tmp_path=tmp_path)
     )
     snapshot = _snapshot(session, project_id)
+    spec_path.write_text('{"schema_version":"agileforge.spec.v1"}', encoding="utf-8")
 
     result = _runner(session, _workflow_for(project_id)).accept(
         _accept_request(project_id=project_id, review_token=snapshot.review_token)
     )
 
     assert result["ok"] is False
-    assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
-    assert result["errors"][0]["details"]["blocking_findings"][0]["code"] == (
-        "AUTHORITY_REVIEW_SOURCE_DIAGNOSTIC"
-    )
+    assert result["errors"][0]["code"] == "SPEC_FILE_INVALID"
     assert _terminal_rows(session) == []
 
 

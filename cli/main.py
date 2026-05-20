@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import io
 import json
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
+from pathlib import Path
 from typing import NoReturn, Protocol, TypedDict, cast
 from uuid import uuid4
 
@@ -26,6 +28,13 @@ from services.agent_workbench.envelope import (
     success_envelope,
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_hash,
+    export_agileforge_spec_schema,
+    render_markdown,
+    rendered_markdown_hash,
+)
 from utils.logging_config import configure_logging
 
 DEFAULT_CONTEXT_PHASE: str = "overview"
@@ -42,9 +51,9 @@ Examples:
   agileforge workflow state --project-id 1
   agileforge authority status --project-id 1
   agileforge authority review --project-id 1
-  agileforge authority accept --project-id 1 --review-token <review_token>
+  agileforge authority accept --project-id 1
   agileforge authority reject --project-id 1 --review-token <review_token> """
-    """--reason "..."
+    """--reason "..." --idempotency-key reject-001
   agileforge sprint candidates --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
@@ -599,6 +608,11 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         choices=("auto", "full", "summary"),
         default="auto",
     )
+    authority_review.add_argument(
+        "--open",
+        action="store_true",
+        help="Acknowledge that the review packet should be opened for human review.",
+    )
     authority_review.add_argument("--format", choices=("json", "text"), default="json")
     authority_review.set_defaults(command_handler=_authority_review)
     authority_accept = authority_sub.add_parser(
@@ -686,6 +700,31 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     schema_check = schema_sub.add_parser("check", help="Check storage schema.")
     schema_check.set_defaults(command_handler=_schema_check)
+
+    spec = subparsers.add_parser("spec", help="Inspect AgileForge spec artifacts.")
+    spec_sub = spec.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    spec_profile = spec_sub.add_parser("profile", help="Inspect spec profile data.")
+    spec_profile_sub = spec_profile.add_subparsers(
+        dest="profile_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    spec_profile_schema = spec_profile_sub.add_parser(
+        "schema",
+        help="Export the AgileForge spec profile JSON Schema.",
+    )
+    spec_profile_schema.set_defaults(command_handler=_spec_profile_schema)
+    spec_profile_validate = spec_profile_sub.add_parser(
+        "validate",
+        help="Validate an AgileForge spec profile JSON file.",
+    )
+    spec_profile_validate.add_argument("--spec-file", required=True)
+    spec_profile_validate.add_argument("--render-md")
+    spec_profile_validate.set_defaults(command_handler=_spec_profile_validate)
 
     command = subparsers.add_parser("command", help="Inspect command contracts.")
     command_sub = command.add_subparsers(
@@ -910,6 +949,14 @@ def _has_explicit_authority_args(args: argparse.Namespace) -> bool:
     )
 
 
+def _has_explicit_authority_guard_args(args: argparse.Namespace) -> bool:
+    """Return whether explicit authority guard fields were passed."""
+    return any(
+        getattr(args, field_name) is not None
+        for field_name in AUTHORITY_ALL_GUARD_FIELDS
+    )
+
+
 def _missing_authority_guards(
     args: argparse.Namespace,
     *,
@@ -941,6 +988,17 @@ def _decision_idempotency_key(args: argparse.Namespace) -> str | None:
     if args.review_token:
         return f"human-token:{uuid4()}"
     return None
+
+
+def _auto_authority_idempotency_key(
+    *,
+    action: str,
+    project_id: int,
+    review_token: str,
+) -> str:
+    """Return a deterministic idempotency key for simple authority decisions."""
+    digest = hashlib.sha256(review_token.encode("utf-8")).hexdigest()[:16]
+    return f"authority-{action}-{project_id}-{digest}"
 
 
 def _authority_request_kwargs(args: argparse.Namespace) -> _AuthorityRequestKwargs:
@@ -1003,23 +1061,17 @@ def _authority_validation_failure(
 def _validate_incomplete_override(args: argparse.Namespace) -> CommandResult | None:
     """Validate incomplete review override arguments."""
     overrides = cast("list[str]", args.incomplete_review_override or [])
-    if overrides:
-        try:
-            _parse_incomplete_review_overrides(overrides)
-        except ValueError as exc:
-            return _invalid_command(
-                "agileforge authority accept",
-                str(exc),
-                details={"field": "incomplete_review_override"},
-            )
+    if not overrides:
         return None
-    if not args.allow_incomplete_review and not args.incomplete_review_rationale:
-        return None
-    return _invalid_command(
-        "agileforge authority accept",
-        "Incomplete review acceptance requires candidate-specific overrides.",
-        details={"missing": ["incomplete_review_overrides"]},
-    )
+    try:
+        _parse_incomplete_review_overrides(overrides)
+    except ValueError as exc:
+        return _invalid_command(
+            "agileforge authority accept",
+            str(exc),
+            details={"field": "incomplete_review_override"},
+        )
+    return None
 
 
 def _parse_incomplete_review_overrides(
@@ -1075,6 +1127,79 @@ def _validate_authority_explicit_args(
     return None
 
 
+def _review_token_from_latest_review(result: JsonObject) -> str | None:
+    """Return the latest review token from current or legacy review packets."""
+    data = _review_data(result)
+    if data is None:
+        return None
+    guards = _as_mapping(data.get("guard_tokens"))
+    review_token = guards.get("review_token") if guards is not None else None
+    if isinstance(review_token, str) and review_token.strip():
+        return review_token
+    legacy_token = data.get("review_token")
+    if isinstance(legacy_token, str) and legacy_token.strip():
+        return legacy_token
+    return None
+
+
+def _latest_authority_review_token(
+    *,
+    command: str,
+    project_id: int,
+    application: _Application,
+) -> str | CommandResult:
+    """Fetch the latest accept-ready authority review token for simple accept."""
+    review = application.authority_review(
+        project_id=project_id,
+        include_spec="auto",
+        output_format="json",
+    )
+    if review.get("ok") is not True:
+        return command, review
+    review_token = _review_token_from_latest_review(review)
+    if review_token is None:
+        return _authority_review_required(command)
+    data = _review_data(review) or {}
+    review_summary = _as_mapping(data.get("review_summary"))
+    if (
+        review_summary is not None
+        and review_summary.get("acceptance_status") == "blocked"
+    ):
+        return _mutation_arg_error(
+            command,
+            workbench_error(
+                ErrorCode.AUTHORITY_REVIEW_INCOMPLETE,
+                message="Latest authority review has blocking findings.",
+                details={
+                    "review_summary": {
+                        str(key): value for key, value in review_summary.items()
+                    }
+                },
+                remediation=[
+                    "Resolve fatal authority review findings and run authority "
+                    "review again."
+                ],
+            ),
+        )
+    return review_token
+
+
+def _args_with_latest_review_token(
+    args: argparse.Namespace,
+    *,
+    review_token: str,
+) -> argparse.Namespace:
+    """Return accept args populated with a fetched review token."""
+    values = vars(args).copy()
+    values["review_token"] = review_token
+    values["idempotency_key"] = args.idempotency_key or _auto_authority_idempotency_key(
+        action="accept",
+        project_id=cast("int", args.project_id),
+        review_token=review_token,
+    )
+    return argparse.Namespace(**values)
+
+
 def _authority_accept(  # noqa: PLR0911
     args: argparse.Namespace,
     application: _Application,
@@ -1099,7 +1224,7 @@ def _authority_accept(  # noqa: PLR0911
             return _authority_validation_failure(command, exc)
         return command, application.authority_accept(request)
 
-    if _has_explicit_authority_args(args):
+    if _has_explicit_authority_guard_args(args):
         validation_error = _validate_authority_explicit_args(
             args,
             command=command,
@@ -1120,10 +1245,26 @@ def _authority_accept(  # noqa: PLR0911
             return _authority_validation_failure(command, exc)
         return command, application.authority_accept(request)
 
-    if not sys.stdin.isatty():
-        return _authority_review_required(command)
-
-    return _interactive_authority_accept(args, application)
+    latest_token = _latest_authority_review_token(
+        command=command,
+        project_id=cast("int", args.project_id),
+        application=application,
+    )
+    if not isinstance(latest_token, str):
+        return latest_token
+    token_args = _args_with_latest_review_token(args, review_token=latest_token)
+    try:
+        request = AuthorityAcceptRequest(
+            **_authority_request_kwargs(token_args),
+            allow_incomplete_review=token_args.allow_incomplete_review,
+            incomplete_review_rationale=token_args.incomplete_review_rationale,
+            incomplete_review_overrides=_parse_incomplete_review_overrides(
+                cast("list[str]", token_args.incomplete_review_override or [])
+            ),
+        )
+    except (ValidationError, ValueError) as exc:
+        return _authority_validation_failure(command, exc)
+    return command, application.authority_accept(request)
 
 
 def _authority_reject(  # noqa: PLR0911
@@ -1138,6 +1279,12 @@ def _authority_reject(  # noqa: PLR0911
                 command,
                 "--reason is required for authority reject.",
                 details={"missing": ["reason"]},
+            )
+        if not args.idempotency_key:
+            return _invalid_command(
+                command,
+                "Authority reject requires --idempotency-key.",
+                details={"missing": ["idempotency_key"]},
             )
         try:
             request = AuthorityRejectRequest(
@@ -1375,6 +1522,128 @@ def _schema_check(
 ) -> CommandResult:
     """Route schema check diagnostics to the application facade."""
     return "agileforge schema check", application.schema_check()
+
+
+def _spec_profile_schema(
+    _args: argparse.Namespace,
+    _application: _Application,
+) -> CommandResult:
+    """Return the AgileForge spec profile JSON Schema."""
+    return (
+        "agileforge spec profile schema",
+        {
+            "ok": True,
+            "data": {"schema": export_agileforge_spec_schema()},
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+
+def _spec_profile_validate(
+    args: argparse.Namespace,
+    _application: _Application,
+) -> CommandResult:
+    """Validate a spec profile JSON file and optionally render Markdown."""
+    command = "agileforge spec profile validate"
+    spec_path = Path(str(args.spec_file)).expanduser().resolve()
+    try:
+        raw_spec = spec_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_NOT_FOUND,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass an existing AgileForge spec profile JSON file."],
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_INVALID,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass a readable UTF-8 AgileForge spec profile JSON file."],
+        )
+
+    try:
+        artifact = TechnicalSpecArtifact.model_validate_json(raw_spec)
+    except ValidationError as exc:
+        return _spec_profile_error(
+            command,
+            ErrorCode.SPEC_FILE_INVALID,
+            str(exc),
+            details={
+                "exception_type": type(exc).__name__,
+                "spec_file": str(spec_path),
+            },
+            remediation=["Pass a valid AgileForge spec profile JSON file."],
+        )
+
+    markdown = render_markdown(artifact)
+    render_md = getattr(args, "render_md", None)
+    if render_md:
+        render_path = Path(str(render_md)).expanduser().resolve()
+        try:
+            render_path.write_text(markdown, encoding="utf-8")
+        except OSError as exc:
+            return _spec_profile_error(
+                command,
+                ErrorCode.INVALID_COMMAND,
+                str(exc),
+                details={
+                    "exception_type": type(exc).__name__,
+                    "render_md": str(render_path),
+                },
+                remediation=["Choose a writable Markdown output path for --render-md."],
+            )
+
+    return (
+        command,
+        {
+            "ok": True,
+            "data": {
+                "format": "agileforge.spec.v1",
+                "spec_sha256": canonical_spec_hash(artifact),
+                "rendered_markdown_sha256": rendered_markdown_hash(markdown),
+            },
+            "warnings": [],
+            "errors": [],
+        },
+    )
+
+
+def _spec_profile_error(
+    command: str,
+    code: ErrorCode,
+    message: str,
+    *,
+    details: dict[str, object],
+    remediation: list[str],
+) -> CommandResult:
+    """Return a structured spec profile command failure."""
+    return (
+        command,
+        {
+            "ok": False,
+            "data": None,
+            "warnings": [],
+            "errors": [
+                workbench_error(
+                    code,
+                    message=message,
+                    details=details,
+                    remediation=remediation,
+                ).to_dict()
+            ],
+        },
+    )
 
 
 def _capabilities(

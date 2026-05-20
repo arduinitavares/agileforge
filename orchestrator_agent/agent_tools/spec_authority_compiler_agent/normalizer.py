@@ -2,39 +2,29 @@
 
 This enforces compiler semantics on the host side:
 - prompt_hash is anchored to SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-- invariant IDs are deterministically computed from source_map excerpt,
-  invariant.type, and invariant.parameters
+- invariant IDs are deterministically computed from invariant.type and
+  invariant.parameters
 
 The caller MUST use the normalized output downstream.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (
-    compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
-)
-from utils.spec_authority_ir import (
-    AuthorityTargetKind,
-    IrProvenance,
-    MappingProvenance,
-    RequirementCandidate,
-    build_authority_mappings,
-    extract_requirement_candidates,
-    parse_markdown_sections,
-    source_units_from_sections,
 )
 from utils.spec_schemas import (
     Invariant,
@@ -44,13 +34,11 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerEnvelope,
     SpecAuthorityCompilerOutput,
-    SpecAuthorityIrPacketLimits,
-    SpecAuthorityMapping,
-    SpecAuthorityRequirementCandidate,
-    SpecAuthoritySourceUnit,
 )
 
 logger: logging.Logger = logging.getLogger(name=__name__)
+
+SpecSourceFormat = Literal["agileforge.spec.v1", "plain_text"]
 
 _META_POLICY_LOCATION_RE = re.compile(
     r"\b("
@@ -87,6 +75,9 @@ _FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
 _RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
 _SUPPORT_RATIO_THRESHOLD = 0.5
 _FORBIDDEN_SAFETY_SUPPORT_THRESHOLD = 0.25
+_STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY = 3
+_STRUCTURED_ENTRY_EXCERPT_MATCH_PRIORITY = 4
+_STRUCTURED_ENTRY_LOCATION_MATCH_PRIORITY = 5
 _FORBIDDEN_SAFETY_CUE_RE = re.compile(
     r"\b("
     r"must\s+not|do\s+not|never|forbidden|prohibited|disallow|deny|"
@@ -106,6 +97,27 @@ _FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
     "submissions": ("post", "request", "submit"),
     "submit": ("post", "request", "submission"),
 }
+_SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
+    {
+        "scope_themes",
+        "invariants",
+        "eligible_feature_rules",
+        "gaps",
+        "assumptions",
+        "compiler_version",
+        "prompt_hash",
+    }
+)
+_DEPRECATED_COMPACT_IR_KEYS = frozenset(
+    {
+        "ir_schema_version",
+        "ir_provenance",
+        "source_units",
+        "requirement_candidates",
+        "authority_mappings",
+        "ir_packet_limits",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -114,15 +126,7 @@ class _SourceEvidenceCandidate:
 
     excerpt: str
     location: str | None
-
-
-@dataclass(frozen=True)
-class _CompactIrModelHints:
-    """Raw compact IR hints supplied by the model before host normalization."""
-
-    ir_provenance: IrProvenance | None
-    candidates: list[SpecAuthorityRequirementCandidate]
-    mappings: list[SpecAuthorityMapping]
+    priority: int = 0
 
 
 def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
@@ -176,6 +180,55 @@ def _summarize_validation_error(label: str, exc: ValidationError) -> str:
             return f"{label}: {loc}: {msg}"
         return f"{label}: {msg}"
     return f"{label}: {exc}"
+
+
+def _detect_source_format(source_text: str | None) -> SpecSourceFormat:
+    """Detect whether the source is canonical AgileForge profile JSON."""
+    if not source_text:
+        return "plain_text"
+    try:
+        parsed = json.loads(source_text)
+    except json.JSONDecodeError:
+        return "plain_text"
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("schema_version") == "agileforge.spec.v1"
+    ):
+        return "agileforge.spec.v1"
+    return "plain_text"
+
+
+def _default_missing_source_map_for_success_payload(payload: object) -> None:
+    """Default omitted source_map only for otherwise success-shaped payloads."""
+    if not isinstance(payload, dict):
+        return
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        _default_missing_source_map_for_success_payload(result)
+
+    if "source_map" in payload or "error" in payload:
+        return
+    if _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
+        payload["source_map"] = []
+
+
+def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
+    """Drop legacy compact IR before validating success-shaped payloads."""
+    if not isinstance(payload, dict):
+        return
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        _drop_deprecated_compact_ir_for_success_payload(result)
+
+    if "error" in payload:
+        return
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
+        return
+
+    for key in _DEPRECATED_COMPACT_IR_KEYS:
+        payload.pop(key, None)
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:
@@ -496,8 +549,75 @@ def _source_text_line_candidates(source_text: str) -> list[_SourceEvidenceCandid
                 _SourceEvidenceCandidate(
                     excerpt=compact,
                     location=f"line {line_number}",
+                    priority=1,
                 )
             )
+    return candidates
+
+
+def _structured_profile_source_candidates(
+    source_text: str,
+    *,
+    location_hint: str | None = None,
+) -> list[_SourceEvidenceCandidate]:
+    """Return item-field evidence candidates from canonical profile JSON."""
+    try:
+        parsed = json.loads(source_text)
+    except json.JSONDecodeError:
+        return []
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("schema_version") != "agileforge.spec.v1"
+    ):
+        return []
+
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return []
+
+    candidates: list[_SourceEvidenceCandidate] = []
+    seen: set[tuple[str, str | None]] = set()
+    normalized_hint = (location_hint or "").strip()
+
+    def append(excerpt: object, location: str | None) -> None:
+        if not isinstance(excerpt, str):
+            return
+        compact = _compact_whitespace(excerpt)
+        if not compact:
+            return
+        key = (compact, location)
+        if key in seen:
+            return
+        seen.add(key)
+        priority = 3 if normalized_hint and normalized_hint == location else 2
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact,
+                location=location,
+                priority=priority,
+            )
+        )
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+
+        for field_name in ("statement", "title", "rationale"):
+            append(item.get(field_name), f"{item_id}.{field_name}")
+
+        acceptance_items = item.get("acceptance")
+        if isinstance(acceptance_items, list):
+            for index, acceptance in enumerate(acceptance_items):
+                append(acceptance, f"{item_id}.acceptance[{index}]")
+
+        source_notes = item.get("source_notes")
+        if isinstance(source_notes, list):
+            for index, source_note in enumerate(source_notes):
+                append(source_note, f"{item_id}.source_notes[{index}]")
+
     return candidates
 
 
@@ -508,17 +628,23 @@ def _candidate_evidence_from_source_text(
 ) -> list[_SourceEvidenceCandidate]:
     """Build deduplicated evidence candidates from LLM source_map plus source text."""
     candidates: list[_SourceEvidenceCandidate] = []
-    seen: set[tuple[str, str | None]] = set()
+    seen: set[tuple[str, str | None, int]] = set()
 
-    def append(excerpt: str, location: str | None) -> None:
+    def append(excerpt: str, location: str | None, *, priority: int = 0) -> None:
         compact = _compact_whitespace(excerpt)
         if not compact:
             return
-        key = (compact, location)
+        key = (compact, location, priority)
         if key in seen:
             return
         seen.add(key)
-        candidates.append(_SourceEvidenceCandidate(excerpt=compact, location=location))
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact,
+                location=location,
+                priority=priority,
+            )
+        )
 
     append(entry.excerpt, entry.location)
     if not source_text:
@@ -528,20 +654,188 @@ def _candidate_evidence_from_source_text(
     combined_hint = f"{location_text}\n{entry.excerpt}"
     for fr_id in _fr_ids_from_text(combined_hint):
         for line in _source_text_lines_for_fr(source_text, fr_id):
-            append(line, entry.location or fr_id)
+            append(line, entry.location or fr_id, priority=1)
     for line in _source_text_lines_containing(source_text, entry.excerpt):
-        append(line, entry.location)
+        append(line, entry.location, priority=1)
     return candidates
+
+
+def _entry_invariant_for_source_map(
+    success: SpecAuthorityCompilationSuccess,
+    entry: SourceMapEntry,
+    entry_index: int,
+    *,
+    evidence_candidates: list[_SourceEvidenceCandidate] | None = None,
+) -> Invariant | None:
+    """Return the invariant most likely referenced by a source_map entry."""
+    matching_invariants = [
+        invariant
+        for invariant in success.invariants
+        if invariant.id == entry.invariant_id
+    ]
+    if len(matching_invariants) == 1:
+        return matching_invariants[0]
+    if evidence_candidates:
+        supported_match = _support_matched_source_map_invariant(
+            matching_invariants or success.invariants,
+            evidence_candidates,
+        )
+        if supported_match is not None:
+            return supported_match
+    if entry_index < len(success.invariants):
+        return success.invariants[entry_index]
+    return None
+
+
+def _support_matched_source_map_invariant(
+    invariants: list[Invariant],
+    evidence_candidates: list[_SourceEvidenceCandidate],
+) -> Invariant | None:
+    """Return a unique invariant match from entry-local evidence, if clear."""
+    scored: list[tuple[Invariant, tuple[int, float]]] = []
+    for invariant in invariants:
+        matched = _best_supported_source_candidate(invariant, evidence_candidates)
+        if matched is None:
+            continue
+        scored.append(
+            (
+                invariant,
+                (
+                    matched.priority,
+                    _source_map_support_score(invariant, matched.excerpt),
+                ),
+            )
+        )
+    if not scored:
+        return None
+
+    best_score = max(score for _, score in scored)
+    best_matches = [
+        invariant for invariant, score in scored if score == best_score
+    ]
+    if len(best_matches) != 1:
+        return None
+    return best_matches[0]
+
+
+def _best_supported_source_candidate(
+    invariant: Invariant,
+    candidates: list[_SourceEvidenceCandidate],
+) -> _SourceEvidenceCandidate | None:
+    """Select the most specific source-text candidate supporting an invariant."""
+    supported = [
+        candidate
+        for candidate in candidates
+        if _source_map_support_error(invariant, candidate.excerpt) is None
+    ]
+    if not supported:
+        return None
+    return max(
+        supported,
+        key=lambda candidate: (
+            candidate.priority,
+            _source_map_support_score(invariant, candidate.excerpt),
+            -len(candidate.excerpt),
+            candidate.location or "",
+            candidate.excerpt,
+        ),
+    )
+
+
+def _structured_entry_match_candidates(
+    entry: SourceMapEntry,
+    *,
+    source_text: str,
+) -> list[_SourceEvidenceCandidate]:
+    """Return entry-local evidence used to disambiguate duplicate IDs."""
+    candidates: list[_SourceEvidenceCandidate] = []
+    compact_excerpt = _compact_whitespace(entry.excerpt)
+    if compact_excerpt:
+        candidates.append(
+            _SourceEvidenceCandidate(
+                excerpt=compact_excerpt,
+                location=entry.location,
+                priority=_STRUCTURED_ENTRY_EXCERPT_MATCH_PRIORITY,
+            )
+        )
+
+    candidates.extend(
+        _SourceEvidenceCandidate(
+            excerpt=candidate.excerpt,
+            location=candidate.location,
+            priority=_STRUCTURED_ENTRY_LOCATION_MATCH_PRIORITY,
+        )
+        for candidate in _structured_profile_source_candidates(
+            source_text,
+            location_hint=entry.location,
+        )
+        if candidate.priority == _STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY
+    )
+    return candidates
+
+
+def _repair_structured_source_map_from_source_text(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> bool:
+    """Repair profile JSON source_map excerpts without rejecting weak evidence."""
+    repaired: list[SourceMapEntry] = []
+    changed = False
+
+    for index, entry in enumerate(success.source_map):
+        candidates = _candidate_evidence_from_source_text(entry, source_text=source_text)
+        candidates.extend(
+            _structured_profile_source_candidates(
+                source_text,
+                location_hint=entry.location,
+            )
+        )
+        candidates.extend(_source_text_line_candidates(source_text))
+        invariant = _entry_invariant_for_source_map(
+            success,
+            entry,
+            index,
+            evidence_candidates=_structured_entry_match_candidates(
+                entry,
+                source_text=source_text,
+            ),
+        )
+        if invariant is None:
+            repaired.append(entry)
+            continue
+
+        matched = _best_supported_source_candidate(invariant, candidates)
+        if matched is None:
+            repaired.append(entry)
+            continue
+
+        repaired_entry = SourceMapEntry(
+            invariant_id=entry.invariant_id,
+            excerpt=matched.excerpt,
+            location=matched.location,
+        )
+        repaired.append(repaired_entry)
+        changed = changed or repaired_entry != entry
+
+    success.source_map = repaired
+    return changed
 
 
 def _repair_source_map_from_source_text(
     success: SpecAuthorityCompilationSuccess,
     *,
     source_text: str | None,
+    source_format: SpecSourceFormat,
 ) -> bool:
-    """Replace weak LLM source maps with one supported source entry per invariant."""
+    """Repair weak LLM source maps from the current source text."""
     if not source_text:
         return False
+    if source_format == "agileforge.spec.v1":
+        return _repair_structured_source_map_from_source_text(
+            success,
+            source_text=source_text,
+        )
 
     evidence_candidates: list[_SourceEvidenceCandidate] = []
     for entry in success.source_map:
@@ -553,10 +847,30 @@ def _repair_source_map_from_source_text(
     if not evidence_candidates:
         return False
 
-    repaired: list[SourceMapEntry] = []
+    original_source_map = list(success.source_map)
+    original_invariants = list(success.invariants)
+    original_id_counts: dict[str, int] = {}
+    for invariant in original_invariants:
+        original_id_counts[invariant.id] = original_id_counts.get(invariant.id, 0) + 1
+
+    repaired_by_entry_index: dict[int, SourceMapEntry] = {}
+    appended_repaired: list[SourceMapEntry] = []
     retained_invariants: list[Invariant] = []
+    retained_invariant_indexes: set[int] = set()
     dropped_invariants: list[Invariant] = []
-    for inv in success.invariants:
+    used_entry_indexes: set[int] = set()
+
+    def primary_entry_index_for_invariant(invariant: Invariant, index: int) -> int | None:
+        for entry_index, entry in enumerate(original_source_map):
+            if entry_index in used_entry_indexes:
+                continue
+            if entry.invariant_id == invariant.id:
+                return entry_index
+        if index < len(original_source_map) and index not in used_entry_indexes:
+            return index
+        return None
+
+    for inv_index, inv in enumerate(success.invariants):
         supported = [
             candidate
             for candidate in evidence_candidates
@@ -570,13 +884,18 @@ def _repair_source_map_from_source_text(
             key=lambda candidate: _source_map_support_score(inv, candidate.excerpt),
         )
         retained_invariants.append(inv)
-        repaired.append(
-            SourceMapEntry(
-                invariant_id=inv.id,
-                excerpt=matched.excerpt,
-                location=matched.location,
-            )
+        retained_invariant_indexes.add(inv_index)
+        repaired_entry = SourceMapEntry(
+            invariant_id=inv.id,
+            excerpt=matched.excerpt,
+            location=matched.location,
         )
+        entry_index = primary_entry_index_for_invariant(inv, inv_index)
+        if entry_index is None:
+            appended_repaired.append(repaired_entry)
+        else:
+            used_entry_indexes.add(entry_index)
+            repaired_by_entry_index[entry_index] = repaired_entry
 
     if not retained_invariants:
         return False
@@ -586,7 +905,27 @@ def _repair_source_map_from_source_text(
             gap = f"Dropped unsupported compiler invariant: {_invariant_text(dropped)}"
             if gap not in success.gaps:
                 success.gaps.append(gap)
-    success.source_map = repaired
+
+    retained_id_counts: dict[str, int] = {}
+    for invariant in retained_invariants:
+        retained_id_counts[invariant.id] = retained_id_counts.get(invariant.id, 0) + 1
+
+    def preserve_original_entry(entry_index: int, entry: SourceMapEntry) -> bool:
+        original_id_count = original_id_counts.get(entry.invariant_id, 0)
+        if original_id_count == 1:
+            return entry.invariant_id in retained_id_counts
+        if entry_index < len(original_invariants):
+            return entry_index in retained_invariant_indexes
+        return retained_id_counts.get(entry.invariant_id, 0) == original_id_count
+
+    repaired_source_map: list[SourceMapEntry] = []
+    for entry_index, entry in enumerate(original_source_map):
+        if entry_index in repaired_by_entry_index:
+            repaired_source_map.append(repaired_by_entry_index[entry_index])
+        elif preserve_original_entry(entry_index, entry):
+            repaired_source_map.append(entry)
+    repaired_source_map.extend(appended_repaired)
+    success.source_map = repaired_source_map
     return True
 
 
@@ -607,317 +946,101 @@ def _invariant_text(invariant: Invariant) -> str:
     return invariant.id
 
 
-def _authority_items(success: SpecAuthorityCompilationSuccess) -> list[dict[str, str]]:
-    """Build authority item dictionaries understood by the shared IR mapper."""
-    return [
-        {
-            "id": invariant.id,
-            "authority_target_kind": AuthorityTargetKind.INVARIANT.value,
-            "text": _invariant_text(invariant),
-        }
-        for invariant in success.invariants
-    ]
+def _clear_compact_ir(success: SpecAuthorityCompilationSuccess) -> None:
+    """Clear legacy compact IR fields; structured authority has no host semantic IR."""
+    success.ir_schema_version = None
+    success.ir_provenance = None
+    success.source_units = []
+    success.requirement_candidates = []
+    success.authority_mappings = []
+    success.ir_packet_limits = None
 
 
-def _candidate_for_source_entry(
-    entry: SourceMapEntry,
-    invariant: Invariant | None,
-    candidates: list[RequirementCandidate],
-) -> RequirementCandidate | None:
-    """Choose the candidate referenced by a normalized source map entry."""
-    excerpt = _compact_whitespace(entry.excerpt)
-    exact_matches = [
-        candidate
-        for candidate in candidates
-        if excerpt
-        and excerpt
-        in {
-            _compact_whitespace(candidate.source_quote),
-            _compact_whitespace(candidate.statement),
-        }
-    ]
-    if exact_matches:
-        return exact_matches[0]
-    if invariant is None:
-        return None
-    supported = [
-        candidate
-        for candidate in candidates
-        if _source_map_support_error(invariant, candidate.statement) is None
-    ]
-    if not supported:
-        return None
-    return max(
-        supported,
-        key=lambda candidate: _source_map_support_score(invariant, candidate.statement),
-    )
-
-
-def _legacy_mapping_provenance(
-    entry: SourceMapEntry,
-    entry_index: int,
-    original_source_map: list[SourceMapEntry],
-) -> MappingProvenance:
-    """Classify source-map evidence generated from legacy fields."""
-    if entry_index < len(original_source_map):
-        original = original_source_map[entry_index]
-        if _compact_whitespace(original.excerpt) == _compact_whitespace(entry.excerpt):
-            return MappingProvenance.HOST_INFERRED
-    return MappingProvenance.HOST_REPAIRED_QUOTE
-
-
-def _source_quote_hash(text: str) -> str:
-    """Return the canonical hash for exact source quote bytes."""
-    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
-
-
-def _model_to_host_candidate_ids(
-    model_ir_provenance: IrProvenance | None,
-    model_candidates: list[SpecAuthorityRequirementCandidate],
-    host_candidates: list[RequirementCandidate],
-) -> dict[str, str]:
-    """Return model candidate IDs that exactly match one host candidate quote."""
-    if model_ir_provenance not in {IrProvenance.MODEL_EMITTED, IrProvenance.MIXED}:
-        return {}
-    host_by_quote_hash: dict[str, list[RequirementCandidate]] = {}
-    for candidate in host_candidates:
-        host_by_quote_hash.setdefault(candidate.quote_hash, []).append(candidate)
-
-    model_to_host: dict[str, str] = {}
-    for candidate in model_candidates:
-        if candidate.provenance != IrProvenance.MODEL_EMITTED:
-            continue
-        if _source_quote_hash(candidate.source_quote) != candidate.quote_hash:
-            continue
-        matching_hosts = [
-            host
-            for host in host_by_quote_hash.get(candidate.quote_hash, [])
-            if host.source_quote == candidate.source_quote
-        ]
-        if len(matching_hosts) == 1:
-            model_to_host[candidate.candidate_id] = matching_hosts[0].candidate_id
-    return model_to_host
-
-
-def _model_quote_mapping_keys(
-    model_ir_provenance: IrProvenance | None,
-    model_mappings: list[SpecAuthorityMapping],
-    model_candidates: list[SpecAuthorityRequirementCandidate],
-    host_candidates: list[RequirementCandidate],
-    authority_id_aliases: dict[str, set[str]],
-) -> set[tuple[str, str]]:
-    """Return host candidate/authority pairs backed by exact model quote hints."""
-    model_to_host_candidate_id = _model_to_host_candidate_ids(
-        model_ir_provenance,
-        model_candidates,
-        host_candidates,
-    )
-    host_quote_hash_by_id = {
-        candidate.candidate_id: candidate.quote_hash for candidate in host_candidates
-    }
-    alias_to_current_id = {
-        alias: current_id
-        for current_id, aliases in authority_id_aliases.items()
-        for alias in aliases
-    }
-    keys: set[tuple[str, str]] = set()
-    for mapping in model_mappings:
-        if mapping.mapping_provenance != MappingProvenance.MODEL_QUOTE:
-            continue
-        if mapping.authority_target_kind != AuthorityTargetKind.INVARIANT:
-            continue
-        host_candidate_id = model_to_host_candidate_id.get(mapping.candidate_id)
-        if host_candidate_id is None:
-            continue
-        host_quote_hash = host_quote_hash_by_id[host_candidate_id]
-        if mapping.source_quote_hash != host_quote_hash:
-            continue
-        current_authority_id = alias_to_current_id.get(mapping.authority_item_id)
-        if current_authority_id is not None:
-            keys.add((host_candidate_id, current_authority_id))
-    return keys
-
-
-def _authority_id_aliases(
+def _rewrite_source_map_invariant_ids(
     success: SpecAuthorityCompilationSuccess,
-    original_invariant_ids: list[str],
-) -> dict[str, set[str]]:
-    """Map normalized authority IDs to model/legacy IDs that referred to them."""
-    aliases: dict[str, set[str]] = {
-        invariant.id: {invariant.id} for invariant in success.invariants
-    }
-    original_id_counts: dict[str, int] = {}
-    for original_id in original_invariant_ids:
-        original_id_counts[original_id] = original_id_counts.get(original_id, 0) + 1
-    for index, invariant in enumerate(success.invariants):
-        if index >= len(original_invariant_ids):
-            continue
-        original_id = original_invariant_ids[index]
-        if original_id_counts.get(original_id) != 1:
-            continue
-        aliases.setdefault(invariant.id, {invariant.id}).add(original_id)
-    return aliases
-
-
-def _mapping_entries_for_compact_ir(
-    success: SpecAuthorityCompilationSuccess,
-    candidates: list[RequirementCandidate],
-    *,
-    model_hints: _CompactIrModelHints,
-    original_source_map: list[SourceMapEntry],
-    original_invariant_ids: list[str],
-) -> list[dict[str, str | None]]:
-    """Convert normalized source_map entries into shared IR mapping inputs."""
-    invariants_by_id = {invariant.id: invariant for invariant in success.invariants}
-    model_quote_keys = _model_quote_mapping_keys(
-        model_hints.ir_provenance,
-        model_hints.mappings,
-        model_hints.candidates,
-        candidates,
-        _authority_id_aliases(success, original_invariant_ids),
-    )
-    entries: list[dict[str, str | None]] = []
-    for entry_index, source_entry in enumerate(success.source_map):
-        invariant = invariants_by_id.get(source_entry.invariant_id)
-        candidate = _candidate_for_source_entry(source_entry, invariant, candidates)
-        if candidate is None:
-            continue
-        provenance = _legacy_mapping_provenance(
-            source_entry,
-            entry_index,
-            original_source_map,
-        )
-        if (
-            candidate.candidate_id,
-            source_entry.invariant_id,
-        ) in model_quote_keys:
-            provenance = MappingProvenance.MODEL_QUOTE
-        entries.append(
-            {
-                "candidate_id": candidate.candidate_id,
-                "authority_item_id": source_entry.invariant_id,
-                "authority_target_kind": AuthorityTargetKind.INVARIANT.value,
-                "source_quote": candidate.source_quote,
-                "source_quote_hash": candidate.quote_hash,
-                "mapping_provenance": provenance.value,
-            }
-        )
-    return entries
-
-
-def _set_compact_ir(
-    success: SpecAuthorityCompilationSuccess,
-    *,
-    source_text: str | None,
-    original_source_map: list[SourceMapEntry],
-    original_invariant_ids: list[str],
-    model_hints: _CompactIrModelHints,
+    original_invariants: list[Invariant],
 ) -> None:
-    """Populate compact authority IR without treating host parsing as acceptance."""
-    if not source_text:
-        success.ir_schema_version = None
-        success.ir_provenance = IrProvenance.LEGACY_ABSENT
-        success.source_units = []
-        success.requirement_candidates = []
-        success.authority_mappings = []
-        success.ir_packet_limits = None
-        return
+    """Rewrite source-map IDs without collapsing duplicate original placeholders."""
+    normalized_ids = {inv.id for inv in success.invariants}
+    original_id_counts: dict[str, int] = {}
+    for original in original_invariants:
+        original_id_counts[original.id] = original_id_counts.get(original.id, 0) + 1
 
-    sections, diagnostics = parse_markdown_sections(source_text)
-    if diagnostics:
-        logger.info("Spec authority IR parser diagnostics: %s", diagnostics)
-    source_units = source_units_from_sections(sections)
-    candidates = extract_requirement_candidates(source_units)
-    model_host_candidate_ids = set(
-        _model_to_host_candidate_ids(
-            model_hints.ir_provenance,
-            model_hints.candidates,
-            candidates,
-        ).values()
-    )
-    candidates = [
-        replace(candidate, provenance=IrProvenance.MODEL_EMITTED)
-        if candidate.candidate_id in model_host_candidate_ids
-        else candidate
-        for candidate in candidates
+    original_id_to_new_id: dict[str, str] = {}
+    for original, normalized in zip(
+        original_invariants,
+        success.invariants,
+        strict=False,
+    ):
+        if original_id_counts[original.id] == 1:
+            original_id_to_new_id[original.id] = normalized.id
+
+    def positional_normalized_id(index: int) -> str | None:
+        if index < len(success.invariants):
+            return success.invariants[index].id
+        if success.invariants:
+            return success.invariants[index % len(success.invariants)].id
+        return None
+
+    def support_matched_normalized_id(
+        entry: SourceMapEntry,
+        positional_id: str | None,
+    ) -> str | None:
+        scored: list[tuple[Invariant, float]] = []
+        positional_score: float | None = None
+        for invariant in success.invariants:
+            if _source_map_support_error(invariant, entry.excerpt) is not None:
+                continue
+            score = _source_map_support_score(invariant, entry.excerpt)
+            scored.append((invariant, score))
+            if invariant.id == positional_id:
+                positional_score = score
+
+        if not scored:
+            return None
+
+        best_score = max(score for _, score in scored)
+        best_matches = [
+            invariant for invariant, score in scored if score == best_score
+        ]
+        if positional_score is not None and positional_score >= best_score:
+            return None
+        if len(best_matches) != 1:
+            return None
+        return best_matches[0].id
+
+    def fallback_normalized_id(entry: SourceMapEntry, index: int) -> str | None:
+        positional_id = positional_normalized_id(index)
+        supported_id = support_matched_normalized_id(entry, positional_id)
+        if supported_id is not None:
+            return supported_id
+        return positional_id
+
+    for index, entry in enumerate(success.source_map):
+        original_id_count = original_id_counts.get(entry.invariant_id, 0)
+        if entry.invariant_id in normalized_ids:
+            continue
+        if original_id_count > 1:
+            fallback_id = fallback_normalized_id(entry, index)
+            if fallback_id is not None:
+                entry.invariant_id = fallback_id
+        elif entry.invariant_id in original_id_to_new_id:
+            entry.invariant_id = original_id_to_new_id[entry.invariant_id]
+        else:
+            fallback_id = fallback_normalized_id(entry, index)
+            if fallback_id is not None:
+                entry.invariant_id = fallback_id
+
+    success.source_map = [
+        entry for entry in success.source_map if entry.invariant_id in normalized_ids
     ]
-    mapping_entries = _mapping_entries_for_compact_ir(
-        success,
-        candidates,
-        model_hints=model_hints,
-        original_source_map=original_source_map,
-        original_invariant_ids=original_invariant_ids,
-    )
-    authority_mappings = build_authority_mappings(
-        candidates,
-        _authority_items(success),
-        mapping_entries,
-    )
-    mapped_model_quotes = any(
-        mapping.mapping_provenance == MappingProvenance.MODEL_QUOTE
-        for mapping in authority_mappings
-    )
-    model_candidate_hints = any(
-        candidate.provenance == IrProvenance.MODEL_EMITTED for candidate in candidates
-    )
-    success.ir_schema_version = "authority-ir-v1"
-    success.ir_provenance = (
-        IrProvenance.MIXED
-        if mapped_model_quotes or model_candidate_hints
-        else IrProvenance.HOST_PARSED
-    )
-    success.source_units = [
-        SpecAuthoritySourceUnit(
-            unit_id=unit.unit_id,
-            section_id=unit.section_id,
-            heading_path=list(unit.heading_path),
-            kind=unit.kind,
-            line_start=unit.line_start,
-            line_end=unit.line_end,
-            text_hash=unit.text_hash,
-            text_excerpt=unit.text_excerpt,
-            disposition=unit.disposition,
-            disposition_reason=unit.disposition_reason,
-        )
-        for unit in source_units
-    ]
-    success.requirement_candidates = [
-        SpecAuthorityRequirementCandidate(
-            candidate_id=candidate.candidate_id,
-            source_unit_id=candidate.source_unit_id,
-            statement=candidate.statement,
-            source_quote=candidate.source_quote,
-            quote_hash=candidate.quote_hash,
-            line_start=candidate.line_start,
-            line_end=candidate.line_end,
-            classification=candidate.classification,
-            provenance=candidate.provenance,
-        )
-        for candidate in candidates
-    ]
-    success.authority_mappings = [
-        SpecAuthorityMapping(
-            candidate_id=mapping.candidate_id,
-            authority_item_id=mapping.authority_item_id,
-            authority_target_kind=mapping.authority_target_kind,
-            mapping_status=mapping.mapping_status,
-            mapping_rationale=mapping.mapping_rationale,
-            source_quote_hash=mapping.source_quote_hash,
-            mapping_provenance=mapping.mapping_provenance,
-        )
-        for mapping in authority_mappings
-    ]
-    success.ir_packet_limits = SpecAuthorityIrPacketLimits(
-        max_candidates=len(success.requirement_candidates),
-        max_findings=0,
-        truncated=False,
-    )
 
 
 def normalize_compiler_output(
     raw_json: str,
     *,
     source_text: str | None = None,
+    source_format: SpecSourceFormat | None = None,
 ) -> SpecAuthorityCompilerOutput:
     """Normalize a raw agent JSON string into a deterministic compiler artifact.
 
@@ -925,12 +1048,15 @@ def normalize_compiler_output(
         raw_json: Raw JSON string emitted by the agent.
         source_text: Optional source spec text used to repair broad/short source
             excerpts into exact source rows or lines before deterministic ID checks.
+        source_format: Optional explicit source format. When omitted, it is detected
+            from source_text.
 
     Returns:
         SpecAuthorityCompilerOutput (success or failure). On success, prompt_hash and
         invariant/source_map IDs are rewritten deterministically.
     """
     logger.info("Normalizing spec authority compiler output")
+    source_format = source_format or _detect_source_format(source_text)
 
     raw_json = _extract_json_candidate(raw_json)
 
@@ -945,6 +1071,8 @@ def normalize_compiler_output(
 
     parsed: SpecAuthorityCompilerOutput | None = None
     validation_gaps: list[str] = []
+    _drop_deprecated_compact_ir_for_success_payload(payload)
+    _default_missing_source_map_for_success_payload(payload)
 
     try:
         parsed = SpecAuthorityCompilerOutput.model_validate(payload)
@@ -987,12 +1115,6 @@ def normalize_compiler_output(
         return parsed
 
     success: SpecAuthorityCompilationSuccess = parsed.root
-    model_hints = _CompactIrModelHints(
-        ir_provenance=success.ir_provenance,
-        candidates=list(success.requirement_candidates),
-        mappings=list(success.authority_mappings),
-    )
-
     _filter_meta_policy_invariants(success)
     _deduplicate_semantic_invariants(success)
 
@@ -1007,90 +1129,25 @@ def normalize_compiler_output(
         logger.warning("No invariants extracted from spec authority compiler output")
         if "No invariants extracted from spec" not in success.gaps:
             success.gaps.append("No invariants extracted from spec")
-        _set_compact_ir(
-            success,
-            source_text=source_text,
-            original_source_map=list(success.source_map),
-            original_invariant_ids=[],
-            model_hints=model_hints,
-        )
+        _clear_compact_ir(success)
         return SpecAuthorityCompilerOutput(root=success)
 
-    if not success.source_map:
-        logger.error("Spec authority compiler output is missing source_map")
-        return _failure(
-            reason="MISSING_SOURCE_MAP",
-            blocking_gaps=["Missing source_map required for deterministic IDs"],
-        )
-
     original_source_map = list(success.source_map)
-    _repair_source_map_from_source_text(success, source_text=source_text)
+    if success.source_map:
+        repaired_source_map = _repair_source_map_from_source_text(
+            success,
+            source_text=source_text,
+            source_format=source_format,
+        )
+        if repaired_source_map and original_source_map != success.source_map:
+            logger.info("Repaired source_map entries from source text")
 
-    # Snapshot original invariant IDs/types before rewriting
-    original_invariants = list(success.invariants)
-    original_invariant_ids = [invariant.id for invariant in success.invariants]
-    # Multi-map: an original ID may appear on several invariants with
-    # different types or parameters (common LLM behaviour).  A plain dict loses
-    # all but the last invariant; we keep them all so source_map rewriting can
-    # try each candidate.
-    original_id_to_invariants: dict[str, list[Invariant]] = {}
-    for _inv in original_invariants:
-        original_id_to_invariants.setdefault(_inv.id, []).append(_inv)
+    original_invariants = [
+        invariant.model_copy(deep=True) for invariant in success.invariants
+    ]
 
-    # Check if all invariants have duplicate/placeholder IDs (common LLM behavior)
-    original_ids = [inv.id for inv in original_invariants]
-    has_duplicate_ids = len(set(original_ids)) < len(original_ids)
-
-    # When IDs are duplicated, prefer positional matching.
-    # This is safe when source_map has at least as many entries as invariants
-    # (the first N source_map entries align with the N invariants; extras are
-    # additional evidence for the same invariants).
-    use_positional_matching = has_duplicate_ids and len(success.source_map) >= len(
-        success.invariants
-    )
-
-    id_to_excerpt: dict[str, str] = {}
-    for entry in success.source_map:
-        if entry.invariant_id and entry.excerpt and entry.excerpt.strip():
-            id_to_excerpt[entry.invariant_id] = entry.excerpt
-
-    def choose_excerpt(invariant_index: int, invariant_id: str) -> str | None:
-        # Prefer positional matching when IDs are duplicated
-        if use_positional_matching:
-            return success.source_map[invariant_index].excerpt
-        if invariant_id and invariant_id in id_to_excerpt:
-            # Guard against last-wins collision: when multiple invariants
-            # share a placeholder ID, id_to_excerpt holds only the last
-            # excerpt.  Fall back to positional if the index is in range.
-            if has_duplicate_ids and invariant_index < len(success.source_map):
-                return success.source_map[invariant_index].excerpt
-            return id_to_excerpt[invariant_id]
-        if invariant_index < len(success.source_map):
-            return success.source_map[invariant_index].excerpt
-        if len(success.invariants) == 1 and len(success.source_map) >= 1:
-            return success.source_map[0].excerpt
-        return None
-
-    # Rewrite invariant IDs deterministically
-    for idx, inv in enumerate(success.invariants):
-        excerpt = choose_excerpt(idx, inv.id)
-        if not excerpt or not excerpt.strip():
-            logger.error("Spec authority compiler invariant/source_map mismatch")
-            return _failure(
-                reason="SOURCE_MAP_INVARIANT_MISMATCH",
-                blocking_gaps=[
-                    "Cannot choose deterministic excerpt for invariant",
-                    f"invariant_index={idx}",
-                ],
-            )
-        support_error = _source_map_support_error(inv, excerpt)
-        if support_error is not None:
-            logger.error("Spec authority compiler source_map support mismatch")
-            return _failure(
-                reason="SOURCE_MAP_INVARIANT_MISMATCH",
-                blocking_gaps=[support_error],
-            )
-        inv.id = compute_invariant_id(excerpt, inv.type, inv.parameters)
+    for inv in success.invariants:
+        inv.id = compute_invariant_id_from_payload(inv.type, inv.parameters)
 
     normalized_ids = [inv.id for inv in success.invariants]
     if len(set(normalized_ids)) != len(normalized_ids):
@@ -1100,121 +1157,9 @@ def normalize_compiler_output(
             blocking_gaps=["Normalized invariant IDs must be unique"],
         )
 
-    # Build the set of already-rewritten invariant IDs so that the
-    # source_map loop can disambiguate duplicate-ID / different-type cases.
-    normalized_inv_ids = {inv.id for inv in success.invariants}
+    if success.source_map:
+        _rewrite_source_map_invariant_ids(success, original_invariants)
 
-    # Rewrite source_map invariant_id deterministically
-    # use_positional_matching is already computed above
-    for entry_index, entry in enumerate(success.source_map):
-        excerpt = (entry.excerpt or "").strip()
-        if not excerpt:
-            logger.error("Spec authority compiler source_map entry has empty excerpt")
-            return _failure(
-                reason="SOURCE_MAP_INVARIANT_MISMATCH",
-                blocking_gaps=["source_map entry has empty excerpt"],
-            )
-
-        inv_type = None
-        inv_parameters = None
-
-        # Prefer positional matching when IDs are duplicated/placeholder
-        if use_positional_matching and entry_index < len(original_invariants):
-            matched_invariant = original_invariants[entry_index]
-            inv_type = matched_invariant.type
-            inv_parameters = matched_invariant.parameters
-        elif use_positional_matching:
-            # Extra source_map entry beyond invariant count.
-            # Try each candidate type and pick the one whose computed ID
-            # matches a known (already-rewritten) invariant.
-            candidate_invariants = original_id_to_invariants.get(entry.invariant_id, [])
-            for candidate in candidate_invariants:
-                if _source_map_support_error(candidate, excerpt) is not None:
-                    continue
-                if (
-                    compute_invariant_id(
-                        excerpt,
-                        candidate.type,
-                        candidate.parameters,
-                    )
-                    in normalized_inv_ids
-                ):
-                    inv_type = candidate.type
-                    inv_parameters = candidate.parameters
-                    break
-            if inv_type is None and candidate_invariants:
-                candidate = candidate_invariants[0]
-                inv_type = candidate.type
-                inv_parameters = candidate.parameters
-            elif inv_type is None:
-                inv_type = original_invariants[0].type
-                inv_parameters = original_invariants[0].parameters
-        else:
-            candidate_invariants = original_id_to_invariants.get(entry.invariant_id, [])
-            if len(candidate_invariants) == 1:
-                inv_type = candidate_invariants[0].type
-                inv_parameters = candidate_invariants[0].parameters
-            elif len(candidate_invariants) > 1:
-                # Multiple invariants share this LLM-generated ID with
-                # different types/parameters. Try each candidate and pick the
-                # one whose computed ID matches a known invariant.
-                for candidate in candidate_invariants:
-                    if _source_map_support_error(candidate, excerpt) is not None:
-                        continue
-                    if (
-                        compute_invariant_id(
-                            excerpt,
-                            candidate.type,
-                            candidate.parameters,
-                        )
-                        in normalized_inv_ids
-                    ):
-                        inv_type = candidate.type
-                        inv_parameters = candidate.parameters
-                        break
-                if inv_type is None:
-                    # Fallback: use the first candidate invariant
-                    inv_type = candidate_invariants[0].type
-                    inv_parameters = candidate_invariants[0].parameters
-            # No matching invariant for this source_map entry
-            elif len(success.invariants) == 1:
-                inv_type = success.invariants[0].type
-                inv_parameters = success.invariants[0].parameters
-            elif len(success.source_map) == len(original_invariants):
-                inv_type = original_invariants[entry_index].type
-                inv_parameters = original_invariants[entry_index].parameters
-            else:
-                logger.error("Cannot match source_map entry to invariant type")
-                return _failure(
-                    reason="SOURCE_MAP_INVARIANT_MISMATCH",
-                    blocking_gaps=[
-                        "Cannot match source_map entry to an invariant type",
-                        f"source_map_index={entry_index}",
-                    ],
-                )
-
-        if inv_parameters is None:
-            candidate = original_invariants[min(entry_index, len(original_invariants) - 1)]
-            inv_parameters = candidate.parameters
-        entry.invariant_id = compute_invariant_id(excerpt, inv_type, inv_parameters)
-
-    # Verify auditability: every invariant has at least one source_map entry
-    normalized_ids = {inv.id for inv in success.invariants}
-    source_map_ids = {entry.invariant_id for entry in success.source_map}
-    missing = sorted(normalized_ids - source_map_ids)
-    if missing:
-        logger.warning(
-            "Spec authority compiler output has %s invariant(s) without source_map coverage: %s",
-            len(missing),
-            missing,
-        )
-
-    _set_compact_ir(
-        success,
-        source_text=source_text,
-        original_source_map=original_source_map,
-        original_invariant_ids=original_invariant_ids,
-        model_hints=model_hints,
-    )
+    _clear_compact_ir(success)
 
     return SpecAuthorityCompilerOutput(root=success)

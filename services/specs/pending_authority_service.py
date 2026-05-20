@@ -16,6 +16,10 @@ from sqlmodel import Session, select
 
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 
 _MAX_SPEC_SIZE_KB = 100
 _MAX_SPEC_SIZE_BYTES = _MAX_SPEC_SIZE_KB * 1024
@@ -297,7 +301,7 @@ def _matching_acceptance_ids(
     }
 
 
-def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0913
+def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     *,
     session: Session,
     product_id: int,
@@ -318,6 +322,19 @@ def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0
             error=loaded.error,
         )
     resolved_path, spec_content, spec_hash = loaded
+    try:
+        normalized_spec = normalize_spec_content_for_registry(spec_content)
+    except SpecContentNormalizationError as exc:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=resolved_path,
+            error_code=exc.error_code,
+            spec_hash=spec_hash,
+            error=str(exc),
+        )
+    spec_content = normalized_spec.content
+    spec_hash = normalized_spec.spec_hash
 
     product = session.get(Product, product_id)
     if product is None:

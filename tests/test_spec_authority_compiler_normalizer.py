@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contract import (  # noqa: E501
-    compute_invariant_id,
+    compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
 from utils.spec_schemas import (
@@ -19,6 +19,55 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
 )
+
+
+def _structured_spec_source() -> str:
+    """Return canonical AgileForge profile JSON with two normative items."""
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.normalizer",
+            "title": "Normalizer Structured Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-19",
+            "updated_at": "2026-05-19",
+            "summary": "Exercise structured spec authority normalization.",
+            "problem_statement": "Structured specs need profile-aware traceability.",
+            "items": [
+                {
+                    "id": "REQ.audit-evidence",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Audit evidence",
+                    "statement": "The system MUST record audit evidence.",
+                    "level": "MUST",
+                    "verification": "system-test",
+                    "acceptance": [
+                        "Audit evidence is stored for each operation."
+                    ],
+                },
+                {
+                    "id": "REQ.review-token",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Review token",
+                    "statement": "The system MUST include review token evidence.",
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "Review packets include review token evidence."
+                    ],
+                },
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
 
 
 def _legacy_success_payload() -> dict[str, Any]:
@@ -147,17 +196,33 @@ def _test_generated_target_id(
     return f"{prefix}-{_test_compact_ir_hash(payload)}"
 
 
-def test_legacy_success_without_ir_stays_valid() -> None:
-    """Historical compiled authority JSON without compact IR remains loadable."""
-    success = SpecAuthorityCompilationSuccess.model_validate(_legacy_success_payload())
-
-    assert success.rejected_features == []
+def _assert_compact_ir_cleared(
+    success: SpecAuthorityCompilationSuccess,
+) -> None:
     assert success.ir_schema_version is None
     assert success.ir_provenance is None
     assert success.source_units == []
     assert success.requirement_candidates == []
     assert success.authority_mappings == []
     assert success.ir_packet_limits is None
+
+
+def _assert_semantic_invariant_ids(
+    success: SpecAuthorityCompilationSuccess,
+) -> None:
+    expected_ids = [
+        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        for invariant in success.invariants
+    ]
+    assert [invariant.id for invariant in success.invariants] == expected_ids
+
+
+def test_legacy_success_without_ir_stays_valid() -> None:
+    """Historical compiled authority JSON without compact IR remains loadable."""
+    success = SpecAuthorityCompilationSuccess.model_validate(_legacy_success_payload())
+
+    assert success.rejected_features == []
+    _assert_compact_ir_cleared(success)
 
 
 def test_success_schema_accepts_compact_ir_with_provenance() -> None:
@@ -182,6 +247,18 @@ def test_success_schema_rejects_mapping_with_missing_candidate_id() -> None:
 
     with pytest.raises(ValidationError):
         SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_schema_accepts_manifest_mapping_without_repeated_candidate() -> None:
+    """Raw model hints may point at host manifest candidates not repeated in output."""
+    payload = _compact_ir_success_payload()
+    payload["source_units"] = []
+    payload["requirement_candidates"] = []
+    payload["authority_mappings"][0]["candidate_id"] = "REQ-host-manifest"
+
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert success.authority_mappings[0].candidate_id == "REQ-host-manifest"
 
 
 def test_success_schema_rejects_candidate_with_missing_source_unit_id() -> None:
@@ -396,17 +473,17 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert isinstance(inv.parameters, RequiredFieldParams)
     assert inv.parameters.field_name == "user_id"
 
-    # ID must be derived from the source_map excerpt
+    # ID must be derived from invariant semantics only
     assert len(normalized.root.source_map) == 1
     sm = normalized.root.source_map[0]
-    expected_id = compute_invariant_id(sm.excerpt, inv.type, inv.parameters)
+    expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
     assert inv.id == expected_id
     assert sm.invariant_id == expected_id
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
 
 
-def test_legacy_ir_provenance_does_not_create_accept_ready_packet() -> None:
-    """Host-parsed legacy artifacts expose incomplete IR, not trusted coverage."""
+def test_exact_legacy_source_map_quote_preserves_review_evidence_only() -> None:
+    """Legacy source_map quotes do not synthesize deprecated compact IR."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -425,19 +502,15 @@ def test_legacy_ir_provenance_does_not_create_accept_ready_packet() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     success = normalized.root
-    assert success.ir_provenance == "host_parsed"
-    assert success.ir_provenance != "model_emitted"
-    assert len(success.requirement_candidates) == 2  # noqa: PLR2004
-    assert {mapping.mapping_provenance for mapping in success.authority_mappings} == {
-        "host_inferred"
-    }
-    assert all(
-        mapping.mapping_status != "covered" for mapping in success.authority_mappings
-    )
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert len(success.source_map) == 1
+    assert success.source_map[0].excerpt == "- The payload must include user_id."
+    assert success.source_map[0].invariant_id == success.invariants[0].id
 
 
-def test_legacy_without_source_text_marks_ir_absent_not_model_emitted() -> None:
-    """Legacy compiler output without current source cannot become model IR."""
+def test_legacy_without_source_text_clears_compact_ir_fields() -> None:
+    """Legacy compiler output without current source stays structural-only."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -445,15 +518,15 @@ def test_legacy_without_source_text_marks_ir_absent_not_model_emitted() -> None:
     normalized = normalize_compiler_output(json.dumps(_legacy_success_payload()))
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert normalized.root.ir_provenance == "legacy_absent"
-    assert normalized.root.ir_provenance != "model_emitted"
-    assert normalized.root.source_units == []
-    assert normalized.root.requirement_candidates == []
-    assert normalized.root.authority_mappings == []
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
+    )
 
 
-def test_unrelated_source_refs_become_weak_mappings() -> None:
-    """Host-repaired mappings stay weak when the model cited unrelated source."""
+def test_unrelated_source_refs_repair_review_evidence_without_mappings() -> None:
+    """Source-map repair updates review evidence without emitting compact mappings."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -472,13 +545,52 @@ def test_unrelated_source_refs_become_weak_mappings() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     success = normalized.root
-    assert success.ir_provenance == "host_parsed"
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
     assert success.source_map[0].excerpt == "- The payload must include user_id."
-    assert len(success.authority_mappings) == 1
-    mapping = success.authority_mappings[0]
-    assert mapping.mapping_provenance == "host_repaired_quote"
-    assert mapping.mapping_provenance != "model_quote"
-    assert mapping.mapping_status == "weak_mapping"
+    assert success.source_map[0].location == "line 2"
+    assert success.source_map[0].invariant_id == success.invariants[0].id
+
+
+def test_source_text_repair_preserves_extra_source_map_review_evidence() -> None:
+    """Source-text repair keeps extra review evidence for the same invariant."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = "\n".join(
+        [
+            "# Requirements",
+            "- The payload must include user_id.",
+            "- Review evidence was checked during source-map audit.",
+        ]
+    )
+    raw = _legacy_success_payload()
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": "- The payload must include account_id.",
+            "location": "spec:line:2",
+        },
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": "- Review evidence was checked during source-map audit.",
+            "location": "spec:line:3",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids = {invariant.id for invariant in normalized.root.invariants}
+    assert len(normalized.root.source_map) == 2  # noqa: PLR2004
+    assert (
+        normalized.root.source_map[0].excerpt
+        == "- The payload must include user_id."
+    )
+    assert all(
+        entry.invariant_id in invariant_ids for entry in normalized.root.source_map
+    )
 
 
 def test_normalizer_keeps_repairable_invariants_and_drops_unsupported_ones() -> None:
@@ -534,8 +646,8 @@ def test_normalizer_keeps_repairable_invariants_and_drops_unsupported_ones() -> 
     assert "0" in " ".join(success.gaps)
 
 
-def test_normalizer_treats_model_target_kind_mismatch_as_untrusted_ir_hint() -> None:
-    """Invalid model mapping hints should not make compiler invocation fail."""
+def test_normalizer_discards_model_target_kind_mismatch_ir_hint() -> None:
+    """Invalid model mapping hints are discarded instead of compiled."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -595,14 +707,15 @@ def test_normalizer_treats_model_target_kind_mismatch_as_untrusted_ir_hint() -> 
     )
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert normalized.root.authority_mappings
-    assert {
-        mapping.mapping_provenance for mapping in normalized.root.authority_mappings
-    } != {"model_quote"}
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].invariant_id == success.invariants[0].id
 
 
-def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> None:
-    """Exact model quote hints are re-keyed to host candidates and normalized IDs."""
+def test_model_emitted_exact_quote_mapping_is_discarded() -> None:
+    """Exact model quote hints no longer survive normalization as compact IR."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -667,16 +780,499 @@ def test_model_emitted_exact_quote_mapping_is_validated_against_host_ir() -> Non
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     success = normalized.root
-    assert success.ir_provenance == "mixed"
-    assert len(success.authority_mappings) == 1
-    mapping = success.authority_mappings[0]
-    assert mapping.authority_item_id == success.invariants[0].id
-    assert mapping.mapping_provenance == "model_quote"
-    assert mapping.mapping_status == "covered"
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].invariant_id == success.invariants[0].id
 
 
-def test_model_emitted_candidate_without_mapping_marks_root_mixed() -> None:
-    """Root provenance reflects retained model candidates even without mappings."""
+def test_structured_profile_clears_compact_ir_and_preserves_item_evidence() -> None:
+    """Profile JSON preserves source evidence without legacy compact IR."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _structured_spec_source()
+    source_quote = "The system MUST record audit evidence."
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].location == "REQ.audit-evidence.statement"
+
+
+def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None:
+    """A model JSON-blob citation is repaired to profile evidence only."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _structured_spec_source()
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = source_text
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == "The system MUST record audit evidence."
+    assert not success.source_map[0].excerpt.lstrip().startswith("{")
+    assert success.source_map[0].location == "REQ.audit-evidence.statement"
+
+
+def test_structured_profile_allows_missing_source_map() -> None:
+    """Structured authority no longer requires source_map for IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _compact_ir_success_payload()
+    del raw["source_map"]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map == []
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.invariants[0].id.startswith("INV-")
+
+
+def test_structured_profile_drops_malformed_deprecated_compact_ir() -> None:
+    """Malformed legacy compact IR is discarded before structured validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"][0]["parameters"] = {"field_name": "audit_evidence"}
+    raw["source_map"][0]["excerpt"] = "The system MUST record audit evidence."
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+    raw.update(
+        {
+            "ir_schema_version": {"malformed": True},
+            "ir_provenance": 123,
+            "source_units": [{"unit_id": 123, "text_excerpt": "x" * 2_001}],
+            "requirement_candidates": {"candidate_id": "REQ-not-a-list"},
+            "authority_mappings": "not-a-list",
+            "ir_packet_limits": {"max_text_excerpt_chars": "not-an-int"},
+        }
+    )
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+
+
+def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_position() -> (
+    None
+):
+    """Duplicate original source-map IDs preserve positional invariant evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "audit_evidence"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "review_token"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST record audit evidence.",
+            "location": "REQ.audit-evidence.statement",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST include review token evidence.",
+            "location": "REQ.review-token.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_invariant_ids = [inv.id for inv in normalized.root.invariants]
+    source_map_ids = [entry.invariant_id for entry in normalized.root.source_map]
+    assert len(source_map_ids) == 2  # noqa: PLR2004
+    assert source_map_ids == normalized_invariant_ids
+    assert len(set(source_map_ids)) == 2  # noqa: PLR2004
+
+
+def test_structured_profile_duplicate_placeholder_source_map_prefers_evidence() -> (
+    None
+):
+    """Structured duplicate placeholders map by evidence before position."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _compact_ir_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "audit_evidence"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "review_token"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST include review token evidence.",
+            "location": "REQ.review-token.statement",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST record audit evidence.",
+            "location": "REQ.audit-evidence.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    normalized_ids_by_field = {
+        invariant.parameters.field_name: invariant.id
+        for invariant in success.invariants
+    }
+    source_map_by_location = {
+        entry.location: entry for entry in success.source_map
+    }
+
+    assert len(success.source_map) == 2  # noqa: PLR2004
+    assert set(source_map_by_location) == {
+        "REQ.review-token.statement",
+        "REQ.audit-evidence.statement",
+    }
+    review_entry = source_map_by_location["REQ.review-token.statement"]
+    assert review_entry.excerpt == "The system MUST include review token evidence."
+    assert review_entry.invariant_id == normalized_ids_by_field["review_token"]
+    audit_entry = source_map_by_location["REQ.audit-evidence.statement"]
+    assert audit_entry.excerpt == "The system MUST record audit evidence."
+    assert audit_entry.invariant_id == normalized_ids_by_field["audit_evidence"]
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+
+
+def test_duplicate_placeholder_source_map_prefers_excerpt_support_over_position() -> (
+    None
+):
+    """Duplicate placeholder IDs map by clear excerpt support before position."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "audit_evidence"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "review_token"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST include review token evidence.",
+            "location": "REQ.review-token.statement",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The system MUST record audit evidence.",
+            "location": "REQ.audit-evidence.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_ids_by_field = {
+        inv.parameters.field_name: inv.id for inv in normalized.root.invariants
+    }
+    source_map_ids_by_location = {
+        entry.location: entry.invariant_id for entry in normalized.root.source_map
+    }
+    assert source_map_ids_by_location["REQ.review-token.statement"] == (
+        normalized_ids_by_field["review_token"]
+    )
+    assert source_map_ids_by_location["REQ.audit-evidence.statement"] == (
+        normalized_ids_by_field["audit_evidence"]
+    )
+    assert len(set(source_map_ids_by_location.values())) == 2  # noqa: PLR2004
+
+
+def test_duplicate_placeholder_source_map_preserves_extra_review_evidence() -> None:
+    """Extra duplicate-placeholder source_map entries are preserved after ID rewrite."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    placeholder_id = "INV-0000000000000000"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "user_id"},
+        },
+        {
+            "id": placeholder_id,
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "account_id"},
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The payload must include user_id.",
+            "location": "spec:line:1",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "The payload must include account_id.",
+            "location": "spec:line:2",
+        },
+        {
+            "invariant_id": placeholder_id,
+            "excerpt": "Review evidence mentions user_id again.",
+            "location": "spec:line:3",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    normalized_invariant_ids = {inv.id for inv in normalized.root.invariants}
+    assert len(normalized.root.invariants) == 2  # noqa: PLR2004
+    assert len(normalized.root.source_map) == 3  # noqa: PLR2004
+    assert {
+        entry.invariant_id for entry in normalized.root.source_map
+    } <= normalized_invariant_ids
+
+
+def test_structured_profile_keeps_unrelated_source_map_as_review_evidence() -> None:
+    """Structured mode does not reject semantically weak source excerpts."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "This sentence is review evidence only."
+    raw["source_map"][0]["location"] = "REQ.audit-evidence.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].location == "REQ.audit-evidence.statement"
+    assert (
+        normalized.root.source_map[0].excerpt
+        == "This sentence is review evidence only."
+    )
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+
+
+def test_structured_profile_invalid_source_ref_is_review_finding_not_compile_failure() -> (  # noqa: E501
+    None
+):
+    """Normalizer preserves invalid source refs so review can block structurally."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["location"] = "REQ.missing.statement"
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].location == "REQ.missing.statement"
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+
+
+def test_model_emitted_manifest_mapping_is_discarded_without_source_units() -> None:
+    """Model candidate/mapping hints are discarded even when source units are absent."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.spec_authority_ir import (  # noqa: PLC0415
+        extract_requirement_candidates,
+        parse_markdown_sections,
+        source_units_from_sections,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    sections, _diagnostics = parse_markdown_sections(source_text)
+    host_candidates = extract_requirement_candidates(
+        source_units_from_sections(sections)
+    )
+    candidate = host_candidates[0]
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = source_quote
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "requirement_candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "source_unit_id": candidate.source_unit_id,
+                    "statement": candidate.statement,
+                    "source_quote": candidate.source_quote,
+                    "quote_hash": candidate.quote_hash,
+                    "line_start": candidate.line_start,
+                    "line_end": candidate.line_end,
+                    "classification": candidate.classification,
+                    "provenance": "model_emitted",
+                }
+            ],
+            "authority_mappings": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Exact manifest candidate maps to invariant.",
+                    "source_quote_hash": candidate.quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].invariant_id == success.invariants[0].id
+
+
+def test_model_mapping_manifest_candidate_hint_is_discarded() -> None:
+    """Model mapping hints do not survive by referencing host candidate IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.spec_authority_ir import (  # noqa: PLC0415
+        extract_requirement_candidates,
+        parse_markdown_sections,
+        source_units_from_sections,
+    )
+
+    source_quote = "- The payload must include user_id."
+    source_text = "\n".join(["# Requirements", source_quote])
+    sections, _diagnostics = parse_markdown_sections(source_text)
+    host_candidates = extract_requirement_candidates(
+        source_units_from_sections(sections)
+    )
+    candidate = host_candidates[0]
+    raw = _legacy_success_payload()
+    raw["source_map"][0]["excerpt"] = "payload must include user_id"
+    raw.update(
+        {
+            "ir_schema_version": "authority-ir-v1",
+            "ir_provenance": "model_emitted",
+            "source_units": [],
+            "requirement_candidates": [],
+            "authority_mappings": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "authority_item_id": "INV-aaaaaaaaaaaaaaaa",
+                    "authority_target_kind": "invariant",
+                    "mapping_status": "covered",
+                    "mapping_rationale": "Exact manifest candidate maps to invariant.",
+                    "source_quote_hash": candidate.quote_hash,
+                    "mapping_provenance": "model_quote",
+                }
+            ],
+        }
+    )
+
+    normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == "payload must include user_id"
+    assert success.source_map[0].invariant_id == success.invariants[0].id
+
+
+def test_model_emitted_candidate_without_mapping_is_discarded() -> None:
+    """Model candidates without mappings do not survive structural normalization."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -730,15 +1326,16 @@ def test_model_emitted_candidate_without_mapping_marks_root_mixed() -> None:
     normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert normalized.root.ir_provenance == "mixed"
-    assert any(
-        candidate.provenance == "model_emitted"
-        for candidate in normalized.root.requirement_candidates
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == source_quote
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
     )
 
 
-def test_swapped_legacy_authority_id_cannot_launder_model_quote_mapping() -> None:
-    """Model mappings cannot use swapped legacy source-map IDs as aliases."""
+def test_swapped_legacy_authority_id_discarded_with_model_quote_mapping() -> None:
+    """Model mappings cannot survive by using swapped legacy source-map IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -826,20 +1423,26 @@ def test_swapped_legacy_authority_id_cannot_launder_model_quote_mapping() -> Non
     normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    user_mappings = [
-        mapping
-        for mapping in normalized.root.authority_mappings
-        if mapping.source_quote_hash == user_hash
-    ]
-    assert user_mappings
-    assert all(
-        mapping.mapping_provenance != "model_quote" for mapping in user_mappings
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    user_id_by_field = {
+        invariant.parameters.field_name: invariant.id
+        for invariant in success.invariants
+    }
+    source_map_by_excerpt = {
+        entry.excerpt: entry for entry in success.source_map
+    }
+    assert source_map_by_excerpt[user_quote].invariant_id == (
+        user_id_by_field["user_id"]
     )
-    assert all(mapping.mapping_status != "covered" for mapping in user_mappings)
+    assert source_map_by_excerpt[account_quote].invariant_id == (
+        user_id_by_field["account_id"]
+    )
 
 
-def test_model_quote_requires_model_quote_text_to_match_hash() -> None:
-    """A supplied quote hash cannot launder stale model quote text."""
+def test_model_quote_with_hash_mismatch_is_discarded() -> None:
+    """A supplied quote hash cannot preserve stale model compact IR."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -905,17 +1508,14 @@ def test_model_quote_requires_model_quote_text_to_match_hash() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     success = normalized.root
-    assert success.ir_provenance == "host_parsed"
-    assert all(
-        candidate.provenance != "model_emitted"
-        for candidate in success.requirement_candidates
-    )
-    assert success.authority_mappings[0].mapping_provenance != "model_quote"
-    assert success.authority_mappings[0].mapping_status == "weak_mapping"
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    assert success.source_map[0].excerpt == source_quote
+    assert success.source_map[0].invariant_id == success.invariants[0].id
 
 
-def test_host_parsed_model_hints_do_not_promote_candidate_provenance() -> None:
-    """Only explicitly model-emitted compact IR can preserve model provenance."""
+def test_host_parsed_model_hints_are_discarded() -> None:
+    """Deprecated compact IR hints are discarded regardless of provenance."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -979,16 +1579,16 @@ def test_host_parsed_model_hints_do_not_promote_candidate_provenance() -> None:
     normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert normalized.root.ir_provenance == "host_parsed"
-    assert all(
-        candidate.provenance != "model_emitted"
-        for candidate in normalized.root.requirement_candidates
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == source_quote
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
     )
-    assert normalized.root.authority_mappings[0].mapping_provenance != "model_quote"
 
 
-def test_swapped_legacy_source_refs_become_host_repaired_quotes() -> None:
-    """Repaired provenance is based on source-map position, not global text reuse."""
+def test_swapped_legacy_source_refs_repair_review_evidence() -> None:
+    """Source-map repair remains evidence-only and rewrites semantic IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1029,20 +1629,29 @@ def test_swapped_legacy_source_refs_become_host_repaired_quotes() -> None:
     normalized = normalize_compiler_output(json.dumps(raw), source_text=source_text)
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert len(normalized.root.authority_mappings) == 2  # noqa: PLR2004
-    repaired_provenance = {
-        mapping.mapping_provenance
-        for mapping in normalized.root.authority_mappings
+    success = normalized.root
+    _assert_compact_ir_cleared(success)
+    _assert_semantic_invariant_ids(success)
+    source_map_by_excerpt = {
+        entry.excerpt: entry for entry in success.source_map
     }
-    assert repaired_provenance == {"host_repaired_quote"}
-    assert all(
-        mapping.mapping_status == "weak_mapping"
-        for mapping in normalized.root.authority_mappings
+    ids_by_field = {
+        invariant.parameters.field_name: invariant.id
+        for invariant in success.invariants
+    }
+    assert source_map_by_excerpt["- The payload must include user_id."].location == (
+        "line 2"
     )
+    assert source_map_by_excerpt[
+        "- The payload must include user_id."
+    ].invariant_id == ids_by_field["user_id"]
+    assert source_map_by_excerpt[
+        "- The payload must include account_id."
+    ].invariant_id == ids_by_field["account_id"]
 
 
-def test_normalizer_fails_when_source_map_missing_or_unmatchable() -> None:
-    """Normalizer must fail deterministically if source_map cannot support ID mapping."""  # noqa: E501
+def test_normalizer_allows_missing_source_map_with_semantic_ids() -> None:
+    """Missing source_map does not block semantic ID normalization."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1065,10 +1674,13 @@ def test_normalizer_fails_when_source_map_missing_or_unmatchable() -> None:
     }
 
     normalized = normalize_compiler_output(json.dumps(raw))
-    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
-    assert normalized.root.error == "SPEC_COMPILATION_FAILED"
-    assert "source_map" in normalized.root.reason.lower() or any(
-        "source_map" in gap.lower() for gap in normalized.root.blocking_gaps
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map == []
+    assert normalized.root.invariants[0].id == compute_invariant_id_from_payload(
+        normalized.root.invariants[0].type,
+        normalized.root.invariants[0].parameters,
     )
 
 
@@ -1207,14 +1819,19 @@ def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> Non
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     invariant_ids = [invariant.id for invariant in normalized.root.invariants]
+    expected_ids = [
+        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        for invariant in normalized.root.invariants
+    ]
+    assert invariant_ids == expected_ids
     assert len(set(invariant_ids)) == len(invariant_ids)
     assert {entry.invariant_id for entry in normalized.root.source_map} == set(
         invariant_ids
     )
 
 
-def test_normalizer_rejects_source_map_that_does_not_support_field() -> None:
-    """A direct source map must mention the field or capability it supports."""
+def test_normalizer_preserves_source_map_that_does_not_support_field() -> None:
+    """A weak source map is preserved as review evidence, not compile-fatal."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1247,9 +1864,15 @@ def test_normalizer_rejects_source_map_that_does_not_support_field() -> None:
 
     normalized = normalize_compiler_output(json.dumps(raw))
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
-    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
-    assert any("captain" in gap for gap in normalized.root.blocking_gaps)
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == (
+        "The live squad must stay within the operator's current budget."
+    )
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
+    )
 
 
 def test_normalizer_allows_forbidden_capability_safety_guard_excerpt() -> None:
@@ -1378,8 +2001,8 @@ def test_normalizer_removes_duplicate_semantic_invariants() -> None:
     assert len({inv.id for inv in normalized.root.invariants}) == 1
 
 
-def test_normalizer_rejects_max_value_when_excerpt_lacks_bound() -> None:
-    """Do not let dynamic relationships become unsupported hard constants."""
+def test_normalizer_preserves_max_value_when_excerpt_lacks_bound() -> None:
+    """Dynamic relationship evidence no longer rejects hard-constant output."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1410,9 +2033,15 @@ def test_normalizer_rejects_max_value_when_excerpt_lacks_bound() -> None:
 
     normalized = normalize_compiler_output(json.dumps(raw))
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
-    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
-    assert any("100" in gap for gap in normalized.root.blocking_gaps)
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == (
+        "Acceptance Criteria: budget_used <= budget."
+    )
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
+    )
 
 
 def test_normalizer_drops_max_value_from_command_example() -> None:
@@ -1477,8 +2106,8 @@ def test_normalizer_drops_max_value_from_command_example() -> None:
     assert any("budget_used 100" in gap for gap in normalized.root.gaps)
 
 
-def test_normalizer_rejects_zero_max_value_when_excerpt_lacks_zero_bound() -> None:
-    """A zero max value must be source-supported, not treated as missing."""
+def test_normalizer_preserves_zero_max_value_when_excerpt_lacks_zero_bound() -> None:
+    """A zero max value keeps weak source evidence for review."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1509,9 +2138,15 @@ def test_normalizer_rejects_zero_max_value_when_excerpt_lacks_zero_bound() -> No
 
     normalized = normalize_compiler_output(json.dumps(raw))
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
-    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
-    assert any("0" in gap for gap in normalized.root.blocking_gaps)
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == (
+        "Acceptance Criteria: budget_used <= budget."
+    )
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
+    )
 
 
 def test_normalizer_preserves_relation_constraint_for_dynamic_budget() -> None:
@@ -1550,8 +2185,8 @@ def test_normalizer_preserves_relation_constraint_for_dynamic_budget() -> None:
     assert normalized.root.invariants[0].type == InvariantType.RELATION_CONSTRAINT
 
 
-def test_normalizer_rejects_relation_constraint_without_operator_evidence() -> None:
-    """A field mention alone cannot support a dynamic relation constraint."""
+def test_normalizer_preserves_relation_constraint_without_operator_evidence() -> None:
+    """A field mention source_map remains review evidence for relation output."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -1582,9 +2217,15 @@ def test_normalizer_rejects_relation_constraint_without_operator_evidence() -> N
 
     normalized = normalize_compiler_output(json.dumps(raw))
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
-    assert normalized.root.reason == "SOURCE_MAP_INVARIANT_MISMATCH"
-    assert any("operator" in gap for gap in normalized.root.blocking_gaps)
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    _assert_compact_ir_cleared(normalized.root)
+    _assert_semantic_invariant_ids(normalized.root)
+    assert normalized.root.source_map[0].excerpt == (
+        "A live run outputs budget used in recommendation metadata."
+    )
+    assert normalized.root.source_map[0].invariant_id == (
+        normalized.root.invariants[0].id
+    )
 
 
 def test_normalizer_handles_duplicate_ids_different_types_length_mismatch() -> None:

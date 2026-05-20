@@ -10,6 +10,7 @@ from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
+from services.specs.profile_content import SpecContentNormalizationError
 
 JsonDict = dict[str, Any]
 
@@ -254,7 +255,7 @@ def _setup_retry_context_guard_token(
             resolved_spec_path=Path(resolved_path),
             workflow_state=workflow_state,
         )
-    except (OSError, UnicodeError):
+    except (OSError, SpecContentNormalizationError, UnicodeError):
         return None
 
 

@@ -20,6 +20,11 @@ from models.specs import (
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.error_codes import ErrorCode, error_metadata
 from tests.typing_helpers import require_id
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_hash,
+    canonical_spec_json,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -34,6 +39,37 @@ AUTHORITY_ERROR_EXIT_CODE: Final[int] = 4
 def _spec_hash(content: str) -> str:
     """Return the persisted SHA-256 hash for spec content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _agileforge_spec_profile_payload() -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.authority-projection",
+        "title": "Authority Projection Spec",
+        "status": "draft",
+        "version": "0.1.0",
+        "created_at": "2026-05-17T12:00:00Z",
+        "updated_at": "2026-05-17T12:00:00Z",
+        "summary": "Authority status preserves structured spec hashes.",
+        "problem_statement": "Status needs stable structured spec hashes.",
+        "items": [
+            {
+                "id": "REQ.guard-tokens",
+                "type": "REQ",
+                "status": "draft",
+                "title": "Guard token packet evidence",
+                "statement": "The review output must include guard tokens.",
+                "level": "MUST",
+                "verification": "inspection",
+                "acceptance": [
+                    "The authority review packet includes guard token evidence."
+                ],
+            },
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+    }
 
 
 def _engine(session: Session) -> Engine:
@@ -288,6 +324,48 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     assert result["data"]["disk_spec"]["sha256"] == spec.spec_hash
     assert result["data"]["disk_spec"]["matches_accepted"] is True
     assert result["data"]["authority_fingerprint"].startswith("sha256:")
+
+
+def test_authority_status_canonicalizes_structured_spec_disk_hash(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pretty structured spec JSON on disk matches canonical accepted hash."""
+    unrelated_cwd = tmp_path / "elsewhere"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
+    artifact = TechnicalSpecArtifact.model_validate(_agileforge_spec_profile_payload())
+    spec_content = canonical_spec_json(artifact)
+    pretty_content = json.dumps(json.loads(spec_content), indent=2)
+    spec_path = tmp_path / "specs" / "app.json"
+    spec_path.parent.mkdir()
+    spec_path.write_text(pretty_content, encoding="utf-8")
+    product = _seed_product(session, spec_file_path="specs/app.json")
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(
+        session,
+        product_id=product_id,
+        content=spec_content,
+        content_ref="specs/app.json",
+    )
+    spec.spec_hash = canonical_spec_hash(artifact)
+    session.add(spec)
+    session.commit()
+    _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "current"
+    assert result["data"]["reason"] == "accepted_authority_current"
+    assert result["data"]["disk_spec"]["sha256"] == canonical_spec_hash(artifact)
+    assert result["data"]["disk_spec"]["matches_accepted"] is True
 
 
 def test_authority_status_uses_latest_accepted_decision(

@@ -13,9 +13,22 @@ The user provides a JSON string matching this schema:
   "spec_content_ref": "<path or identifier>" OR null,
   "domain_hint": "<optional>" OR null,
   "product_id": <optional int> OR null,
-  "spec_version_id": <optional int> OR null
+  "spec_version_id": <optional int> OR null,
+  "spec_source_format": "agileforge.spec.v1"
 }
 Exactly ONE of spec_source or spec_content_ref MUST be provided.
+
+SOURCE FORMAT RULES:
+When spec_source_format is "agileforge.spec.v1":
+- spec_source is canonical TechnicalSpecArtifact JSON.
+- Consume typed items, relations, status, level, acceptance, and source_notes.
+- Do not infer authority from Markdown narrative.
+- Cite typed item IDs in source_map.location when possible.
+- Apply the AgileForge authority support matrix:
+  - REQ/DATA/INTERFACE become REQUIRED_FIELD or RELATION_CONSTRAINT only when explicit.
+  - QUALITY/CONSTRAINT become MAX_VALUE or RELATION_CONSTRAINT only when measurable.
+  - NON_GOAL/MUST_NOT become FORBIDDEN_CAPABILITY only when explicit.
+  - Unsupported normative items become gaps with their item IDs preserved.
 
 OUTPUT FORMAT (JSON ONLY, NO MARKDOWN):
 Return ONLY one of the following JSON objects:
@@ -45,10 +58,6 @@ SUCCESS OBJECT:
   "prompt_hash": "<64 lowercase hex characters>"
 }
 
-Optional Authority IR hint fields MAY also be included:
-- "requirement_candidates": ["<IR hint objects>"]
-- "authority_mappings": ["<IR hint objects>"]
-
 FAILURE OBJECT (ONLY if you cannot comply):
 {
   "error": "SPEC_COMPILATION_FAILED",
@@ -56,24 +65,27 @@ FAILURE OBJECT (ONLY if you cannot comply):
   "blocking_gaps": ["..."]
 }
 
-NO extra keys. NO missing keys. NO free text.
+NO keys outside the success/failure schemas above. NO missing required keys.
+NO free text.
 
 INVARIANT PARAMETER RULES:
 - FORBIDDEN_CAPABILITY => parameters: {"capability": "<token>"}
 - REQUIRED_FIELD => parameters: {"field_name": "<token>"}
 - MAX_VALUE => parameters: {"field_name": "<token>", "max_value": <number>}
 - RELATION_CONSTRAINT => parameters: {"expression": "<field_or_metric> <= <dynamic_field_or_metric>"}
+- Use REQUIRED_FIELD only for explicit required artifacts, fields, records, or evidence.
 - Use MAX_VALUE only when the spec gives a literal numeric maximum.
-- Use RELATION_CONSTRAINT for dynamic comparisons such as budget_used <= budget.
+- Use RELATION_CONSTRAINT for explicit dynamic comparisons such as budget_used <= budget.
 - Never convert a dynamic field relationship into a hard-coded numeric constant.
+- Use FORBIDDEN_CAPABILITY only when the spec explicitly forbids a capability, technology, behavior, or scope.
 
 INVARIANT ID RULE (DETERMINISTIC):
+- Host-side normalization computes semantic-only IDs from invariant type and canonical parameters.
 - id = "INV-" + first 16 hex chars of SHA-256(
-  normalize(excerpt) + "|" + invariant_type + "|" + canonical parameters
+  invariant_type + "|" + canonical parameters
 )
-- normalize(excerpt): lowercase, trim, collapse whitespace to single spaces.
 - canonical parameters: key=value pairs sorted by key and joined with "|".
-- IDs MUST be unique for distinct invariants even when they share one source excerpt.
+- IDs MUST be unique for distinct invariants because their parameters differ; do not use source_map excerpts to make IDs unique.
 
 STRICTNESS:
 - Output must be valid JSON only.
@@ -82,20 +94,12 @@ STRICTNESS:
 - Exclude non-product governance/admin text from invariants. Do NOT compile
   plagiarism policy, citation guidance, rubric/grading notes, submission
   instructions, or similar assignment metadata into product invariants.
+- Unsupported normative items become gaps instead of inferred invariants.
 
 NOTE:
 - Host-side normalization is the final authority for prompt_hash and invariant IDs.
 - You MUST still output a prompt_hash string that matches the required hex format.
-
-AUTHORITY IR HINTS:
-- Host code owns coverage truth and derives coverage truth, including blocking findings.
-- You may emit requirement_candidates and authority_mappings as hints.
-- Every requirement_candidate hint must include an exact source_quote and source_unit_id when known.
-- Every authority_mappings hint must use only schema fields: candidate_id, authority_item_id, authority_target_kind, mapping_status, mapping_rationale, source_quote_hash, and mapping_provenance.
-- Every authority_mappings hint must include mapping_rationale and source_quote_hash when a source quote is available.
-- Do not emit final review_findings or assert coverage completeness. Host code derives coverage and blocking findings.
-- If a requirement is unclear, mark it uncertain rather than ignoring it.
-- Do not leave a known omission only in prose; include it as a gap or uncertain candidate hint.
+- source_map is review evidence. It should point to supporting agileforge.spec.v1 item IDs when possible, but host validation does not use it to prove semantic coverage.
 
 NON-FATAL HASHING RULE (MANDATORY):
 - Hashing and deterministic IDs are enforced by the host normalizer. Do NOT fail if you cannot compute them.
@@ -105,8 +109,7 @@ NON-FATAL HASHING RULE (MANDATORY):
 - You MUST still include a valid source_map excerpt for each invariant.
 - Every source_map excerpt MUST directly support the invariant:
   - REQUIRED_FIELD excerpts must mention the field or closely matching words.
-  - FORBIDDEN_CAPABILITY excerpts must mention the forbidden capability or closely
-    matching words.
+  - FORBIDDEN_CAPABILITY excerpts must mention the forbidden capability or closely matching words.
   - MAX_VALUE excerpts must mention the constrained field and the literal number.
   - RELATION_CONSTRAINT excerpts must mention the fields in the expression.
 - Only return FAILURE when you cannot extract any meaningful authority content.

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from cli.main import main
+
+if TYPE_CHECKING:
+    from services.agent_workbench.authority_decision import AuthorityAcceptRequest
 
 type JsonObject = dict[str, object]
 
@@ -174,6 +177,7 @@ def test_authority_review_parser_calls_application(
             str(PROJECT_ID),
             "--include-spec",
             "full",
+            "--open",
             "--format",
             "json",
         ],
@@ -302,10 +306,10 @@ def test_authority_accept_repeated_incomplete_review_override_flag(
     ]
 
 
-def test_authority_accept_rejects_broad_incomplete_review_override_flag(
+def test_authority_accept_forwards_broad_incomplete_review_fields(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The legacy broad override flags alone are rejected at the CLI boundary."""
+    """The legacy broad override flags still reach the service."""
     app = _AuthorityDecisionCliApplication()
 
     rc = main(
@@ -324,26 +328,131 @@ def test_authority_accept_rejects_broad_incomplete_review_override_flag(
     )
 
     payload = _stdout_payload(capsys)
-    assert rc == INVALID_COMMAND_EXIT_CODE
-    assert _first_error(payload)["code"] == "INVALID_COMMAND"
-    assert app.calls == []
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls[0][0] == "authority_accept"
+    request = app.calls[0][1]
+    assert request["allow_incomplete_review"] is True
+    assert request["incomplete_review_rationale"] == "Reviewed manually."
 
 
-def test_authority_accept_without_token_non_tty_requires_review(
+def test_authority_accept_without_token_uses_latest_review(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify non-interactive accept requires a review token."""
-    app = _AuthorityDecisionCliApplication()
+    """Human CLI can accept with project id only when latest review is fresh."""
+    expected_project_id = 42
+    latest_review_value = "review-token-123"
+    captured_requests: list[AuthorityAcceptRequest] = []
+
+    class FakeApplication:
+        """Fake default application facade for tokenless accept routing."""
+
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str,
+            output_format: str,
+        ) -> dict[str, Any]:
+            """Return the latest fresh review for a project."""
+            assert project_id == expected_project_id
+            assert include_spec == "auto"
+            assert output_format == "json"
+            return {
+                "ok": True,
+                "data": {
+                    "guard_tokens": {"review_token": latest_review_value},
+                    "review_summary": {"acceptance_status": "accept_ready"},
+                },
+                "errors": [],
+                "warnings": [],
+            }
+
+        def authority_accept(
+            self,
+            request: AuthorityAcceptRequest,
+        ) -> dict[str, Any]:
+            """Record the accept request built by CLI tokenless accept."""
+            captured_requests.append(request)
+            return {
+                "ok": True,
+                "data": {"accepted_decision_id": 7},
+                "errors": [],
+                "warnings": [],
+            }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.application.AgentWorkbenchApplication",
+        lambda **_kwargs: FakeApplication(),
+    )
+
+    exit_code = main(["authority", "accept", "--project-id", str(expected_project_id)])
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert len(captured_requests) == 1
+    request = captured_requests[0]
+    assert request.review_token == latest_review_value
+    assert isinstance(request.idempotency_key, str)
+    assert request.idempotency_key.strip()
+
+
+def test_authority_accept_without_token_requires_latest_review_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify tokenless accept fails when latest review has no review token."""
+    expected_project_id = PROJECT_ID
+
+    class FakeApplication:
+        """Fake default application facade for missing-token review routing."""
+
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str,
+            output_format: str,
+        ) -> dict[str, Any]:
+            """Return a latest review packet without a guard review token."""
+            del project_id, include_spec, output_format
+            return {
+                "ok": True,
+                "data": {
+                    "guard_tokens": {},
+                    "review_summary": {"acceptance_status": "accept_ready"},
+                },
+                "errors": [],
+                "warnings": [],
+            }
+
+        def authority_accept(
+            self,
+            request: AuthorityAcceptRequest,
+        ) -> dict[str, Any]:
+            """Record any unexpected accept request."""
+            del request
+            return {
+                "ok": True,
+                "data": {"accepted_decision_id": 7},
+                "errors": [],
+                "warnings": [],
+            }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.application.AgentWorkbenchApplication",
+        lambda **_kwargs: FakeApplication(),
+    )
 
     rc = main(
-        ["authority", "accept", "--project-id", str(PROJECT_ID)],
-        application=app,
+        ["authority", "accept", "--project-id", str(expected_project_id)],
     )
 
     payload = _stdout_payload(capsys)
     assert rc == AUTHORITY_REVIEW_REQUIRED_EXIT_CODE
     assert _first_error(payload)["code"] == "AUTHORITY_REVIEW_REQUIRED"
-    assert app.calls == []
 
 
 def test_authority_accept_explicit_agent_mode_requires_idempotency_key(
@@ -428,6 +537,32 @@ def test_authority_reject_requires_reason(
     assert app.calls == []
 
 
+def test_authority_reject_requires_idempotency_key_in_token_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify guarded reject mode requires explicit idempotency."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--review-token",
+            str(_guard_payload()["review_token"]),
+            "--reason",
+            "Spec needs revision.",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert _first_error(payload)["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
 def test_authority_reject_without_token_non_tty_requires_review(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -496,13 +631,10 @@ def test_authority_help_shows_review_accept_reject_examples(
     captured = capsys.readouterr()
     assert top_level.value.code == 0
     assert "agileforge authority review --project-id 1" in captured.out
-    assert (
-        "agileforge authority accept --project-id 1 --review-token <review_token>"
-        in captured.out
-    )
+    assert "agileforge authority accept --project-id 1" in captured.out
     assert (
         'agileforge authority reject --project-id 1 --review-token <review_token> '
-        '--reason "..."'
+        '--reason "..." --idempotency-key reject-001'
     ) in captured.out
 
     with pytest.raises(SystemExit) as authority:

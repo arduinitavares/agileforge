@@ -635,10 +635,10 @@ def test_dashboard_accept_passes_candidate_scoped_incomplete_review_overrides(
     )
 
 
-def test_dashboard_accept_rejects_broad_incomplete_review_override(
+def test_dashboard_accept_passes_broad_incomplete_review_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dashboard boundary rejects legacy broad override payloads alone."""
+    """Dashboard accept forwards broad incomplete-review fields."""
     client, repo, _workflow = _build_client(monkeypatch)
     fake_app = FakeAuthorityApplication()
     _install_fake_authority_application(monkeypatch, fake_app)
@@ -653,9 +653,12 @@ def test_dashboard_accept_rejects_broad_incomplete_review_override(
         },
     )
 
-    assert response.status_code == HTTP_BAD_REQUEST
-    assert response.json()["detail"]["errors"][0]["code"] == "INVALID_COMMAND"
-    assert fake_app.accept_requests == []
+    assert response.status_code == HTTP_OK
+    assert len(fake_app.accept_requests) == 1
+    assert fake_app.accept_requests[0].allow_incomplete_review is True
+    assert fake_app.accept_requests[0].incomplete_review_rationale == (
+        "Reviewed manually."
+    )
 
 
 def test_dashboard_reject_records_reason_and_keeps_vision_locked(
@@ -672,6 +675,7 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
             "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            "idempotency_key": "dashboard-reject-001",
             "reason": reason,
         },
     )
@@ -681,6 +685,7 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     assert len(fake_app.reject_requests) == 1
     request = fake_app.reject_requests[0]
     assert request.reason == reason
+    assert request.idempotency_key == "dashboard-reject-001"
     assert request.policy == "dashboard_manual"
     assert request.actor_mode == "dashboard-human"
     assert workflow.states[str(product.product_id)]["fsm_state"] == "SETUP_REQUIRED"
@@ -689,6 +694,34 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
         == "authority_rejected"
     )
     assert workflow.states[str(product.product_id)]["setup_error"] == reason
+
+
+def test_dashboard_reject_requires_explicit_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject dashboard reject requests without caller idempotency."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+    product = repo.create("Pending Authority")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/authority/reject",
+        json={
+            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            "reason": "Spec needs revision.",
+        },
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    assert fake_app.reject_requests == []
+    assert (
+        response.json()["detail"]["errors"][0]["code"]
+        == "AUTHORITY_GUARD_INCOMPLETE"
+    )
+    assert response.json()["detail"]["errors"][0]["details"]["missing"] == [
+        "idempotency_key"
+    ]
 
 
 def test_dashboard_reject_empty_reason_returns_request_boundary_error(

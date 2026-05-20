@@ -1078,8 +1078,8 @@ def terminal_decision_key(
 
 
 def _stored_spec_hash(source_spec_hash: str) -> str:
-    """Return the legacy decision spec_hash value compatible with projections."""
-    return source_spec_hash.removeprefix("sha256:")
+    """Return the canonical decision spec_hash value for projections."""
+    return source_spec_hash
 
 
 def _decision_lock(engine: Engine) -> RLock:
@@ -1235,32 +1235,8 @@ def _accept_incomplete_error(
     command: str,
 ) -> JsonDict | None:
     blocking_findings = _blocking_review_findings(snapshot.review_findings)
-    if request.allow_incomplete_review and not request.incomplete_review_overrides:
-        return _invalid_override_error(
-            command=command,
-            message=(
-                "Broad incomplete-review override is not accepted without "
-                "candidate-specific overrides."
-            ),
-            details={"missing": ["incomplete_review_overrides"]},
-        )
-    if request.incomplete_review_rationale and not request.incomplete_review_overrides:
-        return _invalid_override_error(
-            command=command,
-            message=(
-                "Incomplete review rationale must be attached to "
-                "candidate-specific overrides."
-            ),
-            details={"missing": ["incomplete_review_overrides"]},
-        )
-    if not blocking_findings and not request.incomplete_review_overrides:
+    if not blocking_findings:
         return None
-    if not blocking_findings and request.incomplete_review_overrides:
-        return _invalid_override_error(
-            command=command,
-            message="Incomplete review overrides did not match blocking findings.",
-            details={"unmatched_overrides": _override_keys(request)},
-        )
     if request.incomplete_review_overrides:
         validation_error = _validate_incomplete_review_overrides(
             request=request,
@@ -1279,17 +1255,25 @@ def _accept_incomplete_error(
             "blocking_findings": blocking_findings,
         },
         remediation=[
-            "Review blocking findings and provide candidate-specific overrides."
+            "Resolve fatal authority review findings and run authority review again."
         ],
     )
 
 
 def _blocking_review_findings(findings: list[JsonDict]) -> list[JsonDict]:
+    removed_host_semantic_codes = {
+        "AUTHORITY_COVERAGE_INCOMPLETE",
+        "AUTHORITY_CANDIDATE_UNCOVERED",
+        "AUTHORITY_CANDIDATE_WEAK_MAPPING",
+        "AUTHORITY_CANDIDATE_INTENTIONALLY_CLASSIFIED",
+        "AUTHORITY_CANDIDATE_PARTIAL",
+        "AUTHORITY_CANDIDATE_UNCERTAIN",
+    }
     return [
         finding
         for finding in findings
         if finding.get("severity") == "blocking"
-        and finding.get("code") != "AUTHORITY_COVERAGE_INCOMPLETE"
+        and str(finding.get("code") or "") not in removed_host_semantic_codes
     ]
 
 
@@ -1391,7 +1375,7 @@ def _invalid_override_error(
             message=message,
             details=details,
             remediation=[
-                "Pass repeated candidate-specific incomplete-review overrides."
+                "Resolve fatal authority review findings before accepting."
             ],
         ),
     )

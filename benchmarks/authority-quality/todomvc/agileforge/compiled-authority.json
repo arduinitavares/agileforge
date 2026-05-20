@@ -1,0 +1,257 @@
+{
+  "assumptions": [
+    {
+      "id": "ASM-1",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "Source document is treated as the full authority for benchmark scope, and linked external references do not add behavior beyond the source."
+    },
+    {
+      "id": "ASM-2",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "Where the source states SHOULD-level guidance without explicit required artifacts or measurable constraints, it is not promoted to a hard invariant."
+    }
+  ],
+  "domain": "TodoMVC application",
+  "eligible_feature_rules": [],
+  "gaps": [
+    {
+      "id": "GAP-1",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "Unsupported normative guidance on comparison to other examples is treated as non-authoritative style guidance rather than a product invariant."
+    },
+    {
+      "id": "GAP-2",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "Framework-specific best-practice deviations are referenced but not concretely specified in a way that yields additional deterministic invariants."
+    },
+    {
+      "id": "GAP-3",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "The spec does not provide explicit numeric maxima for any field, so no MAX_VALUE invariants were extracted."
+    }
+  ],
+  "invariants": [
+    {
+      "id": "INV-15c181b028494489",
+      "source_excerpt": "README",
+      "source_refs": [
+        "REQ.readme.title"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=README"
+    },
+    {
+      "id": "INV-a959ee3b23ba81ca",
+      "source_excerpt": "package.json dependency example",
+      "source_refs": [
+        "EXAMPLE.package-json.title"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=package.json"
+    },
+    {
+      "id": "INV-ea857bc01235ba31",
+      "source_excerpt": "When the page loads, the new-todo input is focused.",
+      "source_refs": [
+        "REQ.new-todo.acceptance[0]"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=new-todo input"
+    },
+    {
+      "id": "INV-784df8cae188261e",
+      "source_excerpt": "When the mark-all checkbox is unchecked, all todos become active.",
+      "source_refs": [
+        "REQ.toggle-all.acceptance[1]"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=mark-all checkbox"
+    },
+    {
+      "id": "INV-b9930a143d0d0ac3",
+      "source_excerpt": "localStorage key",
+      "source_refs": [
+        "DATA.localstorage-key.title"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=localStorage"
+    },
+    {
+      "id": "INV-d0c3a7d7fc448d33",
+      "source_excerpt": "Routing and filtering",
+      "source_refs": [
+        "REQ.routing.title"
+      ],
+      "support": "direct",
+      "text": "REQUIRED_FIELD:field_name=routing"
+    },
+    {
+      "id": "INV-29a2d43f83b2e1f3",
+      "source_excerpt": "Editing mode must not be persisted.",
+      "source_refs": [
+        "DATA.editing-state.statement"
+      ],
+      "support": "direct",
+      "text": "FORBIDDEN_CAPABILITY:capability=editing mode persistence"
+    },
+    {
+      "id": "INV-f036fa9d50476c33",
+      "source_excerpt": "The implementation avoids Sass, CoffeeScript, or other preprocessors unless a reviewer records a framework-specific reason.",
+      "source_refs": [
+        "CONSTRAINT.html-css-js-style.acceptance[5]"
+      ],
+      "support": "direct",
+      "text": "FORBIDDEN_CAPABILITY:capability=Sass"
+    },
+    {
+      "id": "INV-0368a4c1626c33dc",
+      "source_excerpt": "The implementation avoids Sass, CoffeeScript, or other preprocessors unless a reviewer records a framework-specific reason.",
+      "source_refs": [
+        "CONSTRAINT.html-css-js-style.acceptance[5]"
+      ],
+      "support": "direct",
+      "text": "FORBIDDEN_CAPABILITY:capability=CoffeeScript"
+    },
+    {
+      "id": "INV-be7b91ef55f0d4bf",
+      "source_excerpt": "The app must work in every browser supported by the TodoMVC project.",
+      "source_refs": [
+        "CONSTRAINT.browser-support"
+      ],
+      "support": "direct",
+      "text": "RELATION_CONSTRAINT:expression=#main hidden when todo list empty <= empty todo list state"
+    },
+    {
+      "id": "INV-8e35044a78370507",
+      "source_excerpt": "When there are no todos, #main and #footer should be hidden.",
+      "source_refs": [
+        "REQ.empty-state-visibility"
+      ],
+      "support": "direct",
+      "text": "RELATION_CONSTRAINT:expression=#footer hidden when todo list empty <= empty todo list state"
+    },
+    {
+      "id": "INV-ac2c6fae40d791c8",
+      "source_excerpt": "When the route changes, the todo list must be filtered at the model level, the selected class on filter links must be toggled, item updates in a filtered state must update visibility accordingly, and the active filter must persist on reload.",
+      "source_refs": [
+        "REQ.filtered-state"
+      ],
+      "support": "direct",
+      "text": "RELATION_CONSTRAINT:expression=active count <= number of active todos"
+    },
+    {
+      "id": "INV-28d0075a5a3994f1",
+      "source_excerpt": "Given at least one todo is completed, when Clear completed is clicked, then completed todos are removed.",
+      "source_refs": [
+        "REQ.clear-completed"
+      ],
+      "support": "direct",
+      "text": "RELATION_CONSTRAINT:expression=selected class on filter link <= route state"
+    },
+    {
+      "id": "INV-b28e959ac67753a9",
+      "source_excerpt": null,
+      "source_refs": [],
+      "support": "inferred",
+      "text": "RELATION_CONSTRAINT:expression=completed todos removed <= clear completed action"
+    }
+  ],
+  "rejected_features": [],
+  "scope_themes": [
+    "TodoMVC template fidelity",
+    "Framework-appropriate structure",
+    "Todo item lifecycle and interactions",
+    "Persistence and routing",
+    "Code style and dependency management"
+  ],
+  "source_map": {
+    "INV-0368a4c1626c33dc": [
+      {
+        "excerpt": "The implementation avoids Sass, CoffeeScript, or other preprocessors unless a reviewer records a framework-specific reason.",
+        "location": "CONSTRAINT.html-css-js-style.acceptance[5]"
+      }
+    ],
+    "INV-15c181b028494489": [
+      {
+        "excerpt": "README",
+        "location": "REQ.readme.title"
+      }
+    ],
+    "INV-28d0075a5a3994f1": [
+      {
+        "excerpt": "Given at least one todo is completed, when Clear completed is clicked, then completed todos are removed.",
+        "location": "REQ.clear-completed"
+      }
+    ],
+    "INV-29a2d43f83b2e1f3": [
+      {
+        "excerpt": "Editing mode must not be persisted.",
+        "location": "DATA.editing-state.statement"
+      }
+    ],
+    "INV-784df8cae188261e": [
+      {
+        "excerpt": "When the mark-all checkbox is unchecked, all todos become active.",
+        "location": "REQ.toggle-all.acceptance[1]"
+      }
+    ],
+    "INV-8e35044a78370507": [
+      {
+        "excerpt": "When there are no todos, #main and #footer should be hidden.",
+        "location": "REQ.empty-state-visibility"
+      }
+    ],
+    "INV-a959ee3b23ba81ca": [
+      {
+        "excerpt": "package.json dependency example",
+        "location": "EXAMPLE.package-json.title"
+      }
+    ],
+    "INV-ac2c6fae40d791c8": [
+      {
+        "excerpt": "When the route changes, the todo list must be filtered at the model level, the selected class on filter links must be toggled, item updates in a filtered state must update visibility accordingly, and the active filter must persist on reload.",
+        "location": "REQ.filtered-state"
+      }
+    ],
+    "INV-b9930a143d0d0ac3": [
+      {
+        "excerpt": "localStorage key",
+        "location": "DATA.localstorage-key.title"
+      }
+    ],
+    "INV-be7b91ef55f0d4bf": [
+      {
+        "excerpt": "The app must work in every browser supported by the TodoMVC project.",
+        "location": "CONSTRAINT.browser-support"
+      }
+    ],
+    "INV-d0c3a7d7fc448d33": [
+      {
+        "excerpt": "Routing and filtering",
+        "location": "REQ.routing.title"
+      }
+    ],
+    "INV-ea857bc01235ba31": [
+      {
+        "excerpt": "When the page loads, the new-todo input is focused.",
+        "location": "REQ.new-todo.acceptance[0]"
+      }
+    ],
+    "INV-f036fa9d50476c33": [
+      {
+        "excerpt": "The implementation avoids Sass, CoffeeScript, or other preprocessors unless a reviewer records a framework-specific reason.",
+        "location": "CONSTRAINT.html-css-js-style.acceptance[5]"
+      }
+    ]
+  }
+}

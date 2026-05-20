@@ -182,6 +182,8 @@ class _StoryDescriptionBenefitError(ValueError):
 class SpecAuthorityCompilerInput(BaseModel):
     """Input schema for spec_authority_compiler_agent."""
 
+    model_config = ConfigDict(extra="forbid")
+
     spec_source: Annotated[
         str | None,
         Field(
@@ -214,6 +216,14 @@ class SpecAuthorityCompilerInput(BaseModel):
         int | None,
         Field(default=None, description="Optional spec version identifier."),
     ]
+    spec_source_format: Annotated[
+        Literal["agileforge.spec.v1"],
+        Field(
+            description=(
+                "Input format: canonical agileforge.spec.v1 JSON."
+            )
+        ),
+    ] = "agileforge.spec.v1"
 
     @model_validator(mode="after")
     def validate_exactly_one_source(self) -> SpecAuthorityCompilerInput:
@@ -615,19 +625,28 @@ class SpecAuthorityCompilationSuccess(BaseModel):
             raise _CompactIrProvenanceRequiredError
 
         source_unit_ids = {unit.unit_id for unit in self.source_units}
-        for candidate in self.requirement_candidates:
-            if candidate.source_unit_id not in source_unit_ids:
-                raise _CompactIrSourceReferenceError(
-                    candidate.candidate_id,
-                    candidate.source_unit_id,
-                )
+        allow_model_candidate_hints_without_units = (
+            self.ir_provenance == IrProvenance.MODEL_EMITTED
+            and not self.source_units
+        )
+        if not allow_model_candidate_hints_without_units:
+            for candidate in self.requirement_candidates:
+                if candidate.source_unit_id not in source_unit_ids:
+                    raise _CompactIrSourceReferenceError(
+                        candidate.candidate_id,
+                        candidate.source_unit_id,
+                    )
 
         candidate_ids = {
             candidate.candidate_id for candidate in self.requirement_candidates
         }
+        allow_external_manifest_candidates = allow_model_candidate_hints_without_units
         authority_item_kinds = self._authority_item_kinds_by_id()
         for mapping in self.authority_mappings:
-            if mapping.candidate_id not in candidate_ids:
+            if (
+                mapping.candidate_id not in candidate_ids
+                and not allow_external_manifest_candidates
+            ):
                 raise _CompactIrMappingCandidateError(mapping.candidate_id)
             actual_kind = authority_item_kinds.get(mapping.authority_item_id)
             if actual_kind is None:

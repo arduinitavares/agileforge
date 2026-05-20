@@ -48,6 +48,11 @@ EXPECTED_PHASE_2C_COMMAND_NAMES = {
     "agileforge authority reject",
 }
 
+EXPECTED_PHASE_2E_COMMAND_NAMES = {
+    "agileforge spec profile schema",
+    "agileforge spec profile validate",
+}
+
 EXPECTED_PHASE_1_INPUTS = {
     "agileforge status": (["project_id"], []),
     "agileforge project list": ([], []),
@@ -208,17 +213,21 @@ def test_phase_2a_commands_are_registered_and_available() -> None:
 
 def test_project_create_is_registered_as_mutating_idempotent_command() -> None:
     """Publish the project create mutation contract for agents."""
-    schema = command_schema_payload("agileforge project create")
+    project_create_schema = command_schema_payload("agileforge project create")
 
-    assert schema["mutates"] is True
-    assert schema["idempotency_required"] is True
-    assert schema["idempotency_policy"] == DRY_RUN_IDEMPOTENCY_POLICY
-    assert schema["input"]["required"] == ["name", "spec_file"]
-    assert "idempotency_key" in schema["input"]["optional"]
-    assert "dry_run" in schema["input"]["optional"]
-    assert "dry_run_id" in schema["input"]["optional"]
-    assert ErrorCode.PROJECT_ALREADY_EXISTS.value in schema["errors"]
-    assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
+    assert project_create_schema["mutates"] is True
+    assert project_create_schema["idempotency_required"] is True
+    assert project_create_schema["idempotency_policy"] == DRY_RUN_IDEMPOTENCY_POLICY
+    assert project_create_schema["input"]["required"] == ["name", "spec_file"]
+    assert "idempotency_key" in project_create_schema["input"]["optional"]
+    assert "dry_run" in project_create_schema["input"]["optional"]
+    assert "dry_run_id" in project_create_schema["input"]["optional"]
+    assert ErrorCode.PROJECT_ALREADY_EXISTS.value in project_create_schema["errors"]
+    assert (
+        ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value
+        in project_create_schema["errors"]
+    )
+    assert ErrorCode.MUTATION_FAILED.value in project_create_schema["errors"]
 
 
 def test_project_setup_retry_is_registered_as_guarded_mutation() -> None:
@@ -261,40 +270,45 @@ def test_authority_review_is_registered_as_read_only_command() -> None:
     assert schema["installed"] is True
     assert capabilities["agileforge authority review"]["installed"] is True
     assert schema["input"]["required"] == ["project_id"]
-    assert schema["input"]["optional"] == ["include_spec", "format"]
+    assert schema["input"]["optional"] == ["include_spec", "format", "open"]
 
 
 def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     """Publish the authority accept mutation contract for agents."""
-    schema = command_schema_payload("agileforge authority accept")
+    accept_schema = command_schema_payload("agileforge authority accept")
     capabilities = _capability_by_name()
+    input_required = accept_schema["input"]["required"]
 
-    assert schema["mutates"] is True
-    assert schema["installed"] is True
-    assert schema["idempotency_required"] is True
-    assert schema["idempotency_policy"]["non_dry_run"] == "required"
-    assert schema["idempotency_policy"]["dry_run"] != "not_applicable"
-    assert schema["input"]["required"] == ["project_id", "idempotency_key"]
-    assert "review_token" in schema["input"]["optional"]
-    assert "expected_authority_fingerprint" in schema["input"]["optional"]
-    assert "expected_source_spec_hash" in schema["input"]["optional"]
-    assert "expected_disk_spec_hash" in schema["input"]["optional"]
-    assert "expected_state" in schema["input"]["optional"]
-    assert "expected_setup_status" in schema["input"]["optional"]
-    assert "expected_coverage_summary_fingerprint" in schema["input"]["optional"]
-    assert "review_token" in schema["guard_policy"]
-    assert "expected_coverage_summary_fingerprint" in schema["guard_policy"]
-    assert schema["guard_policy_is_authoritative"] is True
-    assert schema["legacy_guard_flags"]["accepts_expected_state"] is True
-    assert schema["legacy_guard_flags"]["accepts_expected_artifact_fingerprint"] is (
-        False
+    assert accept_schema["mutates"] is True
+    assert accept_schema["installed"] is True
+    assert accept_schema["idempotency_required"] is False
+    assert accept_schema["idempotency_policy"]["non_dry_run"] == "not_applicable"
+    assert accept_schema["idempotency_policy"]["dry_run"] == "not_applicable"
+    assert "project_id" in input_required
+    assert "review_token" not in input_required
+    assert "idempotency_key" not in input_required
+    assert "review_token" in accept_schema["input"]["optional"]
+    assert "expected_authority_fingerprint" in accept_schema["input"]["optional"]
+    assert "expected_source_spec_hash" in accept_schema["input"]["optional"]
+    assert "expected_disk_spec_hash" in accept_schema["input"]["optional"]
+    assert "expected_state" in accept_schema["input"]["optional"]
+    assert "expected_setup_status" in accept_schema["input"]["optional"]
+    assert (
+        "expected_coverage_summary_fingerprint"
+        in accept_schema["input"]["optional"]
     )
+    assert "review_token" in accept_schema["guard_policy"]
+    assert "expected_coverage_summary_fingerprint" in accept_schema["guard_policy"]
+    assert accept_schema["guard_policy_is_authoritative"] is True
+    legacy_guard_flags = accept_schema["legacy_guard_flags"]
+    assert legacy_guard_flags["accepts_expected_state"] is True
+    assert legacy_guard_flags["accepts_expected_artifact_fingerprint"] is False
     assert capabilities["agileforge authority accept"]["guard_policy_is_authoritative"]
     assert capabilities["agileforge authority accept"]["accepts_expected_state"] is True
-    assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in schema["errors"]
-    assert ErrorCode.AUTHORITY_ALREADY_DECIDED.value in schema["errors"]
-    assert ErrorCode.AUTHORITY_SOURCE_CHANGED.value in schema["errors"]
-    assert ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value in schema["errors"]
+    assert ErrorCode.AUTHORITY_REVIEW_INCOMPLETE.value in accept_schema["errors"]
+    assert ErrorCode.AUTHORITY_ALREADY_DECIDED.value in accept_schema["errors"]
+    assert ErrorCode.AUTHORITY_SOURCE_CHANGED.value in accept_schema["errors"]
+    assert ErrorCode.AUTHORITY_GUARD_INCOMPLETE.value in accept_schema["errors"]
 
 
 def test_authority_reject_is_registered_as_guarded_mutation_with_reason() -> None:
@@ -337,3 +351,28 @@ def test_phase_2c_authority_commands_are_registered_and_available() -> None:
         assert command_is_available(command_name) is True
         assert command_name in capabilities
         assert capabilities[command_name]["installed"] is True
+
+
+def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:
+    """Publish spec profile schema and validation command contracts."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert EXPECTED_PHASE_2E_COMMAND_NAMES.issubset(names)
+    for command_name in EXPECTED_PHASE_2E_COMMAND_NAMES:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    schema = command_schema_payload("agileforge spec profile schema")
+    validate = command_schema_payload("agileforge spec profile validate")
+
+    assert schema["mutates"] is False
+    assert schema["input"]["required"] == []
+    assert schema["input"]["optional"] == []
+    assert validate["mutates"] is False
+    assert validate["input"]["required"] == ["spec_file"]
+    assert validate["input"]["optional"] == ["render_md"]
+    assert ErrorCode.SPEC_FILE_NOT_FOUND.value in validate["errors"]
+    assert ErrorCode.SPEC_FILE_INVALID.value in validate["errors"]
+    assert ErrorCode.INVALID_COMMAND.value in validate["errors"]
