@@ -96,6 +96,8 @@ def test_compiler_instructions_require_accepted_must_coverage() -> None:
     assert "Every unsupported accepted MUST or MUST_NOT item must produce a gap" in (
         instructions
     )
+    assert "Never use EXAMPLE items as source evidence for invariants" in instructions
+    assert "Do not use REQUIRED_FIELD for README" in instructions
 
 
 def test_compiler_instructions_document_host_semantic_ids() -> None:

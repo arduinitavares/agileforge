@@ -43,6 +43,8 @@ COVERAGE RULES FOR STRUCTURED SPECS:
 - Do not skip documentation, dependency, counter, clear-completed, keyboard, mouse, route, persistence, or CSS-class requirements merely because they are not API data fields; represent them with the closest supported invariant type or declare an item-ID gap.
 - SHOULD and MAY items may produce behavioral invariants with their original source_level, or gaps when unsupported. They must not be promoted to hard legacy constraints.
 - If using placeholder invariant IDs, keep source_map entries in the same order as invariants and include at least one source_map entry for each invariant.
+- Never use EXAMPLE items as source evidence for invariants; examples may only inform assumptions or gaps and must not create authority by themselves.
+- Do not use REQUIRED_FIELD for README, package.json examples, documentation, build-process descriptions, or dependency guidance. Use DATA_CONTRACT for explicit dependency contracts, or an item-ID gap when unsupported.
 
 OUTPUT FORMAT (JSON ONLY, NO MARKDOWN):
 Return ONLY one of the following JSON objects:

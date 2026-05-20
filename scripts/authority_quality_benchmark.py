@@ -35,6 +35,25 @@ _AUTHORITY_ASSERTION_PREFIXES: Final[tuple[str, ...]] = (
     "RELATION_CONSTRAINT:",
     "REQUIRED_FIELD:",
 )
+_TODOMVC_DEFERABLE_MUST_GAP_ITEMS: Final[frozenset[str]] = frozenset(
+    {
+        "REQ.readme",
+        "REQ.dependency-management",
+    }
+)
+_TODOMVC_REQUIRED_FIELD_COMPRESSION_ITEMS: Final[frozenset[str]] = frozenset(
+    {
+        "REQ.new-todo",
+        "REQ.toggle-all",
+        "REQ.item-interactions",
+        "REQ.editing",
+        "REQ.counter",
+        "REQ.clear-completed",
+        "REQ.persistence",
+        "REQ.routing",
+        "REQ.filtered-state",
+    }
+)
 _TODOMVC_REQUIRED_CONCEPTS: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
     "CONSTRAINT.code-style-rules": (
         ("double-quotes", "double", "quotes"),
@@ -305,9 +324,11 @@ def evaluate_todomvc_authority_guardrails(
     source_items = _gold_items_by_id(gold_spec)
     authority_items = _authority_invariants(authority)
     authority_by_source_item = _authority_text_by_source_item(authority_items)
+    gap_source_item_ids = _authority_gap_source_item_ids(authority)
     weak_or_missing = _weak_or_missing_todomvc_must_items(
         source_items=source_items,
         authority_by_source_item=authority_by_source_item,
+        gap_source_item_ids=gap_source_item_ids,
     )
     findings: list[JsonObject] = []
 
@@ -437,6 +458,11 @@ def _authority_invariants(authority: JsonObject) -> list[JsonObject]:
         source_refs = _authority_source_refs(item_copy)
         if isinstance(item_id, str):
             source_refs.extend(source_refs_by_invariant.get(item_id, []))
+        parameters = item_copy.get("parameters")
+        if isinstance(parameters, dict):
+            source_item_id = parameters.get("source_item_id")
+            if isinstance(source_item_id, str):
+                source_refs.append(source_item_id)
         item_copy["_benchmark_source_refs"] = sorted(set(source_refs))
         result.append(item_copy)
     return result
@@ -457,6 +483,38 @@ def _source_map_refs_by_invariant(authority: JsonObject) -> dict[str, list[str]]
             continue
         by_invariant.setdefault(invariant_id, []).append(location)
     return by_invariant
+
+
+def _authority_gap_source_item_ids(authority: JsonObject) -> set[str]:
+    gaps = authority.get("gaps")
+    if not isinstance(gaps, list):
+        return set()
+
+    source_item_ids: set[str] = set()
+    for gap in gaps:
+        if isinstance(gap, str):
+            source_item_ids.update(_source_item_ids_mentioned_in_text(gap))
+            continue
+        if not isinstance(gap, dict):
+            continue
+        for field_name in ("id", "text", "source_excerpt"):
+            value = gap.get(field_name)
+            if isinstance(value, str):
+                source_item_ids.update(_source_item_ids_mentioned_in_text(value))
+        source_refs = gap.get("source_refs")
+        if isinstance(source_refs, list):
+            for source_ref in source_refs:
+                if isinstance(source_ref, str) and (
+                    source_item_id := _source_item_id(source_ref)
+                ):
+                    source_item_ids.add(source_item_id)
+    return source_item_ids
+
+
+def _source_item_ids_mentioned_in_text(text: str) -> set[str]:
+    prefixes = "|".join(re.escape(prefix) for prefix in STRUCTURED_ITEM_PREFIXES)
+    pattern = re.compile(rf"\b(?:{prefixes})\.[A-Za-z0-9_-]+")
+    return {match.group(0) for match in pattern.finditer(text)}
 
 
 def _authority_text_by_source_item(
@@ -514,11 +572,17 @@ def _weak_or_missing_todomvc_must_items(
     *,
     source_items: dict[str, JsonObject],
     authority_by_source_item: dict[str, list[str]],
+    gap_source_item_ids: set[str],
 ) -> list[str]:
     weak_or_missing: list[str] = []
     for item_id, concept_groups in _TODOMVC_REQUIRED_CONCEPTS.items():
         source_item = source_items.get(item_id)
         if source_item is None or source_item.get("level") != "MUST":
+            continue
+        if (
+            item_id in _TODOMVC_DEFERABLE_MUST_GAP_ITEMS
+            and item_id in gap_source_item_ids
+        ):
             continue
         authority_text = " ".join(authority_by_source_item.get(item_id, []))
         if not authority_text:
@@ -570,7 +634,7 @@ def _unsafe_required_field_compressions(
             if (source_item_id := _source_item_id(source_ref)) is not None
         }
         if any(
-            source_item_id in _TODOMVC_REQUIRED_CONCEPTS
+            source_item_id in _TODOMVC_REQUIRED_FIELD_COMPRESSION_ITEMS
             for source_item_id in source_items
         ):
             unsafe.append(item)
@@ -614,6 +678,8 @@ def _modality_over_promotions(
                 continue
             source_item = source_items.get(source_item_id)
             if source_item is None:
+                continue
+            if source_item.get("type") == "NON_GOAL":
                 continue
             if source_item.get("level") not in {"MUST", "MUST_NOT"}:
                 promotions.append(item)

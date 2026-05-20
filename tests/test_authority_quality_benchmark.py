@@ -500,6 +500,143 @@ def test_todomvc_guardrails_use_top_level_source_map_for_coverage() -> None:
     assert "REQ.new-todo" not in result["weak_or_missing_must_items"]
 
 
+def test_todomvc_guardrails_use_behavioral_source_item_id_for_coverage() -> None:
+    """Validated behavioral source_item_id counts even without source_map."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-new-todo",
+                "type": "USER_INTERACTION",
+                "parameters": {
+                    "source_item_id": "REQ.new-todo",
+                    "source_level": "MUST",
+                    "trigger": "Enter keypress",
+                    "target": "new todo input",
+                    "expected_response": (
+                        "create a todo from non-empty trimmed text, append it "
+                        "to the list, and clear the input"
+                    ),
+                },
+            }
+        ],
+        "source_map": [],
+    }
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority=authority,
+        review_summary={},
+    )
+
+    assert "REQ.new-todo" not in result["weak_or_missing_must_items"]
+
+
+def test_todomvc_guardrails_accept_item_id_gap_for_deferable_must_item() -> None:
+    """Explicit item-ID gaps account for non-runtime MUST coverage."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority={"invariants": [], "gaps": ["REQ.readme: deferred to full spec."]},
+        review_summary={},
+    )
+
+    assert "REQ.readme" not in result["weak_or_missing_must_items"]
+
+
+def test_todomvc_guardrails_do_not_accept_gap_for_core_behavior() -> None:
+    """Core interactive behavior must be represented, not only gapped."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority={"invariants": [], "gaps": ["REQ.new-todo: deferred to full spec."]},
+        review_summary={},
+    )
+
+    assert "REQ.new-todo" in result["weak_or_missing_must_items"]
+
+
+def test_todomvc_guardrails_scope_required_field_compression_to_rich_items() -> None:
+    """README existence alone is weak coverage, not behavioral compression."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-readme",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "README"},
+            }
+        ],
+        "source_map": [
+            {
+                "invariant_id": "INV-readme",
+                "location": "REQ.readme.title",
+                "excerpt": "README",
+            }
+        ],
+    }
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority=authority,
+        review_summary={},
+    )
+
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert "UNSAFE_REQUIRED_FIELD_COMPRESSION" not in finding_codes
+    assert "REQ.readme" in result["weak_or_missing_must_items"]
+
+
+def test_todomvc_guardrails_allow_non_goal_forbidden_capability() -> None:
+    """NON_GOAL exclusions are not weak-guidance modality promotions."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-non-goal",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "custom visual design"},
+            }
+        ],
+        "source_map": [
+            {
+                "invariant_id": "INV-non-goal",
+                "location": "NON_GOAL.customized-visual-design.statement",
+                "excerpt": (
+                    "The app is not intended to introduce a distinct visual "
+                    "design beyond minimal app.css changes."
+                ),
+            }
+        ],
+    }
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority=authority,
+        review_summary={},
+    )
+
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert "MODALITY_OVER_PROMOTION" not in finding_codes
+
+
 def test_todomvc_guardrails_pin_core_missing_behavior_items() -> None:
     """TodoMVC guardrails identify the high-risk missing behavioral contracts."""
     fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"

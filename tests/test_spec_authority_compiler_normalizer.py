@@ -164,6 +164,16 @@ def _structured_behavior_spec_source() -> str:
                         "visual design beyond minimal app.css changes."
                     ),
                 },
+                {
+                    "id": "EXAMPLE.package-json",
+                    "type": "EXAMPLE",
+                    "status": "accepted",
+                    "title": "package.json dependency example",
+                    "statement": (
+                        "A package.json may include framework dependencies "
+                        "alongside todomvc-app-css and todomvc-common."
+                    ),
+                },
             ],
         }
     )
@@ -561,6 +571,42 @@ def test_normalizer_allows_forbidden_capability_from_non_goal_source() -> None:
     )
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+
+
+def test_normalizer_rejects_invariant_sourced_only_from_example() -> None:
+    """Illustrative EXAMPLE items cannot be sole invariant evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "package.json"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "A package.json may include framework dependencies alongside "
+                "todomvc-app-css and todomvc-common."
+            ),
+            "location": "EXAMPLE.package-json.statement",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+    assert "EXAMPLE.package-json" in normalized.root.blocking_gaps[0]
 
 
 def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> None:

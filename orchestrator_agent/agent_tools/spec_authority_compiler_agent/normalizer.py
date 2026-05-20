@@ -721,6 +721,13 @@ def _structured_authority_metadata_errors(
                 source_item_ids=source_map_ids.get(invariant.id, set()),
             )
         )
+        errors.extend(
+            _example_only_source_errors(
+                invariant,
+                source_items=source_items,
+                source_item_ids=source_map_ids.get(invariant.id, set()),
+            )
+        )
     return errors
 
 
@@ -780,6 +787,35 @@ def _legacy_modality_promotion_errors(
             f"{source_item_id} source level {source_level}."
         )
     return errors
+
+
+def _example_only_source_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+    source_item_ids: set[str],
+) -> list[str]:
+    """Return errors when illustrative examples are sole invariant evidence."""
+    if not source_item_ids:
+        return []
+
+    known_source_items = [
+        source_items[source_item_id]
+        for source_item_id in source_item_ids
+        if source_item_id in source_items
+    ]
+    if not known_source_items:
+        return []
+
+    if any(source_item.get("type") != "EXAMPLE" for source_item in known_source_items):
+        return []
+
+    return [
+        (
+            f"{invariant.id} {invariant.type.value} uses only EXAMPLE source "
+            f"evidence: {', '.join(sorted(source_item_ids))}."
+        )
+    ]
 
 
 def _candidate_evidence_from_source_text(
