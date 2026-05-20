@@ -1,0 +1,23 @@
+{
+  "pending_authority_summary": {
+    "assumption_count": 2,
+    "eligible_feature_rule_count": 0,
+    "gap_count": 3,
+    "invariant_count": 14,
+    "rejected_feature_count": 0
+  },
+  "review_findings": [],
+  "review_summary": {
+    "acceptance_status": "accept_ready",
+    "blocking_finding_codes": [],
+    "blocking_finding_count": 0,
+    "compiler_assumption_count": 2,
+    "compiler_eligible_feature_rule_count": 0,
+    "compiler_gap_count": 3,
+    "compiler_invariant_count": 14,
+    "compiler_rejected_feature_count": 0,
+    "non_overrideable_blocking_finding_count": 0,
+    "overrideable_blocking_finding_count": 0,
+    "packet_truncated": false
+  }
+}
