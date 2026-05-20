@@ -301,7 +301,7 @@ def test_init_source_command_writes_normalized_source_and_metadata(
     """The init-source command writes source fixtures and source metadata."""
     raw_path = tmp_path / "raw.md"
     fixture_dir = tmp_path / "fixture"
-    raw_path.write_text("# Title\r\n", encoding="utf-8")
+    raw_path.write_text("# Title\r\n", encoding="utf-8", newline="")
 
     exit_code = main(
         [
@@ -330,6 +330,9 @@ def test_init_source_command_writes_normalized_source_and_metadata(
     )
 
     assert exit_code == 0
+    assert (
+        fixture_dir / "source/raw/source.raw.md"
+    ).read_text(encoding="utf-8", newline="") == "# Title\r\n"
     assert (fixture_dir / "source/source.md").read_text(encoding="utf-8") == "# Title\n"
     assert (fixture_dir / "source/source.sha256").read_text(
         encoding="utf-8"
