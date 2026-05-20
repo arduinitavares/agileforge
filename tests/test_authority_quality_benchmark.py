@@ -6,8 +6,11 @@ import json
 from typing import TYPE_CHECKING
 
 from scripts.authority_quality_benchmark import (
+    build_run_manifest,
     build_source_meta,
+    extract_compiled_authority,
     normalize_source_text,
+    sanitize_review_packet,
     sha256_text,
     write_json,
     write_text,
@@ -86,3 +89,132 @@ def test_write_text_creates_parent_directories_and_writes_utf8(tmp_path: Path) -
     write_text(output, "Café\n")
 
     assert output.read_text(encoding="utf-8") == "Café\n"
+
+
+def test_sanitize_review_packet_removes_guard_tokens_and_project_ids() -> None:
+    """Review packet sanitization removes committed-unsafe envelope data."""
+    packet = {
+        "ok": True,
+        "data": {
+            "guard_tokens": {"review_token": "secret-token"},
+            "project": {
+                "project_id": "proj_raw_123",
+                "id": 123,
+                "name": "Fixture",
+            },
+            "review_summary": {"acceptance_status": "accept_ready"},
+            "review_findings": [{"id": "FIND-1", "severity": "low"}],
+            "pending_authority": {
+                "authority_id": 55,
+                "artifact": {
+                    "invariants": [{"id": "INV-1"}],
+                    "assumptions": [],
+                    "gaps": [],
+                    "eligible_feature_rules": [{"id": "EFR-1"}],
+                    "rejected_features": [],
+                },
+            },
+        },
+        "meta": {"correlation_id": "secret-correlation"},
+    }
+
+    sanitized = sanitize_review_packet(packet)
+
+    serialized = json.dumps(sanitized)
+    assert "guard_tokens" not in serialized
+    assert "secret-token" not in serialized
+    assert "secret-correlation" not in serialized
+    assert "project_id" not in serialized
+    assert "proj_raw_123" not in serialized
+    assert sanitized["review_summary"] == {"acceptance_status": "accept_ready"}
+    assert sanitized["review_findings"] == [{"id": "FIND-1", "severity": "low"}]
+    assert sanitized["pending_authority_summary"] == {
+        "assumption_count": 0,
+        "eligible_feature_rule_count": 1,
+        "gap_count": 0,
+        "invariant_count": 1,
+        "rejected_feature_count": 0,
+    }
+
+
+def test_sanitize_review_packet_handles_malformed_data() -> None:
+    """Malformed review packet shapes produce a minimal committed-safe summary."""
+    assert sanitize_review_packet({}) == {"review_summary": None, "review_findings": []}
+    assert sanitize_review_packet({"data": []}) == {
+        "review_summary": None,
+        "review_findings": [],
+    }
+
+
+def test_extract_compiled_authority_reads_pending_authority_artifact() -> None:
+    """Compiled authority is read from the pending authority artifact."""
+    packet = {
+        "data": {
+            "pending_authority": {
+                "artifact": {
+                    "invariants": [{"id": "INV-1"}],
+                    "assumptions": [],
+                }
+            }
+        }
+    }
+
+    artifact = extract_compiled_authority(packet)
+
+    assert artifact == {"invariants": [{"id": "INV-1"}], "assumptions": []}
+
+
+def test_extract_compiled_authority_handles_malformed_data() -> None:
+    """Malformed review packet shapes do not produce authority content."""
+    assert extract_compiled_authority({}) == {}
+    assert extract_compiled_authority({"data": {"pending_authority": []}}) == {}
+    assert (
+        extract_compiled_authority(
+            {"data": {"pending_authority": {"artifact": "not-json"}}}
+        )
+        == {}
+    )
+
+
+def test_build_run_manifest_records_hashes_without_project_ids() -> None:
+    """Run manifests record reproducibility metadata without raw project ids."""
+    manifest = build_run_manifest(
+        agileforge_commit="abc1234",
+        agileforge_branch="dev/authority-coverage-matrix-phase-2e",
+        schema_version="agileforge.spec.v1",
+        compiler_version="1.0.0",
+        spec_generation_model="manual",
+        authority_compiler_model="openrouter/openai/gpt-5.4-mini",
+        prompt_versions=["writing-technical-specs@local"],
+        normalized_source_text="# Source\r\n",
+        gold_spec_text='{"schema_version":"agileforge.spec.v1"}',
+        compiled_authority_text='{"invariants":[]}',
+        create_command="agileforge project create --project-id proj_raw_123",
+        review_command="agileforge authority review --project-id=proj_raw_123",
+        extraction_command="authority_quality_benchmark extract-review",
+        generated_at="2026-05-20T12:00:00Z",
+        acceptance_mutation_status="not_run",
+    )
+
+    serialized = json.dumps(manifest)
+    assert "project_id" not in serialized
+    assert "proj_raw_123" not in serialized
+    assert manifest["agileforge_commit"] == "abc1234"
+    assert manifest["agileforge_branch"] == "dev/authority-coverage-matrix-phase-2e"
+    assert manifest["schema_version"] == "agileforge.spec.v1"
+    assert manifest["compiler_version"] == "1.0.0"
+    assert manifest["spec_generation_model"] == "manual"
+    assert manifest["authority_compiler_model"] == "openrouter/openai/gpt-5.4-mini"
+    assert manifest["prompt_versions"] == ["writing-technical-specs@local"]
+    assert manifest["normalized_source_sha256"] == sha256_text("# Source\n")
+    assert manifest["gold_spec_sha256"] == sha256_text(
+        '{"schema_version":"agileforge.spec.v1"}'
+    )
+    assert manifest["compiled_authority_sha256"] == sha256_text('{"invariants":[]}')
+    assert manifest["commands"] == {
+        "create": "agileforge project create --project-id REDACTED",
+        "extraction": "authority_quality_benchmark extract-review",
+        "review": "agileforge authority review --project-id=REDACTED",
+    }
+    assert manifest["generated_at"] == "2026-05-20T12:00:00Z"
+    assert manifest["acceptance_mutation_status"] == "not_run"
