@@ -14,10 +14,15 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contr
     compute_prompt_hash,
 )
 from utils.spec_schemas import (
+    DataContractParams,
     InvariantType,
     RequiredFieldParams,
+    RouteContractParams,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
+    StateTransitionParams,
+    UserInteractionParams,
+    VisibilityRuleParams,
 )
 
 
@@ -223,6 +228,139 @@ def test_legacy_success_without_ir_stays_valid() -> None:
 
     assert success.rejected_features == []
     _assert_compact_ir_cleared(success)
+
+
+def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> None:
+    """Behavioral invariant params retain source identity and normative level."""
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "parameters": {
+                "source_item_id": "REQ.item-interactions",
+                "source_level": "MUST",
+                "trigger": "double-click label",
+                "target": "todo item label",
+                "expected_response": "parent li enters editing mode",
+            },
+        },
+        {
+            "id": "INV-bbbbbbbbbbbbbbbb",
+            "type": "STATE_TRANSITION",
+            "parameters": {
+                "source_item_id": "REQ.editing",
+                "source_level": "MUST",
+                "state": "editing",
+                "trigger": "Escape key",
+                "outcome": "editing exits and unsaved changes are discarded",
+            },
+        },
+        {
+            "id": "INV-cccccccccccccccc",
+            "type": "DATA_CONTRACT",
+            "parameters": {
+                "source_item_id": "DATA.todo-record",
+                "source_level": "SHOULD",
+                "subject": "persisted todo record",
+                "fields": ["id", "title", "completed"],
+                "rule": "records use id, title, and completed keys when possible",
+            },
+        },
+        {
+            "id": "INV-dddddddddddddddd",
+            "type": "ROUTE_CONTRACT",
+            "parameters": {
+                "source_item_id": "REQ.routing",
+                "source_level": "MUST",
+                "route": "#/active",
+                "route_name": "active",
+                "behavior": "shows active todos",
+            },
+        },
+        {
+            "id": "INV-eeeeeeeeeeeeeeee",
+            "type": "VISIBILITY_RULE",
+            "parameters": {
+                "source_item_id": "REQ.empty-state-visibility",
+                "source_level": "SHOULD",
+                "target": "#main",
+                "condition": "todo list is empty",
+                "visibility": "hidden",
+            },
+        },
+    ]
+
+    success = SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    assert isinstance(success.invariants[0].parameters, UserInteractionParams)
+    assert isinstance(success.invariants[1].parameters, StateTransitionParams)
+    assert isinstance(success.invariants[2].parameters, DataContractParams)
+    assert isinstance(success.invariants[3].parameters, RouteContractParams)
+    assert isinstance(success.invariants[4].parameters, VisibilityRuleParams)
+    assert success.invariants[0].parameters.source_item_id == "REQ.item-interactions"
+    assert success.invariants[0].parameters.source_level == "MUST"
+    assert success.invariants[2].parameters.fields == ["id", "title", "completed"]
+
+
+def test_behavioral_invariant_parameters_must_match_declared_type() -> None:
+    """A behavioral invariant type cannot reuse an unrelated parameter shape."""
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "parameters": {
+                "source_item_id": "REQ.item-interactions",
+                "source_level": "MUST",
+                "state": "editing",
+                "trigger": "Escape key",
+                "outcome": "editing exits and changes are discarded",
+            },
+        }
+    ]
+
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+
+def test_normalizer_rewrites_behavioral_invariant_ids_semantically() -> None:
+    """Behavioral authority types use the same deterministic semantic ID rule."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "parameters": {
+                "source_item_id": "REQ.item-interactions",
+                "source_level": "MUST",
+                "trigger": "checkbox click",
+                "target": "todo checkbox",
+                "expected_response": "todo completed value toggles",
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant = normalized.root.invariants[0]
+    assert invariant.id == compute_invariant_id_from_payload(
+        InvariantType.USER_INTERACTION,
+        UserInteractionParams(
+            source_item_id="REQ.item-interactions",
+            source_level="MUST",
+            trigger="checkbox click",
+            target="todo checkbox",
+            expected_response="todo completed value toggles",
+        ),
+    )
+    assert invariant.parameters.source_item_id == "REQ.item-interactions"
+    assert invariant.parameters.source_level == "MUST"
 
 
 def test_success_schema_accepts_compact_ir_with_provenance() -> None:

@@ -29,6 +29,11 @@ def test_spec_schema_module_exports_validation_and_compiler_models() -> None:
     assert spec_schemas.SpecAuthorityCompilerInput.__module__ == "utils.spec_schemas"
     assert spec_schemas.InvariantType.__module__ == "utils.spec_schemas"
     assert spec_schemas.RequiredFieldParams.__module__ == "utils.spec_schemas"
+    assert spec_schemas.UserInteractionParams.__module__ == "utils.spec_schemas"
+    assert spec_schemas.StateTransitionParams.__module__ == "utils.spec_schemas"
+    assert spec_schemas.DataContractParams.__module__ == "utils.spec_schemas"
+    assert spec_schemas.RouteContractParams.__module__ == "utils.spec_schemas"
+    assert spec_schemas.VisibilityRuleParams.__module__ == "utils.spec_schemas"
     assert spec_schemas.Invariant.__module__ == "utils.spec_schemas"
     assert (
         spec_schemas.SpecAuthorityCompilationSuccess.__module__ == "utils.spec_schemas"
@@ -44,6 +49,11 @@ def test_spec_schema_module_exports_validation_and_compiler_models() -> None:
     assert schemes.SpecAuthorityCompilerInput is spec_schemas.SpecAuthorityCompilerInput
     assert schemes.InvariantType is spec_schemas.InvariantType
     assert schemes.RequiredFieldParams is spec_schemas.RequiredFieldParams
+    assert schemes.UserInteractionParams is spec_schemas.UserInteractionParams
+    assert schemes.StateTransitionParams is spec_schemas.StateTransitionParams
+    assert schemes.DataContractParams is spec_schemas.DataContractParams
+    assert schemes.RouteContractParams is spec_schemas.RouteContractParams
+    assert schemes.VisibilityRuleParams is spec_schemas.VisibilityRuleParams
     assert schemes.Invariant is spec_schemas.Invariant
     assert (
         schemes.SpecAuthorityCompilationSuccess

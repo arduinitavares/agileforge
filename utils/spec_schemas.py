@@ -242,6 +242,32 @@ class InvariantType(StrEnum):
     REQUIRED_FIELD = "REQUIRED_FIELD"
     MAX_VALUE = "MAX_VALUE"
     RELATION_CONSTRAINT = "RELATION_CONSTRAINT"
+    USER_INTERACTION = "USER_INTERACTION"
+    STATE_TRANSITION = "STATE_TRANSITION"
+    DATA_CONTRACT = "DATA_CONTRACT"
+    ROUTE_CONTRACT = "ROUTE_CONTRACT"
+    VISIBILITY_RULE = "VISIBILITY_RULE"
+
+
+SpecAuthoritySourceLevel = Literal["MUST", "SHOULD", "MAY", "MUST_NOT"]
+
+
+class BehavioralAuthorityParams(BaseModel):
+    """Common source metadata for behavioral authority invariants."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_item_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Structured spec item ID that authorizes this invariant.",
+        ),
+    ]
+    source_level: Annotated[
+        SpecAuthoritySourceLevel,
+        Field(description="Normative level of the source item."),
+    ]
 
 
 class ForbiddenCapabilityParams(BaseModel):
@@ -297,11 +323,104 @@ class RelationConstraintParams(BaseModel):
     ]
 
 
+class UserInteractionParams(BehavioralAuthorityParams):
+    """Parameters for user-triggered interaction contracts."""
+
+    trigger: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="User event or gesture that triggers behavior.",
+        ),
+    ]
+    target: Annotated[
+        str,
+        Field(min_length=1, description="UI element or object receiving the trigger."),
+    ]
+    expected_response: Annotated[
+        str,
+        Field(min_length=1, description="Required response to the interaction."),
+    ]
+
+
+class StateTransitionParams(BehavioralAuthorityParams):
+    """Parameters for state transition contracts."""
+
+    state: Annotated[
+        str,
+        Field(min_length=1, description="State or state machine being constrained."),
+    ]
+    trigger: Annotated[
+        str,
+        Field(min_length=1, description="Event or condition that causes transition."),
+    ]
+    outcome: Annotated[
+        str,
+        Field(min_length=1, description="Required resulting state or side effect."),
+    ]
+
+
+class DataContractParams(BehavioralAuthorityParams):
+    """Parameters for persisted or exchanged data contracts."""
+
+    subject: Annotated[
+        str,
+        Field(min_length=1, description="Data object, record, key, or payload."),
+    ]
+    fields: Annotated[
+        list[str],
+        Field(default_factory=list, description="Required or recommended fields."),
+    ]
+    rule: Annotated[
+        str,
+        Field(min_length=1, description="Data shape, naming, or persistence rule."),
+    ]
+
+
+class RouteContractParams(BehavioralAuthorityParams):
+    """Parameters for routing contracts."""
+
+    route: Annotated[
+        str,
+        Field(min_length=1, description="Route pattern or route family."),
+    ]
+    route_name: Annotated[
+        str,
+        Field(min_length=1, description="Human-readable route purpose."),
+    ]
+    behavior: Annotated[
+        str,
+        Field(min_length=1, description="Required behavior when the route is active."),
+    ]
+
+
+class VisibilityRuleParams(BehavioralAuthorityParams):
+    """Parameters for UI visibility contracts."""
+
+    target: Annotated[
+        str,
+        Field(min_length=1, description="UI element whose visibility is constrained."),
+    ]
+    condition: Annotated[
+        str,
+        Field(min_length=1, description="Condition under which the rule applies."),
+    ]
+    visibility: Annotated[
+        Literal["visible", "hidden", "shown", "removed"],
+        Field(description="Required visibility state."),
+    ]
+
+
 InvariantParameters = (
     ForbiddenCapabilityParams
     | RequiredFieldParams
     | MaxValueParams
     | RelationConstraintParams
+    | UserInteractionParams
+    | StateTransitionParams
+    | DataContractParams
+    | RouteContractParams
+    | VisibilityRuleParams
 )
 
 
@@ -331,6 +450,11 @@ class Invariant(BaseModel):
             InvariantType.REQUIRED_FIELD: RequiredFieldParams,
             InvariantType.MAX_VALUE: MaxValueParams,
             InvariantType.RELATION_CONSTRAINT: RelationConstraintParams,
+            InvariantType.USER_INTERACTION: UserInteractionParams,
+            InvariantType.STATE_TRANSITION: StateTransitionParams,
+            InvariantType.DATA_CONTRACT: DataContractParams,
+            InvariantType.ROUTE_CONTRACT: RouteContractParams,
+            InvariantType.VISIBILITY_RULE: VisibilityRuleParams,
         }
         expected_type = type_map.get(self.type)
         if expected_type and not isinstance(self.parameters, expected_type):
