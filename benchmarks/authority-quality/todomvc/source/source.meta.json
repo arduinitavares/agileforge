@@ -1,0 +1,15 @@
+{
+  "fetched_at": "2026-05-20T12:00:00Z",
+  "license_note": "TodoMVC app spec from tastejs/todomvc; source URL retained for license/provenance review.",
+  "normalization": {
+    "method": "raw-markdown-copy",
+    "notes": "Line endings normalized to LF; source wording preserved.",
+    "tool": "scripts/authority_quality_benchmark.py",
+    "tool_version": "1"
+  },
+  "normalized_artifact": "source/source.md",
+  "normalized_sha256": "sha256:5bf3ac910c720533c9fb57708fc2a5e964ea6a4d59436d145c929b4059521094",
+  "raw_artifact": "source/raw/source.raw.md",
+  "raw_sha256": "sha256:5bf3ac910c720533c9fb57708fc2a5e964ea6a4d59436d145c929b4059521094",
+  "source_url": "https://raw.githubusercontent.com/tastejs/todomvc/refs/heads/master/app-spec.md"
+}
