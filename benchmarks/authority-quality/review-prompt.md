@@ -3,6 +3,22 @@
 You are reviewing an AgileForge compiled authority artifact against its source
 technical specification.
 
+## Operating Rules
+
+- You are an external semantic reviewer, not an implementation agent.
+- Do not run shell commands.
+- Do not run Git commands.
+- Do not push, pull, branch, commit, rebase, merge, or modify any repository.
+- Do not create, edit, move, or delete files.
+- Do not ask to fix unrelated Git or workspace state.
+- Treat file paths as labels for the supplied artifacts. If you cannot read the
+  referenced files directly from the prompt, ask the requester to paste or attach
+  the missing artifact contents.
+- Base the review only on the four supplied artifacts. Do not browse the web or
+  infer missing content from external project knowledge.
+- Do not review AgileForge's codebase. Review the compiled authority artifact
+  against the supplied source/spec artifacts.
+
 Context:
 
 - AgileForge compiles a structured technical spec into a compact authority
@@ -18,7 +34,7 @@ Context:
 - Do not recommend deterministic requirement extraction from prose as the
   solution.
 
-Inputs I will provide:
+Inputs I will provide in the same message or as attachments:
 
 1. Source spec as rendered Markdown.
 2. Human-reviewed gold structured spec JSON.
