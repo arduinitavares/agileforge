@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 JsonObject = dict[str, Any]
@@ -16,7 +17,7 @@ JsonObject = dict[str, Any]
 def normalize_source_text(raw_text: str) -> str:
     """Normalize source text without changing its semantic wording."""
     normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
-    return normalized.rstrip() + "\n"
+    return normalized.rstrip("\n") + "\n"
 
 
 def sha256_text(text: str) -> str:
@@ -40,7 +41,7 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def build_source_meta(
+def build_source_meta(  # noqa: PLR0913
     *,
     source_url: str,
     fetched_at: str,
