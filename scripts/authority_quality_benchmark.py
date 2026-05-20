@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 
 JsonObject = dict[str, Any]
+LOCAL_COMMAND_FLAGS = ("project-id", "idempotency-key", "review-token")
 
 
 def normalize_source_text(raw_text: str) -> str:
@@ -178,5 +179,6 @@ def build_run_manifest(  # noqa: PLR0913
 
 
 def _redact_command(command: str) -> str:
-    redacted = re.sub(r"(--project-id=)\S+", r"\1REDACTED", command)
-    return re.sub(r"(--project-id\s+)\S+", r"\1REDACTED", redacted)
+    flag_pattern = "|".join(re.escape(flag) for flag in LOCAL_COMMAND_FLAGS)
+    redacted = re.sub(rf"(--(?:{flag_pattern})=)\S+", r"\1REDACTED", command)
+    return re.sub(rf"(--(?:{flag_pattern})\s+)\S+", r"\1REDACTED", redacted)

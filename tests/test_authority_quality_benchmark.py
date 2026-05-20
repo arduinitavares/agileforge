@@ -232,3 +232,63 @@ def test_build_run_manifest_records_hashes_without_project_ids() -> None:
     }
     assert manifest["generated_at"] == "2026-05-20T12:00:00Z"
     assert manifest["acceptance_mutation_status"] == "not_run"
+
+
+def test_build_run_manifest_redacts_local_command_artifacts() -> None:
+    """Run manifests redact local-only command ids, keys, and guard tokens."""
+    manifest = build_run_manifest(
+        agileforge_commit="abc1234",
+        agileforge_branch="dev/authority-coverage-matrix-phase-2e",
+        schema_version="agileforge.spec.v1",
+        compiler_version="1.0.0",
+        spec_generation_model="manual",
+        authority_compiler_model="openrouter/openai/gpt-5.4-mini",
+        prompt_versions=["writing-technical-specs@local"],
+        normalized_source_text="# Source\n",
+        gold_spec_text='{"schema_version":"agileforge.spec.v1"}',
+        compiled_authority_text='{"invariants":[]}',
+        create_command=(
+            "agileforge project create --project-id project-space-secret "
+            "--project-id=project-equals-secret --idempotency-key idem-space "
+            "--idempotency-key=idem-equals"
+        ),
+        review_command=(
+            "agileforge authority review --review-token token-space "
+            "--review-token=token-equals"
+        ),
+        extraction_command=(
+            "authority_quality_benchmark extract-review "
+            "--idempotency-key extract-idem --review-token=extract-token"
+        ),
+        generated_at="2026-05-20T12:00:00Z",
+        acceptance_mutation_status="not_run",
+    )
+
+    serialized = json.dumps(manifest)
+    for raw_value in (
+        "project-space-secret",
+        "project-equals-secret",
+        "idem-space",
+        "idem-equals",
+        "token-space",
+        "token-equals",
+        "extract-idem",
+        "extract-token",
+    ):
+        assert raw_value not in serialized
+
+    assert manifest["commands"] == {
+        "create": (
+            "agileforge project create --project-id REDACTED "
+            "--project-id=REDACTED --idempotency-key REDACTED "
+            "--idempotency-key=REDACTED"
+        ),
+        "extraction": (
+            "authority_quality_benchmark extract-review "
+            "--idempotency-key REDACTED --review-token=REDACTED"
+        ),
+        "review": (
+            "agileforge authority review --review-token REDACTED "
+            "--review-token=REDACTED"
+        ),
+    }
