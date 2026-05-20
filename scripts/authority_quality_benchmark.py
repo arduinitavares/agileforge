@@ -8,10 +8,117 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 JsonObject = dict[str, Any]
 LOCAL_COMMAND_FLAGS = ("project-id", "idempotency-key", "review-token")
+MIN_STRUCTURED_SOURCE_REF_PARTS: Final[int] = 2
+STRUCTURED_ITEM_PREFIXES: Final[frozenset[str]] = frozenset(
+    {
+        "ASSUMPTION",
+        "CONSTRAINT",
+        "DATA",
+        "DECISION",
+        "EXAMPLE",
+        "GOAL",
+        "INTERFACE",
+        "NON_GOAL",
+        "OPEN_QUESTION",
+        "QUALITY",
+        "REQ",
+        "RISK",
+    }
+)
+_AUTHORITY_ASSERTION_PREFIXES: Final[tuple[str, ...]] = (
+    "FORBIDDEN_CAPABILITY:",
+    "MAX_VALUE:",
+    "RELATION_CONSTRAINT:",
+    "REQUIRED_FIELD:",
+)
+_TODOMVC_REQUIRED_CONCEPTS: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
+    "CONSTRAINT.code-style-rules": (
+        ("double-quotes", "double", "quotes"),
+        ("single-quotes", "single", "quotes"),
+        ("keycode", "key", "codes", "constants"),
+        ("npm", "packages"),
+    ),
+    "REQ.readme": (
+        ("readme",),
+        ("framework",),
+        ("implementation",),
+        ("build",),
+    ),
+    "REQ.dependency-management": (
+        ("package.json", "package"),
+        ("todomvc-common",),
+        ("todomvc-app-css",),
+    ),
+    "REQ.new-todo": (
+        ("enter",),
+        ("trim", "trimmed"),
+        ("empty", "non-empty"),
+        ("append", "appended"),
+        ("clear", "cleared"),
+    ),
+    "REQ.toggle-all": (
+        ("all",),
+        ("complete", "completed"),
+        ("clear completed", "clear-completed"),
+        ("single", "individual"),
+    ),
+    "REQ.item-interactions": (
+        ("checkbox",),
+        ("completed",),
+        ("double-click", "double", "dblclick"),
+        ("editing",),
+        ("hover",),
+        ("destroy", "remove"),
+    ),
+    "REQ.editing": (
+        ("focus", "focused"),
+        ("blur",),
+        ("enter",),
+        ("trim", "trimmed"),
+        ("destroy", "removed"),
+        ("escape",),
+        ("discard", "discarded"),
+    ),
+    "REQ.counter": (
+        ("active",),
+        ("strong",),
+        ("plural", "pluralize", "items", "item"),
+    ),
+    "REQ.clear-completed": (
+        ("completed",),
+        ("remove", "removed"),
+        ("hidden", "hide"),
+    ),
+    "REQ.persistence": (
+        ("persist", "persisted"),
+        ("localstorage", "localStorage"),
+        ("reload", "restore", "restored"),
+        ("framework",),
+    ),
+    "REQ.routing": (
+        ("#/", "all", "default"),
+        ("#/active", "active"),
+        ("#/completed", "completed"),
+        ("flatiron", "director"),
+        ("framework",),
+    ),
+    "REQ.filtered-state": (
+        ("route", "filter", "filtered"),
+        ("model",),
+        ("selected",),
+        ("visibility", "hidden", "shown"),
+        ("reload", "persist", "restored"),
+    ),
+}
+_TODOMVC_SOURCE_IDENTITY_CONCEPTS: Final[dict[str, tuple[str, ...]]] = {
+    "CONSTRAINT.browser-support": ("browser", "support"),
+    "REQ.clear-completed": ("clear", "completed"),
+    "REQ.filtered-state": ("filter", "route", "selected"),
+}
 
 
 def normalize_source_text(raw_text: str) -> str:
@@ -181,6 +288,357 @@ def build_run_manifest(  # noqa: PLR0913
         "schema_version": schema_version,
         "spec_generation_model": spec_generation_model,
     }
+
+
+def evaluate_todomvc_authority_guardrails(
+    *,
+    gold_spec: JsonObject,
+    authority: JsonObject,
+    review_summary: JsonObject,
+) -> JsonObject:
+    """Evaluate TodoMVC fixture authority against human-adjudicated guardrails.
+
+    This is a benchmark oracle for the TodoMVC fixture. It uses stable structured
+    spec item IDs plus human-selected concept groups; it is not a general prose
+    extractor and should not be used as the product semantic judge.
+    """
+    source_items = _gold_items_by_id(gold_spec)
+    authority_items = _authority_invariants(authority)
+    authority_by_source_item = _authority_text_by_source_item(authority_items)
+    weak_or_missing = _weak_or_missing_todomvc_must_items(
+        source_items=source_items,
+        authority_by_source_item=authority_by_source_item,
+    )
+    findings: list[JsonObject] = []
+
+    if weak_or_missing:
+        findings.append(
+            _finding(
+                code="MISSING_MUST_AUTHORITY",
+                severity="blocking",
+                message=(
+                    "TodoMVC MUST-level source items are missing or only weakly "
+                    "represented in the compiled authority."
+                ),
+                source_refs=weak_or_missing,
+                details={"items": weak_or_missing},
+            )
+        )
+
+    unsafe_required_fields = _unsafe_required_field_compressions(authority_items)
+    if unsafe_required_fields:
+        findings.append(
+            _finding(
+                code="UNSAFE_REQUIRED_FIELD_COMPRESSION",
+                severity="blocking",
+                message=(
+                    "Rich TodoMVC behavior is compressed into REQUIRED_FIELD "
+                    "existence checks."
+                ),
+                source_refs=_finding_source_refs(unsafe_required_fields),
+                details={"invariant_ids": _finding_ids(unsafe_required_fields)},
+            )
+        )
+
+    source_mismatches = _source_ref_semantic_mismatches(authority_items)
+    if source_mismatches:
+        findings.append(
+            _finding(
+                code="SOURCE_REF_SEMANTIC_MISMATCH",
+                severity="blocking",
+                message=(
+                    "Authority items point to structured source IDs whose core "
+                    "concepts do not match the authority text."
+                ),
+                source_refs=_finding_source_refs(source_mismatches),
+                details={"invariant_ids": _finding_ids(source_mismatches)},
+            )
+        )
+
+    modality_promotions = _modality_over_promotions(
+        source_items=source_items,
+        authority_items=authority_items,
+    )
+    if modality_promotions:
+        findings.append(
+            _finding(
+                code="MODALITY_OVER_PROMOTION",
+                severity="blocking",
+                message=(
+                    "SHOULD-level source guidance is compiled as hard authority."
+                ),
+                source_refs=_finding_source_refs(modality_promotions),
+                details={"invariant_ids": _finding_ids(modality_promotions)},
+            )
+        )
+
+    example_promotions = _example_used_as_normative_source(authority_items)
+    if example_promotions:
+        findings.append(
+            _finding(
+                code="EXAMPLE_USED_AS_NORMATIVE_SOURCE",
+                severity="blocking",
+                message=(
+                    "Illustrative EXAMPLE items are used as source evidence for "
+                    "normative authority."
+                ),
+                source_refs=_finding_source_refs(example_promotions),
+                details={"invariant_ids": _finding_ids(example_promotions)},
+            )
+        )
+
+    if _review_summary_status(review_summary) == "accept_ready" and findings:
+        findings.append(
+            _finding(
+                code="FALSE_POSITIVE_ACCEPT_READY",
+                severity="blocking",
+                message=(
+                    "Sanitized review summary reports accept_ready despite "
+                    "semantic benchmark guardrail failures."
+                ),
+                source_refs=[],
+                details={},
+            )
+        )
+
+    return {
+        "fixture": "todomvc",
+        "verdict": "REJECT" if _has_blocking_findings(findings) else "ACCEPT",
+        "findings": findings,
+        "weak_or_missing_must_items": weak_or_missing,
+    }
+
+
+def _gold_items_by_id(gold_spec: JsonObject) -> dict[str, JsonObject]:
+    items = gold_spec.get("items")
+    if not isinstance(items, list):
+        return {}
+    result: dict[str, JsonObject] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            result[item_id] = item
+    return result
+
+
+def _authority_invariants(authority: JsonObject) -> list[JsonObject]:
+    invariants = authority.get("invariants")
+    if not isinstance(invariants, list):
+        return []
+    return [item for item in invariants if isinstance(item, dict)]
+
+
+def _authority_text_by_source_item(
+    authority_items: list[JsonObject],
+) -> dict[str, list[str]]:
+    by_source_item: dict[str, list[str]] = {}
+    for item in authority_items:
+        text = _authority_text(item)
+        for source_ref in _authority_source_refs(item):
+            source_item_id = _source_item_id(source_ref)
+            if source_item_id is None:
+                continue
+            by_source_item.setdefault(source_item_id, []).append(text)
+    return by_source_item
+
+
+def _authority_text(item: JsonObject) -> str:
+    text = item.get("text")
+    if isinstance(text, str):
+        return text
+
+    invariant_type = item.get("type")
+    parameters = item.get("parameters")
+    if isinstance(invariant_type, str) and isinstance(parameters, dict):
+        return f"{invariant_type}:{json.dumps(parameters, sort_keys=True)}"
+    return json.dumps(item, sort_keys=True)
+
+
+def _authority_source_refs(item: JsonObject) -> list[str]:
+    source_refs = item.get("source_refs")
+    if not isinstance(source_refs, list):
+        return []
+    return [source_ref for source_ref in source_refs if isinstance(source_ref, str)]
+
+
+def _source_item_id(source_ref: str) -> str | None:
+    parts = source_ref.split(".")
+    if (
+        len(parts) < MIN_STRUCTURED_SOURCE_REF_PARTS
+        or parts[0] not in STRUCTURED_ITEM_PREFIXES
+    ):
+        return None
+    return ".".join(parts[:MIN_STRUCTURED_SOURCE_REF_PARTS])
+
+
+def _weak_or_missing_todomvc_must_items(
+    *,
+    source_items: dict[str, JsonObject],
+    authority_by_source_item: dict[str, list[str]],
+) -> list[str]:
+    weak_or_missing: list[str] = []
+    for item_id, concept_groups in _TODOMVC_REQUIRED_CONCEPTS.items():
+        source_item = source_items.get(item_id)
+        if source_item is None or source_item.get("level") != "MUST":
+            continue
+        authority_text = " ".join(authority_by_source_item.get(item_id, []))
+        if not authority_text:
+            weak_or_missing.append(item_id)
+            continue
+        if _missing_concept_groups(authority_text, concept_groups):
+            weak_or_missing.append(item_id)
+    return sorted(weak_or_missing)
+
+
+def _missing_concept_groups(
+    text: str,
+    concept_groups: tuple[tuple[str, ...], ...],
+) -> list[str]:
+    return [
+        "/".join(group)
+        for group in concept_groups
+        if not any(_text_has_concept(text, concept) for concept in group)
+    ]
+
+
+def _text_has_concept(text: str, concept: str) -> bool:
+    lowered = text.casefold()
+    lowered_concept = concept.casefold()
+    if lowered_concept in lowered:
+        return True
+    return lowered_concept in _tokens(text)
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.split(r"[^a-zA-Z0-9#/_-]+", text.casefold())
+        if token
+    }
+
+
+def _unsafe_required_field_compressions(
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    unsafe: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        if not text.startswith("REQUIRED_FIELD:"):
+            continue
+        source_items = {
+            source_item_id
+            for source_ref in _authority_source_refs(item)
+            if (source_item_id := _source_item_id(source_ref)) is not None
+        }
+        if any(
+            source_item_id in _TODOMVC_REQUIRED_CONCEPTS
+            for source_item_id in source_items
+        ):
+            unsafe.append(item)
+    return unsafe
+
+
+def _source_ref_semantic_mismatches(
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    mismatches: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        for source_ref in _authority_source_refs(item):
+            source_item_id = _source_item_id(source_ref)
+            if source_item_id is None:
+                continue
+            identity_concepts = _TODOMVC_SOURCE_IDENTITY_CONCEPTS.get(source_item_id)
+            if identity_concepts is None:
+                continue
+            if not any(
+                _text_has_concept(text, concept) for concept in identity_concepts
+            ):
+                mismatches.append(item)
+                break
+    return mismatches
+
+
+def _modality_over_promotions(
+    *,
+    source_items: dict[str, JsonObject],
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    promotions: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        if not text.startswith("FORBIDDEN_CAPABILITY:"):
+            continue
+        for source_ref in _authority_source_refs(item):
+            source_item_id = _source_item_id(source_ref)
+            if source_item_id is None:
+                continue
+            source_item = source_items.get(source_item_id)
+            if source_item is None:
+                continue
+            if source_item.get("level") not in {"MUST", "MUST_NOT"}:
+                promotions.append(item)
+                break
+    return promotions
+
+
+def _example_used_as_normative_source(
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    promoted: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        if not text.startswith(_AUTHORITY_ASSERTION_PREFIXES):
+            continue
+        if any(
+            source_ref.startswith("EXAMPLE.")
+            for source_ref in _authority_source_refs(item)
+        ):
+            promoted.append(item)
+    return promoted
+
+
+def _review_summary_status(review_summary: JsonObject) -> str | None:
+    summary = review_summary.get("review_summary")
+    if not isinstance(summary, dict):
+        summary = review_summary
+    status = summary.get("acceptance_status")
+    return status if isinstance(status, str) else None
+
+
+def _has_blocking_findings(findings: list[JsonObject]) -> bool:
+    return any(finding.get("severity") == "blocking" for finding in findings)
+
+
+def _finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    source_refs: list[str],
+    details: JsonObject,
+) -> JsonObject:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "source_refs": sorted(set(source_refs)),
+        "details": details,
+    }
+
+
+def _finding_source_refs(items: list[JsonObject]) -> list[str]:
+    refs: set[str] = set()
+    for item in items:
+        refs.update(_authority_source_refs(item))
+    return sorted(refs)
+
+
+def _finding_ids(items: list[JsonObject]) -> list[str]:
+    ids = [item.get("id") for item in items]
+    return sorted(item_id for item_id in ids if isinstance(item_id, str))
 
 
 def _redact_command(command: str) -> str:

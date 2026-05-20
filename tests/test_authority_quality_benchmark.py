@@ -9,6 +9,7 @@ from typing import Any, cast
 from scripts.authority_quality_benchmark import (
     build_run_manifest,
     build_source_meta,
+    evaluate_todomvc_authority_guardrails,
     extract_compiled_authority,
     main,
     normalize_source_text,
@@ -418,3 +419,72 @@ def test_local_benchmark_run_artifacts_are_gitignored() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
 
     assert ".agileforge/" in gitignore
+
+
+def test_todomvc_fixture_is_rejected_by_semantic_guardrails() -> None:
+    """TodoMVC guardrails reject the current structurally accepted authority."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+    authority = json.loads(
+        (fixture_dir / "agileforge/compiled-authority.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    review_summary = json.loads(
+        (fixture_dir / "agileforge/review-summary.json").read_text(encoding="utf-8")
+    )
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority=authority,
+        review_summary=review_summary,
+    )
+
+    assert result["verdict"] == "REJECT"
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert {
+        "MISSING_MUST_AUTHORITY",
+        "UNSAFE_REQUIRED_FIELD_COMPRESSION",
+        "SOURCE_REF_SEMANTIC_MISMATCH",
+        "MODALITY_OVER_PROMOTION",
+        "EXAMPLE_USED_AS_NORMATIVE_SOURCE",
+        "FALSE_POSITIVE_ACCEPT_READY",
+    } <= finding_codes
+
+
+def test_todomvc_guardrails_pin_core_missing_behavior_items() -> None:
+    """TodoMVC guardrails identify the high-risk missing behavioral contracts."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=json.loads(
+            (fixture_dir / "agileforge/gold-spec/spec.json").read_text(
+                encoding="utf-8"
+            )
+        ),
+        authority=json.loads(
+            (fixture_dir / "agileforge/compiled-authority.json").read_text(
+                encoding="utf-8"
+            )
+        ),
+        review_summary=json.loads(
+            (fixture_dir / "agileforge/review-summary.json").read_text(
+                encoding="utf-8"
+            )
+        ),
+    )
+
+    weak_or_missing = set(result["weak_or_missing_must_items"])
+    assert {
+        "CONSTRAINT.code-style-rules",
+        "REQ.new-todo",
+        "REQ.toggle-all",
+        "REQ.item-interactions",
+        "REQ.editing",
+        "REQ.counter",
+        "REQ.clear-completed",
+        "REQ.persistence",
+        "REQ.routing",
+        "REQ.filtered-state",
+    } <= weak_or_missing
