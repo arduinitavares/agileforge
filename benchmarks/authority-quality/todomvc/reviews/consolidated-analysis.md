@@ -62,7 +62,7 @@ The compiled authority is not ready to guide downstream agents. If treated as th
 | `REQ.toggle-all` | MUST | Existence of checkbox only | **Weak** |
 | `REQ.item-interactions` | MUST | None | **Missing** |
 | `REQ.editing` | MUST | Persistence ban only; no interaction contracts | **Weak** |
-| `REQ.counter` | MUST | RELATIONAL_CONSTRAINT only; no strong/pluralization | **Weak** |
+| `REQ.counter` | MUST | RELATION_CONSTRAINT only; no strong/pluralization | **Weak** |
 | `REQ.persistence` | MUST | Existence of storage only; no sync/shape rules | **Weak** |
 | `REQ.routing` | MUST | Existence only; no route specs | **Weak** |
 | `DATA.todo-record` | SHOULD | None | **Missing** |
