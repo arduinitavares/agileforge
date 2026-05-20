@@ -37,6 +37,7 @@ _AUTHORITY_ASSERTION_PREFIXES: Final[tuple[str, ...]] = (
 )
 _TODOMVC_DEFERABLE_MUST_GAP_ITEMS: Final[frozenset[str]] = frozenset(
     {
+        "CONSTRAINT.code-style-rules",
         "REQ.readme",
         "REQ.dependency-management",
     }

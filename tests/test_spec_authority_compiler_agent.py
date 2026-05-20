@@ -96,8 +96,35 @@ def test_compiler_instructions_require_accepted_must_coverage() -> None:
     assert "Every unsupported accepted MUST or MUST_NOT item must produce a gap" in (
         instructions
     )
+    assert "Gaps are a last resort for unsupported requirements" in instructions
+    assert "Do not emit gaps for supported runtime UI behavior" in instructions
     assert "Never use EXAMPLE items as source evidence for invariants" in instructions
     assert "Do not use REQUIRED_FIELD for README" in instructions
+    assert "follow-on synchronization/reset/reload/restoration behavior" in (
+        instructions
+    )
+    assert "aggregate control state after individual item changes" in instructions
+    assert "fallback route libraries or built-in routing selection" in instructions
+    assert "framework persistence capabilities and vanilla localStorage fallback" in (
+        instructions
+    )
+    assert "built-in framework routing and Flatiron Director fallback" in (
+        instructions
+    )
+    assert "route path contracts alone are insufficient" in instructions
+    assert "documentation deliverables and dependency/tooling requirements" in (
+        instructions
+    )
+    assert "REQ.readme: ..." in instructions
+    assert "REQ.dependency-management: ..." in instructions
+    assert "filtered item visibility and active-filter reload restoration" in (
+        instructions
+    )
+    assert "previously active filter is restored after reload" in instructions
+    assert "Product documentation deliverables such as README" in instructions
+    assert "framework capability with a fallback implementation" in instructions
+    assert "Run a final accepted MUST/MUST_NOT coverage audit" in instructions
+    assert "Do not leave gaps empty" in instructions
 
 
 def test_compiler_instructions_document_host_semantic_ids() -> None:

@@ -40,11 +40,26 @@ COVERAGE RULES FOR STRUCTURED SPECS:
 - For every accepted MUST or MUST_NOT typed item, output one or more invariants that preserve the item's required behavior, contract, constraint, or exclusion.
 - If an accepted MUST or MUST_NOT item contains multiple events, acceptance bullets, route cases, visibility states, data fields, or side effects, split compound accepted items into multiple invariants instead of summarizing them.
 - Every unsupported accepted MUST or MUST_NOT item must produce a gap string that starts with the typed item ID and explains the missing behavior or contract.
+- Gaps are a last resort for unsupported requirements, not a substitute for available invariant types.
+- Do not emit gaps for supported runtime UI behavior: event-driven UI behavior, state lifecycle behavior, route behavior, persistence records, and visibility rules must use USER_INTERACTION, STATE_TRANSITION, ROUTE_CONTRACT, DATA_CONTRACT, or VISIBILITY_RULE.
 - Do not skip documentation, dependency, counter, clear-completed, keyboard, mouse, route, persistence, or CSS-class requirements merely because they are not API data fields; represent them with the closest supported invariant type or declare an item-ID gap.
 - SHOULD and MAY items may produce behavioral invariants with their original source_level, or gaps when unsupported. They must not be promoted to hard legacy constraints.
 - If using placeholder invariant IDs, keep source_map entries in the same order as invariants and include at least one source_map entry for each invariant.
 - Never use EXAMPLE items as source evidence for invariants; examples may only inform assumptions or gaps and must not create authority by themselves.
 - Do not use REQUIRED_FIELD for README, package.json examples, documentation, build-process descriptions, or dependency guidance. Use DATA_CONTRACT for explicit dependency contracts, or an item-ID gap when unsupported.
+- For documentation deliverables and dependency/tooling requirements that cannot be fully represented by supported invariant types, emit source-ID gap strings rather than shallow REQUIRED_FIELD invariants. The gap must start with the item ID, for example "REQ.readme: ..." or "REQ.dependency-management: ...".
+- Do not omit follow-on synchronization/reset/reload/restoration behavior from acceptance bullets; represent supported runtime behavior as STATE_TRANSITION, VISIBILITY_RULE, or ROUTE_CONTRACT.
+- For aggregate controls, include aggregate control state after individual item changes and after related bulk actions reset the aggregate state.
+- For routing requirements, include each required route plus fallback route libraries or built-in routing selection when specified.
+- For persistence requirements, include framework persistence capabilities and vanilla localStorage fallback when both are specified.
+- For routing fallback requirements, include built-in framework routing and Flatiron Director fallback, including the assets-folder library source when specified.
+- For routing fallback requirements, route path contracts alone are insufficient; add a separate ROUTE_CONTRACT for routing-library selection when the source item specifies built-in framework routing versus a fallback library.
+- For filtering requirements, include model-level filtering, selected-link changes, filtered item visibility and active-filter reload restoration when specified.
+- For filtered-state acceptance bullets, output a dedicated STATE_TRANSITION or VISIBILITY_RULE when the previously active filter is restored after reload; do not count the item covered unless reload/restored behavior is represented.
+- Product documentation deliverables such as README are product requirements, not admin metadata; if they cannot be represented as invariants, emit an item-ID gap.
+- Conditional requirements that specify a framework capability with a fallback implementation are still requirements; compile both the preferred framework path and the fallback path instead of reducing them to a gap.
+- Run a final accepted MUST/MUST_NOT coverage audit before returning JSON. For each accepted MUST or MUST_NOT item, verify it has at least one invariant or an item-ID gap.
+- Do not leave gaps empty when accepted MUST/MUST_NOT documentation, style/manual-review, tooling, dependency, or conditional requirements are not represented as invariants.
 
 OUTPUT FORMAT (JSON ONLY, NO MARKDOWN):
 Return ONLY one of the following JSON objects:

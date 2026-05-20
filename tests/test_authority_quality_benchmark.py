@@ -551,6 +551,29 @@ def test_todomvc_guardrails_accept_item_id_gap_for_deferable_must_item() -> None
     assert "REQ.readme" not in result["weak_or_missing_must_items"]
 
 
+def test_todomvc_guardrails_accept_code_style_gap_for_manual_review() -> None:
+    """Manual style/tooling constraints may be deferred as item-ID gaps."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority={
+            "invariants": [],
+            "gaps": [
+                "CONSTRAINT.code-style-rules: deferred to lint/manual review."
+            ],
+        },
+        review_summary={},
+    )
+
+    assert "CONSTRAINT.code-style-rules" not in result[
+        "weak_or_missing_must_items"
+    ]
+
+
 def test_todomvc_guardrails_do_not_accept_gap_for_core_behavior() -> None:
     """Core interactive behavior must be represented, not only gapped."""
     fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
