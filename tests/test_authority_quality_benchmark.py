@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from scripts.authority_quality_benchmark import (
     build_run_manifest,
@@ -146,6 +146,14 @@ def test_sanitize_review_packet_handles_malformed_data() -> None:
     }
 
 
+def test_sanitize_review_packet_handles_non_dict_packets() -> None:
+    """Non-dict review packet values produce a minimal committed-safe summary."""
+    expected = {"review_summary": None, "review_findings": []}
+
+    for packet in (None, [], "x"):
+        assert sanitize_review_packet(cast("Any", packet)) == expected
+
+
 def test_extract_compiled_authority_reads_pending_authority_artifact() -> None:
     """Compiled authority is read from the pending authority artifact."""
     packet = {
@@ -174,6 +182,12 @@ def test_extract_compiled_authority_handles_malformed_data() -> None:
         )
         == {}
     )
+
+
+def test_extract_compiled_authority_handles_non_dict_packets() -> None:
+    """Non-dict review packet values do not produce authority content."""
+    for packet in (None, [], "x"):
+        assert extract_compiled_authority(cast("Any", packet)) == {}
 
 
 def test_build_run_manifest_records_hashes_without_project_ids() -> None:

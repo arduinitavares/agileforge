@@ -76,6 +76,9 @@ def build_source_meta(  # noqa: PLR0913
 
 def sanitize_review_packet(packet: JsonObject) -> JsonObject:
     """Return a committed-safe review summary from an authority review packet."""
+    if not isinstance(packet, dict):
+        return {"review_summary": None, "review_findings": []}
+
     data = packet.get("data")
     if not isinstance(data, dict):
         return {"review_summary": None, "review_findings": []}
@@ -115,6 +118,9 @@ def _list_count(value: object) -> int:
 
 def extract_compiled_authority(packet: JsonObject) -> JsonObject:
     """Extract compiled authority artifact from an authority review packet."""
+    if not isinstance(packet, dict):
+        return {}
+
     data = packet.get("data")
     if not isinstance(data, dict):
         return {}
