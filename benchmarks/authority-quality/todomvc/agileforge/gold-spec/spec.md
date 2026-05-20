@@ -67,6 +67,27 @@ Acceptance:
 
 - The implementation does not knowingly rely on features or dependencies that exclude a TodoMVC-supported browser.
 
+### CONSTRAINT.code-style-rules - Hard code style rules
+
+- Type: CONSTRAINT
+- Status: accepted
+- Level: MUST
+- Verification: manual-review
+- Tags: dependencies, style
+
+Statement:
+
+The implementation must follow the TodoMVC code style, use double-quotes in HTML, use single-quotes in JavaScript and CSS, use npm packages for third-party dependencies, manually remove third-party dependency files that are not required for the app to run, and use constants instead of direct keyCode values.
+
+Acceptance:
+
+- A reviewer can confirm that the implementation follows the TodoMVC code style.
+- HTML attributes use double-quotes.
+- JavaScript and CSS strings use single-quotes.
+- Third-party dependencies are provided as npm packages.
+- Third-party dependency files that are not required for the app to run are removed when dependency files are included with the app.
+- Key codes are represented by named constants instead of direct numeric literals.
+
 ### CONSTRAINT.framework-best-practices - Framework best practices
 
 - Type: CONSTRAINT
@@ -83,45 +104,43 @@ Acceptance:
 
 - A reviewer can explain any structural deviation from the recommended TodoMVC layout in terms of the selected framework's best practices.
 
-### CONSTRAINT.html-css-js-style - HTML, CSS, and JavaScript style
+### CONSTRAINT.html-css-js-style - Template style guidance
 
 - Type: CONSTRAINT
 - Status: accepted
-- Level: MUST
+- Level: SHOULD
 - Verification: manual-review
 - Tags: style, template
 
 Statement:
 
-The implementation must follow the source style constraints: keep HTML close to the template, remove finished HTML comments, reference base.css from the assets folder without modifying it, use app.css for minimal style changes, update relative paths from the template, follow the project code style, use double-quotes in HTML, use single-quotes in JavaScript and CSS, use constants instead of direct keyCode literals, and avoid preprocessors.
+The implementation should keep HTML as close to the template as possible, reference base.css from the assets folder without touching it, use app.css for minimal style changes, update relative paths when using the template, and avoid preprocessors to reach the largest audience.
 
 Acceptance:
 
-- HTML remains close to the template and contains no leftover implementation comments.
-- base.css is referenced from assets and is not modified by the app.
-- Style changes, if any, are in app.css and are minimal.
+- A reviewer can compare the app HTML with the template and identify any material divergence.
+- Finished HTML has template comments removed unless a reviewer records a framework-specific reason.
+- base.css is referenced from assets and is not modified by the app unless a reviewer records a framework-specific reason.
+- Style changes, if any, are in app.css and are limited to changes needed by the implementation.
 - Relative paths copied from the template resolve correctly.
-- HTML attributes use double-quotes.
-- JavaScript and CSS strings use single-quotes.
-- Key codes are represented by named constants instead of direct numeric literals.
-- The implementation source is not written in a preprocessor language.
+- The implementation avoids Sass, CoffeeScript, or other preprocessors unless a reviewer records a framework-specific reason.
 
 ### CONSTRAINT.template-base - Template base
 
 - Type: CONSTRAINT
 - Status: accepted
-- Level: MUST
+- Level: SHOULD
 - Verification: manual-review
 - Tags: fidelity, template
 
 Statement:
 
-The implementation must use the TodoMVC app template as the base and must keep the app looking and behaving exactly like the template and other examples.
+The implementation should use the TodoMVC app template as the base and should keep the app looking and behaving exactly like the template and other examples to support framework comparison.
 
 Acceptance:
 
-- A reviewer can identify that the implementation is based on the TodoMVC app template.
-- A reviewer comparing the app to the template and other examples finds no intentional visual or behavioral divergence not required by the chosen framework.
+- A reviewer can identify whether the implementation is based on the TodoMVC app template.
+- A reviewer comparing the app to the template and other examples can identify any visual or behavioral divergence and whether the divergence is required by the chosen framework.
 
 ### DATA.editing-state - Editing state persistence
 
@@ -267,7 +286,7 @@ Acceptance:
 
 - None
 
-### NON_GOAL.preprocessor-based-source - Preprocessor-based source
+### NON_GOAL.preprocessor-based-source - Stricter preprocessor prohibition
 
 - Type: NON_GOAL
 - Status: accepted
@@ -277,7 +296,7 @@ Acceptance:
 
 Statement:
 
-The app is not intended to rely on Sass, CoffeeScript, or other preprocessors.
+The gold spec is not intended to add a stricter preprocessor prohibition than the source's SHOULD-level guidance to write apps without preprocessors.
 
 Acceptance:
 
@@ -549,6 +568,7 @@ Acceptance:
 
 ## Relations
 
+- CONSTRAINT.code-style-rules constrains GOAL.consistent-todomvc-example
 - CONSTRAINT.framework-best-practices satisfies GOAL.framework-appropriate-implementation
 - CONSTRAINT.html-css-js-style constrains GOAL.consistent-todomvc-example
 - CONSTRAINT.template-base satisfies GOAL.consistent-todomvc-example
