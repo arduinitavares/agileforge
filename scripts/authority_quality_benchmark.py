@@ -761,7 +761,8 @@ def _load_json(path: Path) -> JsonObject:
 def _cmd_init_source(args: argparse.Namespace) -> int:
     fixture_dir = Path(args.fixture_dir)
     raw_input = Path(args.raw_input)
-    raw_text = raw_input.read_text(encoding="utf-8", newline="")
+    with raw_input.open("r", encoding="utf-8", newline="") as raw_file:
+        raw_text = raw_file.read()
     normalized = normalize_source_text(raw_text)
     raw_relative = f"source/raw/{args.raw_artifact_name}"
 

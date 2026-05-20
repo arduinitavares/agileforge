@@ -20,6 +20,7 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.SPEC_VERSION_NOT_FOUND: (4, False),
     ErrorCode.SPEC_FILE_NOT_FOUND: (2, False),
     ErrorCode.SPEC_FILE_INVALID: (2, False),
+    ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED: (2, False),
     ErrorCode.SPEC_COMPILE_FAILED: (1, True),
     ErrorCode.AUTHORITY_NOT_ACCEPTED: (4, False),
     ErrorCode.AUTHORITY_NOT_COMPILED: (4, False),

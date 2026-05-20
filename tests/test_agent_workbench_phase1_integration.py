@@ -24,6 +24,11 @@ from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.read_projection import ReadProjectionService
 from tests.typing_helpers import require_id
+from utils.agileforge_spec_profile import (
+    TechnicalSpecArtifact,
+    canonical_spec_hash,
+    canonical_spec_json,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -36,7 +41,6 @@ type JsonObject = dict[str, object]
 
 SCHEMA_VERSION = "agileforge.cli.v1"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SPEC_CONTENT = "# Phase 1 Spec\n\nThe CLI must expose read-only project context.\n"
 COMPILER_VERSION = "1.0.0"
 PROMPT_HASH = "a" * 64
 SEEDED_STORY_COUNT = 2
@@ -50,6 +54,41 @@ PHASE_1_GROUPS = (
     "context",
     "status",
 )
+
+
+def _structured_spec_content() -> str:
+    """Return canonical structured spec content for Phase 1 disk checks."""
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.phase1",
+            "title": "Phase 1 Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-20",
+            "updated_at": "2026-05-20",
+            "summary": "Exercise the Phase 1 CLI.",
+            "problem_statement": "The CLI must expose read-only project context.",
+            "items": [
+                {
+                    "id": "REQ.phase1-context",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Read-only context",
+                    "statement": "The CLI must expose read-only project context.",
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "The CLI exposes read-only project context."
+                    ],
+                }
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
+
+
+SPEC_CONTENT = _structured_spec_content()
 
 
 class _SprintPlanningSessionReader:
@@ -70,7 +109,11 @@ class _SprintPlanningSessionReader:
 
 def _spec_hash(content: str) -> str:
     """Return SHA-256 hash for persisted spec content."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    try:
+        artifact = TechnicalSpecArtifact.model_validate(json.loads(content))
+    except (json.JSONDecodeError, ValueError):
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return canonical_spec_hash(artifact)
 
 
 def _seed_phase1_project(
@@ -79,7 +122,7 @@ def _seed_phase1_project(
     repo_root: Path,
 ) -> tuple[int, int, int]:
     """Seed a project with current authority, sprint, and candidate data."""
-    spec_path = repo_root / "specs" / "phase1.md"
+    spec_path = repo_root / "specs" / "phase1.json"
     spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(SPEC_CONTENT, encoding="utf-8")
     spec_hash = _spec_hash(SPEC_CONTENT)
@@ -89,7 +132,7 @@ def _seed_phase1_project(
         description="Seeded integration project",
         vision="Inspect read-only context",
         roadmap="Ship CLI workbench",
-        spec_file_path="specs/phase1.md",
+        spec_file_path="specs/phase1.json",
     )
     session.add(product)
     session.commit()
@@ -100,7 +143,7 @@ def _seed_phase1_project(
         product_id=project_id,
         spec_hash=spec_hash,
         content=SPEC_CONTENT,
-        content_ref="specs/phase1.md",
+        content_ref="specs/phase1.json",
         status="approved",
         approved_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
         approved_by="integration-test",

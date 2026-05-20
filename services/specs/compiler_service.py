@@ -742,23 +742,29 @@ def _default_invoke_spec_authority_compiler(
 ) -> str:
     """Invoke the compiler agent from sync code and return raw JSON text."""
     del content_ref
-    spec_source_format = _detect_spec_source_format(spec_content)
+    normalize_spec_content_for_registry(spec_content)
     input_payload = SpecAuthorityCompilerInput(
         spec_source=spec_content,
         spec_content_ref=None,
         domain_hint=None,
         product_id=product_id,
         spec_version_id=spec_version_id,
-        spec_source_format=spec_source_format,
+        spec_source_format=cast(
+            "Literal['agileforge.spec.v1']",
+            STRUCTURED_SPEC_FORMAT,
+        ),
     )
     return _run_async_task(_invoke_spec_authority_compiler_async(input_payload))
 
 
 def _detect_spec_source_format(
     spec_content: str,
-) -> Literal["agileforge.spec.v1"]:
+) -> Literal["agileforge.spec.v1", "plain_text"]:
     """Return the source format marker for compiler input."""
-    normalize_spec_content_for_registry(spec_content)
+    try:
+        normalize_spec_content_for_registry(spec_content)
+    except SpecContentNormalizationError:
+        return "plain_text"
     return cast("Literal['agileforge.spec.v1']", STRUCTURED_SPEC_FORMAT)
 
 

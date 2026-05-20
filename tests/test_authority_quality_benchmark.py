@@ -102,7 +102,7 @@ def test_sanitize_review_packet_removes_guard_tokens_and_project_ids() -> None:
     packet = {
         "ok": True,
         "data": {
-            "guard_tokens": {"review_token": "secret-token"},
+            "guard_tokens": {"review_token": "secret-token"},  # nosec B105
             "project": {
                 "project_id": "proj_raw_123",
                 "id": 123,
@@ -339,9 +339,12 @@ def test_init_source_command_writes_normalized_source_and_metadata(
     )
 
     assert exit_code == 0
-    assert (
-        fixture_dir / "source/raw/source.raw.md"
-    ).read_text(encoding="utf-8", newline="") == "# Title\r\n"
+    with (fixture_dir / "source/raw/source.raw.md").open(
+        "r",
+        encoding="utf-8",
+        newline="",
+    ) as raw_file:
+        assert raw_file.read() == "# Title\r\n"
     assert (fixture_dir / "source/source.md").read_text(encoding="utf-8") == "# Title\n"
     assert (fixture_dir / "source/source.sha256").read_text(
         encoding="utf-8"
@@ -362,7 +365,7 @@ def test_extract_review_command_writes_compiled_authority_and_summary(
         json.dumps(
             {
                 "data": {
-                    "guard_tokens": {"review_token": "secret"},
+                    "guard_tokens": {"review_token": "secret"},  # nosec B105
                     "review_summary": {"acceptance_status": "accept_ready"},
                     "review_findings": [],
                     "pending_authority": {

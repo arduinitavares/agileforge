@@ -15,7 +15,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -209,14 +209,15 @@ def _default_missing_source_map_for_success_payload(payload: object) -> None:
     if not isinstance(payload, dict):
         return
 
-    result = payload.get("result")
+    payload_dict = cast("dict[str, Any]", payload)
+    result = payload_dict.get("result")
     if isinstance(result, dict):
         _default_missing_source_map_for_success_payload(result)
 
-    if "source_map" in payload or "error" in payload:
+    if "source_map" in payload_dict or "error" in payload_dict:
         return
-    if _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
-        payload["source_map"] = []
+    if _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload_dict):
+        payload_dict["source_map"] = []
 
 
 def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
@@ -224,17 +225,18 @@ def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
     if not isinstance(payload, dict):
         return
 
-    result = payload.get("result")
+    payload_dict = cast("dict[str, Any]", payload)
+    result = payload_dict.get("result")
     if isinstance(result, dict):
         _drop_deprecated_compact_ir_for_success_payload(result)
 
-    if "error" in payload:
+    if "error" in payload_dict:
         return
-    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload):
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload_dict):
         return
 
     for key in _DEPRECATED_COMPACT_IR_KEYS:
-        payload.pop(key, None)
+        payload_dict.pop(key, None)
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:

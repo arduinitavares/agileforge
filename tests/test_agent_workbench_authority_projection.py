@@ -38,6 +38,34 @@ AUTHORITY_ERROR_EXIT_CODE: Final[int] = 4
 
 def _spec_hash(content: str) -> str:
     """Return the persisted SHA-256 hash for spec content."""
+    try:
+        artifact = TechnicalSpecArtifact.model_validate(json.loads(content))
+    except (json.JSONDecodeError, ValueError):
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return canonical_spec_hash(artifact)
+
+
+def _structured_spec_content(
+    *,
+    artifact_id: str = "SPEC.authority-projection",
+    title: str = "Authority Projection Spec",
+    statement: str = "The review output must include guard tokens.",
+) -> str:
+    """Return canonical structured spec content for disk-hash tests."""
+    payload = _agileforge_spec_profile_payload()
+    payload["artifact_id"] = artifact_id
+    payload["title"] = title
+    items = payload["items"]
+    assert isinstance(items, list)
+    first_item = cast("dict[str, Any]", items[0])
+    assert isinstance(first_item, dict)
+    first_item["statement"] = statement
+    first_item["acceptance"] = [statement]
+    return canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
+
+
+def _legacy_spec_hash(content: str) -> str:
+    """Return the legacy raw SHA-256 hash for non-structured spec content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -289,17 +317,17 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     unrelated_cwd = tmp_path / "elsewhere"
     unrelated_cwd.mkdir()
     monkeypatch.chdir(unrelated_cwd)
-    spec_content = "# Spec\n"
-    spec_path = tmp_path / "specs" / "app.md"
+    spec_content = _structured_spec_content()
+    spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(spec_content, encoding="utf-8")
-    product = _seed_product(session, spec_file_path="specs/app.md")
+    product = _seed_product(session, spec_file_path="specs/app.json")
     product_id = require_id(product.product_id, "product_id")
     spec = _seed_spec(
         session,
         product_id=product_id,
         content=spec_content,
-        content_ref="specs/app.md",
+            content_ref="specs/app.json",
     )
     authority = _seed_authority(
         session,
@@ -321,7 +349,9 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
     assert result["data"]["pending_authority_fingerprint"] is None
     assert result["data"]["invariant_count"] == 1
     assert result["data"]["disk_spec"]["resolved_path"] == str(spec_path.resolve())
-    assert result["data"]["disk_spec"]["sha256"] == spec.spec_hash
+    assert result["data"]["disk_spec"]["sha256"] == spec.spec_hash.removeprefix(
+        "sha256:"
+    )
     assert result["data"]["disk_spec"]["matches_accepted"] is True
     assert result["data"]["authority_fingerprint"].startswith("sha256:")
 
@@ -538,11 +568,20 @@ def test_authority_status_marks_disk_spec_hash_drift_stale(
     tmp_path: Path,
 ) -> None:
     """Mark accepted authority stale when the repo-root spec file drifts."""
-    accepted_content = "# Accepted\n"
-    spec_path = tmp_path / "specs" / "app.md"
+    accepted_content = _structured_spec_content(
+        artifact_id="SPEC.accepted",
+        title="Accepted Spec",
+        statement="The accepted spec must remain current.",
+    )
+    changed_content = _structured_spec_content(
+        artifact_id="SPEC.changed",
+        title="Changed Spec",
+        statement="The changed spec must be detected.",
+    )
+    spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
-    spec_path.write_text("# Changed\n", encoding="utf-8")
-    product = _seed_product(session, spec_file_path="specs/app.md")
+    spec_path.write_text(changed_content, encoding="utf-8")
+    product = _seed_product(session, spec_file_path="specs/app.json")
     product_id = require_id(product.product_id, "product_id")
     spec = _seed_spec(session, product_id=product_id, content=accepted_content)
     _seed_authority(
@@ -557,7 +596,9 @@ def test_authority_status_marks_disk_spec_hash_drift_stale(
     assert result["ok"] is True
     assert result["data"]["status"] == "stale"
     assert result["data"]["reason"] == "disk_spec_hash_mismatch"
-    assert result["data"]["disk_spec"]["sha256"] == _spec_hash("# Changed\n")
+    assert result["data"]["disk_spec"]["sha256"] == _spec_hash(
+        changed_content
+    ).removeprefix("sha256:")
     assert result["data"]["disk_spec"]["matches_accepted"] is False
 
 
@@ -594,11 +635,20 @@ def test_authority_status_fingerprint_changes_on_disk_spec_drift(
     tmp_path: Path,
 ) -> None:
     """Include disk spec hash state in the authority fingerprint."""
-    accepted_content = "# Accepted\n"
-    spec_path = tmp_path / "specs" / "app.md"
+    accepted_content = _structured_spec_content(
+        artifact_id="SPEC.accepted",
+        title="Accepted Spec",
+        statement="The accepted spec must remain current.",
+    )
+    changed_content = _structured_spec_content(
+        artifact_id="SPEC.changed",
+        title="Changed Spec",
+        statement="The changed spec must be detected.",
+    )
+    spec_path = tmp_path / "specs" / "app.json"
     spec_path.parent.mkdir()
     spec_path.write_text(accepted_content, encoding="utf-8")
-    product = _seed_product(session, spec_file_path="specs/app.md")
+    product = _seed_product(session, spec_file_path="specs/app.json")
     product_id = require_id(product.product_id, "product_id")
     spec = _seed_spec(session, product_id=product_id, content=accepted_content)
     _seed_authority(
@@ -609,7 +659,7 @@ def test_authority_status_fingerprint_changes_on_disk_spec_drift(
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
     current_result = service.status(project_id=product_id)
 
-    spec_path.write_text("# Changed\n", encoding="utf-8")
+    spec_path.write_text(changed_content, encoding="utf-8")
     drift_result = service.status(project_id=product_id)
 
     assert current_result["data"]["status"] == "current"

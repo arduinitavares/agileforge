@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Self
 
 from pydantic import ValidationError
 
@@ -23,8 +24,27 @@ class SpecContentNormalizationError(ValueError):
     """Raised when spec content cannot be normalized for authority compilation."""
 
     def __init__(self, message: str, *, error_code: str) -> None:
+        """Store the normalization error message and stable error code."""
         super().__init__(message)
         self.error_code: str = error_code
+
+    @classmethod
+    def non_json(cls) -> Self:
+        """Build the canonical unsupported non-JSON source error."""
+        message = "Expected agileforge.spec.v1 JSON; received non-JSON spec content."
+        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
+
+    @classmethod
+    def non_object(cls) -> Self:
+        """Build the canonical unsupported JSON value error."""
+        message = "Expected agileforge.spec.v1 JSON object."
+        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
+
+    @classmethod
+    def unsupported_schema_version(cls) -> Self:
+        """Build the canonical unsupported schema-version error."""
+        message = "Expected schema_version='agileforge.spec.v1'."
+        return cls(message, error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT)
 
 
 @dataclass(frozen=True)
@@ -41,21 +61,12 @@ def normalize_spec_content_for_registry(raw_content: str) -> NormalizedSpecConte
     try:
         parsed = json.loads(raw_content)
     except json.JSONDecodeError as exc:
-        raise SpecContentNormalizationError(
-            "Expected agileforge.spec.v1 JSON; received non-JSON spec content.",
-            error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT,
-        ) from exc
+        raise SpecContentNormalizationError.non_json() from exc
 
     if not isinstance(parsed, dict):
-        raise SpecContentNormalizationError(
-            "Expected agileforge.spec.v1 JSON object.",
-            error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT,
-        )
+        raise SpecContentNormalizationError.non_object()
     if parsed.get("schema_version") != STRUCTURED_SPEC_FORMAT:
-        raise SpecContentNormalizationError(
-            "Expected schema_version='agileforge.spec.v1'.",
-            error_code=UNSUPPORTED_SPEC_SOURCE_FORMAT,
-        )
+        raise SpecContentNormalizationError.unsupported_schema_version()
 
     try:
         artifact = TechnicalSpecArtifact.model_validate(parsed)

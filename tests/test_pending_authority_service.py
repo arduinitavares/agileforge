@@ -2,6 +2,7 @@
 
 import hashlib
 import inspect
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,8 +40,40 @@ def _create_product(session: Session, *, name: str = "Pending Product") -> Produ
     return product
 
 
-def _write_spec(tmp_path: Path, content: str = "# Spec\n\nBuild the thing.") -> Path:
-    spec_path = tmp_path / "spec.md"
+def _structured_spec_content(statement: str = "Build the thing.") -> str:
+    """Return canonical-shape structured spec JSON for pending authority tests."""
+    return json.dumps(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.pending-authority-test",
+            "title": "Pending Authority Test Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-20",
+            "updated_at": "2026-05-20",
+            "summary": "Exercise pending authority setup.",
+            "problem_statement": "Pending authority needs structured specs.",
+            "items": [
+                {
+                    "id": "REQ.pending-behavior",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Pending behavior",
+                    "statement": statement,
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [statement],
+                }
+            ],
+        },
+        sort_keys=True,
+    )
+
+
+def _write_spec(tmp_path: Path, content: str | None = None) -> Path:
+    spec_path = tmp_path / "spec.json"
+    if content is None:
+        content = _structured_spec_content()
     spec_path.write_text(content, encoding="utf-8")
     return spec_path
 

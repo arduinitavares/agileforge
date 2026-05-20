@@ -789,18 +789,24 @@ def _source_map_entries(source_map: object) -> list[Mapping[str, Any]] | None:
         source_map,
         (str, bytes, bytearray),
     ):
-        return [entry for entry in source_map if isinstance(entry, Mapping)]
+        return [
+            cast("Mapping[str, Any]", entry)
+            for entry in source_map
+            if isinstance(entry, Mapping)
+        ]
     if isinstance(source_map, Mapping):
         entries: list[Mapping[str, Any]] = []
         for value in source_map.values():
             if isinstance(value, Mapping):
-                entries.append(value)
+                entries.append(cast("Mapping[str, Any]", value))
             elif isinstance(value, Sequence) and not isinstance(
                 value,
                 (str, bytes, bytearray),
             ):
                 entries.extend(
-                    entry for entry in value if isinstance(entry, Mapping)
+                    cast("Mapping[str, Any]", entry)
+                    for entry in value
+                    if isinstance(entry, Mapping)
                 )
         return entries
     return None

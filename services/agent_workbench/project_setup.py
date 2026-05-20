@@ -41,12 +41,12 @@ from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
     setup_spec_hash,
 )
+from services.specs.pending_authority_service import (
+    compile_pending_authority_for_project,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
-)
-from services.specs.pending_authority_service import (
-    compile_pending_authority_for_project,
 )
 
 if TYPE_CHECKING:
@@ -1308,7 +1308,6 @@ def _spec_hash_or_error(path: Path) -> str | dict[str, Any]:
     try:
         raw_content = path.read_text(encoding="utf-8")
         normalized = normalize_spec_content_for_registry(raw_content)
-        return normalized.spec_hash
     except SpecContentNormalizationError as exc:
         remediation = [
             "Generate specs/spec.json as agileforge.spec.v1 JSON.",
@@ -1331,6 +1330,8 @@ def _spec_hash_or_error(path: Path) -> str | dict[str, Any]:
             details={"spec_file": str(path), "reason": str(exc)},
             remediation=["Pass a readable agileforge.spec.v1 JSON file."],
         )
+    else:
+        return normalized.spec_hash
 
 
 def _workflow_has_required_setup_state(state: dict[str, Any], spec_path: Path) -> bool:

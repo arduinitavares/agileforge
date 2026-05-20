@@ -62,6 +62,36 @@ def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
+def _structured_spec_content(name: str) -> str:
+    """Return structured spec JSON accepted by the authority compiler path."""
+    return json.dumps(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": f"SPEC.update-{name.lower().replace(' ', '-')}",
+            "title": f"{name} Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-20",
+            "updated_at": "2026-05-20",
+            "summary": f"Exercise update flow for {name}.",
+            "problem_statement": "Update flow needs structured specs.",
+            "items": [
+                {
+                    "id": "REQ.update-behavior",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Update behavior",
+                    "statement": f"The system must compile {name}.",
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [f"The system compiles {name}."],
+                }
+            ],
+        },
+        sort_keys=True,
+    )
+
+
 @pytest.fixture
 def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
     """Return compiler stub."""
@@ -85,7 +115,7 @@ def test_creates_new_version_on_content_change(
     result = update_spec_and_compile_authority(
         {
             "product_id": sample_product.product_id,
-            "spec_content": "Spec A",
+            "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
     )
@@ -113,12 +143,18 @@ def test_noop_on_unchanged_content(
     """Second call with unchanged content should reuse version and authority."""
     del compiler_stub
     first = update_spec_and_compile_authority(
-        {"product_id": sample_product.product_id, "spec_content": "Spec A"},
+        {
+            "product_id": sample_product.product_id,
+            "spec_content": _structured_spec_content("Spec A"),
+        },
         tool_context=None,
     )
 
     second = update_spec_and_compile_authority(
-        {"product_id": sample_product.product_id, "spec_content": "Spec A"},
+        {
+            "product_id": sample_product.product_id,
+            "spec_content": _structured_spec_content("Spec A"),
+        },
         tool_context=None,
     )
 
@@ -136,8 +172,9 @@ def test_content_ref_path(
 ) -> None:
     """Tool should load content from content_ref path."""
     del compiler_stub
-    spec_path = tmp_path / "spec.md"
-    spec_path.write_text("Spec from file", encoding="utf-8")
+    spec_content = _structured_spec_content("Spec from file")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(spec_content, encoding="utf-8")
 
     result = update_spec_and_compile_authority(
         {
@@ -150,7 +187,7 @@ def test_content_ref_path(
     assert result["success"] is True
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
-    assert spec_row.content == "Spec from file"
+    assert json.loads(spec_row.content)["title"] == "Spec from file Spec"
     assert spec_row.content_ref == str(spec_path)
 
 
@@ -160,7 +197,10 @@ def test_recompile_behavior(
     """Recompile should update compiled_at when requested."""
     del compiler_stub
     first = update_spec_and_compile_authority(
-        {"product_id": sample_product.product_id, "spec_content": "Spec A"},
+        {
+            "product_id": sample_product.product_id,
+            "spec_content": _structured_spec_content("Spec A"),
+        },
         tool_context=None,
     )
 
@@ -177,7 +217,7 @@ def test_recompile_behavior(
     second = update_spec_and_compile_authority(
         {
             "product_id": sample_product.product_id,
-            "spec_content": "Spec A",
+            "spec_content": _structured_spec_content("Spec A"),
             "recompile": True,
         },
         tool_context=None,
@@ -230,7 +270,7 @@ def test_compiler_hashing_failure_is_rejected(
     result = update_spec_and_compile_authority(
         {
             "product_id": sample_product.product_id,
-            "spec_content": "Spec A",
+            "spec_content": _structured_spec_content("Spec A"),
         },
         tool_context=None,
     )

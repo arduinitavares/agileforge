@@ -454,6 +454,7 @@ def test_normalizer_rewrites_behavioral_invariant_ids_semantically() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     invariant = normalized.root.invariants[0]
+    assert isinstance(invariant.parameters, UserInteractionParams)
     assert invariant.id == compute_invariant_id_from_payload(
         InvariantType.USER_INTERACTION,
         UserInteractionParams(
@@ -662,6 +663,7 @@ def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> 
             entry.location
             for entry in normalized.root.source_map
             if entry.invariant_id == invariant.id
+            and isinstance(entry.location, str)
         ]
         for invariant in normalized.root.invariants
     }
@@ -1441,6 +1443,7 @@ def test_structured_profile_duplicate_placeholder_source_map_prefers_evidence() 
     normalized_ids_by_field = {
         invariant.parameters.field_name: invariant.id
         for invariant in success.invariants
+        if isinstance(invariant.parameters, RequiredFieldParams)
     }
     source_map_by_location = {
         entry.location: entry for entry in success.source_map
@@ -1500,7 +1503,9 @@ def test_duplicate_placeholder_source_map_prefers_excerpt_support_over_position(
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     normalized_ids_by_field = {
-        inv.parameters.field_name: inv.id for inv in normalized.root.invariants
+        inv.parameters.field_name: inv.id
+        for inv in normalized.root.invariants
+        if isinstance(inv.parameters, RequiredFieldParams)
     }
     source_map_ids_by_location = {
         entry.location: entry.invariant_id for entry in normalized.root.source_map
@@ -1881,6 +1886,7 @@ def test_swapped_legacy_authority_id_discarded_with_model_quote_mapping() -> Non
     user_id_by_field = {
         invariant.parameters.field_name: invariant.id
         for invariant in success.invariants
+        if isinstance(invariant.parameters, RequiredFieldParams)
     }
     source_map_by_excerpt = {
         entry.excerpt: entry for entry in success.source_map
@@ -2090,6 +2096,7 @@ def test_swapped_legacy_source_refs_repair_review_evidence() -> None:
     ids_by_field = {
         invariant.parameters.field_name: invariant.id
         for invariant in success.invariants
+        if isinstance(invariant.parameters, RequiredFieldParams)
     }
     assert source_map_by_excerpt["- The payload must include user_id."].location == (
         "line 2"
