@@ -19,11 +19,11 @@ if TYPE_CHECKING:
 
 def test_normalize_source_text_converts_crlf_and_ensures_trailing_newline() -> None:
     """Source normalization converts line endings and leaves one final newline."""
-    raw = "# Title\r\n\r\nLine one\r\n"
+    raw = "# Title\r\n\r\nLine one\rLine two\r\n"
 
     normalized = normalize_source_text(raw)
 
-    assert normalized == "# Title\n\nLine one\n"
+    assert normalized == "# Title\n\nLine one\nLine two\n"
     assert sha256_text(normalized).startswith("sha256:")
     assert len(sha256_text(normalized)) == len("sha256:") + 64
 
@@ -57,15 +57,21 @@ def test_build_source_meta_records_hashes_and_license_note() -> None:
     )
 
     assert meta["source_url"] == "https://example.test/source"
+    assert meta["fetched_at"] == "2026-05-20T12:00:00Z"
+    assert meta["raw_artifact"] == "source/raw/source.raw.md"
     assert meta["raw_sha256"] == sha256_text(raw)
+    assert meta["normalized_artifact"] == "source/source.md"
     assert meta["normalized_sha256"] == sha256_text(normalized)
     assert meta["normalization"]["method"] == "raw-markdown-copy"
+    assert meta["normalization"]["tool"] == "manual"
+    assert meta["normalization"]["tool_version"] == "n/a"
+    assert meta["normalization"]["notes"] == "Line endings normalized to LF."
     assert meta["license_note"] == "Public fixture retained for benchmark review."
 
 
 def test_write_json_sorts_keys_and_adds_newline(tmp_path: Path) -> None:
-    """Stable JSON output sorts keys and writes a final newline."""
-    output = tmp_path / "meta.json"
+    """Stable JSON output creates parents, sorts keys, and writes a newline."""
+    output = tmp_path / "nested" / "meta.json"
 
     write_json(output, {"b": 2, "a": 1})
 
