@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import Any, cast
 
 from scripts.authority_quality_benchmark import (
     build_run_manifest,
@@ -17,8 +18,7 @@ from scripts.authority_quality_benchmark import (
     write_text,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_normalize_source_text_converts_crlf_and_ensures_trailing_newline() -> None:
@@ -380,3 +380,24 @@ def test_extract_review_command_writes_compiled_authority_and_summary(
     summary = json.loads((fixture_dir / "agileforge/review-summary.json").read_text())
     assert authority == {"invariants": [{"id": "INV-1"}]}
     assert "secret" not in json.dumps(summary)
+
+
+def test_benchmark_prompt_forbids_deterministic_extraction_solution() -> None:
+    """Shared external review prompt forbids deterministic extraction advice."""
+    prompt = (
+        REPO_ROOT / "benchmarks/authority-quality/review-prompt.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Do not recommend deterministic requirement extraction" in prompt
+    assert "Human-reviewed gold structured spec JSON" in prompt
+
+
+def test_oracle_notes_warn_against_reviewer_leakage() -> None:
+    """Fixture oracle notes warn that reviewers must not receive them."""
+    for fixture in ("todomvc", "petstore", "gherkin"):
+        notes = (
+            REPO_ROOT
+            / f"benchmarks/authority-quality/{fixture}/oracle/oracle-notes.md"
+        ).read_text(encoding="utf-8")
+        assert "Do not provide these notes" in notes
+        assert "external LLM reviewers" in notes
