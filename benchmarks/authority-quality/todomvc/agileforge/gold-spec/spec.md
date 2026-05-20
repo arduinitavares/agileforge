@@ -219,22 +219,6 @@ Acceptance:
 
 - None
 
-### EXAMPLE.split-components - Split component structure
-
-- Type: EXAMPLE
-- Status: accepted
-- Level: -
-- Verification: -
-- Tags: -
-
-Statement:
-
-Components may be split into separate files such as js/controllers/todos.js and js/models/todo.js when that makes sense for the framework.
-
-Acceptance:
-
-- None
-
 ### GOAL.consistent-todomvc-example - Consistent TodoMVC example
 
 - Type: GOAL
@@ -315,6 +299,24 @@ Acceptance:
 
 - Given at least one todo is completed, when Clear completed is clicked, then completed todos are removed.
 - Given there are no completed todos, the Clear completed button is hidden.
+
+### REQ.component-organization - Component organization
+
+- Type: REQ
+- Status: accepted
+- Level: SHOULD
+- Verification: inspection
+- Tags: components, structure
+
+Statement:
+
+Components should be split up into separate files and placed into folders where it makes the most sense, while keeping the selected framework's best practices for application structure first.
+
+Acceptance:
+
+- Components that represent separable application responsibilities are placed in separate files unless the selected framework's best practices call for a different structure.
+- Component files are placed in folders that match their application role or the selected framework's preferred organization.
+- A reviewer can trace any decision not to split a component into a separate file to the selected framework's best practices or to the component not being meaningfully separable.
 
 ### REQ.counter - Active todo counter
 
@@ -551,6 +553,7 @@ Acceptance:
 - CONSTRAINT.html-css-js-style constrains GOAL.consistent-todomvc-example
 - CONSTRAINT.template-base satisfies GOAL.consistent-todomvc-example
 - DATA.editing-state constrains REQ.persistence
+- REQ.component-organization depends_on CONSTRAINT.framework-best-practices
 - REQ.dependency-management depends_on CONSTRAINT.framework-best-practices
 - REQ.editing satisfies GOAL.consistent-todomvc-example
 - REQ.filtered-state depends_on REQ.routing

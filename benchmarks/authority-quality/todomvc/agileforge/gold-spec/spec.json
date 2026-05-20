@@ -107,6 +107,24 @@
       ]
     },
     {
+      "id": "REQ.component-organization",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Component organization",
+      "statement": "Components should be split up into separate files and placed into folders where it makes the most sense, while keeping the selected framework's best practices for application structure first.",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "Components that represent separable application responsibilities are placed in separate files unless the selected framework's best practices call for a different structure.",
+        "Component files are placed in folders that match their application role or the selected framework's preferred organization.",
+        "A reviewer can trace any decision not to split a component into a separate file to the selected framework's best practices or to the component not being meaningfully separable."
+      ],
+      "tags": [
+        "structure",
+        "components"
+      ]
+    },
+    {
       "id": "CONSTRAINT.html-css-js-style",
       "type": "CONSTRAINT",
       "status": "accepted",
@@ -437,13 +455,6 @@
       "statement": "A recommended structure includes index.html, package.json, node_modules, css/app.css, js/app.js, framework-appropriate controllers and models folders, and readme.md."
     },
     {
-      "id": "EXAMPLE.split-components",
-      "type": "EXAMPLE",
-      "status": "accepted",
-      "title": "Split component structure",
-      "statement": "Components may be split into separate files such as js/controllers/todos.js and js/models/todo.js when that makes sense for the framework."
-    },
-    {
       "id": "EXAMPLE.package-json",
       "type": "EXAMPLE",
       "status": "accepted",
@@ -475,6 +486,11 @@
       "from": "CONSTRAINT.framework-best-practices",
       "type": "satisfies",
       "to": "GOAL.framework-appropriate-implementation"
+    },
+    {
+      "from": "REQ.component-organization",
+      "type": "depends_on",
+      "to": "CONSTRAINT.framework-best-practices"
     },
     {
       "from": "CONSTRAINT.html-css-js-style",
