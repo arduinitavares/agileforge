@@ -26,9 +26,15 @@ When spec_source_format is "agileforge.spec.v1":
 - Cite typed item IDs in source_map.location when possible.
 - Apply the AgileForge authority support matrix:
   - REQ/DATA/INTERFACE become REQUIRED_FIELD or RELATION_CONSTRAINT only when explicit.
+  - Event-driven UI behavior becomes USER_INTERACTION when a user gesture causes a required response.
+  - State lifecycle behavior becomes STATE_TRANSITION when an event changes state or causes a side effect.
+  - Persisted records, payload shapes, storage keys, and naming rules become DATA_CONTRACT.
+  - Required route paths, route names, and route-specific behavior become ROUTE_CONTRACT.
+  - Conditional UI display/hide/remove behavior becomes VISIBILITY_RULE.
   - QUALITY/CONSTRAINT become MAX_VALUE or RELATION_CONSTRAINT only when measurable.
   - NON_GOAL/MUST_NOT become FORBIDDEN_CAPABILITY only when explicit.
   - Unsupported normative items become gaps with their item IDs preserved.
+  - Every behavioral invariant MUST include source_item_id and source_level from the typed item.
 
 OUTPUT FORMAT (JSON ONLY, NO MARKDOWN):
 Return ONLY one of the following JSON objects:
@@ -40,7 +46,7 @@ SUCCESS OBJECT:
   "invariants": [
     {
       "id": "INV-xxxxxxxxxxxxxxxx",
-      "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE" | "RELATION_CONSTRAINT",
+      "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE" | "RELATION_CONSTRAINT" | "USER_INTERACTION" | "STATE_TRANSITION" | "DATA_CONTRACT" | "ROUTE_CONTRACT" | "VISIBILITY_RULE",
       "parameters": { ... }
     }
   ],
@@ -73,11 +79,19 @@ INVARIANT PARAMETER RULES:
 - REQUIRED_FIELD => parameters: {"field_name": "<token>"}
 - MAX_VALUE => parameters: {"field_name": "<token>", "max_value": <number>}
 - RELATION_CONSTRAINT => parameters: {"expression": "<field_or_metric> <= <dynamic_field_or_metric>"}
+- USER_INTERACTION => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "trigger": "<user event>", "target": "<ui target>", "expected_response": "<required response>"}
+- STATE_TRANSITION => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "state": "<state>", "trigger": "<event or condition>", "outcome": "<resulting state or side effect>"}
+- DATA_CONTRACT => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "subject": "<record/key/payload>", "fields": ["<field>"], "rule": "<shape, naming, or persistence rule>"}
+- ROUTE_CONTRACT => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "route": "<route pattern>", "route_name": "<purpose>", "behavior": "<route behavior>"}
+- VISIBILITY_RULE => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "target": "<ui element>", "condition": "<condition>", "visibility": "visible|hidden|shown|removed"}
 - Use REQUIRED_FIELD only for explicit required artifacts, fields, records, or evidence.
+- Do not compress event-driven behavior into REQUIRED_FIELD.
+- Do not compress state lifecycle rules, keyboard/mouse interactions, route behavior, persistence shape, or visibility rules into REQUIRED_FIELD.
 - Use MAX_VALUE only when the spec gives a literal numeric maximum.
 - Use RELATION_CONSTRAINT for explicit dynamic comparisons such as budget_used <= budget.
 - Never convert a dynamic field relationship into a hard-coded numeric constant.
 - Use FORBIDDEN_CAPABILITY only when the spec explicitly forbids a capability, technology, behavior, or scope.
+- Do not promote SHOULD-level guidance to FORBIDDEN_CAPABILITY, REQUIRED_FIELD, MAX_VALUE, or RELATION_CONSTRAINT. Preserve the SHOULD level through a behavioral invariant with source_level="SHOULD" or record a gap.
 
 INVARIANT ID RULE (DETERMINISTIC):
 - Host-side normalization computes semantic-only IDs from invariant type and canonical parameters.

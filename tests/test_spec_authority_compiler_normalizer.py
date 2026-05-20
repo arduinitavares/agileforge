@@ -75,6 +75,65 @@ def _structured_spec_source() -> str:
     return canonical_spec_json(artifact)
 
 
+def _structured_behavior_spec_source() -> str:
+    """Return canonical structured spec JSON with behavioral authority items."""
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.behavior",
+            "title": "Behavioral Structured Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-05-20",
+            "updated_at": "2026-05-20",
+            "summary": "Exercise behavioral authority normalization.",
+            "problem_statement": "Behavioral specs need source metadata checks.",
+            "items": [
+                {
+                    "id": "REQ.item-interactions",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Todo item interactions",
+                    "statement": (
+                        "Each todo item must support checkbox completion and "
+                        "label double-click editing activation."
+                    ),
+                    "level": "MUST",
+                    "verification": "system-test",
+                    "acceptance": [
+                        "Clicking a todo checkbox updates the todo completed value.",
+                        "Double-clicking a todo label enters editing mode.",
+                    ],
+                },
+                {
+                    "id": "CONSTRAINT.html-css-js-style",
+                    "type": "CONSTRAINT",
+                    "status": "accepted",
+                    "title": "Template style guidance",
+                    "statement": (
+                        "The implementation should avoid Sass, CoffeeScript, "
+                        "or other preprocessors unless a reviewer records a "
+                        "framework-specific reason."
+                    ),
+                    "level": "SHOULD",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "The implementation avoids Sass, CoffeeScript, or "
+                        "other preprocessors unless a reviewer records a "
+                        "framework-specific reason."
+                    ],
+                },
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
+
+
 def _legacy_success_payload() -> dict[str, Any]:
     return {
         "scope_themes": ["payload validation"],
@@ -361,6 +420,77 @@ def test_normalizer_rewrites_behavioral_invariant_ids_semantically() -> None:
     )
     assert invariant.parameters.source_item_id == "REQ.item-interactions"
     assert invariant.parameters.source_level == "MUST"
+
+
+def test_normalizer_rejects_behavioral_source_level_mismatch() -> None:
+    """Behavioral params must match source item level in structured specs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "parameters": {
+                "source_item_id": "REQ.item-interactions",
+                "source_level": "SHOULD",
+                "trigger": "checkbox click",
+                "target": "todo checkbox",
+                "expected_response": "todo completed value toggles",
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+    assert "REQ.item-interactions" in normalized.root.blocking_gaps[0]
+    assert "source_level SHOULD does not match MUST" in normalized.root.blocking_gaps[0]
+
+
+def test_normalizer_rejects_forbidden_capability_from_should_source() -> None:
+    """SHOULD guidance cannot become a hard forbidden capability."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "Sass"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "The implementation avoids Sass, CoffeeScript, or other "
+                "preprocessors unless a reviewer records a framework-specific "
+                "reason."
+            ),
+            "location": "CONSTRAINT.html-css-js-style.acceptance[0]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+    assert "FORBIDDEN_CAPABILITY" in normalized.root.blocking_gaps[0]
+    assert "CONSTRAINT.html-css-js-style" in normalized.root.blocking_gaps[0]
 
 
 def test_success_schema_accepts_compact_ir_with_provenance() -> None:

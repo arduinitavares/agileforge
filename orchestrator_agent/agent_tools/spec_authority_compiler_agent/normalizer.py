@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -27,6 +28,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from utils.spec_schemas import (
+    BehavioralAuthorityParams,
     Invariant,
     InvariantType,
     SourceMapEntry,
@@ -97,6 +99,10 @@ _FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
     "submissions": ("post", "request", "submit"),
     "submit": ("post", "request", "submission"),
 }
+_STRUCTURED_ITEM_ID_RE = re.compile(
+    r"\b(?:GOAL|NON_GOAL|REQ|QUALITY|CONSTRAINT|INTERFACE|DATA|DECISION|"
+    r"ASSUMPTION|RISK|EXAMPLE|OPEN_QUESTION)\.[A-Za-z0-9_-]+"
+)
 _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
     {
         "scope_themes",
@@ -621,6 +627,142 @@ def _structured_profile_source_candidates(
     return candidates
 
 
+def _structured_profile_items_by_id(
+    source_text: str,
+) -> dict[str, Mapping[str, Any]]:
+    """Return structured spec items keyed by item ID."""
+    try:
+        parsed = json.loads(source_text)
+    except json.JSONDecodeError:
+        return {}
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("schema_version") != "agileforge.spec.v1"
+    ):
+        return {}
+
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return {}
+
+    result: dict[str, Mapping[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            result[item_id] = item
+    return result
+
+
+def _structured_item_id_from_reference(reference: str | None) -> str | None:
+    """Extract a structured spec item ID from a source reference string."""
+    if not reference:
+        return None
+    match = _STRUCTURED_ITEM_ID_RE.search(reference)
+    return match.group(0) if match else None
+
+
+def _source_map_item_ids_by_invariant(
+    success: SpecAuthorityCompilationSuccess,
+) -> dict[str, set[str]]:
+    """Return source item IDs from source_map entries by invariant ID."""
+    by_invariant: dict[str, set[str]] = {}
+    for entry in success.source_map:
+        source_item_id = _structured_item_id_from_reference(entry.location)
+        if source_item_id is None:
+            source_item_id = _structured_item_id_from_reference(entry.excerpt)
+        if source_item_id is None:
+            continue
+        by_invariant.setdefault(entry.invariant_id, set()).add(source_item_id)
+    return by_invariant
+
+
+def _structured_authority_metadata_errors(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> list[str]:
+    """Validate model-emitted authority metadata against structured source."""
+    source_items = _structured_profile_items_by_id(source_text)
+    if not source_items:
+        return []
+
+    errors: list[str] = []
+    source_map_ids = _source_map_item_ids_by_invariant(success)
+    for invariant in success.invariants:
+        errors.extend(
+            _behavioral_source_metadata_errors(
+                invariant,
+                source_items=source_items,
+            )
+        )
+        errors.extend(
+            _legacy_modality_promotion_errors(
+                invariant,
+                source_items=source_items,
+                source_item_ids=source_map_ids.get(invariant.id, set()),
+            )
+        )
+    return errors
+
+
+def _behavioral_source_metadata_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Return behavioral source metadata mismatch errors for an invariant."""
+    parameters = invariant.parameters
+    if not isinstance(parameters, BehavioralAuthorityParams):
+        return []
+
+    source_item = source_items.get(parameters.source_item_id)
+    if source_item is None:
+        return [
+            (
+                f"{invariant.id} references unknown source_item_id "
+                f"{parameters.source_item_id}."
+            )
+        ]
+
+    actual_level = source_item.get("level")
+    if actual_level != parameters.source_level:
+        return [
+            (
+                f"{invariant.id} source_item_id {parameters.source_item_id} "
+                f"source_level {parameters.source_level} does not match "
+                f"{actual_level}."
+            )
+        ]
+    return []
+
+
+def _legacy_modality_promotion_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+    source_item_ids: set[str],
+) -> list[str]:
+    """Return errors for legacy hard bans sourced from non-hard guidance."""
+    if invariant.type != InvariantType.FORBIDDEN_CAPABILITY:
+        return []
+
+    errors: list[str] = []
+    for source_item_id in sorted(source_item_ids):
+        source_item = source_items.get(source_item_id)
+        if source_item is None:
+            continue
+        source_level = source_item.get("level")
+        if source_level in {"MUST", "MUST_NOT"}:
+            continue
+        errors.append(
+            f"{invariant.id} FORBIDDEN_CAPABILITY over-promotes "
+            f"{source_item_id} source level {source_level}."
+        )
+    return errors
+
+
 def _candidate_evidence_from_source_text(
     entry: SourceMapEntry,
     *,
@@ -1117,6 +1259,17 @@ def normalize_compiler_output(
     success: SpecAuthorityCompilationSuccess = parsed.root
     _filter_meta_policy_invariants(success)
     _deduplicate_semantic_invariants(success)
+
+    if source_format == "agileforge.spec.v1" and source_text:
+        metadata_errors = _structured_authority_metadata_errors(
+            success,
+            source_text=source_text,
+        )
+        if metadata_errors:
+            return _failure(
+                reason="SOURCE_METADATA_MISMATCH",
+                blocking_gaps=metadata_errors,
+            )
 
     expected_prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
     if not success.prompt_hash or not re.match(r"^[0-9a-f]{64}$", success.prompt_hash):

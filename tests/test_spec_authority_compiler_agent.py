@@ -69,6 +69,24 @@ def test_compiler_instructions_document_structured_spec_support_matrix() -> None
     assert "agileforge.spec_legacy_markdown.v1" not in instructions
 
 
+def test_compiler_instructions_document_behavioral_authority_types() -> None:
+    """Compiler prompt must teach behavioral authority generation."""
+    instructions = _compiler_instructions()
+
+    for invariant_type in (
+        "USER_INTERACTION",
+        "STATE_TRANSITION",
+        "DATA_CONTRACT",
+        "ROUTE_CONTRACT",
+        "VISIBILITY_RULE",
+    ):
+        assert invariant_type in instructions
+
+    assert "source_item_id" in instructions
+    assert "source_level" in instructions
+    assert "Do not compress event-driven behavior into REQUIRED_FIELD" in instructions
+
+
 def test_compiler_instructions_document_host_semantic_ids() -> None:
     """Compiler prompt must align with host semantic-only invariant IDs."""
     instructions = _compiler_instructions()
