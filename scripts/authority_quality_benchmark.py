@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
+from pathlib import Path
+from typing import Any
 
 JsonObject = dict[str, Any]
 LOCAL_COMMAND_FLAGS = ("project-id", "idempotency-key", "review-token")
@@ -182,3 +180,92 @@ def _redact_command(command: str) -> str:
     flag_pattern = "|".join(re.escape(flag) for flag in LOCAL_COMMAND_FLAGS)
     redacted = re.sub(rf"(--(?:{flag_pattern})=)\S+", r"\1REDACTED", command)
     return re.sub(rf"(--(?:{flag_pattern})\s+)\S+", r"\1REDACTED", redacted)
+
+
+def _load_json(path: Path) -> JsonObject:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def _cmd_init_source(args: argparse.Namespace) -> int:
+    fixture_dir = Path(args.fixture_dir)
+    raw_input = Path(args.raw_input)
+    raw_text = raw_input.read_text(encoding="utf-8")
+    normalized = normalize_source_text(raw_text)
+    raw_relative = f"source/raw/{args.raw_artifact_name}"
+
+    write_text(fixture_dir / raw_relative, raw_text)
+    write_text(fixture_dir / "source/source.md", normalized)
+    write_text(
+        fixture_dir / "source/source.sha256",
+        sha256_text(normalized) + "\n",
+    )
+    meta = build_source_meta(
+        source_url=args.source_url,
+        fetched_at=args.fetched_at,
+        raw_artifact=raw_relative,
+        raw_text=raw_text,
+        normalized_artifact="source/source.md",
+        normalized_text=normalized,
+        normalization_method=args.normalization_method,
+        normalization_tool=args.normalization_tool,
+        normalization_tool_version=args.normalization_tool_version,
+        normalization_notes=args.normalization_notes,
+        license_note=args.license_note,
+    )
+    write_json(fixture_dir / "source/source.meta.json", meta)
+    return 0
+
+
+def _cmd_extract_review(args: argparse.Namespace) -> int:
+    fixture_dir = Path(args.fixture_dir)
+    packet = _load_json(Path(args.review_packet))
+    write_json(
+        fixture_dir / "agileforge/compiled-authority.json",
+        extract_compiled_authority(packet),
+    )
+    write_json(
+        fixture_dir / "agileforge/review-summary.json",
+        sanitize_review_packet(packet),
+    )
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build AgileForge authority quality benchmark artifacts."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_source = subparsers.add_parser("init-source")
+    init_source.add_argument("--fixture-dir", required=True)
+    init_source.add_argument("--source-url", required=True)
+    init_source.add_argument("--raw-input", required=True)
+    init_source.add_argument("--raw-artifact-name", required=True)
+    init_source.add_argument("--fetched-at", required=True)
+    init_source.add_argument("--normalization-method", required=True)
+    init_source.add_argument("--normalization-tool", required=True)
+    init_source.add_argument("--normalization-tool-version", required=True)
+    init_source.add_argument("--normalization-notes", required=True)
+    init_source.add_argument("--license-note", required=True)
+    init_source.set_defaults(func=_cmd_init_source)
+
+    extract_review = subparsers.add_parser("extract-review")
+    extract_review.add_argument("--fixture-dir", required=True)
+    extract_review.add_argument("--review-packet", required=True)
+    extract_review.set_defaults(func=_cmd_extract_review)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the benchmark helper CLI."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

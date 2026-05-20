@@ -9,6 +9,7 @@ from scripts.authority_quality_benchmark import (
     build_run_manifest,
     build_source_meta,
     extract_compiled_authority,
+    main,
     normalize_source_text,
     sanitize_review_packet,
     sha256_text,
@@ -292,3 +293,87 @@ def test_build_run_manifest_redacts_local_command_artifacts() -> None:
             "--review-token=REDACTED"
         ),
     }
+
+
+def test_init_source_command_writes_normalized_source_and_metadata(
+    tmp_path: Path,
+) -> None:
+    """The init-source command writes source fixtures and source metadata."""
+    raw_path = tmp_path / "raw.md"
+    fixture_dir = tmp_path / "fixture"
+    raw_path.write_text("# Title\r\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "init-source",
+            "--fixture-dir",
+            str(fixture_dir),
+            "--source-url",
+            "https://example.test/source.md",
+            "--raw-input",
+            str(raw_path),
+            "--raw-artifact-name",
+            "source.raw.md",
+            "--fetched-at",
+            "2026-05-20T12:00:00Z",
+            "--normalization-method",
+            "raw-markdown-copy",
+            "--normalization-tool",
+            "manual",
+            "--normalization-tool-version",
+            "n/a",
+            "--normalization-notes",
+            "Line endings normalized to LF.",
+            "--license-note",
+            "Public fixture retained for benchmark review.",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (fixture_dir / "source/source.md").read_text(encoding="utf-8") == "# Title\n"
+    assert (fixture_dir / "source/source.sha256").read_text(
+        encoding="utf-8"
+    ).startswith("sha256:")
+    meta = json.loads((fixture_dir / "source/source.meta.json").read_text())
+    assert meta["source_url"] == "https://example.test/source.md"
+
+
+def test_extract_review_command_writes_compiled_authority_and_summary(
+    tmp_path: Path,
+) -> None:
+    """The extract-review command writes authority and sanitized review JSON."""
+    fixture_dir = tmp_path / "fixture"
+    review_path = tmp_path / "review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "guard_tokens": {"review_token": "secret"},
+                    "review_summary": {"acceptance_status": "accept_ready"},
+                    "review_findings": [],
+                    "pending_authority": {
+                        "artifact": {"invariants": [{"id": "INV-1"}]}
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "extract-review",
+            "--fixture-dir",
+            str(fixture_dir),
+            "--review-packet",
+            str(review_path),
+        ]
+    )
+
+    assert exit_code == 0
+    authority = json.loads(
+        (fixture_dir / "agileforge/compiled-authority.json").read_text()
+    )
+    summary = json.loads((fixture_dir / "agileforge/review-summary.json").read_text())
+    assert authority == {"invariants": [{"id": "INV-1"}]}
+    assert "secret" not in json.dumps(summary)
