@@ -1,0 +1,539 @@
+{
+  "schema_version": "agileforge.spec.v1",
+  "artifact_id": "SPEC.todomvc-app",
+  "title": "TodoMVC Application Technical Spec",
+  "status": "accepted",
+  "version": "1.0",
+  "created_at": "2026-05-20",
+  "updated_at": "2026-05-20",
+  "summary": "Defines the TodoMVC application behavior, structure, dependencies, style constraints, persistence, and routing expected for framework examples.",
+  "problem_statement": "TodoMVC examples need a consistent, framework-comparable implementation contract so each app looks and behaves like the template and other examples while still allowing framework best practices where the source permits them.",
+  "controlled_terms": [
+    {
+      "term": "active todo",
+      "definition": "A todo whose completed value is false.",
+      "scope": "artifact"
+    },
+    {
+      "term": "completed todo",
+      "definition": "A todo whose completed value is true.",
+      "scope": "artifact"
+    },
+    {
+      "term": "editing mode",
+      "definition": "The item state activated by double-clicking a todo label, represented by the editing class on the item li.",
+      "scope": "artifact"
+    }
+  ],
+  "external_references": [
+    {
+      "id": "EXT.todomvc-template",
+      "title": "TodoMVC App Template",
+      "url": "https://github.com/tastejs/todomvc-app-template/",
+      "summary": "Template application that the source directs implementations to use as the base."
+    },
+    {
+      "id": "EXT.backbone-reference",
+      "title": "TodoMVC Backbone Reference Implementation",
+      "url": "http://todomvc.com/examples/backbone/dist",
+      "summary": "Reference implementation suggested by the source for understanding behavior when unclear."
+    },
+    {
+      "id": "EXT.flatiron-director",
+      "title": "Flatiron Director",
+      "url": "https://github.com/flatiron/director",
+      "summary": "Routing library allowed by the source when the framework lacks built-in routing capabilities."
+    }
+  ],
+  "items": [
+    {
+      "id": "GOAL.consistent-todomvc-example",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Consistent TodoMVC example",
+      "statement": "The app should be easy to compare with other TodoMVC examples by following the shared template and matching expected TodoMVC behavior."
+    },
+    {
+      "id": "GOAL.framework-appropriate-implementation",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Framework-appropriate implementation",
+      "statement": "The app should follow the selected framework's best practices when they affect structure, dependency management, persistence, or routing and do not conflict with the TodoMVC source requirements."
+    },
+    {
+      "id": "NON_GOAL.customized-visual-design",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Customized visual design",
+      "statement": "The app is not intended to introduce a distinct visual design beyond minimal app.css changes needed for the implementation."
+    },
+    {
+      "id": "NON_GOAL.preprocessor-based-source",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Preprocessor-based source",
+      "statement": "The app is not intended to rely on Sass, CoffeeScript, or other preprocessors."
+    },
+    {
+      "id": "CONSTRAINT.template-base",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Template base",
+      "statement": "The implementation must use the TodoMVC app template as the base and must keep the app looking and behaving exactly like the template and other examples.",
+      "level": "MUST",
+      "verification": "manual-review",
+      "acceptance": [
+        "A reviewer can identify that the implementation is based on the TodoMVC app template.",
+        "A reviewer comparing the app to the template and other examples finds no intentional visual or behavioral divergence not required by the chosen framework."
+      ],
+      "tags": [
+        "template",
+        "fidelity"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.framework-best-practices",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Framework best practices",
+      "statement": "The implementation should follow the selected framework's best practices for application structure, even when that differs from the recommended example file layout.",
+      "level": "SHOULD",
+      "verification": "manual-review",
+      "acceptance": [
+        "A reviewer can explain any structural deviation from the recommended TodoMVC layout in terms of the selected framework's best practices."
+      ],
+      "tags": [
+        "structure"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.html-css-js-style",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "HTML, CSS, and JavaScript style",
+      "statement": "The implementation must follow the source style constraints: keep HTML close to the template, remove finished HTML comments, reference base.css from the assets folder without modifying it, use app.css for minimal style changes, update relative paths from the template, follow the project code style, use double-quotes in HTML, use single-quotes in JavaScript and CSS, use constants instead of direct keyCode literals, and avoid preprocessors.",
+      "level": "MUST",
+      "verification": "manual-review",
+      "acceptance": [
+        "HTML remains close to the template and contains no leftover implementation comments.",
+        "base.css is referenced from assets and is not modified by the app.",
+        "Style changes, if any, are in app.css and are minimal.",
+        "Relative paths copied from the template resolve correctly.",
+        "HTML attributes use double-quotes.",
+        "JavaScript and CSS strings use single-quotes.",
+        "Key codes are represented by named constants instead of direct numeric literals.",
+        "The implementation source is not written in a preprocessor language."
+      ],
+      "tags": [
+        "style",
+        "template"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.browser-support",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Supported browsers",
+      "statement": "The app must work in every browser supported by the TodoMVC project.",
+      "level": "MUST",
+      "verification": "manual-review",
+      "acceptance": [
+        "The implementation does not knowingly rely on features or dependencies that exclude a TodoMVC-supported browser."
+      ],
+      "tags": [
+        "compatibility"
+      ]
+    },
+    {
+      "id": "REQ.readme",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "README",
+      "statement": "The example must include a README describing the framework, the general implementation, and the build process when a build process is required.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "The app includes a README file.",
+        "The README names and describes the framework.",
+        "The README summarizes the general implementation.",
+        "When the app requires a build process, the README describes that process."
+      ],
+      "tags": [
+        "documentation"
+      ]
+    },
+    {
+      "id": "REQ.dependency-management",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Dependency management",
+      "statement": "Unless it conflicts with the project's best practices, the example should use npm package management with package.json in the app root and must include todomvc-common and todomvc-app-css as dependencies.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "If npm does not conflict with project best practices, package.json exists in the app root.",
+        "package.json includes todomvc-common as a dependency.",
+        "package.json includes todomvc-app-css as a dependency.",
+        "Third-party dependencies are provided as npm packages."
+      ],
+      "tags": [
+        "dependencies"
+      ]
+    },
+    {
+      "id": "REQ.node-modules-pruning",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Node modules pruning",
+      "statement": "The example should gitignore everything in node_modules except files actually used by the example, and documentation, READMEs, and tests from dependencies should not be included in the pull request.",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "node_modules content that is not required for the example to run is excluded.",
+        "Dependency documentation, README files, and tests are not included in the submitted example unless required for runtime."
+      ],
+      "tags": [
+        "dependencies"
+      ]
+    },
+    {
+      "id": "REQ.empty-state-visibility",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Empty state visibility",
+      "statement": "When there are no todos, #main and #footer should be hidden.",
+      "level": "SHOULD",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "Given the todo list is empty, #main is hidden.",
+        "Given the todo list is empty, #footer is hidden."
+      ],
+      "tags": [
+        "visibility"
+      ]
+    },
+    {
+      "id": "REQ.new-todo",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "New todo",
+      "statement": "The top input must be focused when the page loads, pressing Enter in that input must create a todo from non-empty trimmed text, append it to the todo list, and clear the input.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When the page loads, the new-todo input is focused.",
+        "Given the top input contains text with surrounding whitespace, when Enter is pressed, then a todo is created using the trimmed title.",
+        "Given the top input is empty after trimming, when Enter is pressed, then no todo is created.",
+        "After a todo is created, it is appended to the todo list and the top input is cleared."
+      ],
+      "tags": [
+        "creation",
+        "input"
+      ]
+    },
+    {
+      "id": "REQ.toggle-all",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Mark all as complete",
+      "statement": "The mark-all checkbox must toggle all todos to the same completed state as itself, clear its checked state after completed todos are cleared, and reflect single-item completed state changes.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When the mark-all checkbox is checked, all todos become completed.",
+        "When the mark-all checkbox is unchecked, all todos become active.",
+        "After the Clear completed button removes completed todos, the mark-all checkbox is not checked.",
+        "When every individual todo is completed, the mark-all checkbox is checked.",
+        "When at least one individual todo is active, the mark-all checkbox is not checked."
+      ],
+      "tags": [
+        "completion"
+      ]
+    },
+    {
+      "id": "REQ.item-interactions",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Todo item interactions",
+      "statement": "Each todo item must support checkbox completion, label double-click editing activation, and hover-revealed removal.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "Clicking a todo checkbox updates the todo completed value.",
+        "Clicking a todo checkbox toggles the completed class on the parent li.",
+        "Double-clicking a todo label toggles the editing class on the parent li.",
+        "Hovering over a todo item shows the .destroy remove button."
+      ],
+      "tags": [
+        "item",
+        "interaction"
+      ]
+    },
+    {
+      "id": "REQ.editing",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Editing behavior",
+      "statement": "Editing mode must hide the other controls, focus an input containing the todo title, save non-empty trimmed edits on blur or Enter, destroy the todo on an empty trimmed edit, remove the editing class after saving, and discard changes when Escape is pressed.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When editing mode activates, the other item controls are hidden.",
+        "When editing mode activates, an input containing the todo title is focused.",
+        "Given an edit input contains non-empty text after trimming, when it blurs, then the todo title is saved and the editing class is removed.",
+        "Given an edit input contains non-empty text after trimming, when Enter is pressed, then the todo title is saved and the editing class is removed.",
+        "Given an edit input is empty after trimming, when the edit is saved, then the todo is destroyed.",
+        "Given the edit input has unsaved changes, when Escape is pressed, then editing mode exits and the changes are discarded."
+      ],
+      "tags": [
+        "editing"
+      ]
+    },
+    {
+      "id": "REQ.counter",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Active todo counter",
+      "statement": "The counter must display the number of active todos, wrap the number in a strong tag, and pluralize item correctly for zero, one, and multiple active todos.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When there are zero active todos, the counter text uses items.",
+        "When there is one active todo, the counter text uses item.",
+        "When there are two or more active todos, the counter text uses items.",
+        "The numeric active count is wrapped in a strong tag."
+      ],
+      "tags": [
+        "counter"
+      ]
+    },
+    {
+      "id": "REQ.clear-completed",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Clear completed",
+      "statement": "The Clear completed button must remove completed todos when clicked and must be hidden when there are no completed todos.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "Given at least one todo is completed, when Clear completed is clicked, then completed todos are removed.",
+        "Given there are no completed todos, the Clear completed button is hidden."
+      ],
+      "tags": [
+        "completion"
+      ]
+    },
+    {
+      "id": "REQ.persistence",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Todo persistence",
+      "statement": "The app must dynamically persist todos to localStorage, using framework persistence capabilities when available and otherwise using vanilla localStorage.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When todos change, the changed todo data is persisted to localStorage.",
+        "After reload, persisted todos are restored.",
+        "If the framework provides persistence capabilities, the implementation uses them.",
+        "If the framework does not provide persistence capabilities, the implementation uses vanilla localStorage."
+      ],
+      "tags": [
+        "persistence"
+      ]
+    },
+    {
+      "id": "DATA.todo-record",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "Todo record fields",
+      "statement": "When possible, each persisted todo item should use the keys id, title, and completed.",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "Persisted todo records use id, title, and completed keys when the implementation can do so."
+      ],
+      "tags": [
+        "persistence",
+        "data"
+      ]
+    },
+    {
+      "id": "DATA.localstorage-key",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "localStorage key",
+      "statement": "The localStorage name should use the format todos-[framework].",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "The localStorage key used for todos follows the todos-[framework] format."
+      ],
+      "tags": [
+        "persistence",
+        "data"
+      ]
+    },
+    {
+      "id": "DATA.editing-state",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "Editing state persistence",
+      "statement": "Editing mode must not be persisted.",
+      "level": "MUST_NOT",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "Given a todo is in editing mode, when the app persists and reloads, then the todo is not restored in editing mode."
+      ],
+      "tags": [
+        "persistence",
+        "editing"
+      ]
+    },
+    {
+      "id": "REQ.routing",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Routing and filtering",
+      "statement": "Routing is required and must support all, active, and completed routes; use framework routing when supported and otherwise use the Flatiron Director routing library located in the assets folder.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "The app supports #/ as the all/default route.",
+        "The app supports #/active as the active route.",
+        "The app supports #/completed as the completed route.",
+        "The equivalent #!/ route style is accepted where implemented.",
+        "If the framework supports built-in routing, the implementation uses it.",
+        "If the framework does not support built-in routing, the implementation uses the Flatiron Director routing library from the assets folder."
+      ],
+      "tags": [
+        "routing",
+        "filtering"
+      ]
+    },
+    {
+      "id": "REQ.filtered-state",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Filtered state behavior",
+      "statement": "When the route changes, the todo list must be filtered at the model level, the selected class on filter links must be toggled, item updates in a filtered state must update visibility accordingly, and the active filter must persist on reload.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "When the route changes to all, active, or completed, the list is filtered at the model level.",
+        "When the route changes, the selected class is applied to the active filter link and removed from inactive filter links.",
+        "Given the active filter is selected, when an active todo is checked complete, then it is hidden from the active list.",
+        "After reload, the previously active filter is restored."
+      ],
+      "tags": [
+        "routing",
+        "filtering"
+      ]
+    },
+    {
+      "id": "EXAMPLE.recommended-directory-structure",
+      "type": "EXAMPLE",
+      "status": "accepted",
+      "title": "Recommended directory structure",
+      "statement": "A recommended structure includes index.html, package.json, node_modules, css/app.css, js/app.js, framework-appropriate controllers and models folders, and readme.md."
+    },
+    {
+      "id": "EXAMPLE.split-components",
+      "type": "EXAMPLE",
+      "status": "accepted",
+      "title": "Split component structure",
+      "statement": "Components may be split into separate files such as js/controllers/todos.js and js/models/todo.js when that makes sense for the framework."
+    },
+    {
+      "id": "EXAMPLE.package-json",
+      "type": "EXAMPLE",
+      "status": "accepted",
+      "title": "package.json dependency example",
+      "statement": "A package.json may be private and include framework dependencies alongside todomvc-app-css and todomvc-common."
+    },
+    {
+      "id": "EXAMPLE.counter-text",
+      "type": "EXAMPLE",
+      "status": "accepted",
+      "title": "Counter text",
+      "statement": "With two active todos, the counter can render as a strong-wrapped 2 followed by items left."
+    },
+    {
+      "id": "ASSUMPTION.source-is-complete",
+      "type": "ASSUMPTION",
+      "status": "accepted",
+      "title": "Source is complete for benchmark scope",
+      "statement": "The source document is treated as the full authority for this structured benchmark spec; linked external references provide context but do not add behavior not stated in the source."
+    }
+  ],
+  "relations": [
+    {
+      "from": "CONSTRAINT.template-base",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "CONSTRAINT.framework-best-practices",
+      "type": "satisfies",
+      "to": "GOAL.framework-appropriate-implementation"
+    },
+    {
+      "from": "CONSTRAINT.html-css-js-style",
+      "type": "constrains",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.dependency-management",
+      "type": "depends_on",
+      "to": "CONSTRAINT.framework-best-practices"
+    },
+    {
+      "from": "REQ.new-todo",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.item-interactions",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.editing",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.persistence",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.persistence",
+      "type": "depends_on",
+      "to": "DATA.todo-record"
+    },
+    {
+      "from": "REQ.persistence",
+      "type": "depends_on",
+      "to": "DATA.localstorage-key"
+    },
+    {
+      "from": "REQ.routing",
+      "type": "satisfies",
+      "to": "GOAL.consistent-todomvc-example"
+    },
+    {
+      "from": "REQ.filtered-state",
+      "type": "depends_on",
+      "to": "REQ.routing"
+    },
+    {
+      "from": "DATA.editing-state",
+      "type": "constrains",
+      "to": "REQ.persistence"
+    }
+  ],
+  "rendering": {
+    "markdown_profile": "agileforge.spec_markdown.v1",
+    "rendered_markdown_sha256": null
+  }
+}
