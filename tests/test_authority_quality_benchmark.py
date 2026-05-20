@@ -454,6 +454,52 @@ def test_todomvc_fixture_is_rejected_by_semantic_guardrails() -> None:
     } <= finding_codes
 
 
+def test_todomvc_guardrails_use_top_level_source_map_for_coverage() -> None:
+    """Normalized authority source_map entries count as source references."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    gold_spec = json.loads(
+        (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
+    )
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-new-todo",
+                "type": "USER_INTERACTION",
+                "parameters": {
+                    "source_item_id": "REQ.new-todo",
+                    "source_level": "MUST",
+                    "trigger": "Enter keypress",
+                    "target": "new todo input",
+                    "expected_response": (
+                        "create a todo from non-empty trimmed text, append it "
+                        "to the list, and clear the input"
+                    ),
+                },
+            }
+        ],
+        "source_map": [
+            {
+                "invariant_id": "INV-new-todo",
+                "location": "REQ.new-todo.statement",
+                "excerpt": (
+                    "The top input must be focused when the page loads, "
+                    "pressing Enter in that input must create a todo from "
+                    "non-empty trimmed text, append it to the todo list, and "
+                    "clear the input."
+                ),
+            }
+        ],
+    }
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=gold_spec,
+        authority=authority,
+        review_summary={},
+    )
+
+    assert "REQ.new-todo" not in result["weak_or_missing_must_items"]
+
+
 def test_todomvc_guardrails_pin_core_missing_behavior_items() -> None:
     """TodoMVC guardrails identify the high-risk missing behavioral contracts."""
     fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"

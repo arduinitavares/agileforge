@@ -383,6 +383,21 @@ def _support_overlap_ratio(expected: list[str], excerpt: str) -> float:
     return matched / len(expected_unique)
 
 
+def _behavioral_support_tokens(parameters: BehavioralAuthorityParams) -> list[str]:
+    """Return semantic tokens from behavioral parameters for evidence ranking."""
+    dumped = parameters.model_dump(mode="json")
+    text_parts: list[str] = []
+    for key, value in dumped.items():
+        if key in {"source_item_id", "source_level"}:
+            continue
+        if isinstance(value, str):
+            text_parts.append(value)
+            continue
+        if isinstance(value, list):
+            text_parts.extend(item for item in value if isinstance(item, str))
+    return _tokenize_support_text(" ".join(text_parts))
+
+
 def _forbidden_capability_support_tokens(capability: str) -> list[str]:
     """Return capability tokens plus narrow aliases for explicit safety guards."""
     tokens = _tokenize_support_text(capability)
@@ -513,6 +528,8 @@ def _source_map_support_score(inv: Invariant, excerpt: str) -> float:
         if _relation_operator_supported(expression, excerpt):
             base += 0.1
         return base
+    if isinstance(parameters, BehavioralAuthorityParams):
+        return _support_overlap_ratio(_behavioral_support_tokens(parameters), excerpt)
     return 0.0
 
 
@@ -753,6 +770,8 @@ def _legacy_modality_promotion_errors(
         source_item = source_items.get(source_item_id)
         if source_item is None:
             continue
+        if source_item.get("type") == "NON_GOAL":
+            continue
         source_level = source_item.get("level")
         if source_level in {"MUST", "MUST_NOT"}:
             continue
@@ -865,6 +884,19 @@ def _best_supported_source_candidate(
     candidates: list[_SourceEvidenceCandidate],
 ) -> _SourceEvidenceCandidate | None:
     """Select the most specific source-text candidate supporting an invariant."""
+    parameters = invariant.parameters
+    if isinstance(parameters, BehavioralAuthorityParams):
+        item_candidates = [
+            candidate
+            for candidate in candidates
+            if (
+                _structured_item_id_from_reference(candidate.location)
+                == parameters.source_item_id
+            )
+        ]
+        if item_candidates:
+            candidates = item_candidates
+
     supported = [
         candidate
         for candidate in candidates
@@ -1260,17 +1292,6 @@ def normalize_compiler_output(
     _filter_meta_policy_invariants(success)
     _deduplicate_semantic_invariants(success)
 
-    if source_format == "agileforge.spec.v1" and source_text:
-        metadata_errors = _structured_authority_metadata_errors(
-            success,
-            source_text=source_text,
-        )
-        if metadata_errors:
-            return _failure(
-                reason="SOURCE_METADATA_MISMATCH",
-                blocking_gaps=metadata_errors,
-            )
-
     expected_prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
     if not success.prompt_hash or not re.match(r"^[0-9a-f]{64}$", success.prompt_hash):
         success.prompt_hash = expected_prompt_hash
@@ -1312,6 +1333,17 @@ def normalize_compiler_output(
 
     if success.source_map:
         _rewrite_source_map_invariant_ids(success, original_invariants)
+
+    if source_format == "agileforge.spec.v1" and source_text:
+        metadata_errors = _structured_authority_metadata_errors(
+            success,
+            source_text=source_text,
+        )
+        if metadata_errors:
+            return _failure(
+                reason="SOURCE_METADATA_MISMATCH",
+                blocking_gaps=metadata_errors,
+            )
 
     _clear_compact_ir(success)
 

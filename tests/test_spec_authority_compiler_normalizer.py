@@ -128,6 +128,42 @@ def _structured_behavior_spec_source() -> str:
                         "framework-specific reason."
                     ],
                 },
+                {
+                    "id": "DATA.todo-record",
+                    "type": "DATA",
+                    "status": "accepted",
+                    "title": "Todo record",
+                    "statement": (
+                        "When possible, each persisted todo item should use "
+                        "the keys id, title, and completed."
+                    ),
+                    "level": "SHOULD",
+                    "verification": "inspection",
+                    "acceptance": [
+                        "Persisted todo records use id, title, and completed "
+                        "keys when possible."
+                    ],
+                },
+                {
+                    "id": "DATA.editing-state",
+                    "type": "DATA",
+                    "status": "accepted",
+                    "title": "Editing state",
+                    "statement": "Editing mode must not be persisted.",
+                    "level": "MUST_NOT",
+                    "verification": "system-test",
+                    "acceptance": ["Editing mode is not restored after reload."],
+                },
+                {
+                    "id": "NON_GOAL.customized-visual-design",
+                    "type": "NON_GOAL",
+                    "status": "accepted",
+                    "title": "Customized visual design",
+                    "statement": (
+                        "The app is not intended to introduce a distinct "
+                        "visual design beyond minimal app.css changes."
+                    ),
+                },
             ],
         }
     )
@@ -491,6 +527,108 @@ def test_normalizer_rejects_forbidden_capability_from_should_source() -> None:
     assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
     assert "FORBIDDEN_CAPABILITY" in normalized.root.blocking_gaps[0]
     assert "CONSTRAINT.html-css-js-style" in normalized.root.blocking_gaps[0]
+
+
+def test_normalizer_allows_forbidden_capability_from_non_goal_source() -> None:
+    """Accepted NON_GOAL items are hard exclusion evidence without a level."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "distinct visual design"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "The app is not intended to introduce a distinct visual "
+                "design beyond minimal app.css changes."
+            ),
+            "location": "NON_GOAL.customized-visual-design.statement",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+
+
+def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> None:
+    """Duplicate model placeholder IDs do not smear source-map metadata."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-0000000000000000",
+            "type": "DATA_CONTRACT",
+            "parameters": {
+                "source_item_id": "DATA.todo-record",
+                "source_level": "SHOULD",
+                "subject": "persisted todo record",
+                "fields": ["id", "title", "completed"],
+                "rule": "records use id, title, and completed keys when possible",
+            },
+        },
+        {
+            "id": "INV-0000000000000000",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "persist editing mode"},
+        },
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-0000000000000000",
+            "excerpt": (
+                "When possible, each persisted todo item should use the keys "
+                "id, title, and completed."
+            ),
+            "location": "DATA.todo-record",
+        },
+        {
+            "invariant_id": "INV-0000000000000000",
+            "excerpt": "Editing mode must not be persisted.",
+            "location": "DATA.editing-state",
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    source_refs_by_type = {
+        invariant.type: [
+            entry.location
+            for entry in normalized.root.source_map
+            if entry.invariant_id == invariant.id
+        ]
+        for invariant in normalized.root.invariants
+    }
+    source_item_ids_by_type = {
+        invariant_type: [".".join(location.split(".")[:2]) for location in locations]
+        for invariant_type, locations in source_refs_by_type.items()
+    }
+    assert source_item_ids_by_type[InvariantType.DATA_CONTRACT] == [
+        "DATA.todo-record"
+    ]
+    assert source_item_ids_by_type[InvariantType.FORBIDDEN_CAPABILITY] == [
+        "DATA.editing-state"
+    ]
 
 
 def test_success_schema_accepts_compact_ir_with_provenance() -> None:

@@ -36,6 +36,14 @@ When spec_source_format is "agileforge.spec.v1":
   - Unsupported normative items become gaps with their item IDs preserved.
   - Every behavioral invariant MUST include source_item_id and source_level from the typed item.
 
+COVERAGE RULES FOR STRUCTURED SPECS:
+- For every accepted MUST or MUST_NOT typed item, output one or more invariants that preserve the item's required behavior, contract, constraint, or exclusion.
+- If an accepted MUST or MUST_NOT item contains multiple events, acceptance bullets, route cases, visibility states, data fields, or side effects, split compound accepted items into multiple invariants instead of summarizing them.
+- Every unsupported accepted MUST or MUST_NOT item must produce a gap string that starts with the typed item ID and explains the missing behavior or contract.
+- Do not skip documentation, dependency, counter, clear-completed, keyboard, mouse, route, persistence, or CSS-class requirements merely because they are not API data fields; represent them with the closest supported invariant type or declare an item-ID gap.
+- SHOULD and MAY items may produce behavioral invariants with their original source_level, or gaps when unsupported. They must not be promoted to hard legacy constraints.
+- If using placeholder invariant IDs, keep source_map entries in the same order as invariants and include at least one source_map entry for each invariant.
+
 OUTPUT FORMAT (JSON ONLY, NO MARKDOWN):
 Return ONLY one of the following JSON objects:
 

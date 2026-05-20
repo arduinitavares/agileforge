@@ -87,6 +87,17 @@ def test_compiler_instructions_document_behavioral_authority_types() -> None:
     assert "Do not compress event-driven behavior into REQUIRED_FIELD" in instructions
 
 
+def test_compiler_instructions_require_accepted_must_coverage() -> None:
+    """Compiler prompt must require explicit coverage for accepted MUST items."""
+    instructions = _compiler_instructions()
+
+    assert "For every accepted MUST or MUST_NOT typed item" in instructions
+    assert "split compound accepted items into multiple invariants" in instructions
+    assert "Every unsupported accepted MUST or MUST_NOT item must produce a gap" in (
+        instructions
+    )
+
+
 def test_compiler_instructions_document_host_semantic_ids() -> None:
     """Compiler prompt must align with host semantic-only invariant IDs."""
     instructions = _compiler_instructions()

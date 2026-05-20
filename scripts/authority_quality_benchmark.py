@@ -427,7 +427,36 @@ def _authority_invariants(authority: JsonObject) -> list[JsonObject]:
     invariants = authority.get("invariants")
     if not isinstance(invariants, list):
         return []
-    return [item for item in invariants if isinstance(item, dict)]
+    source_refs_by_invariant = _source_map_refs_by_invariant(authority)
+    result: list[JsonObject] = []
+    for item in invariants:
+        if not isinstance(item, dict):
+            continue
+        item_copy = dict(item)
+        item_id = item_copy.get("id")
+        source_refs = _authority_source_refs(item_copy)
+        if isinstance(item_id, str):
+            source_refs.extend(source_refs_by_invariant.get(item_id, []))
+        item_copy["_benchmark_source_refs"] = sorted(set(source_refs))
+        result.append(item_copy)
+    return result
+
+
+def _source_map_refs_by_invariant(authority: JsonObject) -> dict[str, list[str]]:
+    source_map = authority.get("source_map")
+    if not isinstance(source_map, list):
+        return {}
+
+    by_invariant: dict[str, list[str]] = {}
+    for entry in source_map:
+        if not isinstance(entry, dict):
+            continue
+        invariant_id = entry.get("invariant_id")
+        location = entry.get("location")
+        if not isinstance(invariant_id, str) or not isinstance(location, str):
+            continue
+        by_invariant.setdefault(invariant_id, []).append(location)
+    return by_invariant
 
 
 def _authority_text_by_source_item(
@@ -457,6 +486,14 @@ def _authority_text(item: JsonObject) -> str:
 
 
 def _authority_source_refs(item: JsonObject) -> list[str]:
+    benchmark_source_refs = item.get("_benchmark_source_refs")
+    if isinstance(benchmark_source_refs, list):
+        return [
+            source_ref
+            for source_ref in benchmark_source_refs
+            if isinstance(source_ref, str)
+        ]
+
     source_refs = item.get("source_refs")
     if not isinstance(source_refs, list):
         return []
