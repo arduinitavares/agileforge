@@ -65,6 +65,46 @@ test('authority review tabs default to overview and manage all tab panels', () =
     assert.deepEqual(tabs, ['overview', 'invariants', 'spec', 'raw']);
 });
 
+test('renderAuthorityReviewCard delegates production rendering to authority console helpers', () => {
+    const source = extractFunctionSource('renderAuthorityReviewCard');
+
+    assert.match(source, /attachAuthorityReviewControls\(\);/);
+    assert.match(source, /renderAuthoritySummary\(currentAuthorityReview\);/);
+    assert.match(source, /renderAuthorityOverview\(currentAuthorityReview\);/);
+    assert.match(source, /renderAuthorityInvariants\(artifact\);/);
+});
+
+test('renderAuthorityReviewCard raw preview is textContent JSON with post accept state', () => {
+    const source = extractFunctionSource('renderAuthorityReviewCard');
+
+    assert.match(source, /post_accept:\s*currentAuthorityReview\.post_accept\s*===\s*true/);
+    assert.match(source, /preview\.textContent\s*=\s*JSON\.stringify\(previewPayload,\s*null,\s*2\);/);
+    assert.doesNotMatch(source, /preview\.innerText\s*=\s*JSON\.stringify/);
+    assert.doesNotMatch(source, /preview\.innerHTML\s*=/);
+});
+
+test('renderAuthorityReviewCard shows explicit unavailable source fallback', () => {
+    const source = extractFunctionSource('renderAuthorityReviewCard');
+
+    assert.match(source, /Specification source content is unavailable in this review packet\./);
+});
+
+test('renderAuthorityReviewCard removed legacy unsafe authority list clearing', () => {
+    const source = extractFunctionSource('renderAuthorityReviewCard');
+    const removedPatterns = [
+        /invariantsList\.innerHTML\s*=\s*''/,
+        /gapsList\.innerHTML\s*=\s*''/,
+        /assumptionsList\.innerHTML\s*=\s*''/,
+        /exclusionsList\.innerHTML\s*=\s*''/,
+        /eligibleRulesList\.innerHTML\s*=\s*''/,
+        /themesContainer\.innerHTML\s*=\s*''/,
+    ];
+
+    for (const pattern of removedPatterns) {
+        assert.doesNotMatch(source, pattern);
+    }
+});
+
 function extractFunctionSource(functionName) {
     const start = projectJsSource.indexOf(`function ${functionName}(`);
     assert.notEqual(start, -1, `${functionName} should exist in frontend/project.js`);

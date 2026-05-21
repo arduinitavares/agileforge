@@ -776,7 +776,7 @@ function createSimpleCard(item, badgeColorClass) {
     
     const contentDiv = document.createElement('div');
     contentDiv.className = 'text-slate-700 dark:text-slate-300 whitespace-pre-wrap font-medium';
-    contentDiv.textContent = item.text || '';
+    contentDiv.textContent = item.text || item.message || item.code || '';
     card.appendChild(contentDiv);
     
     return card;
@@ -893,215 +893,67 @@ function renderAuthorityReviewCard(visible) {
     }
 
     card.classList.remove('hidden');
-    const titleEl = document.getElementById('authority-card-title');
-    const summary = document.getElementById('authority-review-summary');
-    const findingsEl = document.getElementById('authority-review-findings');
-    const actionsContainer = document.getElementById('authority-review-actions-container');
-    const preview = document.getElementById('authority-review-preview');
+    attachAuthorityReviewControls();
 
-    const invariantsList = document.getElementById('invariants-list');
-    const gapsList = document.getElementById('gaps-list');
-    const assumptionsList = document.getElementById('assumptions-list');
-    const exclusionsList = document.getElementById('exclusions-list');
-    const eligibleRulesList = document.getElementById('eligible-rules-list');
-    const domainBadge = document.getElementById('authority-domain-badge');
-    const themesContainer = document.getElementById('authority-themes-container');
+    const preview = document.getElementById('authority-review-preview');
     const specViewer = document.getElementById('spec-source-viewer');
     const truncationBanner = document.getElementById('spec-truncation-banner');
 
     if (!currentAuthorityReview) {
-        if (titleEl) titleEl.innerText = 'Loading Authority Review';
-        if (summary) summary.innerText = 'Fetching review data from backend...';
-        if (findingsEl) findingsEl.innerText = '';
-        if (invariantsList) invariantsList.innerHTML = '';
-        if (gapsList) gapsList.innerHTML = '';
-        if (assumptionsList) assumptionsList.innerHTML = '';
-        if (exclusionsList) exclusionsList.innerHTML = '';
-        if (eligibleRulesList) eligibleRulesList.innerHTML = '';
-        if (domainBadge) domainBadge.textContent = '';
-        if (themesContainer) themesContainer.innerHTML = '';
+        setTextContent('authority-card-title', 'Loading Authority Review');
+        setTextContent('authority-review-state-badge', 'Loading');
+        setTextContent('authority-review-summary', 'Fetching review data from backend...');
+        setTextContent('authority-decision-status', 'Loading review packet.');
+        setTextContent('authority-blocked-reason', '');
+        if (preview) preview.textContent = '';
         if (specViewer) specViewer.textContent = '';
         if (truncationBanner) truncationBanner.classList.add('hidden');
-        if (preview) preview.innerText = '';
+        renderAuthorityOverview({ pending_authority: { artifact: {} } });
+        renderAuthorityInvariants({});
         return;
     }
 
     const isPostAccept = currentAuthorityReview.post_accept === true;
-    
-    // Theme styling based on post-accept state
     if (isPostAccept) {
-        card.className = "mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-900 dark:border-slate-800 dark:bg-slate-900/20 dark:text-slate-100";
-        if (titleEl) titleEl.innerText = 'Accepted Authority Invariants';
-        if (findingsEl) findingsEl.classList.add('hidden');
-        if (actionsContainer) actionsContainer.classList.add('hidden');
+        card.className = 'mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-900 dark:border-slate-800 dark:bg-slate-900/20 dark:text-slate-100';
     } else {
-        card.className = "mt-4 rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-100";
-        if (titleEl) titleEl.innerText = 'Pending Authority Review';
-        if (findingsEl) findingsEl.classList.remove('hidden');
-        if (actionsContainer) actionsContainer.classList.remove('hidden');
+        card.className = 'mt-4 rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-100';
     }
 
-    const project = currentAuthorityReview.project || {};
     const spec = currentAuthorityReview.spec || {};
     const pending = currentAuthorityReview.pending_authority || {};
-    const authorityId = pending.authority_id || pending.pending_authority_id || 'pending';
-    const omission = spec.coverage_summary?.omission_assessment || 'unknown';
-    const path = spec.resolved_path || 'linked specification';
-
-    if (summary) {
-        if (isPostAccept) {
-            summary.innerText = `${project.name || 'Project'} authority is complete and accepted. Coverage: ${omission}. Source: ${path}.`;
-        } else {
-            summary.innerText = `${project.name || 'Project'} authority ${authorityId} awaits review. Coverage: ${omission}. Source: ${path}.`;
-        }
-    }
-
-    if (findingsEl && !isPostAccept) {
-        const findings = pending.review_findings || [];
-        const blockingCount = findings.filter((finding) => finding?.severity === 'blocking').length;
-        findingsEl.innerText = blockingCount
-            ? `${blockingCount} blocking review finding(s) require resolution or candidate-specific overrides.`
-            : '';
-    }
-
-    // Render Invariants & Elements
     const artifact = pending.artifact || {};
-    
-    // Domain Badge
-    if (domainBadge) {
-        domainBadge.textContent = artifact.domain || 'N/A';
-    }
 
-    // Themes Badge Container
-    if (themesContainer) {
-        themesContainer.innerHTML = '';
-        const themes = artifact.scope_themes || [];
-        if (themes.length === 0) {
-            const none = document.createElement('span');
-            none.className = 'text-xs text-slate-500 font-medium italic';
-            none.textContent = 'None';
-            themesContainer.appendChild(none);
-        } else {
-            themes.forEach(theme => {
-                const span = document.createElement('span');
-                span.className = 'px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 font-semibold text-xs border border-slate-200 dark:border-slate-700';
-                span.textContent = theme;
-                themesContainer.appendChild(span);
-            });
-        }
-    }
+    renderAuthoritySummary(currentAuthorityReview);
+    renderAuthorityOverview(currentAuthorityReview);
+    renderAuthorityInvariants(artifact);
 
-    // Invariants List
-    if (invariantsList) {
-        invariantsList.innerHTML = '';
-        const invariants = artifact.invariants || [];
-        if (invariants.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
-            empty.textContent = 'No compiled invariants.';
-            invariantsList.appendChild(empty);
-        } else {
-            invariants.forEach(inv => {
-                invariantsList.appendChild(createInvariantCard(inv));
-            });
-        }
-    }
-
-    // Gaps List
-    if (gapsList) {
-        gapsList.innerHTML = '';
-        const gaps = artifact.gaps || [];
-        if (gaps.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
-            empty.textContent = 'No identified gaps.';
-            gapsList.appendChild(empty);
-        } else {
-            gaps.forEach(gap => {
-                gapsList.appendChild(createSimpleCard(gap, 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'));
-            });
-        }
-    }
-
-    // Assumptions List
-    if (assumptionsList) {
-        assumptionsList.innerHTML = '';
-        const assumptions = artifact.assumptions || [];
-        if (assumptions.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
-            empty.textContent = 'No compiler assumptions.';
-            assumptionsList.appendChild(empty);
-        } else {
-            assumptions.forEach(asm => {
-                assumptionsList.appendChild(createSimpleCard(asm, 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200'));
-            });
-        }
-    }
-
-    // Excluded Features (exclusions)
-    if (exclusionsList) {
-        exclusionsList.innerHTML = '';
-        const exclusions = artifact.rejected_features || [];
-        if (exclusions.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
-            empty.textContent = 'No excluded features.';
-            exclusionsList.appendChild(empty);
-        } else {
-            exclusions.forEach(excl => {
-                exclusionsList.appendChild(createSimpleCard(excl, 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200'));
-            });
-        }
-    }
-
-    // Eligible Feature Rules
-    if (eligibleRulesList) {
-        eligibleRulesList.innerHTML = '';
-        const eligibleRules = artifact.eligible_feature_rules || [];
-        if (eligibleRules.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
-            empty.textContent = 'No eligible feature rules.';
-            eligibleRulesList.appendChild(empty);
-        } else {
-            eligibleRules.forEach(rule => {
-                eligibleRulesList.appendChild(createSimpleCard(rule, 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200'));
-            });
-        }
-    }
-
-    // Render Spec Tab
     if (specViewer) {
         const specContent = spec.source_content || spec.excerpt || '';
-        specViewer.textContent = specContent;
+        specViewer.textContent = specContent || 'Specification source content is unavailable in this review packet.';
     }
     if (truncationBanner) {
-        if (spec.content_truncated === true) {
-            truncationBanner.classList.remove('hidden');
-        } else {
-            truncationBanner.classList.add('hidden');
-        }
+        truncationBanner.classList.toggle('hidden', spec.content_truncated !== true);
     }
 
-    // Render Raw JSON Tab
     if (preview) {
         const previewPayload = {
-            project,
+            project: currentAuthorityReview.project || {},
             spec: {
                 resolved_path: spec.resolved_path,
                 spec_hash: spec.spec_hash,
                 disk_sha256: spec.disk_sha256,
                 content_included: spec.content_included,
+                content_truncated: spec.content_truncated,
                 coverage_summary: spec.coverage_summary,
                 coverage_diagnostics: spec.coverage_diagnostics,
             },
             pending_authority: pending,
+            post_accept: currentAuthorityReview.post_accept === true,
         };
-        preview.innerText = JSON.stringify(previewPayload, null, 2);
+        preview.textContent = JSON.stringify(previewPayload, null, 2);
     }
-    
-    // Restore/Apply active tab view
+
     switchAuthorityReviewTab(currentAuthorityReviewActiveTab);
 }
 
