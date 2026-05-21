@@ -564,6 +564,28 @@ def _dashboard_authority_response(result: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _extract_workbench_error(result: dict[str, Any]) -> str:
+    """Extract a user-friendly error message from a failed result envelope."""
+    errors = result.get("errors") or []
+    if errors:
+        err = errors[0]
+        code = err.get("code") or ""
+        msg = err.get("message") or ""
+        rem = err.get("remediation") or ""
+        if isinstance(rem, list):
+            rem = " ".join(rem)
+        parts = []
+        if code:
+            parts.append(f"[{code}]")
+        if msg:
+            parts.append(msg)
+        if rem:
+            parts.append(f"Remediation: {rem}")
+        if parts:
+            return " ".join(parts)
+    return str(result.get("error") or "")
+
+
 def _complete_authority_guard_set(req: AuthorityDecisionApiRequest) -> bool:
     """Return true when dashboard provided every explicit freshness guard."""
     return all(
@@ -1698,18 +1720,35 @@ async def create_project(
     if not result.get("ok"):
         data = result.get("data") or {}
         project_id = data.get("project_id")
+        errors = result.get("errors") or []
+        warnings = result.get("warnings") or []
+        err_msg = _extract_workbench_error(result) or "Setup failed"
         if project_id is not None:
+            failed_state = {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "failed",
+                "setup_error": data.get("setup_error") or err_msg,
+                "setup_failure_artifact_id": data.get("setup_failure_artifact_id"),
+                "setup_failure_stage": (
+                    data.get("setup_failure_stage")
+                    or data.get("failure_artifact_stage")
+                ),
+                "setup_failure_summary": data.get("setup_failure_summary") or err_msg,
+                "setup_raw_output_preview": data.get("raw_output_preview"),
+                "setup_has_full_artifact": bool(data.get("has_full_artifact", False)),
+                "setup_spec_file_path": req.spec_file_path,
+                "errors": errors,
+                "warnings": warnings,
+            }
+            _save_session_state(str(project_id), failed_state)
+
             return {
                 "status": "success",
                 "data": {
                     "id": project_id,
                     "name": data.get("name") or req.name,
                     "setup_status": "failed",
-                    "setup_error": (
-                        data.get("setup_error")
-                        or result.get("error")
-                        or "Setup failed"
-                    ),
+                    "setup_error": data.get("setup_error") or err_msg,
                     "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
                     "vision_auto_run": {"attempted": False},
                     "failure_artifact_id": data.get("setup_failure_artifact_id"),
@@ -1717,14 +1756,23 @@ async def create_project(
                         data.get("setup_failure_stage")
                         or data.get("failure_artifact_stage")
                     ),
-                    "failure_summary": data.get("setup_failure_summary"),
+                    "failure_summary": data.get("setup_failure_summary") or err_msg,
                     "raw_output_preview": data.get("raw_output_preview"),
                     "has_full_artifact": bool(data.get("has_full_artifact", False)),
+                    "errors": errors,
+                    "warnings": warnings,
                 },
+                "errors": errors,
+                "warnings": warnings,
             }
         raise HTTPException(
             status_code=400,
-            detail=result.get("error") or "Failed to create project",
+            detail={
+                "status": "error",
+                "message": err_msg,
+                "errors": errors,
+                "warnings": warnings,
+            },
         )
     data = result.get("data") or {}
     project_id = data.get("project_id")
@@ -1845,17 +1893,34 @@ async def retry_project_setup(
 
     if not result.get("ok"):
         data = result.get("data") or {}
+        errors = result.get("errors") or []
+        warnings = result.get("warnings") or []
+        err_msg = _extract_workbench_error(result) or "Setup retry failed"
+        failed_state = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "failed",
+            "setup_error": data.get("setup_error") or err_msg,
+            "setup_failure_artifact_id": data.get("setup_failure_artifact_id"),
+            "setup_failure_stage": (
+                data.get("setup_failure_stage")
+                or data.get("failure_artifact_stage")
+            ),
+            "setup_failure_summary": data.get("setup_failure_summary") or err_msg,
+            "setup_raw_output_preview": data.get("raw_output_preview"),
+            "setup_has_full_artifact": bool(data.get("has_full_artifact", False)),
+            "setup_spec_file_path": req.spec_file_path,
+            "errors": errors,
+            "warnings": warnings,
+        }
+        _save_session_state(str(project_id), failed_state)
+
         return {
             "status": "success",
             "data": {
                 "id": project_id,
                 "name": product.name,
                 "setup_status": "failed",
-                "setup_error": (
-                    data.get("setup_error")
-                    or result.get("error")
-                    or "Setup retry failed"
-                ),
+                "setup_error": data.get("setup_error") or err_msg,
                 "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
                 "vision_auto_run": {"attempted": False},
                 "failure_artifact_id": data.get("setup_failure_artifact_id"),
@@ -1863,12 +1928,14 @@ async def retry_project_setup(
                     data.get("setup_failure_stage")
                     or data.get("failure_artifact_stage")
                 ),
-                "failure_summary": (
-                    data.get("setup_failure_summary") or result.get("error")
-                ),
+                "failure_summary": data.get("setup_failure_summary") or err_msg,
                 "raw_output_preview": data.get("raw_output_preview"),
                 "has_full_artifact": bool(data.get("has_full_artifact", False)),
+                "errors": errors,
+                "warnings": warnings,
             },
+            "errors": errors,
+            "warnings": warnings,
         }
 
     data = result.get("data") or {}

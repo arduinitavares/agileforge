@@ -299,6 +299,20 @@ class FakeAuthorityApplication:
             raise ValueError(msg)
         product.spec_file_path = spec_file
 
+        if "nonexistent" in spec_file.lower():
+            return {
+                "ok": False,
+                "data": None,
+                "errors": [
+                    {
+                        "code": "SPEC_FILE_NOT_FOUND",
+                        "message": f"Specification file not found at path {spec_file}",
+                        "remediation": ["Please check if the file exists."],
+                    }
+                ],
+                "warnings": [],
+            }
+
         if "invalid" in spec_file.lower():
             data = {
                 "project_id": product.product_id,
@@ -424,6 +438,20 @@ class FakeAuthorityApplication:
         if not product:
             return {"ok": False, "error": "Project not found"}
         product.spec_file_path = spec_file
+
+        if "nonexistent" in spec_file.lower():
+            return {
+                "ok": False,
+                "data": None,
+                "errors": [
+                    {
+                        "code": "SPEC_FILE_NOT_FOUND",
+                        "message": f"Specification file not found at path {spec_file}",
+                        "remediation": ["Please check if the file exists."],
+                    }
+                ],
+                "warnings": [],
+            }
 
         if "invalid" in spec_file.lower():
             data = {
@@ -1210,18 +1238,44 @@ def test_retry_setup_nonexistent_or_invalid_spec_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test setup retry with a missing spec file returning structured failure."""
-    client, repo, _workflow = _build_client(monkeypatch)
+    client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Retry Missing Spec Product")
 
     response = client.post(
         f"/api/projects/{product.product_id}/setup/retry",
-        json={"spec_file_path": "invalid/nonexistent_spec.json"},
+        json={"spec_file_path": "nonexistent_spec.json"},
     )
     assert response.status_code == HTTP_OK
     payload = response.json()
     assert payload["status"] == "success"
     assert payload["data"]["setup_status"] == "failed"
-    assert "invalid" in payload["data"]["setup_error"].lower()
+
+    # Assert structured workbench validation errors are preserved
+    assert "[SPEC_FILE_NOT_FOUND]" in payload["data"]["setup_error"]
+    assert "Specification file not found" in payload["data"]["setup_error"]
+    assert "Please check if the file exists" in payload["data"]["setup_error"]
+    assert "[SPEC_FILE_NOT_FOUND]" in payload["data"]["failure_summary"]
+
+    assert payload["errors"] == [
+        {
+            "code": "SPEC_FILE_NOT_FOUND",
+            "message": "Specification file not found at path nonexistent_spec.json",
+            "remediation": ["Please check if the file exists."],
+        }
+    ]
+    assert payload["data"]["errors"] == payload["errors"]
+    assert payload["warnings"] == []
+    assert payload["data"]["warnings"] == []
+
+    # Assert failed setup state is persisted in session state
+    session_id = str(product.product_id)
+    assert session_id in workflow.states
+    saved_state = workflow.states[session_id]
+    assert saved_state["setup_status"] == "failed"
+    assert saved_state["fsm_state"] == "SETUP_REQUIRED"
+    assert isinstance(saved_state["setup_error"], str)
+    assert "[SPEC_FILE_NOT_FOUND]" in saved_state["setup_error"]
+    assert saved_state["errors"] == payload["errors"]
 
 
 def test_ui_retry_calls_facade_telemetry(
