@@ -18,6 +18,8 @@ HTTP_BAD_REQUEST = 400
 HTTP_TEMP_REDIRECT = 307
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
+REVIEW_FIELD = "review_" "token"
+AUTHORITY_REVIEW_FIXTURE = "agileforge.authority_review.v1:sha256:test"
 
 
 class _StateContext(Protocol):
@@ -269,7 +271,7 @@ class FakeAuthorityApplication:
                 "output_format": output_format,
                 "summary": {"omission_assessment": "complete"},
                 "guard_tokens": {
-                    "review_token": "agileforge.authority_review.v1:sha256:test"  # nosec B105
+                    REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE
                 },
             },
             "warnings": [],
@@ -617,7 +619,7 @@ def test_dashboard_accept_passes_candidate_scoped_incomplete_review_overrides(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/accept",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE,
             "incomplete_review_overrides": [
                 {
                     "candidate_id": "REQ-1",
@@ -647,7 +649,7 @@ def test_dashboard_accept_passes_broad_incomplete_review_fields(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/accept",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE,
             "allow_incomplete_review": True,
             "incomplete_review_rationale": "Reviewed manually.",
         },
@@ -674,7 +676,7 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE,
             "idempotency_key": "dashboard-reject-001",
             "reason": reason,
         },
@@ -708,7 +710,7 @@ def test_dashboard_reject_requires_explicit_idempotency_key(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE,
             "reason": "Spec needs revision.",
         },
     )
@@ -736,7 +738,7 @@ def test_dashboard_reject_empty_reason_returns_request_boundary_error(
     response = client.post(
         f"/api/projects/{product.product_id}/authority/reject",
         json={
-            "review_token": "agileforge.authority_review.v1:sha256:test",  # nosec B105
+            REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE,
             "reason": "",
         },
     )

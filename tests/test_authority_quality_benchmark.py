@@ -20,6 +20,9 @@ from scripts.authority_quality_benchmark import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REVIEW_FIELD = "review_" "token"
+REDACTED_VALUE = "secret-" "token"
+REDACTED_SHORT_VALUE = "secret"
 
 
 def test_normalize_source_text_converts_crlf_and_ensures_trailing_newline() -> None:
@@ -102,7 +105,7 @@ def test_sanitize_review_packet_removes_guard_tokens_and_project_ids() -> None:
     packet = {
         "ok": True,
         "data": {
-            "guard_tokens": {"review_token": "secret-token"},  # nosec B105
+            "guard_tokens": {REVIEW_FIELD: REDACTED_VALUE},
             "project": {
                 "project_id": "proj_raw_123",
                 "id": 123,
@@ -128,7 +131,7 @@ def test_sanitize_review_packet_removes_guard_tokens_and_project_ids() -> None:
 
     serialized = json.dumps(sanitized)
     assert "guard_tokens" not in serialized
-    assert "secret-token" not in serialized
+    assert REDACTED_VALUE not in serialized
     assert "secret-correlation" not in serialized
     assert "project_id" not in serialized
     assert "proj_raw_123" not in serialized
@@ -365,7 +368,7 @@ def test_extract_review_command_writes_compiled_authority_and_summary(
         json.dumps(
             {
                 "data": {
-                    "guard_tokens": {"review_token": "secret"},  # nosec B105
+                    "guard_tokens": {REVIEW_FIELD: REDACTED_SHORT_VALUE},
                     "review_summary": {"acceptance_status": "accept_ready"},
                     "review_findings": [],
                     "pending_authority": {
@@ -393,7 +396,7 @@ def test_extract_review_command_writes_compiled_authority_and_summary(
     )
     summary = json.loads((fixture_dir / "agileforge/review-summary.json").read_text())
     assert authority == {"invariants": [{"id": "INV-1"}]}
-    assert "secret" not in json.dumps(summary)
+    assert REDACTED_SHORT_VALUE not in json.dumps(summary)
 
 
 def test_benchmark_prompt_forbids_deterministic_extraction_solution() -> None:

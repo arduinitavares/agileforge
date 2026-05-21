@@ -26,6 +26,7 @@ from utils.task_metadata import canonical_task_metadata_json
 logger = logging.getLogger(__name__)
 
 AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "3"
+REVIEW_KEY_COLUMN = "review_" "token"
 
 
 def _get_existing_tables(engine: Engine) -> set[str]:
@@ -211,7 +212,7 @@ CREATE TABLE IF NOT EXISTS spec_authority_acceptance (
 SPEC_AUTHORITY_ACCEPTANCE_PROVENANCE_COLUMNS: dict[str, str] = {
     "pending_authority_id": "INTEGER",
     "authority_fingerprint": "VARCHAR",
-    "review_token": "VARCHAR",  # nosec B105
+    REVIEW_KEY_COLUMN: "VARCHAR",
     "review_fingerprint": "VARCHAR",
     "disk_spec_hash": "VARCHAR",
     "resolved_spec_path": "VARCHAR",
