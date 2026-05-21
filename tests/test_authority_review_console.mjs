@@ -732,3 +732,22 @@ test('renderAuthorityInvariants uses createInvariantCard for visible invariants'
     assert.doesNotMatch(invariantsList.textContent, /REQ\.archive/);
     assert.equal(invariantsList.innerHTML, '');
 });
+
+test('authority artifact renderer does not assign user-controlled content through innerHTML', () => {
+    const unsafePatterns = [
+        /specViewer\.innerHTML\s*=/,
+        /preview\.innerHTML\s*=/,
+        /findingsEl\.innerHTML\s*=/,
+        /invariantsList\.innerHTML\s*=/,
+        /gapsList\.innerHTML\s*=/,
+        /assumptionsList\.innerHTML\s*=/,
+        /exclusionsList\.innerHTML\s*=/,
+        /eligibleRulesList\.innerHTML\s*=/,
+        /message\.innerHTML\s*=/,
+        /contentDiv\.innerHTML\s*=/,
+    ];
+
+    for (const pattern of unsafePatterns) {
+        assert.doesNotMatch(projectJsSource, pattern);
+    }
+});
