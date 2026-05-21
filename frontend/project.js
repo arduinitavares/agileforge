@@ -426,11 +426,11 @@ function updateSetupPanelCopy(title, description) {
     if (descriptionEl) descriptionEl.innerText = description;
 }
 
-let currentAuthorityReviewActiveTab = 'invariants';
+let currentAuthorityReviewActiveTab = 'overview';
 
 function switchAuthorityReviewTab(tabName) {
     currentAuthorityReviewActiveTab = tabName;
-    const tabs = ['invariants', 'spec', 'raw'];
+    const tabs = ['overview', 'invariants', 'spec', 'raw'];
     
     tabs.forEach(t => {
         const btn = document.getElementById(`tab-btn-${t}`);
