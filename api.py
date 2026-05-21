@@ -26,6 +26,7 @@ from typing import (
 )
 from uuid import uuid4
 
+import anyio
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -37,6 +38,7 @@ from sqlalchemy.orm.attributes import QueryableAttribute
 from sqlmodel import Session, select
 from sqlmodel.sql._expression_select_cls import SelectOfScalar
 
+from models.agent_workbench import CliMutationLedger
 from models.core import Product, Sprint, SprintStory, Task, UserStory
 from models.db import ensure_business_db_ready, get_engine
 from models.enums import (
@@ -71,6 +73,15 @@ from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
+)
+from services.agent_workbench.authority_projection import _load_authority_selection
+from services.agent_workbench.authority_review import (
+    _render_review_packet,
+    build_authority_review_snapshot,
+)
+from services.agent_workbench.mutation_ledger import MutationStatus
+from services.agent_workbench.project_setup_fingerprints import (
+    setup_retry_context_fingerprint,
 )
 from services.backlog_runtime import run_backlog_agent_from_state
 from services.interview_runtime import (
@@ -1666,29 +1677,74 @@ async def create_project(
     req: CreateProjectRequest,
 ) -> dict[str, object]:
     """Create a new project and initialize its workflow session."""
+    # Note: This automatically generated key is a human convenience layer
+    # to prevent duplicate setups from rapid double-clicks on the UI form
+    # (which is also protected by disabling the submit button). It does not
+    # represent mathematically true browser-to-server network retry idempotency.
+    idempotency_key = f"ui-create-{uuid4()}"
     try:
-        new_product = product_repo.create(name=req.name)
-        project_id = _require_product_id(new_product)
-        session_id = str(project_id)
-        await workflow_service.initialize_session(session_id=session_id)
-
-        setup_result = await _run_setup(session_id, project_id, req.spec_file_path)
-
-        return {
-            "status": "success",
-            "data": {
-                "id": project_id,
-                "name": new_product.name,
-                "setup_status": "passed" if setup_result["passed"] else "failed",
-                "setup_error": setup_result["error"],
-                "fsm_state": setup_result["fsm_state"],
-                "vision_auto_run": setup_result.get("vision_auto_run"),
-                **_failure_meta(setup_result, fallback_summary=setup_result["error"]),
-            },
-        }
+        result = _workbench_application().project_create(
+            name=req.name,
+            spec_file=req.spec_file_path,
+            idempotency_key=idempotency_key,
+            changed_by="dashboard-ui",
+        )
     except Exception as exc:
         logger.exception("Error creating project")
-        raise HTTPException(status_code=500, detail="Failed to create project") from exc
+        raise HTTPException(
+            status_code=500, detail="Failed to create project"
+        ) from exc
+
+    if not result.get("ok"):
+        data = result.get("data") or {}
+        project_id = data.get("project_id")
+        if project_id is not None:
+            return {
+                "status": "success",
+                "data": {
+                    "id": project_id,
+                    "name": data.get("name") or req.name,
+                    "setup_status": "failed",
+                    "setup_error": (
+                        data.get("setup_error")
+                        or result.get("error")
+                        or "Setup failed"
+                    ),
+                    "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
+                    "vision_auto_run": {"attempted": False},
+                    "failure_artifact_id": data.get("setup_failure_artifact_id"),
+                    "failure_stage": (
+                        data.get("setup_failure_stage")
+                        or data.get("failure_artifact_stage")
+                    ),
+                    "failure_summary": data.get("setup_failure_summary"),
+                    "raw_output_preview": data.get("raw_output_preview"),
+                    "has_full_artifact": bool(data.get("has_full_artifact", False)),
+                },
+            }
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error") or "Failed to create project",
+        )
+    data = result.get("data") or {}
+    project_id = data.get("project_id")
+    setup_status = data.get("setup_status") or "authority_pending_review"
+    return {
+        "status": "success",
+        "data": {
+            "id": project_id,
+            "name": data.get("name") or req.name,
+            "setup_status": setup_status,
+            "setup_error": None,
+            "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
+            "vision_auto_run": data.get("vision_auto_run"),
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        },
+    }
 
 
 @app.delete("/api/projects/{project_id}")
@@ -1719,25 +1775,118 @@ async def delete_project(project_id: int) -> dict[str, object]:
 async def retry_project_setup(
     project_id: int, req: RetrySetupRequest
 ) -> dict[str, object]:
-    """Retry project setup after a failure."""
+    """Retry project setup after a failure using unified workbench flow."""
     product = product_repo.get_by_id(project_id)
     if not product:
         raise HTTPException(status_code=404, detail="Project not found")
 
     session_id = str(project_id)
-    await _ensure_session(session_id)
-    setup_result = await _run_setup(session_id, project_id, req.spec_file_path)
+    state = await _ensure_session(session_id)
 
+    recovery_event_id = None
+    with Session(get_engine()) as db_session:
+        unresolved = db_session.exec(
+            select(CliMutationLedger).where(
+                CliMutationLedger.command == "agileforge project create",
+                CliMutationLedger.project_id == project_id,
+                CliMutationLedger.status == MutationStatus.RECOVERY_REQUIRED.value,
+            )
+        ).first()
+        if unresolved is not None:
+            recovery_event_id = unresolved.mutation_event_id
+        else:
+            unresolved_retry = db_session.exec(
+                select(CliMutationLedger).where(
+                    CliMutationLedger.command == "agileforge project setup retry",
+                    CliMutationLedger.project_id == project_id,
+                    CliMutationLedger.status == MutationStatus.RECOVERY_REQUIRED.value,
+                )
+            ).first()
+            if unresolved_retry is not None:
+                recovery_event_id = unresolved_retry.mutation_event_id
+
+    expected_state = str(state.get("fsm_state") or "SETUP_REQUIRED")
+
+    try:
+        def _compute() -> str:
+            resolved = Path(req.spec_file_path).expanduser().resolve()
+            return setup_retry_context_fingerprint(
+                project_id=project_id,
+                resolved_spec_path=resolved,
+                workflow_state=state,
+            )
+
+        expected_context_fingerprint = await cast(
+            "Any", anyio.to_thread
+        ).run_sync(_compute)
+    except Exception:
+        # If the spec file path is invalid/missing/unreadable, the fingerprint
+        # cannot be computed. Fall back to a non-empty sentinel string. This avoids
+        # Pydantic validation errors (since the field requires min_length=1) while
+        # allowing the workbench service to safely validate the spec file path first
+        # and return a structured error response.
+        expected_context_fingerprint = "unavailable-before-spec-validation"
+
+    # Note: This automatically generated key is a human convenience layer
+    # to prevent duplicate setups from rapid double-clicks on the UI form
+    # (which is also protected by disabling the submit button). It does not
+    # represent mathematically true browser-to-server network retry idempotency.
+    idempotency_key = f"ui-retry-{uuid4()}"
+
+    result = _workbench_application().project_setup_retry(
+        project_id=project_id,
+        spec_file=req.spec_file_path,
+        expected_state=expected_state,
+        expected_context_fingerprint=expected_context_fingerprint,
+        recovery_mutation_event_id=recovery_event_id,
+        idempotency_key=idempotency_key,
+        changed_by="dashboard-ui",
+    )
+
+    if not result.get("ok"):
+        data = result.get("data") or {}
+        return {
+            "status": "success",
+            "data": {
+                "id": project_id,
+                "name": product.name,
+                "setup_status": "failed",
+                "setup_error": (
+                    data.get("setup_error")
+                    or result.get("error")
+                    or "Setup retry failed"
+                ),
+                "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
+                "vision_auto_run": {"attempted": False},
+                "failure_artifact_id": data.get("setup_failure_artifact_id"),
+                "failure_stage": (
+                    data.get("setup_failure_stage")
+                    or data.get("failure_artifact_stage")
+                ),
+                "failure_summary": (
+                    data.get("setup_failure_summary") or result.get("error")
+                ),
+                "raw_output_preview": data.get("raw_output_preview"),
+                "has_full_artifact": bool(data.get("has_full_artifact", False)),
+            },
+        }
+
+    data = result.get("data") or {}
+    setup_status = data.get("setup_status") or "authority_pending_review"
     return {
         "status": "success",
         "data": {
             "id": project_id,
             "name": product.name,
-            "setup_status": "passed" if setup_result["passed"] else "failed",
-            "setup_error": setup_result["error"],
-            "fsm_state": setup_result["fsm_state"],
-            "vision_auto_run": setup_result.get("vision_auto_run"),
-            **_failure_meta(setup_result, fallback_summary=setup_result["error"]),
+            "setup_status": setup_status,
+            "setup_error": None,
+            "fsm_state": data.get("fsm_state") or "SETUP_REQUIRED",
+            "vision_auto_run": data.get("vision_auto_run"),
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
         },
     }
 
@@ -1759,7 +1908,10 @@ async def get_project_state(project_id: int) -> dict[str, object]:
 
 
 @app.get("/api/projects/{project_id}/authority/review")
-async def get_project_authority_review(project_id: int) -> dict[str, Any]:
+async def get_project_authority_review(
+    project_id: int,
+    include_spec: str = "auto",
+) -> dict[str, Any]:
     """Return the pending authority review packet for the dashboard."""
     product = product_repo.get_by_id(project_id)
     if not product:
@@ -1767,9 +1919,47 @@ async def get_project_authority_review(project_id: int) -> dict[str, Any]:
 
     result = _workbench_application().authority_review(
         project_id=project_id,
-        include_spec="auto",
+        include_spec=include_spec,
         output_format="json",
     )
+
+    if not result.get("ok"):
+        errors = result.get("errors", [])
+        is_not_pending = any(
+            err.get("code") == "AUTHORITY_NOT_PENDING" for err in errors
+        )
+        if (
+            is_not_pending
+            and product.compiled_authority_json
+            and product.spec_file_path
+        ):
+            with Session(get_engine()) as session:
+                selection = _load_authority_selection(
+                    session, project_id=project_id
+                )
+                accepted_spec = selection.accepted_spec
+                authority = selection.authority
+
+                if accepted_spec is not None and authority is not None:
+                    snapshot = build_authority_review_snapshot(
+                        project_id=project_id,
+                        product=product,
+                        spec=accepted_spec,
+                        authority=authority,
+                        include_spec=include_spec,
+                    )
+                    if isinstance(snapshot, dict):
+                        pass
+                    else:
+                        rendered = _render_review_packet(snapshot)
+                        rendered["post_accept"] = True
+                        rendered["project"]["setup_status"] = "complete"
+                        return {
+                            "status": "success",
+                            "data": rendered,
+                            "warnings": [],
+                        }
+
     return _dashboard_authority_response(result)
 
 
