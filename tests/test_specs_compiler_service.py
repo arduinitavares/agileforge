@@ -777,6 +777,114 @@ def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
     assert calls[0] == ["REQ.todo-create", "REQ.todo-toggle", "REQ.todo-color"]
 
 
+def test_preview_spec_authority_retries_transient_focused_item_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient focused item failure should not abort structured compilation."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[list[str]] = []
+    focused_attempts: dict[str, int] = {}
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        item_ids = [item["id"] for item in items]
+        calls.append(item_ids)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+
+        item_id = item_ids[0]
+        focused_attempts[item_id] = focused_attempts.get(item_id, 0) + 1
+        if item_id == "REQ.todo-create" and focused_attempts[item_id] == 1:
+            return _vacant_success_json()
+
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        source_level = first_item["level"]
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    compiled = SpecAuthorityCompilerOutput.model_validate_json(
+        result["compiled_authority"]
+    )
+    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    covered_item_ids = {
+        invariant.parameters.source_item_id
+        for invariant in compiled.root.invariants
+        if isinstance(invariant.parameters, UserInteractionParams)
+    }
+    assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
+    assert focused_attempts["REQ.todo-create"] == 2  # noqa: PLR2004
+
+
+def test_preview_spec_authority_reports_persistent_focused_item_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent focused item failure should identify the failed item."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        item_id = first_item["id"]
+        if item_id == "REQ.todo-create":
+            return _vacant_success_json()
+        source_level = first_item["level"]
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=cast("str", item_id),
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["details"]["error"] == "STRUCTURED_ITEM_COMPILATION_FAILED"
+    assert result["details"]["reason"] == "FOCUSED_ITEM_AUTHORITY_FAILED"
+    assert result["details"]["blocking_gaps"] == [
+        "BLOCKED_REVIEW: 1/2 accepted MUST/MUST_NOT items did not compile into "
+        "authority; downstream planning is blocked until the source spec item is "
+        "fixed or explicitly marked non-accepted/proposed.",
+        "REQ.todo-create: SPEC_AUTHORITY_VACANT - "
+        "NO_INVARIANTS_EXTRACTED: No invariants extracted from spec",
+    ]
+
+
 def test_preview_spec_authority_returns_failure_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

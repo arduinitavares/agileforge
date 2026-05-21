@@ -81,6 +81,7 @@ _ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
     {RequirementLevel.MUST, RequirementLevel.MUST_NOT}
 )
 _NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
+_FOCUSED_ITEM_COMPILER_ATTEMPTS: int = 2
 
 
 class SpecAuthorityAcceptanceError(ValueError):
@@ -239,6 +240,14 @@ class _NormalizedCompilerInvocation:
 
     raw_json: str
     output: SpecAuthorityCompilerOutput
+
+
+@dataclass(frozen=True)
+class _FocusedItemCompilationFailure:
+    """Focused structured item compilation failure with item context."""
+
+    item_id: str
+    failure: SpecAuthorityCompilationFailure
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -984,6 +993,112 @@ def _structured_coverage_failure(
     )
 
 
+def _focused_item_failure_message(failure: _FocusedItemCompilationFailure) -> str:
+    """Return a compact blocking gap for a focused item compile failure."""
+    message = f"{failure.item_id}: {failure.failure.error}"
+    if failure.failure.reason:
+        message += f" - {failure.failure.reason}"
+    if failure.failure.blocking_gaps:
+        message += f": {', '.join(failure.failure.blocking_gaps)}"
+    return message
+
+
+def _blocked_review_summary(
+    *,
+    blocked_item_count: int,
+    total_item_count: int,
+) -> str:
+    """Return the user-facing review summary for blocked structured authority."""
+    return (
+        f"BLOCKED_REVIEW: {blocked_item_count}/{total_item_count} accepted "
+        "MUST/MUST_NOT items did not compile into authority; downstream planning "
+        "is blocked until the source spec item is fixed or explicitly marked "
+        "non-accepted/proposed."
+    )
+
+
+def _structured_item_compilation_failure(
+    failures: list[_FocusedItemCompilationFailure],
+    *,
+    missing_item_ids: list[str] | None = None,
+    total_item_count: int | None = None,
+) -> SpecAuthorityCompilerOutput:
+    """Build the failure envelope for focused structured item failures."""
+    failure_item_ids = {failure.item_id for failure in failures}
+    blocked_item_ids = failure_item_ids | set(missing_item_ids or [])
+    blocking_gaps = [
+        _blocked_review_summary(
+            blocked_item_count=len(blocked_item_ids),
+            total_item_count=total_item_count or len(blocked_item_ids),
+        )
+    ]
+    blocking_gaps.extend(_focused_item_failure_message(failure) for failure in failures)
+    blocking_gaps.extend(
+        item_id for item_id in missing_item_ids or [] if item_id not in failure_item_ids
+    )
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationFailure(
+            error="STRUCTURED_ITEM_COMPILATION_FAILED",
+            reason="FOCUSED_ITEM_AUTHORITY_FAILED",
+            blocking_gaps=_dedupe_strings(blocking_gaps),
+        )
+    )
+
+
+def _invoke_focused_structured_item_authority(
+    artifact: TechnicalSpecArtifact,
+    *,
+    item_id: str,
+    product_id: int | None,
+    spec_version_id: int | None,
+) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
+    """Compile one structured item with a bounded retry for transient failures."""
+    focused_content = _focused_structured_spec_content(artifact, item_id=item_id)
+    item_failure: SpecAuthorityCompilationFailure | None = None
+    for _attempt in range(_FOCUSED_ITEM_COMPILER_ATTEMPTS):
+        item_invocation = _invoke_and_normalize_spec_authority(
+            spec_content=focused_content,
+            content_ref=None,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        if isinstance(item_invocation.output.root, SpecAuthorityCompilationFailure):
+            item_failure = item_invocation.output.root
+            continue
+        return cast("SpecAuthorityCompilationSuccess", item_invocation.output.root)
+
+    if item_failure is None:
+        item_failure = SpecAuthorityCompilationFailure(
+            error="SPEC_COMPILATION_FAILED",
+            reason="FOCUSED_ITEM_COMPILER_RETURNED_NO_RESULT",
+            blocking_gaps=[item_id],
+        )
+    return _FocusedItemCompilationFailure(item_id=item_id, failure=item_failure)
+
+
+def _structured_missing_authority_failure(
+    *,
+    missing_item_ids: list[str],
+    focused_failures: list[_FocusedItemCompilationFailure],
+    total_item_count: int,
+) -> SpecAuthorityCompilerOutput:
+    """Return the most precise failure for missing structured item coverage."""
+    missing_failure_ids = {failure.item_id for failure in focused_failures} & set(
+        missing_item_ids
+    )
+    if not missing_failure_ids:
+        return _structured_coverage_failure(missing_item_ids)
+    return _structured_item_compilation_failure(
+        [
+            failure
+            for failure in focused_failures
+            if failure.item_id in missing_failure_ids
+        ],
+        missing_item_ids=missing_item_ids,
+        total_item_count=total_item_count,
+    )
+
+
 def _vacant_authority_blocking_gaps(
     success: SpecAuthorityCompilationSuccess,
 ) -> list[str]:
@@ -1116,6 +1231,7 @@ def _compile_spec_authority_output(
         return full_invocation
 
     successes: list[SpecAuthorityCompilationSuccess] = []
+    focused_failures: list[_FocusedItemCompilationFailure] = []
     if not isinstance(full_invocation.output.root, SpecAuthorityCompilationFailure):
         full_success = cast(
             "SpecAuthorityCompilationSuccess",
@@ -1124,26 +1240,31 @@ def _compile_spec_authority_output(
         successes.append(full_success)
 
     for item_id in item_ids:
-        focused_content = _focused_structured_spec_content(
+        item_result = _invoke_focused_structured_item_authority(
             artifact,
             item_id=item_id,
-        )
-        item_invocation = _invoke_and_normalize_spec_authority(
-            spec_content=focused_content,
-            content_ref=None,
             product_id=product_id,
             spec_version_id=spec_version_id,
         )
-        if isinstance(item_invocation.output.root, SpecAuthorityCompilationFailure):
-            return item_invocation
-        item_success = cast(
-            "SpecAuthorityCompilationSuccess",
-            item_invocation.output.root,
-        )
-        successes.append(item_success)
+        if isinstance(item_result, _FocusedItemCompilationFailure):
+            focused_failures.append(item_result)
+            continue
+        successes.append(item_result)
 
     if not successes:
-        return full_invocation
+        output = (
+            _structured_item_compilation_failure(
+                focused_failures,
+                missing_item_ids=item_ids,
+                total_item_count=len(item_ids),
+            )
+            if focused_failures
+            else full_invocation.output
+        )
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=output,
+        )
 
     merged_success = _merge_compilation_successes(successes)
     missing_item_ids = _missing_iterative_authority_item_ids(
@@ -1153,7 +1274,11 @@ def _compile_spec_authority_output(
     if missing_item_ids:
         return _NormalizedCompilerInvocation(
             raw_json=full_invocation.raw_json,
-            output=_structured_coverage_failure(missing_item_ids),
+            output=_structured_missing_authority_failure(
+                missing_item_ids=missing_item_ids,
+                focused_failures=focused_failures,
+                total_item_count=len(item_ids),
+            ),
         )
 
     return _NormalizedCompilerInvocation(
