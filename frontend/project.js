@@ -445,6 +445,16 @@ function authorityReviewState(review) {
         };
     }
 
+    if (!Array.isArray(review?.pending_authority?.review_findings)) {
+        return {
+            label: 'Review Incomplete',
+            tone: 'blocked',
+            acceptDisabled: true,
+            decision: 'Review packet is incomplete.',
+            reason: 'Reload the authority review before deciding.',
+        };
+    }
+
     const findings = safeArray(review?.pending_authority?.review_findings);
     const blocking = findings.filter((finding) => finding?.severity === 'blocking');
     const nonOverrideable = blocking.filter((finding) => finding?.override_allowed === false);

@@ -157,6 +157,24 @@ test('authorityReviewState allows overrideable blocking findings', () => {
     });
 });
 
+test('authorityReviewState fails closed for incomplete review packets', () => {
+    const authorityReviewState = loadAuthorityConsoleFunction(
+        'authorityReviewState',
+        ['safeArray', 'authorityReviewState'],
+    );
+    const incompleteState = {
+        label: 'Review Incomplete',
+        tone: 'blocked',
+        acceptDisabled: true,
+        decision: 'Review packet is incomplete.',
+        reason: 'Reload the authority review before deciding.',
+    };
+
+    assert.deepEqual(authorityReviewState(undefined), incompleteState);
+    assert.deepEqual(authorityReviewState({}), incompleteState);
+    assert.deepEqual(authorityReviewState({ pending_authority: {} }), incompleteState);
+});
+
 test('authorityReviewState marks packets without blocking findings ready', () => {
     const authorityReviewState = loadAuthorityConsoleFunction(
         'authorityReviewState',
