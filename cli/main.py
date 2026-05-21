@@ -798,15 +798,9 @@ def _validate_mutation_idempotency_args(
             retryable=False,
         )
     if not args.dry_run and not args.idempotency_key:
-        return WorkbenchError(
-            code="INVALID_COMMAND",
-            message="--idempotency-key is required for non-dry-run mutations.",
-            details={},
-            remediation=["Pass --idempotency-key or use --dry-run."],
-            exit_code=INVALID_COMMAND_EXIT_CODE,
-            retryable=False,
-        )
+        args.idempotency_key = f"auto-{uuid4()}"
     return None
+
 
 
 def _project_create(

@@ -393,7 +393,7 @@ function updateSetupStatusBanner() {
         banner.className = 'text-sm rounded-lg border px-4 py-3 border-emerald-200 bg-emerald-50 text-emerald-700';
         banner.innerText = 'Setup passed. Specification linked and authority compiled.';
         updateSetupPanelCopy('Project Setup', 'Project setup is complete.');
-        renderAuthorityReviewCard(false);
+        renderAuthorityReviewCard(true);
         return;
     }
 
@@ -426,6 +426,105 @@ function updateSetupPanelCopy(title, description) {
     if (descriptionEl) descriptionEl.innerText = description;
 }
 
+let currentAuthorityReviewActiveTab = 'invariants';
+
+function switchAuthorityReviewTab(tabName) {
+    currentAuthorityReviewActiveTab = tabName;
+    const tabs = ['invariants', 'spec', 'raw'];
+    
+    tabs.forEach(t => {
+        const btn = document.getElementById(`tab-btn-${t}`);
+        const content = document.getElementById(`tab-content-${t}`);
+        if (!btn || !content) return;
+        
+        if (t === tabName) {
+            btn.className = 'px-4 py-2 -mb-px text-xs font-bold border-b-2 border-sky-600 text-sky-600 dark:border-sky-400 dark:text-sky-300 transition-colors focus:outline-none';
+            content.classList.remove('hidden');
+        } else {
+            btn.className = 'px-4 py-2 -mb-px text-xs font-bold border-b-2 border-transparent text-slate-500 hover:text-sky-600 dark:text-slate-400 dark:hover:text-sky-300 transition-colors focus:outline-none';
+            content.classList.add('hidden');
+        }
+    });
+}
+
+function createInvariantCard(invariant) {
+    const card = document.createElement('div');
+    card.className = 'p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 shadow-sm space-y-2 hover:border-sky-200 dark:hover:border-sky-900 transition-all';
+    
+    const header = document.createElement('div');
+    header.className = 'flex items-center justify-between gap-2 flex-wrap';
+    
+    const leftBadges = document.createElement('div');
+    leftBadges.className = 'flex items-center gap-1.5';
+    
+    const idStr = invariant.id || '';
+    let idColorClass = 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200';
+    if (idStr.startsWith('REQ.')) {
+        idColorClass = 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200';
+    } else if (idStr.startsWith('DATA.')) {
+        idColorClass = 'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-200';
+    } else if (idStr.startsWith('CONSTRAINT.')) {
+        idColorClass = 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200';
+    } else if (idStr.startsWith('INTERFACE.')) {
+        idColorClass = 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200';
+    }
+    
+    const idBadge = document.createElement('span');
+    idBadge.className = `px-2 py-0.5 rounded text-[10px] font-black uppercase ${idColorClass}`;
+    idBadge.textContent = idStr;
+    leftBadges.appendChild(idBadge);
+    
+    const supportBadge = document.createElement('span');
+    const supportStr = invariant.support || 'inferred';
+    let supportColorClass = 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400';
+    if (supportStr === 'direct') {
+        supportColorClass = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200';
+    }
+    supportBadge.className = `px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${supportColorClass}`;
+    supportBadge.textContent = supportStr;
+    leftBadges.appendChild(supportBadge);
+    
+    header.appendChild(leftBadges);
+    
+    const rightRefs = document.createElement('div');
+    rightRefs.className = 'flex flex-wrap gap-1';
+    
+    const refs = invariant.source_refs || [];
+    refs.forEach(ref => {
+        const refSpan = document.createElement('span');
+        refSpan.className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
+        refSpan.textContent = ref;
+        rightRefs.appendChild(refSpan);
+    });
+    
+    header.appendChild(rightRefs);
+    card.appendChild(header);
+    
+    const textP = document.createElement('p');
+    textP.className = 'text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed font-medium';
+    textP.textContent = invariant.text || '';
+    card.appendChild(textP);
+    
+    return card;
+}
+
+function createSimpleCard(item, badgeColorClass) {
+    const card = document.createElement('div');
+    card.className = 'p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/30 text-xs shadow-sm hover:border-slate-300 dark:hover:border-slate-700 transition-all flex items-start gap-2';
+    
+    const badge = document.createElement('span');
+    badge.className = `px-1.5 py-0.5 rounded text-[9px] font-black uppercase flex-shrink-0 ${badgeColorClass}`;
+    badge.textContent = item.id || '';
+    card.appendChild(badge);
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'text-slate-700 dark:text-slate-300 whitespace-pre-wrap font-medium';
+    contentDiv.textContent = item.text || '';
+    card.appendChild(contentDiv);
+    
+    return card;
+}
+
 function renderAuthorityReviewCard(visible) {
     const card = document.getElementById('authority-review-card');
     if (!card) return;
@@ -436,14 +535,52 @@ function renderAuthorityReviewCard(visible) {
     }
 
     card.classList.remove('hidden');
+    const titleEl = document.getElementById('authority-card-title');
     const summary = document.getElementById('authority-review-summary');
     const findingsEl = document.getElementById('authority-review-findings');
+    const actionsContainer = document.getElementById('authority-review-actions-container');
     const preview = document.getElementById('authority-review-preview');
+
+    const invariantsList = document.getElementById('invariants-list');
+    const gapsList = document.getElementById('gaps-list');
+    const assumptionsList = document.getElementById('assumptions-list');
+    const exclusionsList = document.getElementById('exclusions-list');
+    const eligibleRulesList = document.getElementById('eligible-rules-list');
+    const domainBadge = document.getElementById('authority-domain-badge');
+    const themesContainer = document.getElementById('authority-themes-container');
+    const specViewer = document.getElementById('spec-source-viewer');
+    const truncationBanner = document.getElementById('spec-truncation-banner');
+
     if (!currentAuthorityReview) {
-        if (summary) summary.innerText = 'Loading authority review...';
+        if (titleEl) titleEl.innerText = 'Loading Authority Review';
+        if (summary) summary.innerText = 'Fetching review data from backend...';
         if (findingsEl) findingsEl.innerText = '';
+        if (invariantsList) invariantsList.innerHTML = '';
+        if (gapsList) gapsList.innerHTML = '';
+        if (assumptionsList) assumptionsList.innerHTML = '';
+        if (exclusionsList) exclusionsList.innerHTML = '';
+        if (eligibleRulesList) eligibleRulesList.innerHTML = '';
+        if (domainBadge) domainBadge.textContent = '';
+        if (themesContainer) themesContainer.innerHTML = '';
+        if (specViewer) specViewer.textContent = '';
+        if (truncationBanner) truncationBanner.classList.add('hidden');
         if (preview) preview.innerText = '';
         return;
+    }
+
+    const isPostAccept = currentAuthorityReview.post_accept === true;
+    
+    // Theme styling based on post-accept state
+    if (isPostAccept) {
+        card.className = "mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-900 dark:border-slate-800 dark:bg-slate-900/20 dark:text-slate-100";
+        if (titleEl) titleEl.innerText = 'Accepted Authority Invariants';
+        if (findingsEl) findingsEl.classList.add('hidden');
+        if (actionsContainer) actionsContainer.classList.add('hidden');
+    } else {
+        card.className = "mt-4 rounded-lg border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-100";
+        if (titleEl) titleEl.innerText = 'Pending Authority Review';
+        if (findingsEl) findingsEl.classList.remove('hidden');
+        if (actionsContainer) actionsContainer.classList.remove('hidden');
     }
 
     const project = currentAuthorityReview.project || {};
@@ -452,10 +589,16 @@ function renderAuthorityReviewCard(visible) {
     const authorityId = pending.authority_id || pending.pending_authority_id || 'pending';
     const omission = spec.coverage_summary?.omission_assessment || 'unknown';
     const path = spec.resolved_path || 'linked specification';
+
     if (summary) {
-        summary.innerText = `${project.name || 'Project'} authority ${authorityId} awaits review. Coverage: ${omission}. Source: ${path}.`;
+        if (isPostAccept) {
+            summary.innerText = `${project.name || 'Project'} authority is complete and accepted. Coverage: ${omission}. Source: ${path}.`;
+        } else {
+            summary.innerText = `${project.name || 'Project'} authority ${authorityId} awaits review. Coverage: ${omission}. Source: ${path}.`;
+        }
     }
-    if (findingsEl) {
+
+    if (findingsEl && !isPostAccept) {
         const findings = pending.review_findings || [];
         const blockingCount = findings.filter((finding) => finding?.severity === 'blocking').length;
         findingsEl.innerText = blockingCount
@@ -463,6 +606,127 @@ function renderAuthorityReviewCard(visible) {
             : '';
     }
 
+    // Render Invariants & Elements
+    const artifact = pending.artifact || {};
+    
+    // Domain Badge
+    if (domainBadge) {
+        domainBadge.textContent = artifact.domain || 'N/A';
+    }
+
+    // Themes Badge Container
+    if (themesContainer) {
+        themesContainer.innerHTML = '';
+        const themes = artifact.scope_themes || [];
+        if (themes.length === 0) {
+            const none = document.createElement('span');
+            none.className = 'text-xs text-slate-500 font-medium italic';
+            none.textContent = 'None';
+            themesContainer.appendChild(none);
+        } else {
+            themes.forEach(theme => {
+                const span = document.createElement('span');
+                span.className = 'px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 font-semibold text-xs border border-slate-200 dark:border-slate-700';
+                span.textContent = theme;
+                themesContainer.appendChild(span);
+            });
+        }
+    }
+
+    // Invariants List
+    if (invariantsList) {
+        invariantsList.innerHTML = '';
+        const invariants = artifact.invariants || [];
+        if (invariants.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+            empty.textContent = 'No compiled invariants.';
+            invariantsList.appendChild(empty);
+        } else {
+            invariants.forEach(inv => {
+                invariantsList.appendChild(createInvariantCard(inv));
+            });
+        }
+    }
+
+    // Gaps List
+    if (gapsList) {
+        gapsList.innerHTML = '';
+        const gaps = artifact.gaps || [];
+        if (gaps.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+            empty.textContent = 'No identified gaps.';
+            gapsList.appendChild(empty);
+        } else {
+            gaps.forEach(gap => {
+                gapsList.appendChild(createSimpleCard(gap, 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'));
+            });
+        }
+    }
+
+    // Assumptions List
+    if (assumptionsList) {
+        assumptionsList.innerHTML = '';
+        const assumptions = artifact.assumptions || [];
+        if (assumptions.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+            empty.textContent = 'No compiler assumptions.';
+            assumptionsList.appendChild(empty);
+        } else {
+            assumptions.forEach(asm => {
+                assumptionsList.appendChild(createSimpleCard(asm, 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200'));
+            });
+        }
+    }
+
+    // Excluded Features (exclusions)
+    if (exclusionsList) {
+        exclusionsList.innerHTML = '';
+        const exclusions = artifact.rejected_features || [];
+        if (exclusions.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+            empty.textContent = 'No excluded features.';
+            exclusionsList.appendChild(empty);
+        } else {
+            exclusions.forEach(excl => {
+                exclusionsList.appendChild(createSimpleCard(excl, 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200'));
+            });
+        }
+    }
+
+    // Eligible Feature Rules
+    if (eligibleRulesList) {
+        eligibleRulesList.innerHTML = '';
+        const eligibleRules = artifact.eligible_feature_rules || [];
+        if (eligibleRules.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+            empty.textContent = 'No eligible feature rules.';
+            eligibleRulesList.appendChild(empty);
+        } else {
+            eligibleRules.forEach(rule => {
+                eligibleRulesList.appendChild(createSimpleCard(rule, 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200'));
+            });
+        }
+    }
+
+    // Render Spec Tab
+    if (specViewer) {
+        const specContent = spec.source_content || spec.excerpt || '';
+        specViewer.textContent = specContent;
+    }
+    if (truncationBanner) {
+        if (spec.content_truncated === true) {
+            truncationBanner.classList.remove('hidden');
+        } else {
+            truncationBanner.classList.add('hidden');
+        }
+    }
+
+    // Render Raw JSON Tab
     if (preview) {
         const previewPayload = {
             project,
@@ -478,6 +742,9 @@ function renderAuthorityReviewCard(visible) {
         };
         preview.innerText = JSON.stringify(previewPayload, null, 2);
     }
+    
+    // Restore/Apply active tab view
+    switchAuthorityReviewTab(currentAuthorityReviewActiveTab);
 }
 
 function setAuthorityReviewError(message) {
@@ -960,6 +1227,10 @@ async function fetchProjectFSMState(projectId, options = {}) {
         } else {
             applyResolvedLanding(stateKey, landing);
             setTimeout(runAutoLoadForVisiblePhase, 500);
+        }
+
+        if (currentProjectState.setup_status === 'passed') {
+            await loadAuthorityReview();
         }
 
         updateSetupStatusBanner();
@@ -4257,6 +4528,7 @@ async function toggleTaskBrief(event, sprintId, taskId) {
 
 // Assign globally for inline onclick handlers attached in project.html
 window.retryProjectSetup = retryProjectSetup;
+window.switchAuthorityReviewTab = switchAuthorityReviewTab;
 window.loadAuthorityReview = loadAuthorityReview;
 window.acceptAuthorityReview = acceptAuthorityReview;
 window.rejectAuthorityReview = rejectAuthorityReview;

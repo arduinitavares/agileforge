@@ -1,0 +1,1044 @@
+{
+  "schema_version": "agileforge.spec.v1",
+  "artifact_id": "SPEC.cartola-champion-squad-selector",
+  "title": "Cartola Champion Squad Selector And Sports Prediction Platform",
+  "status": "changed",
+  "version": "0.3",
+  "created_at": "2026-05-16",
+  "updated_at": "2026-05-19",
+  "summary": "Define a private Cartola FC decision engine whose first mission is to recommend the operator's highest-value legal squad before market lock, evaluate live outcomes without leakage, and keep future betting and paid advice tracks gated by validation, compliance, and customer protection.",
+  "problem_statement": "Cartola managers must choose a squad before market lock with incomplete information about availability, form, fixtures, prices, captain upside, and opponent context. Manual selection is slow and inconsistent, while naive models can win historical backtests but fail live by leaking future data, ignoring budget risk, overfitting one season, or selecting unavailable players. The repository already contains research and operational machinery, but project management needs a structured product-level specification that makes live Cartola squad selection the primary objective and treats betting predictions and subscription advice as future gated products.",
+  "controlled_terms": [
+    {
+      "term": "live recommendation",
+      "definition": "A squad recommendation generated before market lock for a target Cartola round using only pre-lock information.",
+      "scope": "domain"
+    },
+    {
+      "term": "captain-aware points",
+      "definition": "Cartola points after applying the official captain multiplier to one non-tecnico selected player.",
+      "scope": "domain"
+    },
+    {
+      "term": "moving budget",
+      "definition": "Backtest semantics where each strategy carries its own next-round budget from selected historical price variation.",
+      "scope": "domain"
+    },
+    {
+      "term": "strict fixture evidence",
+      "definition": "Canonical pre-lock fixture CSV and manifest evidence required before strict matchup context can be used for live advice.",
+      "scope": "domain"
+    },
+    {
+      "term": "paper trading",
+      "definition": "A future betting-research mode that records forecast probabilities and settlement outcomes without placing wagers or selling paid betting advice.",
+      "scope": "domain"
+    }
+  ],
+  "external_references": [
+    {
+      "id": "EXT.brazil-fixed-odds-guidance",
+      "title": "Brazil Ministry of Finance Fixed-Odds Betting Guidance",
+      "summary": "Fixed-odds betting in Brazil requires prior authorization and authorized national betting sites use the .bet.br domain.",
+      "url": "https://www.gov.br/fazenda/pt-br/composicao/orgaos/secretaria-de-premios-e-apostas/apostas-de-quota-fixa/apostas-de-quota-fixa"
+    },
+    {
+      "id": "EXT.ftc-endorsement-guides",
+      "title": "FTC Endorsements, Influencers, and Reviews Guidance",
+      "summary": "Paid recommendations and advertising must avoid deceptive claims and disclose material connections that affect how consumers evaluate recommendations.",
+      "url": "https://www.ftc.gov/business-guidance/advertising-marketing/endorsements-influencers-reviews"
+    }
+  ],
+  "items": [
+    {
+      "id": "GOAL.private-cartola-edge",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Private Cartola edge",
+      "statement": "The initial product should help the operator make better weekly and season-long Cartola decisions than manual selection and practical baselines.",
+      "tags": [
+        "cartola",
+        "mvp"
+      ]
+    },
+    {
+      "id": "GOAL.live-score-lift",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Live score lift",
+      "statement": "Recommendation quality should be judged by live actual captain-aware points, budget path, captain contribution, DNP exposure, and baseline deltas rather than by historical model metrics alone.",
+      "tags": [
+        "live",
+        "metrics"
+      ]
+    },
+    {
+      "id": "GOAL.leakage-safe-evidence",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Leakage-safe evidence",
+      "statement": "Historical, replay, and live evidence should maintain explicit data-boundary metadata so future information is not used for pre-event recommendations.",
+      "tags": [
+        "evidence",
+        "leakage"
+      ]
+    },
+    {
+      "id": "GOAL.evidence-gated-promotion",
+      "type": "GOAL",
+      "status": "accepted",
+      "title": "Evidence-gated promotion",
+      "statement": "Model, feature, optimizer, policy, and tuning changes should become live defaults only after frozen comparable evidence passes documented decision gates.",
+      "tags": [
+        "promotion",
+        "governance"
+      ]
+    },
+    {
+      "id": "GOAL.future-prediction-platform",
+      "type": "GOAL",
+      "status": "proposed",
+      "title": "Future prediction platform",
+      "statement": "The prediction stack may later expand to football match-event forecasting, including match winner, goals, and cards, after separate validation and data contracts exist.",
+      "tags": [
+        "future",
+        "betting-research"
+      ]
+    },
+    {
+      "id": "GOAL.future-subscription-advice",
+      "type": "GOAL",
+      "status": "proposed",
+      "title": "Future subscription advice",
+      "statement": "A public paid advice product may be considered only after separate specs define performance evidence, compliance, disclosures, billing, privacy, support, and customer safeguards.",
+      "tags": [
+        "future",
+        "subscription"
+      ]
+    },
+    {
+      "id": "NON_GOAL.guaranteed-wins",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Guaranteed wins excluded",
+      "statement": "The system must not claim that it will win every Cartola round, win a championship, or produce guaranteed betting profit.",
+      "tags": [
+        "claims"
+      ]
+    },
+    {
+      "id": "NON_GOAL.real-money-betting",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Real-money betting excluded",
+      "statement": "Real-money betting, bookmaker account integration, wager placement, and bankroll automation are outside this spec.",
+      "tags": [
+        "betting",
+        "scope"
+      ]
+    },
+    {
+      "id": "NON_GOAL.paid-betting-advice-now",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Paid betting advice excluded",
+      "statement": "Paid betting-adjacent advice is not part of the accepted scope until legal, advertising, responsible-gambling, and prediction-performance requirements are accepted in later specs.",
+      "tags": [
+        "subscription",
+        "compliance"
+      ]
+    },
+    {
+      "id": "NON_GOAL.research-as-production",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Research output is not production advice",
+      "statement": "Research-only artifacts, oracle hindsight, exploratory fixture evidence, and one-off experiment wins must not be exposed as production recommendations.",
+      "tags": [
+        "research",
+        "production"
+      ]
+    },
+    {
+      "id": "NON_GOAL.downstream-project-tasks",
+      "type": "NON_GOAL",
+      "status": "accepted",
+      "title": "Implementation tasks excluded",
+      "statement": "This spec does not create tickets, implementation tasks, payment systems, project generators, code changes, or downstream AgileForge workflow items.",
+      "tags": [
+        "spec-boundary"
+      ]
+    },
+    {
+      "id": "ASSUMPTION.operator-first",
+      "type": "ASSUMPTION",
+      "status": "accepted",
+      "title": "Operator-first product",
+      "statement": "The first accepted product is for the operator's own Cartola gameplay, not for public subscription distribution.",
+      "tags": [
+        "mvp"
+      ]
+    },
+    {
+      "id": "ASSUMPTION.current-default-profile",
+      "type": "ASSUMPTION",
+      "status": "accepted",
+      "title": "Current live default profile",
+      "statement": "The current live default remains xgboost_depth2_l2_heavy with ppg_xg, fixture_mode none, and matchup_context_mode none until a later accepted promotion decision changes it.",
+      "tags": [
+        "model",
+        "default"
+      ]
+    },
+    {
+      "id": "ASSUMPTION.betting-research-later",
+      "type": "ASSUMPTION",
+      "status": "accepted",
+      "title": "Betting starts as research",
+      "statement": "Future betting predictions start as paper-trading research and are not public advice or wager execution.",
+      "tags": [
+        "future",
+        "betting"
+      ]
+    },
+    {
+      "id": "REQ.live-squad-recommendation",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Recommend one live squad",
+      "statement": "The system must recommend exactly one live Cartola squad for the operator before market lock for the target round.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "Given the Cartola market is open and a target round is available, when a live recommendation run completes, then the output identifies one selected squad, one formation, one captain, predicted total, budget used, target round, and recommendation metadata.",
+        "Given the same completed live run, when the recommendation artifacts are inspected, then there is exactly one primary recommended squad marked as the operator-facing recommendation."
+      ],
+      "tags": [
+        "live",
+        "cartola"
+      ]
+    },
+    {
+      "id": "REQ.legal-roster",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Satisfy Cartola roster rules",
+      "statement": "The selected live squad must satisfy Cartola roster rules.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "The selected squad contains exactly 12 rows.",
+        "The selected squad contains exactly one tecnico and 11 non-tecnico players.",
+        "The selected squad contains exactly one non-tecnico captain.",
+        "The selected squad uses one official Cartola formation."
+      ],
+      "tags": [
+        "optimizer",
+        "cartola"
+      ]
+    },
+    {
+      "id": "REQ.budget-bound",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Stay within available budget",
+      "statement": "The live squad must stay within the operator's current available Cartola budget.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "For every live recommendation, the recommendation summary and selected-player artifacts show budget_used less than or equal to budget.",
+        "When the available budget is missing, the live recommendation workflow does not infer a private account balance and requires an explicit operator-provided budget."
+      ],
+      "tags": [
+        "budget",
+        "optimizer"
+      ]
+    },
+    {
+      "id": "REQ.captain-aware-optimization",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Optimize captain-aware points",
+      "statement": "The optimizer must select recommendations using captain-aware predicted Cartola points while preserving raw per-player predicted points.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "Round-level predicted totals use predicted_points_with_captain.",
+        "Selected-player predicted_points remains the raw per-athlete prediction before captain multiplier.",
+        "The selected captain is a non-tecnico player."
+      ],
+      "tags": [
+        "captain",
+        "scoring"
+      ]
+    },
+    {
+      "id": "REQ.prelock-market-capture",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Capture or validate pre-lock market data",
+      "statement": "The live recommendation workflow must capture or validate pre-lock market data before producing live advice.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "A live run records capture path, capture hash, capture timestamp, target round, market status, and capture policy.",
+        "When the market is unavailable or closed, live mode fails before squad generation unless the operator explicitly runs replay mode."
+      ],
+      "tags": [
+        "capture",
+        "live"
+      ]
+    },
+    {
+      "id": "REQ.no-finalized-live-outcomes",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Suppress finalized target-round outcomes",
+      "statement": "Live recommendations must not include finalized target-round actual points or scout outcomes.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "Live output artifacts omit target-round actual points and target-round scout outcomes.",
+        "If finalized target-round data is present during live recommendation generation, the workflow fails unless an explicit debug-only mode is selected."
+      ],
+      "tags": [
+        "leakage",
+        "live"
+      ]
+    },
+    {
+      "id": "REQ.walk-forward-boundary",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Prevent future-round leakage",
+      "statement": "Historical and replay evaluation must train only on information available before the evaluated target round.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "For target round N, training uses only rounds earlier than N.",
+        "Candidate optimization for target round N uses only round N candidate data.",
+        "Backtest and replay metadata records the evidence boundary used for each target round."
+      ],
+      "tags": [
+        "backtest",
+        "leakage"
+      ]
+    },
+    {
+      "id": "REQ.moving-budget-backtests",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Use moving-budget backtests",
+      "statement": "Historical backtests must use moving-budget semantics for strategy comparison.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "Each strategy records budget_policy as moving.",
+        "Each strategy records budget before and after each round, selected-player price variation, final budget, minimum budget, budget-constrained rounds, and maximum drawdown.",
+        "Reports do not compare fixed-budget and moving-budget evidence as equivalent."
+      ],
+      "tags": [
+        "backtest",
+        "budget"
+      ]
+    },
+    {
+      "id": "REQ.default-promotion-gate",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Gate live default changes",
+      "statement": "The current live default must change only when a frozen decision artifact passes the accepted promotion gates.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Every live default change cites a frozen decision artifact.",
+        "The cited decision artifact records points, budget, DNP, calibration, and comparability results.",
+        "A one-off experiment win, oracle hindsight run, or exploratory fixture-only run cannot change the live default."
+      ],
+      "tags": [
+        "promotion",
+        "governance"
+      ]
+    },
+    {
+      "id": "REQ.post-round-review",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Track completed-round outcome quality",
+      "statement": "The system must support post-round review for each completed live recommendation.",
+      "level": "MUST",
+      "verification": "acceptance-test",
+      "acceptance": [
+        "A post-round review links to the exact recommendation artifact it evaluates.",
+        "The review records actual captain-aware points, captain result, DNP count, budget delta, oracle gap when available, and baseline comparisons."
+      ],
+      "tags": [
+        "review",
+        "metrics"
+      ]
+    },
+    {
+      "id": "REQ.baseline-comparison",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Compare against practical baselines",
+      "statement": "Recommendation reports must compare selected squads against strong practical baselines.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Reports include comparisons to the current default profile.",
+        "Reports include comparison to at least one price or budget baseline when candidate data supports it.",
+        "Reports include comparison to a prior promoted baseline when one is applicable."
+      ],
+      "tags": [
+        "metrics",
+        "baseline"
+      ]
+    },
+    {
+      "id": "REQ.strict-fixture-fail-closed",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Fail closed for strict fixture mode",
+      "statement": "Strict fixture and matchup context must fail before recommendation when required strict evidence is missing or invalid.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "fixture_mode strict requires canonical strict fixture CSV and manifest files.",
+        "Missing or invalid strict fixture evidence fails before recommendation generation.",
+        "Strict live matchup context cannot run from exploratory fixture evidence alone."
+      ],
+      "tags": [
+        "fixtures",
+        "leakage"
+      ]
+    },
+    {
+      "id": "REQ.exploratory-evidence-labeling",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Label exploratory fixture evidence",
+      "statement": "Exploratory fixture evidence must remain labeled as research-only for strict no-leakage claims.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Metadata distinguishes exploratory fixture mode from strict fixture mode.",
+        "Exploratory-only runs cannot justify strict no-leakage production claims."
+      ],
+      "tags": [
+        "fixtures",
+        "research"
+      ]
+    },
+    {
+      "id": "REQ.research-not-direct-production",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Keep research diagnostics out of direct production advice",
+      "statement": "Research diagnostics must not directly change production advice.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Oracle discovery, EBM diagnostics, policy simulation, and hypothesis diagnostics record research-only status.",
+        "Research-only artifacts require frozen validation before promotion to live defaults."
+      ],
+      "tags": [
+        "research",
+        "production"
+      ]
+    },
+    {
+      "id": "REQ.submission-plan-only",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Generate submission plan without real submit",
+      "statement": "The operator must be able to review a sanitized Cartola squad submission plan without real authenticated submission.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "Submission planning writes submission_plan.json beside the recommendation run.",
+        "Submission planning writes submission_result.json indicating that real submit is disabled.",
+        "Submission planning does not mutate a Cartola account."
+      ],
+      "tags": [
+        "submission",
+        "safety"
+      ]
+    },
+    {
+      "id": "REQ.real-submit-disabled",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Disable real authenticated submission",
+      "statement": "Real authenticated Cartola squad submission must remain disabled until a separate Phase 2 submission spec is accepted.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "Any confirm-submit invocation exits with CONTRACT_UNVERIFIED.",
+        "The disabled real-submit path exits before reading account tokens.",
+        "The disabled real-submit path exits before constructing an authenticated POST request."
+      ],
+      "tags": [
+        "submission",
+        "security"
+      ]
+    },
+    {
+      "id": "REQ.betting-paper-trading",
+      "type": "REQ",
+      "status": "proposed",
+      "title": "Track future betting forecasts as probabilities",
+      "statement": "Future betting predictions must be tracked as calibrated probability forecasts, not guaranteed picks.",
+      "level": "SHOULD",
+      "verification": "analysis",
+      "acceptance": [
+        "Each future forecast records event, market, timestamp, data boundary, predicted probability, fair odds, offered odds when available, and realized outcome after settlement.",
+        "Paper-trading reports include calibration, Brier score or log loss, expected-value assumptions, closing-line comparison when odds are available, and drawdown simulation."
+      ],
+      "tags": [
+        "future",
+        "betting"
+      ]
+    },
+    {
+      "id": "REQ.subscription-disclosures",
+      "type": "REQ",
+      "status": "proposed",
+      "title": "Disclose limitations for future subscription advice",
+      "statement": "Future subscription advice must disclose limitations, confidence, material conflicts, and historical-performance context.",
+      "level": "SHOULD",
+      "verification": "manual-review",
+      "acceptance": [
+        "Future public advice includes timestamp, model version, confidence or probability, historical performance window, and non-guarantee language.",
+        "Future public advice discloses material connections or conflicts when they affect user interpretation."
+      ],
+      "tags": [
+        "future",
+        "subscription",
+        "disclosure"
+      ]
+    },
+    {
+      "id": "REQ.repo-quality-gate",
+      "type": "REQ",
+      "status": "accepted",
+      "title": "Keep repository quality gates reproducible",
+      "statement": "Repository quality checks must remain reproducible with the documented uv workflow.",
+      "level": "MUST",
+      "verification": "system-test",
+      "acceptance": [
+        "uv sync --locked --dev completes in a clean checkout.",
+        "uv run --frozen pyrepo-check --all reproduces the expected quality gate."
+      ],
+      "tags": [
+        "quality",
+        "repository"
+      ]
+    },
+    {
+      "id": "DATA.market-capture",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "Live market capture artifact",
+      "statement": "A live market capture must identify the source market data used for a live recommendation.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "The capture artifact records season, round, capture timestamp, market status, source identity, CSV path, and CSV hash.",
+        "The capture artifact is linked from the live recommendation metadata."
+      ],
+      "tags": [
+        "data",
+        "capture"
+      ]
+    },
+    {
+      "id": "DATA.recommended-squad",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "Recommended squad artifact",
+      "statement": "A recommended squad artifact must preserve enough information to review, reproduce, and compare a selected live squad.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "The artifact records selected players, club, position, price, predicted points, predicted points with captain where applicable, captain marker, formation, budget used, model ID, feature pack, fixture mode, matchup mode, optimizer status, and target round."
+      ],
+      "tags": [
+        "data",
+        "recommendation"
+      ]
+    },
+    {
+      "id": "DATA.promotion-decision",
+      "type": "DATA",
+      "status": "accepted",
+      "title": "Promotion decision artifact",
+      "statement": "A promotion decision artifact must record why a model, feature pack, policy, tuning candidate, or blend is accepted or rejected for live default use.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "The artifact records candidate identity, control identity, comparison seasons, budget policy, points delta, budget-risk checks, calibration checks when applicable, comparability status, and final decision."
+      ],
+      "tags": [
+        "data",
+        "promotion"
+      ]
+    },
+    {
+      "id": "DATA.future-advice-record",
+      "type": "DATA",
+      "status": "proposed",
+      "title": "Future advice publication record",
+      "statement": "Future public advice must retain an immutable record of what was shown, when it was shown, and which model or version produced it.",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "A future advice record includes user-visible advice text, delivery timestamp, model version, confidence or probability, disclosure text, and delivery channel."
+      ],
+      "tags": [
+        "future",
+        "subscription",
+        "data"
+      ]
+    },
+    {
+      "id": "INTERFACE.live-round-command",
+      "type": "INTERFACE",
+      "status": "accepted",
+      "title": "Live round command",
+      "statement": "The live round command must provide the preferred one-command interface for private live recommendations.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "The command accepts season, budget, and current-year inputs.",
+        "The command writes a live recommendation run directory with recommendation metadata and selected squad artifacts."
+      ],
+      "tags": [
+        "cli",
+        "live"
+      ]
+    },
+    {
+      "id": "INTERFACE.replay-recommendation-command",
+      "type": "INTERFACE",
+      "status": "accepted",
+      "title": "Replay recommendation command",
+      "statement": "The recommendation command must support completed-round replay for current-season review.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "Replay mode accepts season, target round, budget, and current-year inputs.",
+        "Replay outputs include oracle comparison fields when complete target-round actual points are available."
+      ],
+      "tags": [
+        "cli",
+        "replay"
+      ]
+    },
+    {
+      "id": "INTERFACE.backtest-command",
+      "type": "INTERFACE",
+      "status": "accepted",
+      "title": "Backtest command",
+      "statement": "The backtesting command must support historical moving-budget evaluation by season and start round.",
+      "level": "MUST",
+      "verification": "integration-test",
+      "acceptance": [
+        "Backtest runs accept season, start round, budget, and fixture mode inputs.",
+        "Backtest metadata records moving-budget policy and evidence boundaries."
+      ],
+      "tags": [
+        "cli",
+        "backtest"
+      ]
+    },
+    {
+      "id": "INTERFACE.cartola-api",
+      "type": "INTERFACE",
+      "status": "accepted",
+      "title": "Cartola market API integration",
+      "statement": "The system may use Cartola public market, status, and athlete APIs for live capture and recommendation context.",
+      "level": "MAY",
+      "verification": "integration-test",
+      "acceptance": [
+        "When Cartola public API data is captured, the capture manifest records source identity and capture timestamp."
+      ],
+      "tags": [
+        "integration",
+        "cartola"
+      ]
+    },
+    {
+      "id": "INTERFACE.future-odds-source",
+      "type": "INTERFACE",
+      "status": "proposed",
+      "title": "Future odds source integration",
+      "statement": "Future betting research may use legally available odds feeds or manually captured odds snapshots.",
+      "level": "MAY",
+      "verification": "inspection",
+      "acceptance": [
+        "Future odds data records source, timestamp, market identity, offered odds, and legal availability assumptions.",
+        "Odds data is used for paper-trading research only until later compliance specs are accepted."
+      ],
+      "tags": [
+        "future",
+        "odds"
+      ]
+    },
+    {
+      "id": "QUALITY.security-secrets",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "Protect secrets and account data",
+      "statement": "The repository and runtime artifacts must not expose secrets, local machine configuration, account tokens, subscriber payment data, or authenticated API payloads.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Secrets and local machine config are not committed.",
+        "Phase 1 submission planning does not read CARTOLA_GLB_TOKEN.",
+        "Future authenticated submission specs must require account and team identity verification before any account mutation."
+      ],
+      "tags": [
+        "security",
+        "privacy"
+      ]
+    },
+    {
+      "id": "QUALITY.live-runtime",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "Live recommendation runtime",
+      "statement": "Private live recommendations should complete with enough time for manual review before market lock.",
+      "level": "SHOULD",
+      "verification": "monitoring",
+      "acceptance": [
+        "For the private MVP, p95 live recommendation runtime is under 5 minutes from command start to completed recommendation artifact on the operator's local machine.",
+        "Long experiment workflows document native thread caps when needed to avoid local machine oversubscription."
+      ],
+      "tags": [
+        "performance",
+        "operations"
+      ]
+    },
+    {
+      "id": "QUALITY.recommendation-traceability",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "Recommendation traceability",
+      "statement": "Every live recommendation must write enough metadata to reproduce source data identity, capture timing, configuration, model identity, and output paths.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Recommendation metadata links to market capture identity, model profile, feature pack, fixture mode, matchup mode, budget, selected squad artifact, and output directory.",
+        "Recommendation run directories are unique and do not overwrite prior live recommendations."
+      ],
+      "tags": [
+        "reliability",
+        "traceability"
+      ]
+    },
+    {
+      "id": "QUALITY.observability",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "Outcome observability",
+      "statement": "Dashboards and reports should separate live production evidence from historical research evidence.",
+      "level": "SHOULD",
+      "verification": "inspection",
+      "acceptance": [
+        "Live performance reports track actual points, baseline deltas, captain contribution, DNP count, budget delta, and recommendation usage by round.",
+        "Research reports distinguish historical backtest, replay, paper-trading, and live production evidence."
+      ],
+      "tags": [
+        "observability",
+        "metrics"
+      ]
+    },
+    {
+      "id": "QUALITY.localization-accessibility",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "Readable outputs and localization",
+      "statement": "Machine-readable artifacts must remain canonical, while human-facing outputs should be readable and use appropriate Cartola terminology.",
+      "level": "SHOULD",
+      "verification": "manual-review",
+      "acceptance": [
+        "CLI output remains readable in terminals and CI logs.",
+        "CSV and JSON artifacts are treated as canonical machine-readable outputs.",
+        "Future user-facing advice supports Portuguese labels and Cartola terminology."
+      ],
+      "tags": [
+        "accessibility",
+        "localization"
+      ]
+    },
+    {
+      "id": "QUALITY.utc-timestamps",
+      "type": "QUALITY",
+      "status": "accepted",
+      "title": "UTC timestamps",
+      "statement": "Persisted metadata timestamps that identify run, capture, delivery, or settlement events must use UTC ISO-8601 format.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Run, capture, delivery, and settlement event metadata use UTC ISO-8601 timestamps."
+      ],
+      "tags": [
+        "data",
+        "time"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.before-market-lock",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Live decisions before market lock",
+      "statement": "Live Cartola decisions must be generated before market lock from available pre-lock information.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Live recommendation metadata records market status and capture timestamp.",
+        "Recommendation generation fails when live mode cannot establish a pre-lock evidence boundary."
+      ],
+      "tags": [
+        "live",
+        "leakage"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.future-public-product-specs",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Separate specs for public products",
+      "statement": "Any future real submission, subscription, or betting-adjacent public product must have a separate accepted spec before implementation or launch.",
+      "level": "MUST",
+      "verification": "manual-review",
+      "acceptance": [
+        "A future implementation proposal for real submit, subscription, or betting-adjacent public advice cites an accepted governing spec before work begins."
+      ],
+      "tags": [
+        "governance",
+        "future"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.compliance-approval",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Compliance approval for paid betting-adjacent advice",
+      "statement": "The system must not publish paid betting-adjacent advice before compliance approval.",
+      "level": "MUST_NOT",
+      "verification": "manual-review",
+      "acceptance": [
+        "Paid betting-related features remain disabled until legal review, responsible-gambling controls, jurisdiction rules, advertising disclosures, privacy requirements, and customer-support requirements are documented in accepted specs."
+      ],
+      "tags": [
+        "compliance",
+        "betting"
+      ]
+    },
+    {
+      "id": "CONSTRAINT.fixed-budget-non-comparable",
+      "type": "CONSTRAINT",
+      "status": "accepted",
+      "title": "Fixed-budget reports are non-comparable",
+      "statement": "Old fixed-budget reports must remain historical artifacts and must not be mixed with moving-budget promotion evidence.",
+      "level": "MUST",
+      "verification": "inspection",
+      "acceptance": [
+        "Promotion decisions identify budget policy for compared runs.",
+        "Runs with missing or fixed budget policy are not ranked against moving-budget evidence as equivalent."
+      ],
+      "tags": [
+        "backtest",
+        "comparability"
+      ]
+    },
+    {
+      "id": "DECISION.focus-private-cartola-first",
+      "type": "DECISION",
+      "status": "accepted",
+      "title": "Focus first on personal Cartola squad selection",
+      "statement": "The selected MVP direction is private Cartola squad selection because it directly supports the operator's current gameplay and uses existing repository strengths.",
+      "rationale": "The alternatives of treating the fork as a generic research clone, focusing first on betting predictions, or selling subscriptions before validation do not match the current operator goal or risk profile.",
+      "tags": [
+        "mvp",
+        "scope"
+      ]
+    },
+    {
+      "id": "DECISION.keep-real-submit-disabled",
+      "type": "DECISION",
+      "status": "accepted",
+      "title": "Keep real Cartola submit disabled",
+      "statement": "Real authenticated Cartola submission remains disabled until a separate save and read-back contract is accepted.",
+      "rationale": "This avoids unverified account mutation while still allowing the operator to review a sanitized submission plan and submit manually.",
+      "tags": [
+        "submission",
+        "safety"
+      ]
+    },
+    {
+      "id": "RISK.stale-market-data",
+      "type": "RISK",
+      "status": "accepted",
+      "title": "Stale market data",
+      "statement": "Player status can change after capture and before market lock, so late manual review remains necessary until stronger availability controls are validated.",
+      "tags": [
+        "live",
+        "availability"
+      ]
+    },
+    {
+      "id": "RISK.overfit-research",
+      "type": "RISK",
+      "status": "accepted",
+      "title": "Research overfit",
+      "statement": "A historical variant can outperform in backtests while harming live score, budget, or DNP exposure if promotion gates are weak.",
+      "tags": [
+        "research",
+        "promotion"
+      ]
+    },
+    {
+      "id": "RISK.public-advice-harm",
+      "type": "RISK",
+      "status": "accepted",
+      "title": "Public advice harm",
+      "statement": "Future paid advice can mislead users or create legal exposure if performance, limitations, conflicts, and jurisdiction restrictions are not clear.",
+      "tags": [
+        "future",
+        "compliance"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.primary-cartola-objective",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "Primary Cartola competition objective",
+      "statement": "The most important Cartola objective is unresolved: weekly high score, private league rank, global rank, season-long consistency, or another objective.",
+      "rationale": "This decision changes objective weighting between upside, floor, and budget preservation.",
+      "tags": [
+        "objective"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.live-validation-window",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "Live validation window",
+      "statement": "The live sample size or validation window needed before declaring the selector meaningfully better than manual selection or baseline is unresolved.",
+      "rationale": "This decision changes promotion and confidence thresholds.",
+      "tags": [
+        "validation",
+        "metrics"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.risk-thresholds",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "Accepted DNP and budget risk thresholds",
+      "statement": "The acceptable DNP, budget drawdown, and captain-risk thresholds for the operator's style of play are unresolved.",
+      "rationale": "This decision changes optimizer risk policy and promotion gates.",
+      "tags": [
+        "risk",
+        "optimizer"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.first-betting-markets",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "First betting research markets",
+      "statement": "The first future betting research markets are unresolved: match winner, over or under goals, player cards, team cards, or another market.",
+      "rationale": "This decision changes data acquisition and forecast schema for future paper trading.",
+      "tags": [
+        "future",
+        "betting"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.subscription-jurisdictions",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "Subscription jurisdictions and languages",
+      "statement": "The first jurisdictions and languages for future subscription advice are unresolved.",
+      "rationale": "This decision changes legal, payment, disclosure, localization, and responsible-gambling requirements.",
+      "tags": [
+        "future",
+        "subscription"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.real-submit-contract",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "Verified real-submit contract",
+      "statement": "The save and read-back contract required before real authenticated Cartola submission is unresolved.",
+      "rationale": "This blocks authenticated squad submission.",
+      "tags": [
+        "submission"
+      ]
+    },
+    {
+      "id": "OPEN_QUESTION.agileforge-spec-update",
+      "type": "OPEN_QUESTION",
+      "status": "proposed",
+      "title": "AgileForge spec update command",
+      "statement": "The AgileForge command for future spec updates after project creation is unresolved.",
+      "rationale": "This affects how this living spec stays synchronized with project-management state.",
+      "tags": [
+        "agileforge",
+        "workflow"
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": "REQ.live-squad-recommendation",
+      "type": "satisfies",
+      "to": "GOAL.private-cartola-edge"
+    },
+    {
+      "from": "REQ.post-round-review",
+      "type": "verifies",
+      "to": "GOAL.live-score-lift"
+    },
+    {
+      "from": "REQ.walk-forward-boundary",
+      "type": "satisfies",
+      "to": "GOAL.leakage-safe-evidence"
+    },
+    {
+      "from": "REQ.default-promotion-gate",
+      "type": "satisfies",
+      "to": "GOAL.evidence-gated-promotion"
+    },
+    {
+      "from": "REQ.betting-paper-trading",
+      "type": "depends_on",
+      "to": "CONSTRAINT.compliance-approval"
+    },
+    {
+      "from": "REQ.subscription-disclosures",
+      "type": "depends_on",
+      "to": "CONSTRAINT.future-public-product-specs"
+    },
+    {
+      "from": "REQ.real-submit-disabled",
+      "type": "implements",
+      "to": "DECISION.keep-real-submit-disabled"
+    },
+    {
+      "from": "CONSTRAINT.before-market-lock",
+      "type": "constrains",
+      "to": "REQ.live-squad-recommendation"
+    },
+    {
+      "from": "QUALITY.recommendation-traceability",
+      "type": "tracks",
+      "to": "REQ.post-round-review"
+    }
+  ]
+}

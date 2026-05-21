@@ -1,8 +1,10 @@
 """API tests for deterministic setup-first dashboard endpoints."""
 
+import asyncio
+import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +14,8 @@ from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
 )
+from services.agent_workbench.authority_projection import _AuthoritySelection
+from services.agent_workbench.authority_review import AuthorityReviewSnapshot
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -243,17 +247,242 @@ def _build_client(
         api_module, "run_vision_agent_from_state", fake_run_vision_agent_from_state
     )
 
+    app_double = FakeAuthorityApplication(workflow=workflow, repo=repo)
+    monkeypatch.setattr(
+        api_module,
+        "AgentWorkbenchApplication",
+        lambda: app_double,
+        raising=False,
+    )
+
     return TestClient(api_module.app), repo, workflow
 
 
 class FakeAuthorityApplication:
     """Application facade double for dashboard authority route tests."""
 
-    def __init__(self, workflow: DummyWorkflowService | None = None) -> None:
+    def __init__(
+        self,
+        workflow: DummyWorkflowService | None = None,
+        repo: DummyProductRepository | None = None,
+    ) -> None:
         """Initialize captured request state."""
         self.workflow = workflow
+        self.repo = repo
         self.accept_requests: list[AuthorityAcceptRequest] = []
         self.reject_requests: list[AuthorityRejectRequest] = []
+        self.create_calls: list[dict[str, Any]] = []
+        self.retry_calls: list[dict[str, Any]] = []
+
+    def project_create(
+        self,
+        *,
+        name: str,
+        spec_file: str,
+        idempotency_key: str,
+        changed_by: str,
+    ) -> dict[str, object]:
+        """Mock project creation."""
+        self.create_calls.append(
+            {
+                "name": name,
+                "spec_file": spec_file,
+                "idempotency_key": idempotency_key,
+                "changed_by": changed_by,
+            }
+        )
+        if not self.repo:
+            return {"ok": False, "error": "Repo not initialized"}
+        product = self.repo.create(name)
+        if product.product_id is None:
+            msg = "Repository failed to persist product ID"
+            raise ValueError(msg)
+        product.spec_file_path = spec_file
+
+        if "invalid" in spec_file.lower():
+            data = {
+                "project_id": product.product_id,
+                "name": product.name,
+                "setup_status": "failed",
+                "setup_error": "invalid spec path",
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_failure_artifact_id": "setup-artifact-1",
+                "setup_failure_stage": "output_validation",
+                "setup_failure_summary": (
+                    "SPEC_COMPILATION_FAILED: invalid spec path"
+                ),
+                "raw_output_preview": '{"invalid": true}',
+                "has_full_artifact": True,
+            }
+            if self.workflow:
+                self.workflow.states[str(product.product_id)] = {
+                    "fsm_state": "SETUP_REQUIRED",
+                    "setup_status": "failed",
+                    "setup_error": "invalid spec path",
+                    "setup_failure_artifact_id": "setup-artifact-1",
+                    "setup_failure_stage": "output_validation",
+                    "setup_failure_summary": (
+                        "SPEC_COMPILATION_FAILED: invalid spec path"
+                    ),
+                    "setup_raw_output_preview": '{"invalid": true}',
+                    "setup_has_full_artifact": True,
+                    "setup_spec_file_path": spec_file,
+                }
+            return {
+                "ok": False,
+                "error": "SPEC_COMPILATION_FAILED: invalid spec path",
+                "data": data,
+            }
+
+        state = {
+            "fsm_state": "VISION_INTERVIEW",
+            "setup_status": "passed",
+            "pending_spec_path": spec_file,
+            "pending_spec_content": "SPEC",
+            "compiled_authority_cached": '{"ok": true}',
+        }
+        product.compiled_authority_json = '{"ok": true}'
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            vision_res = executor.submit(
+                lambda: asyncio.run(
+                    api_module.run_vision_agent_from_state(
+                        state,
+                        project_id=product.product_id,
+                        user_input=None,
+                    )
+                )
+            ).result()
+
+        vision_auto = {
+            "attempted": True,
+            "success": bool(vision_res.get("success")),
+            "is_complete": vision_res.get("is_complete"),
+            "failure_artifact_id": vision_res.get("failure_artifact_id"),
+            "failure_stage": vision_res.get("failure_stage"),
+            "failure_summary": vision_res.get("failure_summary"),
+            "raw_output_preview": vision_res.get("raw_output_preview"),
+            "has_full_artifact": bool(vision_res.get("has_full_artifact")),
+        }
+
+        if self.workflow:
+            workflow_state: dict[str, object] = {
+                "fsm_state": "VISION_INTERVIEW",
+                "setup_status": "passed",
+                "pending_spec_path": spec_file,
+                "pending_spec_content": "SPEC",
+                "compiled_authority_cached": '{"ok": true}',
+            }
+            if not vision_res.get("success"):
+                attempt = {
+                    "trigger": "auto_setup_transition",
+                    "is_complete": False,
+                    "failure_artifact_id": vision_res.get("failure_artifact_id"),
+                    "failure_stage": vision_res.get("failure_stage"),
+                    "failure_summary": vision_res.get("failure_summary"),
+                }
+                workflow_state["vision_attempts"] = [attempt]
+            self.workflow.states[str(product.product_id)] = workflow_state
+
+        return {
+            "ok": True,
+            "data": {
+                "project_id": product.product_id,
+                "name": product.name,
+                "setup_status": "passed",
+                "fsm_state": "VISION_INTERVIEW",
+                "vision_auto_run": vision_auto,
+            },
+        }
+
+    def project_setup_retry(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        expected_state: str,
+        expected_context_fingerprint: str,
+        recovery_mutation_event_id: str | None,
+        idempotency_key: str,
+        changed_by: str,
+    ) -> dict[str, object]:
+        """Mock setup retry service."""
+        self.retry_calls.append(
+            {
+                "project_id": project_id,
+                "spec_file": spec_file,
+                "expected_state": expected_state,
+                "expected_context_fingerprint": expected_context_fingerprint,
+                "recovery_mutation_event_id": recovery_mutation_event_id,
+                "idempotency_key": idempotency_key,
+                "changed_by": changed_by,
+            }
+        )
+        if not self.repo:
+            return {"ok": False, "error": "Repo not initialized"}
+        product = self.repo.get_by_id(project_id)
+        if not product:
+            return {"ok": False, "error": "Project not found"}
+        product.spec_file_path = spec_file
+
+        if "invalid" in spec_file.lower():
+            data = {
+                "project_id": product.product_id,
+                "name": product.name,
+                "setup_status": "failed",
+                "setup_error": "invalid spec path",
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_failure_artifact_id": "setup-artifact-1",
+                "setup_failure_stage": "output_validation",
+                "setup_failure_summary": (
+                    "SPEC_COMPILATION_FAILED: invalid spec path"
+                ),
+                "raw_output_preview": '{"invalid": true}',
+                "has_full_artifact": True,
+            }
+            if self.workflow:
+                self.workflow.states[str(product.product_id)] = {
+                    "fsm_state": "SETUP_REQUIRED",
+                    "setup_status": "failed",
+                    "setup_error": "invalid spec path",
+                    "setup_failure_artifact_id": "setup-artifact-1",
+                    "setup_failure_stage": "output_validation",
+                    "setup_failure_summary": (
+                        "SPEC_COMPILATION_FAILED: invalid spec path"
+                    ),
+                    "setup_raw_output_preview": '{"invalid": true}',
+                    "setup_has_full_artifact": True,
+                    "setup_spec_file_path": spec_file,
+                }
+            return {
+                "ok": False,
+                "error": "SPEC_COMPILATION_FAILED: invalid spec path",
+                "data": data,
+            }
+
+        product.compiled_authority_json = '{"ok": true}'
+        if self.workflow:
+            self.workflow.states[str(product.product_id)] = {
+                "fsm_state": "VISION_INTERVIEW",
+                "setup_status": "passed",
+                "pending_spec_path": spec_file,
+                "pending_spec_content": "SPEC",
+                "compiled_authority_cached": '{"ok": true}',
+            }
+        return {
+            "ok": True,
+            "data": {
+                "project_id": product.product_id,
+                "name": product.name,
+                "setup_status": "passed",
+                "fsm_state": "VISION_INTERVIEW",
+                "vision_auto_run": {
+                    "attempted": True,
+                    "success": True,
+                    "is_complete": False,
+                },
+            },
+        }
 
     def authority_review(
         self,
@@ -270,9 +499,7 @@ class FakeAuthorityApplication:
                 "include_spec": include_spec,
                 "output_format": output_format,
                 "summary": {"omission_assessment": "complete"},
-                "guard_tokens": {
-                    REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE
-                },
+                "guard_tokens": {REVIEW_FIELD: AUTHORITY_REVIEW_FIXTURE},
             },
             "warnings": [],
             "errors": [],
@@ -294,6 +521,7 @@ class FakeAuthorityApplication:
 
     def authority_reject(self, request: AuthorityRejectRequest) -> dict[str, object]:
         """Capture an authority reject request and keep setup locked."""
+        self.accept_requests = []  # Clear to avoid cross-contamination if any
         self.reject_requests.append(request)
         if self.workflow is not None:
             self.workflow.update_session_status(
@@ -486,7 +714,11 @@ def test_create_project_setup_fail_and_retry_same_project(
 
     retry_response = client.post(
         f"/api/projects/{product.product_id}/setup/retry",
-        json={"spec_file_path": __file__},
+        json={
+            "spec_file_path": (
+                "benchmarks/authority-quality/todomvc/agileforge/gold-spec/spec.json"
+            )
+        },
     )
     assert retry_response.status_code == HTTP_OK
 
@@ -868,3 +1100,176 @@ def test_create_project_setup_failure_exposes_failure_metadata(
     assert payload["data"]["failure_stage"] == "output_validation"
     assert payload["data"]["has_full_artifact"] is True
     assert workflow.states["1"]["setup_failure_artifact_id"] == "setup-artifact-1"
+
+
+def test_get_project_authority_review_post_accept_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback to post-accept rendering when AUTHORITY_NOT_PENDING is returned."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Accepted Product")
+    product.spec_file_path = "specs/cartola/spec.json"
+    product.compiled_authority_json = "{}"
+
+    class FallbackFakeAuthorityApplication(FakeAuthorityApplication):
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str = "auto",
+            output_format: str = "json",
+        ) -> dict[str, object]:
+            _ = (project_id, include_spec, output_format)
+            return {
+                "ok": False,
+                "errors": [{"code": "AUTHORITY_NOT_PENDING"}],
+            }
+
+    fake_app = FallbackFakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+
+    selection = _AuthoritySelection(
+        specs=[],
+        latest_spec=None,
+        accepted=None,
+        rejected=None,
+        accepted_spec=cast("Any", object()),
+        authority=cast("Any", object()),
+        pending_authority=None,
+    )
+
+    monkeypatch.setattr(
+        api_module,
+        "_load_authority_selection",
+        lambda *_args, **_kwargs: selection
+    )
+
+    snapshot = AuthorityReviewSnapshot(
+        schema="agileforge.authority_review.v1",
+        project_id=product.product_id,
+        project_name=product.name,
+        fsm_state="VISION_INTERVIEW",
+        setup_status="passed",
+        spec_version_id=1,
+        content_ref="ref",
+        resolved_spec_path="path",
+        source_spec_hash="hash",
+        disk_status="ok",
+        disk_spec_hash="hash",
+        size_bytes=100,
+        review_source_limit_bytes=1000,
+        source_outline=[],
+        source_units=[],
+        coverage_summary={"omission_assessment": "complete"},
+        coverage_summary_fingerprint="fp",
+        coverage_diagnostics=[],
+        excerpt="excerpt",
+        content_included=True,
+        content_truncated=False,
+        source_content="spec source content",
+        source_content_sha256="sha",
+        structured_spec_snapshot=None,
+        pending_authority_id=1,
+        pending_spec_version_id=1,
+        authority_fingerprint="fingerprint",
+        compiler_version="1.0",
+        prompt_hash="hash",
+        compiled_at="date",
+        artifact={
+            "invariants": [],
+            "gaps": [],
+            "assumptions": [],
+            "rejected_features": [],
+            "eligible_feature_rules": [],
+            "domain": "test",
+            "scope_themes": [],
+        },
+        ir_provenance="provenance",
+        review_findings=[],
+        ir_packet_limits={},
+        authority_mappings=[],
+        ir_coverage_summary={},
+        omission_assessment="complete",
+    )
+
+    monkeypatch.setattr(
+        api_module,
+        "build_authority_review_snapshot",
+        lambda *_args, **_kwargs: snapshot
+    )
+
+    response = client.get(f"/api/projects/{product.product_id}/authority/review")
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["post_accept"] is True
+    assert payload["data"]["project"]["setup_status"] == "complete"
+
+
+def test_retry_setup_nonexistent_or_invalid_spec_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test setup retry with a missing spec file returning structured failure."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Retry Missing Spec Product")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/setup/retry",
+        json={"spec_file_path": "invalid/nonexistent_spec.json"},
+    )
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["setup_status"] == "failed"
+    assert "invalid" in payload["data"]["setup_error"].lower()
+
+
+def test_ui_retry_calls_facade_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate UI setup retry telemetry: idempotency key shape & changed_by."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Telemetry Retry Product")
+
+    app_double = api_module.AgentWorkbenchApplication()
+    assert isinstance(app_double, FakeAuthorityApplication)
+    assert len(app_double.retry_calls) == 0
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/setup/retry",
+        json={"spec_file_path": "specs/cartola/spec.json"},
+    )
+    assert response.status_code == HTTP_OK
+    assert len(app_double.retry_calls) == 1
+
+    call_params = app_double.retry_calls[0]
+    assert call_params["changed_by"] == "dashboard-ui"
+    assert call_params["idempotency_key"] is not None
+    assert call_params["idempotency_key"].startswith("ui-retry-")
+
+
+def test_ui_create_calls_facade_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate UI project creation telemetry: idempotency key & changed_by."""
+    client, _repo, _workflow = _build_client(monkeypatch)
+
+    app_double = api_module.AgentWorkbenchApplication()
+    assert isinstance(app_double, FakeAuthorityApplication)
+    assert len(app_double.create_calls) == 0
+
+    response = client.post(
+        "/api/projects",
+        json={
+            "name": "Telemetry Create Project",
+            "spec_file_path": "specs/cartola/spec.json",
+        },
+    )
+    assert response.status_code == HTTP_OK
+    assert len(app_double.create_calls) == 1
+
+    call_params = app_double.create_calls[0]
+    assert call_params["changed_by"] == "dashboard-ui"
+    assert call_params["idempotency_key"] is not None
+    assert call_params["idempotency_key"].startswith("ui-create-")
+

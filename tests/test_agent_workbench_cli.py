@@ -711,14 +711,6 @@ def test_cli_routes_project_create_dry_run_without_idempotency_key(
             "--idempotency-key",
             "create-001",
         ],
-        [
-            "project",
-            "create",
-            "--name",
-            "CLI Project",
-            "--spec-file",
-            "specs/app.md",
-        ],
     ],
 )
 def test_cli_rejects_invalid_project_create_idempotency_args(
@@ -735,6 +727,30 @@ def test_cli_rejects_invalid_project_create_idempotency_args(
     assert _mapping(payload["meta"])["command"] == "agileforge project create"
     assert _first_mapping(payload["errors"])["code"] == "INVALID_COMMAND"
     assert app.calls == []
+
+
+def test_cli_generates_auto_idempotency_key_when_omitted() -> None:
+    """Verify project create automatically generates an idempotency key if omitted."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "project",
+            "create",
+            "--name",
+            "CLI Project",
+            "--spec-file",
+            "specs/app.md",
+        ],
+        application=app,
+    )
+
+    assert rc == 0
+    assert len(app.calls) == 1
+    call_args = app.calls[0][1]
+    key = call_args["idempotency_key"]
+    assert isinstance(key, str)
+    assert key.startswith("auto-")
 
 
 def test_cli_routes_project_setup_retry_to_application(
