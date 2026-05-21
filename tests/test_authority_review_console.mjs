@@ -64,3 +64,110 @@ test('authority review tabs default to overview and manage all tab panels', () =
     const tabs = [...tabsMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
     assert.deepEqual(tabs, ['overview', 'invariants', 'spec', 'raw']);
 });
+
+function extractFunctionSource(functionName) {
+    const start = projectJsSource.indexOf(`function ${functionName}(`);
+    assert.notEqual(start, -1, `${functionName} should exist in frontend/project.js`);
+
+    const bodyStart = projectJsSource.indexOf('{', start);
+    assert.notEqual(bodyStart, -1, `${functionName} should have a function body`);
+
+    let depth = 0;
+    for (let index = bodyStart; index < projectJsSource.length; index += 1) {
+        const character = projectJsSource[index];
+        if (character === '{') depth += 1;
+        if (character === '}') depth -= 1;
+        if (depth === 0) {
+            return projectJsSource.slice(start, index + 1);
+        }
+    }
+
+    assert.fail(`${functionName} should have a complete function body`);
+}
+
+function loadAuthorityConsoleFunction(name, functionNames) {
+    const source = functionNames.map((functionName) => extractFunctionSource(functionName)).join('\n');
+    return new Function(`${source}; return ${name};`)();
+}
+
+test('safeArray normalizes missing and non-array values', () => {
+    const safeArray = loadAuthorityConsoleFunction('safeArray', ['safeArray']);
+
+    assert.deepEqual(safeArray(null), []);
+    assert.deepEqual(safeArray(undefined), []);
+    assert.deepEqual(safeArray({ length: 2 }), []);
+    assert.deepEqual(safeArray(['gap']), ['gap']);
+});
+
+test('authorityReviewState classifies accepted authority packets', () => {
+    const authorityReviewState = loadAuthorityConsoleFunction(
+        'authorityReviewState',
+        ['safeArray', 'authorityReviewState'],
+    );
+
+    assert.deepEqual(authorityReviewState({ post_accept: true }), {
+        label: 'Accepted',
+        tone: 'accepted',
+        acceptDisabled: true,
+        decision: 'Authority accepted. Vision is unlocked.',
+        reason: '',
+    });
+});
+
+test('authorityReviewState blocks non-overrideable blocking findings', () => {
+    const authorityReviewState = loadAuthorityConsoleFunction(
+        'authorityReviewState',
+        ['safeArray', 'authorityReviewState'],
+    );
+
+    const state = authorityReviewState({
+        pending_authority: {
+            review_findings: [
+                { code: 'SPEC_GAP', severity: 'blocking', override_allowed: false },
+            ],
+        },
+    });
+
+    assert.equal(state.label, 'Blocked');
+    assert.equal(state.tone, 'blocked');
+    assert.equal(state.acceptDisabled, true);
+    assert.equal(state.decision, 'Authority cannot be accepted yet.');
+    assert.match(state.reason, /SPEC_GAP/);
+    assert.match(state.reason, /must be resolved before acceptance\./);
+});
+
+test('authorityReviewState allows overrideable blocking findings', () => {
+    const authorityReviewState = loadAuthorityConsoleFunction(
+        'authorityReviewState',
+        ['safeArray', 'authorityReviewState'],
+    );
+
+    assert.deepEqual(authorityReviewState({
+        pending_authority: {
+            review_findings: [
+                { code: 'OVERRIDE', severity: 'blocking', override_allowed: true },
+            ],
+        },
+    }), {
+        label: 'Override Required',
+        tone: 'warning',
+        acceptDisabled: false,
+        decision: 'Authority has overrideable blocking findings.',
+        reason: 'Accepting will request candidate-specific override rationale.',
+    });
+});
+
+test('authorityReviewState marks packets without blocking findings ready', () => {
+    const authorityReviewState = loadAuthorityConsoleFunction(
+        'authorityReviewState',
+        ['safeArray', 'authorityReviewState'],
+    );
+
+    assert.deepEqual(authorityReviewState({ pending_authority: { review_findings: [] } }), {
+        label: 'Accept Ready',
+        tone: 'ready',
+        acceptDisabled: false,
+        decision: 'Authority is ready for human acceptance.',
+        reason: 'Review the compiled artifacts, then accept or request refinement.',
+    });
+});

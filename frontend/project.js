@@ -427,6 +427,57 @@ function updateSetupPanelCopy(title, description) {
 }
 
 let currentAuthorityReviewActiveTab = 'overview';
+let authorityInvariantSearchQuery = '';
+let authoritySupportFilter = 'all';
+
+function safeArray(value) {
+    return Array.isArray(value) ? value : [];
+}
+
+function authorityReviewState(review) {
+    if (review?.post_accept === true) {
+        return {
+            label: 'Accepted',
+            tone: 'accepted',
+            acceptDisabled: true,
+            decision: 'Authority accepted. Vision is unlocked.',
+            reason: '',
+        };
+    }
+
+    const findings = safeArray(review?.pending_authority?.review_findings);
+    const blocking = findings.filter((finding) => finding?.severity === 'blocking');
+    const nonOverrideable = blocking.filter((finding) => finding?.override_allowed === false);
+
+    if (nonOverrideable.length > 0) {
+        const first = nonOverrideable[0];
+        return {
+            label: 'Blocked',
+            tone: 'blocked',
+            acceptDisabled: true,
+            decision: 'Authority cannot be accepted yet.',
+            reason: `${first.code || 'Blocking finding'} must be resolved before acceptance.`,
+        };
+    }
+
+    if (blocking.length > 0) {
+        return {
+            label: 'Override Required',
+            tone: 'warning',
+            acceptDisabled: false,
+            decision: 'Authority has overrideable blocking findings.',
+            reason: 'Accepting will request candidate-specific override rationale.',
+        };
+    }
+
+    return {
+        label: 'Accept Ready',
+        tone: 'ready',
+        acceptDisabled: false,
+        decision: 'Authority is ready for human acceptance.',
+        reason: 'Review the compiled artifacts, then accept or request refinement.',
+    };
+}
 
 function switchAuthorityReviewTab(tabName) {
     currentAuthorityReviewActiveTab = tabName;
