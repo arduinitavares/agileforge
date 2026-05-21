@@ -434,6 +434,44 @@ function safeArray(value) {
     return Array.isArray(value) ? value : [];
 }
 
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function authorityReviewIncompleteReason(review) {
+    if (review?.post_accept === true) return '';
+
+    const pending = review?.pending_authority;
+    if (!isPlainObject(pending) || !Array.isArray(pending.review_findings)) {
+        return 'Reload the authority review before deciding.';
+    }
+
+    const artifact = pending.artifact;
+    const requiredArtifactArrays = [
+        'scope_themes',
+        'invariants',
+        'eligible_feature_rules',
+        'rejected_features',
+        'gaps',
+        'assumptions',
+    ];
+    const hasArtifactArrays = isPlainObject(artifact)
+        && requiredArtifactArrays.every((key) => Array.isArray(artifact[key]))
+        && isPlainObject(artifact.source_map);
+    if (!hasArtifactArrays) {
+        return 'Reload the authority review before deciding.';
+    }
+
+    const spec = review?.spec;
+    const hasSpecLocation = Boolean(spec?.resolved_path || spec?.path || spec?.content_ref);
+    const hasSpecHash = Boolean(spec?.spec_hash || spec?.disk_sha256 || spec?.source_content_sha256);
+    if (!isPlainObject(spec) || !hasSpecLocation || !hasSpecHash) {
+        return 'Reload the authority review before deciding.';
+    }
+
+    return '';
+}
+
 function authorityReviewState(review) {
     if (review?.post_accept === true) {
         return {
@@ -445,13 +483,14 @@ function authorityReviewState(review) {
         };
     }
 
-    if (!Array.isArray(review?.pending_authority?.review_findings)) {
+    const incompleteReason = authorityReviewIncompleteReason(review);
+    if (incompleteReason) {
         return {
             label: 'Review Incomplete',
             tone: 'blocked',
             acceptDisabled: true,
             decision: 'Review packet is incomplete.',
-            reason: 'Reload the authority review before deciding.',
+            reason: incompleteReason,
         };
     }
 
@@ -1076,6 +1115,12 @@ async function acceptAuthorityReview() {
 }
 
 function collectIncompleteReviewOverrides() {
+    const incompleteReason = authorityReviewIncompleteReason(currentAuthorityReview);
+    if (incompleteReason) {
+        setAuthorityReviewError(`Review packet is incomplete. ${incompleteReason}`);
+        return null;
+    }
+
     const findings = currentAuthorityReview?.pending_authority?.review_findings || [];
     const blocking = findings.filter((finding) => (
         finding?.severity === 'blocking'

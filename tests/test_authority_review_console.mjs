@@ -126,8 +126,39 @@ function extractFunctionSource(functionName) {
 }
 
 function loadAuthorityConsoleFunction(name, functionNames) {
-    const source = functionNames.map((functionName) => extractFunctionSource(functionName)).join('\n');
+    const dependencyNames = ['isPlainObject', 'authorityReviewIncompleteReason'];
+    const loadedNames = [
+        ...dependencyNames.filter((functionName) => (
+            projectJsSource.includes(`function ${functionName}(`)
+        )),
+        ...functionNames,
+    ];
+    const source = [...new Set(loadedNames)]
+        .map((functionName) => extractFunctionSource(functionName))
+        .join('\n');
     return new Function(`${source}; return ${name};`)();
+}
+
+function completeAuthorityReviewPacket(overrides = {}) {
+    return {
+        spec: {
+            resolved_path: '/tmp/spec.json',
+            spec_hash: 'sha256:spec',
+        },
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                scope_themes: [],
+                invariants: [],
+                eligible_feature_rules: [],
+                rejected_features: [],
+                gaps: [],
+                assumptions: [],
+                source_map: {},
+            },
+        },
+        ...overrides,
+    };
 }
 
 function createDocumentStub() {
@@ -248,13 +279,11 @@ test('authorityReviewState blocks non-overrideable blocking findings', () => {
         ['safeArray', 'authorityReviewState'],
     );
 
-    const state = authorityReviewState({
-        pending_authority: {
-            review_findings: [
-                { code: 'SPEC_GAP', severity: 'blocking', override_allowed: false },
-            ],
-        },
-    });
+    const review = completeAuthorityReviewPacket();
+    review.pending_authority.review_findings = [
+        { code: 'SPEC_GAP', severity: 'blocking', override_allowed: false },
+    ];
+    const state = authorityReviewState(review);
 
     assert.equal(state.label, 'Blocked');
     assert.equal(state.tone, 'blocked');
@@ -270,13 +299,12 @@ test('authorityReviewState allows overrideable blocking findings', () => {
         ['safeArray', 'authorityReviewState'],
     );
 
-    assert.deepEqual(authorityReviewState({
-        pending_authority: {
-            review_findings: [
-                { code: 'OVERRIDE', severity: 'blocking', override_allowed: true },
-            ],
-        },
-    }), {
+    const review = completeAuthorityReviewPacket();
+    review.pending_authority.review_findings = [
+        { code: 'OVERRIDE', severity: 'blocking', override_allowed: true },
+    ];
+
+    assert.deepEqual(authorityReviewState(review), {
         label: 'Override Required',
         tone: 'warning',
         acceptDisabled: false,
@@ -301,6 +329,43 @@ test('authorityReviewState fails closed for incomplete review packets', () => {
     assert.deepEqual(authorityReviewState(undefined), incompleteState);
     assert.deepEqual(authorityReviewState({}), incompleteState);
     assert.deepEqual(authorityReviewState({ pending_authority: {} }), incompleteState);
+    assert.deepEqual(authorityReviewState({
+        pending_authority: {
+            review_findings: [],
+        },
+        spec: {
+            resolved_path: '/tmp/spec.json',
+            spec_hash: 'sha256:spec',
+        },
+    }), incompleteState);
+    assert.deepEqual(authorityReviewState({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                invariants: [],
+                gaps: [],
+                assumptions: [],
+            },
+        },
+        spec: {
+            resolved_path: '/tmp/spec.json',
+            spec_hash: 'sha256:spec',
+        },
+    }), incompleteState);
+    assert.deepEqual(authorityReviewState({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                scope_themes: [],
+                invariants: [],
+                eligible_feature_rules: [],
+                rejected_features: [],
+                gaps: [],
+                assumptions: [],
+                source_map: {},
+            },
+        },
+    }), incompleteState);
 });
 
 test('authorityReviewState marks packets without blocking findings ready', () => {
@@ -309,13 +374,44 @@ test('authorityReviewState marks packets without blocking findings ready', () =>
         ['safeArray', 'authorityReviewState'],
     );
 
-    assert.deepEqual(authorityReviewState({ pending_authority: { review_findings: [] } }), {
+    assert.deepEqual(authorityReviewState(completeAuthorityReviewPacket()), {
         label: 'Accept Ready',
         tone: 'ready',
         acceptDisabled: false,
         decision: 'Authority is ready for human acceptance.',
         reason: 'Review the compiled artifacts, then accept or request refinement.',
     });
+});
+
+test('collectIncompleteReviewOverrides refuses incomplete authority review packets', () => {
+    const source = [
+        extractFunctionSource('safeArray'),
+        extractFunctionSource('isPlainObject'),
+        extractFunctionSource('authorityReviewIncompleteReason'),
+        extractFunctionSource('collectIncompleteReviewOverrides'),
+    ].join('\n');
+    const runCollect = new Function(
+        'review',
+        'setError',
+        `${source}; currentAuthorityReview = review; setAuthorityReviewError = setError; return collectIncompleteReviewOverrides();`,
+    );
+    const errors = [];
+
+    const result = runCollect(
+        {
+            pending_authority: {
+                review_findings: [],
+            },
+            spec: {
+                resolved_path: '/tmp/spec.json',
+                spec_hash: 'sha256:spec',
+            },
+        },
+        (message) => errors.push(message),
+    );
+
+    assert.equal(result, null);
+    assert.deepEqual(errors, ['Review packet is incomplete. Reload the authority review before deciding.']);
 });
 
 test('renderAuthoritySummary writes metrics and disables non-overrideable accept safely', () => {
@@ -351,9 +447,13 @@ test('renderAuthoritySummary writes metrics and disables non-overrideable accept
                 { code: 'NO_OVERRIDE', severity: 'blocking', override_allowed: false },
             ],
             artifact: {
+                scope_themes: [],
                 invariants: [{ id: 'REQ.one' }, { id: 'REQ.two' }],
+                eligible_feature_rules: [],
+                rejected_features: [],
                 gaps: [{ id: 'GAP.one' }],
                 assumptions: [{ id: 'ASM.one' }],
+                source_map: {},
             },
         },
     });
