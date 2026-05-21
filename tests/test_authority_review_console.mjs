@@ -428,6 +428,42 @@ test('renderAuthorityOverview renders findings and assumptions as literal text w
     assert.equal(assumptionsList.innerHTML, '');
 });
 
+test('renderAuthorityOverview renders finding candidate IDs as literal provenance text', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityOverview = loadAuthorityConsoleFunction(
+        'renderAuthorityOverview',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createSimpleCard',
+            'createFindingCard',
+            'renderListSection',
+            'renderAuthorityOverview',
+        ],
+    );
+
+    renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [
+                {
+                    code: 'CANDIDATE_GAP',
+                    severity: 'warning',
+                    override_allowed: true,
+                    candidate_ids: ['REQ.one', 'REQ.two'],
+                },
+            ],
+            artifact: {},
+        },
+    });
+
+    const findingsList = documentStub.getElementById('overview-findings-list');
+
+    assert.match(findingsList.textContent, /Candidates: REQ\.one, REQ\.two/);
+    assert.equal(findingsList.innerHTML, '');
+});
+
 test('renderAuthorityOverview renders explicit empty states without innerHTML', () => {
     const { documentStub } = createDocumentStub();
     globalThis.document = documentStub;

@@ -737,6 +737,14 @@ function createFindingCard(finding) {
         card.appendChild(messageEl);
     }
 
+    const candidateIds = safeArray(finding?.candidate_ids);
+    if (candidateIds.length > 0) {
+        const candidatesEl = document.createElement('div');
+        candidatesEl.className = 'text-[11px] text-slate-500 dark:text-slate-400 font-semibold';
+        candidatesEl.textContent = `Candidates: ${candidateIds.join(', ')}`;
+        card.appendChild(candidatesEl);
+    }
+
     return card;
 }
 
