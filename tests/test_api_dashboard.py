@@ -1232,6 +1232,14 @@ def test_get_project_authority_review_post_accept_fallback(
     assert payload["status"] == "success"
     assert payload["data"]["post_accept"] is True
     assert payload["data"]["project"]["setup_status"] == "complete"
+    assert payload["data"]["spec"]["source_content"] == "spec source content"
+    assert payload["data"]["spec"]["content_included"] is True
+    assert payload["data"]["spec"]["content_truncated"] is False
+    assert payload["data"]["pending_authority"]["artifact"]["domain"] == "test"
+    assert payload["data"]["pending_authority"]["review_findings"] == []
+    assert payload["data"]["pending_authority"]["authority_fingerprint"] == (
+        "fingerprint"
+    )
 
 
 def test_retry_setup_nonexistent_or_invalid_spec_file(
