@@ -90,6 +90,81 @@ function loadAuthorityConsoleFunction(name, functionNames) {
     return new Function(`${source}; return ${name};`)();
 }
 
+function createDocumentStub() {
+    class ElementStub {
+        constructor(id = '') {
+            this.id = id;
+            this.children = [];
+            this.className = '';
+            this.disabled = false;
+            this._textContent = '';
+            this.classList = {
+                add: (...classes) => {
+                    const current = new Set(this.className.split(/\s+/).filter(Boolean));
+                    classes.forEach((className) => current.add(className));
+                    this.className = [...current].join(' ');
+                },
+                remove: (...classes) => {
+                    const removed = new Set(classes);
+                    this.className = this.className
+                        .split(/\s+/)
+                        .filter((className) => className && !removed.has(className))
+                        .join(' ');
+                },
+                toggle: (className, force) => {
+                    if (force === true) {
+                        this.classList.add(className);
+                        return true;
+                    }
+                    if (force === false) {
+                        this.classList.remove(className);
+                        return false;
+                    }
+                    if (this.classList.contains(className)) {
+                        this.classList.remove(className);
+                        return false;
+                    }
+                    this.classList.add(className);
+                    return true;
+                },
+                contains: (className) => this.className.split(/\s+/).includes(className),
+            };
+        }
+
+        get textContent() {
+            return `${this._textContent}${this.children.map((child) => child.textContent).join('')}`;
+        }
+
+        set textContent(value) {
+            this.children = [];
+            this._textContent = value == null ? '' : String(value);
+        }
+
+        appendChild(child) {
+            this.children.push(child);
+            return child;
+        }
+
+        replaceChildren(...children) {
+            this._textContent = '';
+            this.children = children;
+        }
+    }
+
+    const elements = new Map();
+    const documentStub = {
+        createElement: () => new ElementStub(),
+        getElementById: (id) => {
+            if (!elements.has(id)) {
+                elements.set(id, new ElementStub(id));
+            }
+            return elements.get(id);
+        },
+    };
+
+    return { documentStub, elements };
+}
+
 test('safeArray normalizes missing and non-array values', () => {
     const safeArray = loadAuthorityConsoleFunction('safeArray', ['safeArray']);
 
@@ -188,4 +263,105 @@ test('authorityReviewState marks packets without blocking findings ready', () =>
         decision: 'Authority is ready for human acceptance.',
         reason: 'Review the compiled artifacts, then accept or request refinement.',
     });
+});
+
+test('renderAuthoritySummary writes metrics and disables non-overrideable accept safely', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthoritySummary = loadAuthorityConsoleFunction(
+        'renderAuthoritySummary',
+        [
+            'safeArray',
+            'authorityReviewState',
+            'setTextContent',
+            'createMetricElement',
+            'sourceStateLabel',
+            'applyStateBadgeTone',
+            'renderAuthoritySummary',
+        ],
+    );
+
+    renderAuthoritySummary({
+        project: { name: 'Cartola' },
+        spec: {
+            resolved_path: '/tmp/spec.json',
+            spec_hash: 'sha256:spec',
+            content_included: true,
+            content_truncated: false,
+        },
+        pending_authority: {
+            authority_fingerprint: 'sha256:authority',
+            compiled_at: '2026-05-21T13:00:00Z',
+            compiler_version: '1.0.0',
+            review_findings: [
+                { code: 'NO_OVERRIDE', severity: 'blocking', override_allowed: false },
+            ],
+            artifact: {
+                invariants: [{ id: 'REQ.one' }, { id: 'REQ.two' }],
+                gaps: [{ id: 'GAP.one' }],
+                assumptions: [{ id: 'ASM.one' }],
+            },
+        },
+    });
+
+    assert.equal(documentStub.getElementById('authority-review-state-badge').textContent, 'Blocked');
+    assert.match(documentStub.getElementById('authority-review-summary').textContent, /Cartola authority/);
+    assert.match(documentStub.getElementById('authority-spec-location').textContent, /\/tmp\/spec\.json/);
+    assert.match(documentStub.getElementById('authority-spec-hash').textContent, /sha256:spec/);
+    assert.match(documentStub.getElementById('authority-fingerprint').textContent, /sha256:authority/);
+    assert.match(documentStub.getElementById('authority-compiled-at').textContent, /1\.0\.0/);
+    assert.match(documentStub.getElementById('authority-source-state').textContent, /Full source included/);
+    assert.match(documentStub.getElementById('authority-review-metrics').textContent, /Blockers1/);
+    assert.match(documentStub.getElementById('authority-review-metrics').textContent, /Invariants2/);
+    assert.match(documentStub.getElementById('authority-review-metrics').textContent, /Gaps1/);
+    assert.match(documentStub.getElementById('authority-review-metrics').textContent, /Assumptions1/);
+    assert.equal(documentStub.getElementById('btn-accept-authority').disabled, true);
+    assert.match(documentStub.getElementById('authority-blocked-reason').textContent, /NO_OVERRIDE/);
+});
+
+test('renderAuthoritySummary hides actions and findings after accept', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthoritySummary = loadAuthorityConsoleFunction(
+        'renderAuthoritySummary',
+        [
+            'safeArray',
+            'authorityReviewState',
+            'setTextContent',
+            'createMetricElement',
+            'sourceStateLabel',
+            'applyStateBadgeTone',
+            'renderAuthoritySummary',
+        ],
+    );
+
+    renderAuthoritySummary({
+        post_accept: true,
+        project: { name: 'Cartola' },
+        spec: {
+            resolved_path: '/tmp/spec.json',
+            disk_sha256: 'sha256:disk',
+            content_truncated: true,
+        },
+        pending_authority: {
+            authority_fingerprint: 'sha256:accepted-authority',
+            compiled_at: '2026-05-21T13:00:00Z',
+            compiler_version: '1.0.0',
+            artifact: {
+                invariants: [{ id: 'REQ.one' }],
+                gaps: [],
+                assumptions: [],
+            },
+        },
+    });
+
+    assert.equal(documentStub.getElementById('authority-review-state-badge').textContent, 'Accepted');
+    assert.match(documentStub.getElementById('authority-review-summary').textContent, /Cartola authority is accepted/);
+    assert.match(documentStub.getElementById('authority-source-state').textContent, /Source excerpt shown/);
+    assert.equal(documentStub.getElementById('authority-decision-status').textContent, 'Authority accepted. Vision is unlocked.');
+    assert.equal(documentStub.getElementById('btn-accept-authority').disabled, true);
+    assert.equal(documentStub.getElementById('authority-review-actions-container').classList.contains('hidden'), true);
+    assert.equal(documentStub.getElementById('authority-review-findings').classList.contains('hidden'), true);
 });

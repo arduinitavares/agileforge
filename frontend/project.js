@@ -489,6 +489,116 @@ function authorityReviewState(review) {
     };
 }
 
+function setTextContent(id, value) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.textContent = value == null ? '' : String(value);
+}
+
+function createMetricElement(label, value) {
+    const item = document.createElement('div');
+    item.className = 'rounded-lg border border-slate-200 bg-white/80 p-2 dark:border-slate-800 dark:bg-slate-950/30';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'text-[10px] font-black uppercase tracking-wide text-slate-500 dark:text-slate-400';
+    labelEl.textContent = label;
+    item.appendChild(labelEl);
+
+    const valueEl = document.createElement('div');
+    valueEl.className = 'mt-1 text-lg font-black text-slate-900 dark:text-slate-100';
+    valueEl.textContent = String(value);
+    item.appendChild(valueEl);
+
+    return item;
+}
+
+function sourceStateLabel(spec) {
+    if (spec?.content_truncated === true) return 'Source excerpt shown; full content is truncated.';
+    if (spec?.content_included === true) return 'Full source included.';
+    if (spec?.excerpt) return 'Source excerpt available.';
+    return 'Source content unavailable in review packet.';
+}
+
+function applyStateBadgeTone(element, tone) {
+    if (!element) return;
+    const base = 'rounded-full px-2.5 py-1 text-[11px] font-black uppercase tracking-wide';
+    const tones = {
+        accepted: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-100',
+        blocked: 'bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-100',
+        warning: 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-100',
+        ready: 'bg-sky-100 text-sky-800 dark:bg-sky-900/50 dark:text-sky-100',
+    };
+    element.className = `${base} ${tones[tone] || tones.ready}`;
+}
+
+function renderAuthoritySummary(review) {
+    const project = review?.project || {};
+    const spec = review?.spec || {};
+    const pending = review?.pending_authority || {};
+    const artifact = pending.artifact || {};
+    const state = authorityReviewState(review);
+    const findings = safeArray(pending.review_findings);
+
+    const title = review?.post_accept === true
+        ? 'Accepted Authority Invariants'
+        : 'Pending Authority Review';
+    setTextContent('authority-card-title', title);
+    setTextContent('authority-review-state-badge', state.label);
+    applyStateBadgeTone(document.getElementById('authority-review-state-badge'), state.tone);
+
+    const sourcePath = spec.resolved_path || 'linked specification';
+    const authorityLabel = pending.authority_id || pending.pending_authority_id || 'pending';
+    const summaryPrefix = review?.post_accept === true
+        ? `${project.name || 'Project'} authority is accepted.`
+        : `${project.name || 'Project'} authority ${authorityLabel} awaits review.`;
+    setTextContent(
+        'authority-review-summary',
+        `${summaryPrefix} Coverage: ${spec.coverage_summary?.omission_assessment || 'unknown'}. Source: ${sourcePath}.`,
+    );
+
+    const metrics = document.getElementById('authority-review-metrics');
+    if (metrics) {
+        metrics.replaceChildren(
+            createMetricElement('Blockers', findings.filter((finding) => finding?.severity === 'blocking').length),
+            createMetricElement('Invariants', safeArray(artifact.invariants).length),
+            createMetricElement('Gaps', safeArray(artifact.gaps).length),
+            createMetricElement('Assumptions', safeArray(artifact.assumptions).length),
+            createMetricElement('Excluded', safeArray(artifact.rejected_features).length),
+            createMetricElement('Rules', safeArray(artifact.eligible_feature_rules).length),
+        );
+    }
+
+    setTextContent('authority-spec-location', sourcePath);
+    setTextContent('authority-spec-hash', spec.spec_hash || spec.disk_sha256 || 'No spec hash available');
+    setTextContent('authority-fingerprint', pending.authority_fingerprint || 'No authority fingerprint available');
+    setTextContent(
+        'authority-compiled-at',
+        [pending.compiled_at || 'Compile time unavailable', pending.compiler_version || 'compiler unknown'].join(' - '),
+    );
+    setTextContent('authority-source-state', sourceStateLabel(spec));
+    setTextContent('authority-decision-status', state.decision);
+    setTextContent('authority-blocked-reason', state.reason);
+
+    const acceptButton = document.getElementById('btn-accept-authority');
+    if (acceptButton) acceptButton.disabled = state.acceptDisabled;
+
+    const actionsContainer = document.getElementById('authority-review-actions-container');
+    const findingsEl = document.getElementById('authority-review-findings');
+    if (review?.post_accept === true) {
+        if (actionsContainer) actionsContainer.classList.add('hidden');
+        if (findingsEl) findingsEl.classList.add('hidden');
+    } else {
+        if (actionsContainer) actionsContainer.classList.remove('hidden');
+        if (findingsEl) {
+            const blockingCount = findings.filter((finding) => finding?.severity === 'blocking').length;
+            findingsEl.textContent = blockingCount
+                ? `${blockingCount} blocking review finding(s) require resolution or candidate-specific overrides.`
+                : '';
+            findingsEl.classList.toggle('hidden', blockingCount === 0);
+        }
+    }
+}
+
 function switchAuthorityReviewTab(tabName) {
     currentAuthorityReviewActiveTab = tabName;
     const tabs = ['overview', 'invariants', 'spec', 'raw'];
