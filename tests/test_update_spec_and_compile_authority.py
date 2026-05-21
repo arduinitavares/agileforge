@@ -37,7 +37,12 @@ def sample_product(session: Session, engine: Engine) -> Product:
     return product
 
 
-def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
+def _build_raw_compiler_output(
+    excerpt: str,
+    field_name: str,
+    *,
+    location: str | None = None,
+) -> str:
     invariant = Invariant(
         id="INV-0000000000000000",
         type=InvariantType.REQUIRED_FIELD,
@@ -53,7 +58,7 @@ def _build_raw_compiler_output(excerpt: str, field_name: str) -> str:
             SourceMapEntry(
                 invariant_id=invariant.id,
                 excerpt=excerpt,
-                location=None,
+                location=location,
             )
         ],
         compiler_version="0.0.0",
@@ -95,16 +100,24 @@ def _structured_spec_content(name: str) -> str:
 @pytest.fixture
 def compiler_stub(monkeypatch: pytest.MonkeyPatch) -> object:
     """Return compiler stub."""
-    raw_json = _build_raw_compiler_output(
-        excerpt="The payload must include user_id.",
-        field_name="user_id",
-    )
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        item = payload["items"][0]
+        return _build_raw_compiler_output(
+            excerpt=item["statement"],
+            field_name="user_id",
+            location=f"{item['id']}.statement",
+        )
+
     monkeypatch.setattr(
         spec_tools,
         "_invoke_spec_authority_compiler",
-        lambda **_: raw_json,
+        fake_compiler,
     )
-    return raw_json
+    return fake_compiler
 
 
 def test_creates_new_version_on_content_change(

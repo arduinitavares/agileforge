@@ -41,6 +41,12 @@ from services.specs.profile_content import (
     normalize_spec_content_for_registry,
 )
 from utils.adk_runner import get_agent_model_info, invoke_agent_to_text
+from utils.agileforge_spec_profile import (
+    AgileForgeSpecStatus,
+    RequirementLevel,
+    TechnicalSpecArtifact,
+    canonical_spec_json,
+)
 from utils.failure_artifacts import (
     AgentInvocationError,
     FailureMetadataDict,
@@ -48,8 +54,10 @@ from utils.failure_artifacts import (
 )
 from utils.runtime_config import SPEC_AUTHORITY_COMPILER_IDENTITY
 from utils.spec_schemas import (
+    EligibleFeatureRule,
     Invariant,
     InvariantType,
+    SourceMapEntry,
     SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerInput,
@@ -69,6 +77,9 @@ SPEC_AUTHORITY_COMPILER_INSTRUCTIONS = (
     instructions_source.SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
 )
 SPEC_AUTHORITY_COMPILER_VERSION = instructions_source.SPEC_AUTHORITY_COMPILER_VERSION
+_ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
+    {RequirementLevel.MUST, RequirementLevel.MUST_NOT}
+)
 
 
 class SpecAuthorityAcceptanceError(ValueError):
@@ -159,6 +170,20 @@ class UpdateSpecAuthorityInputError(ValueError):
         return cls("Provide exactly one of spec_content or content_ref")
 
 
+class _FocusedSpecItemNotFoundError(ValueError):
+    """Raised when a requested focused spec item is absent."""
+
+    def __init__(self, item_id: str) -> None:
+        super().__init__(f"Spec item {item_id} not found")
+
+
+class _EmptyCompilerSuccessMergeError(ValueError):
+    """Raised when merge is requested without compiler successes."""
+
+    def __init__(self) -> None:
+        super().__init__("At least one compiler success is required")
+
+
 @dataclass(frozen=True)
 class _AcceptedAuthorityLookup:
     """State discovered while checking for a reusable accepted authority."""
@@ -205,6 +230,14 @@ class _PersistedCompilation:
     scope_themes_count: int
     invariants_count: int
     recompiled: bool
+
+
+@dataclass(frozen=True)
+class _NormalizedCompilerInvocation:
+    """Raw and normalized output for one compiler invocation."""
+
+    raw_json: str
+    output: SpecAuthorityCompilerOutput
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -796,6 +829,302 @@ def _invoke_spec_authority_compiler(
     )
 
 
+def _structured_spec_artifact_or_none(
+    spec_content: str,
+) -> TechnicalSpecArtifact | None:
+    """Parse canonical structured spec content when available."""
+    try:
+        normalized = normalize_spec_content_for_registry(spec_content)
+    except SpecContentNormalizationError:
+        return None
+    return TechnicalSpecArtifact.model_validate_json(normalized.content)
+
+
+def _iterative_authority_item_ids(artifact: TechnicalSpecArtifact) -> list[str]:
+    """Return accepted high-priority item IDs for focused compilation."""
+    return [
+        item.id
+        for item in artifact.items
+        if item.status == AgileForgeSpecStatus.ACCEPTED
+        and item.level in _ITERATIVE_AUTHORITY_LEVELS
+    ]
+
+
+def _focused_structured_spec_content(
+    artifact: TechnicalSpecArtifact,
+    *,
+    item_id: str,
+) -> str:
+    """Build a valid structured spec payload containing one authority item."""
+    selected_items = [item for item in artifact.items if item.id == item_id]
+    if not selected_items:
+        raise _FocusedSpecItemNotFoundError(item_id)
+
+    kept_item_ids = {item_id}
+    focused_relations = [
+        relation
+        for relation in artifact.relations
+        if relation.from_ in kept_item_ids and relation.to in kept_item_ids
+    ]
+    focused = artifact.model_copy(
+        update={"items": selected_items, "relations": focused_relations}
+    )
+    return canonical_spec_json(focused)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    """Return unique strings in first-seen order."""
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _dedupe_invariants(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> list[Invariant]:
+    """Return unique invariants in first-seen order."""
+    deduped: list[Invariant] = []
+    seen: set[str] = set()
+    for success in successes:
+        for invariant in success.invariants:
+            key = invariant.id
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(invariant)
+    return deduped
+
+
+def _dedupe_eligible_feature_rules(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> list[EligibleFeatureRule]:
+    """Return unique eligible feature rules in first-seen order."""
+    deduped: list[EligibleFeatureRule] = []
+    seen: set[str] = set()
+    for success in successes:
+        for rule in success.eligible_feature_rules:
+            if rule.rule in seen:
+                continue
+            seen.add(rule.rule)
+            deduped.append(rule)
+    return deduped
+
+
+def _dedupe_source_map_entries(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> list[SourceMapEntry]:
+    """Return unique source map entries in first-seen order."""
+    deduped: list[SourceMapEntry] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for success in successes:
+        for entry in success.source_map:
+            key = (entry.invariant_id, entry.excerpt, entry.location)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(entry)
+    return deduped
+
+
+def _mentioned_item_ids(text: str | None, candidate_item_ids: set[str]) -> set[str]:
+    """Return structured item IDs explicitly mentioned in text."""
+    if not text:
+        return set()
+    return {item_id for item_id in candidate_item_ids if item_id in text}
+
+
+def _accounted_iterative_authority_item_ids(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    item_ids: list[str],
+) -> set[str]:
+    """Return high-priority item IDs represented by authority or explicit gaps."""
+    candidate_item_ids = set(item_ids)
+    accounted: set[str] = set()
+    for invariant in success.invariants:
+        source_item_id = getattr(invariant.parameters, "source_item_id", None)
+        if isinstance(source_item_id, str) and source_item_id in candidate_item_ids:
+            accounted.add(source_item_id)
+
+    for entry in success.source_map:
+        accounted.update(_mentioned_item_ids(entry.location, candidate_item_ids))
+        accounted.update(_mentioned_item_ids(entry.excerpt, candidate_item_ids))
+
+    for gap in success.gaps:
+        accounted.update(_mentioned_item_ids(gap, candidate_item_ids))
+    return accounted
+
+
+def _missing_iterative_authority_item_ids(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    item_ids: list[str],
+) -> list[str]:
+    """Return accepted high-priority item IDs omitted from authority output."""
+    accounted = _accounted_iterative_authority_item_ids(success, item_ids=item_ids)
+    return [item_id for item_id in item_ids if item_id not in accounted]
+
+
+def _structured_coverage_failure(
+    missing_item_ids: list[str],
+) -> SpecAuthorityCompilerOutput:
+    """Build the failure envelope for missing structured item coverage."""
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationFailure(
+            error="STRUCTURED_COVERAGE_INCOMPLETE",
+            reason="MISSING_ACCEPTED_MUST_AUTHORITY",
+            blocking_gaps=missing_item_ids,
+        )
+    )
+
+
+def _merge_compilation_successes(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> SpecAuthorityCompilationSuccess:
+    """Merge normalized full-spec and item-pass compiler outputs."""
+    if not successes:
+        raise _EmptyCompilerSuccessMergeError()
+    if len(successes) == 1:
+        return successes[0]
+
+    merged_payload = successes[0].model_dump(mode="json")
+    merged_payload.update(
+        {
+            "scope_themes": _dedupe_strings(
+                [
+                    theme
+                    for success in successes
+                    for theme in success.scope_themes
+                ]
+            ),
+            "domain": next(
+                (success.domain for success in successes if success.domain),
+                None,
+            ),
+            "invariants": [
+                invariant.model_dump(mode="json")
+                for invariant in _dedupe_invariants(successes)
+            ],
+            "eligible_feature_rules": [
+                rule.model_dump(mode="json")
+                for rule in _dedupe_eligible_feature_rules(successes)
+            ],
+            "rejected_features": _dedupe_strings(
+                [
+                    feature
+                    for success in successes
+                    for feature in success.rejected_features
+                ]
+            ),
+            "gaps": _dedupe_strings(
+                [gap for success in successes for gap in success.gaps]
+            ),
+            "assumptions": _dedupe_strings(
+                [
+                    assumption
+                    for success in successes
+                    for assumption in success.assumptions
+                ]
+            ),
+            "source_map": [
+                entry.model_dump(mode="json")
+                for entry in _dedupe_source_map_entries(successes)
+            ],
+        }
+    )
+    return SpecAuthorityCompilationSuccess.model_validate(merged_payload)
+
+
+def _invoke_and_normalize_spec_authority(
+    *,
+    spec_content: str,
+    content_ref: str | None,
+    product_id: int | None,
+    spec_version_id: int | None,
+) -> _NormalizedCompilerInvocation:
+    """Invoke the compiler once and normalize the result."""
+    raw_json = _invoke_spec_authority_compiler(
+        spec_content=spec_content,
+        content_ref=content_ref,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+    normalized = normalize_compiler_output(
+        raw_json,
+        source_text=spec_content,
+        source_format=_detect_spec_source_format(spec_content),
+    )
+    return _NormalizedCompilerInvocation(raw_json=raw_json, output=normalized)
+
+
+def _compile_spec_authority_output(
+    *,
+    spec_content: str,
+    content_ref: str | None,
+    product_id: int | None,
+    spec_version_id: int | None,
+) -> _NormalizedCompilerInvocation:
+    """Compile authority, adding focused item passes for structured specs."""
+    artifact = _structured_spec_artifact_or_none(spec_content)
+    full_invocation = _invoke_and_normalize_spec_authority(
+        spec_content=spec_content,
+        content_ref=content_ref,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+    if artifact is None:
+        return full_invocation
+
+    item_ids = _iterative_authority_item_ids(artifact)
+    if not item_ids or isinstance(
+        full_invocation.output.root,
+        SpecAuthorityCompilationFailure,
+    ):
+        return full_invocation
+
+    full_success = cast("SpecAuthorityCompilationSuccess", full_invocation.output.root)
+    successes = [full_success]
+    for item_id in item_ids:
+        focused_content = _focused_structured_spec_content(
+            artifact,
+            item_id=item_id,
+        )
+        item_invocation = _invoke_and_normalize_spec_authority(
+            spec_content=focused_content,
+            content_ref=None,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        if isinstance(item_invocation.output.root, SpecAuthorityCompilationFailure):
+            return item_invocation
+        item_success = cast(
+            "SpecAuthorityCompilationSuccess",
+            item_invocation.output.root,
+        )
+        successes.append(item_success)
+
+    merged_success = _merge_compilation_successes(successes)
+    missing_item_ids = _missing_iterative_authority_item_ids(
+        merged_success,
+        item_ids=item_ids,
+    )
+    if missing_item_ids:
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=_structured_coverage_failure(missing_item_ids),
+        )
+
+    return _NormalizedCompilerInvocation(
+        raw_json=full_invocation.raw_json,
+        output=SpecAuthorityCompilerOutput(root=merged_success),
+    )
+
+
 def preview_spec_authority(
     params: dict[str, Any] | PreviewSpecAuthorityInput | None = None,
     *,
@@ -810,17 +1139,13 @@ def preview_spec_authority(
         return {"success": False, "error": f"Invalid input: {exc}"}
 
     try:
-        raw_json = _invoke_spec_authority_compiler(
+        compiled = _compile_spec_authority_output(
             spec_content=parsed.content,
             content_ref=None,
             product_id=None,
             spec_version_id=None,
         )
-        normalized = normalize_compiler_output(
-            raw_json,
-            source_text=parsed.content,
-            source_format=_detect_spec_source_format(parsed.content),
-        )
+        normalized = compiled.output
 
         if isinstance(normalized.root, SpecAuthorityCompilationFailure):
             return {
@@ -966,18 +1291,14 @@ def _extract_spec_authority_llm(
     spec_version_id: int,
 ) -> SpecAuthorityCompilationSuccess:
     """Extract spec authority using the compiler and normalize to success output."""
-    raw_json = _invoke_spec_authority_compiler(
+    compiled = _compile_spec_authority_output(
         spec_content=spec_content,
         content_ref=content_ref,
         product_id=product_id,
         spec_version_id=spec_version_id,
     )
 
-    normalized: SpecAuthorityCompilerOutput = normalize_compiler_output(
-        raw_json,
-        source_text=spec_content,
-        source_format=_detect_spec_source_format(spec_content),
-    )
+    normalized: SpecAuthorityCompilerOutput = compiled.output
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         raise SpecAuthorityCompilationError.failed(
             normalized.root.error,
@@ -1290,7 +1611,7 @@ def _invoke_compiler_for_version(
 ) -> SpecAuthorityCompilationSuccess | dict[str, Any]:
     """Invoke the compiler and normalize either a success artifact or failure result."""
     try:
-        raw_json = _invoke_spec_authority_compiler(
+        compiled = _compile_spec_authority_output(
             spec_content=spec_content,
             content_ref=spec_version.content_ref,
             product_id=spec_version.product_id,
@@ -1318,11 +1639,8 @@ def _invoke_compiler_for_version(
             exception=exc,
         )
 
-    normalized = normalize_compiler_output(
-        raw_json,
-        source_text=spec_content,
-        source_format=_detect_spec_source_format(spec_content),
-    )
+    raw_json = compiled.raw_json
+    normalized = compiled.output
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
         failure_stage = (
             "invalid_json"

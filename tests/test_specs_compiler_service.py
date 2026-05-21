@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -34,6 +35,8 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerInput,
     SpecAuthorityCompilerOutput,
+    SpecAuthoritySourceLevel,
+    UserInteractionParams,
 )
 
 
@@ -131,8 +134,80 @@ def _agileforge_spec_profile_json() -> str:
     return json.dumps(_agileforge_spec_profile_payload())
 
 
+def _accepted_multi_item_spec_profile_payload() -> dict[str, object]:
+    payload = _agileforge_spec_profile_payload()
+    payload["items"] = [
+        {
+            "id": "REQ.todo-create",
+            "type": "REQ",
+            "status": "accepted",
+            "level": "MUST",
+            "title": "Create todos",
+            "statement": "The app MUST create a todo when Enter is pressed.",
+            "verification": "system-test",
+            "acceptance": ["Pressing Enter creates a new todo."],
+        },
+        {
+            "id": "REQ.todo-toggle",
+            "type": "REQ",
+            "status": "accepted",
+            "level": "MUST_NOT",
+            "title": "Toggle without deleting",
+            "statement": "The app MUST_NOT delete a todo when it is toggled.",
+            "verification": "system-test",
+            "acceptance": ["Toggling changes completion state without deletion."],
+        },
+        {
+            "id": "REQ.todo-color",
+            "type": "REQ",
+            "status": "accepted",
+            "level": "SHOULD",
+            "title": "Highlight todos",
+            "statement": "The app SHOULD highlight the active todo.",
+            "verification": "inspection",
+            "acceptance": ["The active todo is visually distinct."],
+        },
+    ]
+    return payload
+
+
+def _accepted_multi_item_spec_profile_json() -> str:
+    return normalize_spec_content_for_registry(
+        json.dumps(_accepted_multi_item_spec_profile_payload())
+    ).content
+
+
 def _canonical_agileforge_spec_profile_json() -> str:
     return normalize_spec_content_for_registry(_agileforge_spec_profile_json()).content
+
+
+def _behavioral_payload_json(
+    source_item_id: str, source_level: SpecAuthoritySourceLevel
+) -> str:
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["TodoMVC"],
+        domain="todo",
+        invariants=[
+            Invariant(
+                id="INV-0123456789abcdef",
+                type=InvariantType.USER_INTERACTION,
+                parameters=UserInteractionParams(
+                    source_item_id=source_item_id,
+                    source_level=source_level,
+                    trigger="user action",
+                    target=source_item_id,
+                    expected_response=f"Honor {source_item_id}.",
+                ),
+            )
+        ],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
 def test_normalize_structured_spec_content_canonicalizes_json() -> None:
@@ -530,6 +605,86 @@ def test_preview_spec_authority_returns_success_and_updates_cache(
     )
 
 
+def test_preview_spec_authority_iteratively_covers_accepted_must_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structured preview compiles each accepted MUST/MUST_NOT item in focus."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[list[str]] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        item_ids = [item["id"] for item in items]
+        calls.append(item_ids)
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        source_item_id = first_item["id"]
+        source_level = first_item["level"]
+        assert isinstance(source_item_id, str)
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=source_item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    compiled = SpecAuthorityCompilerOutput.model_validate_json(
+        result["compiled_authority"]
+    )
+    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    covered_item_ids = {
+        invariant.parameters.source_item_id
+        for invariant in compiled.root.invariants
+        if isinstance(invariant.parameters, UserInteractionParams)
+    }
+    assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
+    assert ["REQ.todo-create"] in calls
+    assert ["REQ.todo-toggle"] in calls
+    assert ["REQ.todo-color"] not in calls
+
+
+def test_preview_spec_authority_rejects_unaccounted_iterative_must_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structured item pass cannot succeed without source-item coverage."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _compiled_success_json(),
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["details"]["error"] == "STRUCTURED_COVERAGE_INCOMPLETE"
+    assert result["details"]["reason"] == "MISSING_ACCEPTED_MUST_AUTHORITY"
+    assert result["details"]["blocking_gaps"] == [
+        "REQ.todo-create",
+        "REQ.todo-toggle",
+    ]
+
+
 def test_preview_spec_authority_returns_failure_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -754,6 +909,67 @@ def test_compile_spec_authority_for_version_persists_authority(
     ).first()
     assert authority is not None
     assert authority.compiled_artifact_json == sample_product.compiled_authority_json
+
+
+def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
+    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persisted structured compilation merges focused MUST/MUST_NOT item outputs."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[list[str]] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        item_ids = [item["id"] for item in items]
+        calls.append(item_ids)
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        source_item_id = first_item["id"]
+        source_level = first_item["level"]
+        assert isinstance(source_item_id, str)
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=source_item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=_accepted_multi_item_spec_profile_json(),
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert sample_product.compiled_authority_json is not None
+    compiled = SpecAuthorityCompilerOutput.model_validate_json(
+        sample_product.compiled_authority_json
+    )
+    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    covered_item_ids = {
+        invariant.parameters.source_item_id
+        for invariant in compiled.root.invariants
+        if isinstance(invariant.parameters, UserInteractionParams)
+    }
+    assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
+    assert ["REQ.todo-create"] in calls
+    assert ["REQ.todo-toggle"] in calls
+    assert ["REQ.todo-color"] not in calls
 
 
 def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(
