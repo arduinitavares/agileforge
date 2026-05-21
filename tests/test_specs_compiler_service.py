@@ -70,6 +70,21 @@ def _compiled_failure_json() -> str:
     return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
 
 
+def _vacant_success_json() -> str:
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["notes-only"],
+        domain=None,
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+
+
 def _raw_compiler_output_json() -> str:
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Payments"],
@@ -685,6 +700,29 @@ def test_preview_spec_authority_rejects_unaccounted_iterative_must_items(
     ]
 
 
+def test_preview_spec_authority_rejects_vacant_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normalized zero-invariant success is not usable compiled authority."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _vacant_success_json(),
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _canonical_agileforge_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["details"]["error"] == "SPEC_AUTHORITY_VACANT"
+    assert result["details"]["reason"] == "NO_INVARIANTS_EXTRACTED"
+    assert result["details"]["blocking_gaps"] == ["No invariants extracted from spec"]
+
+
 def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1024,6 +1062,52 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     assert ["REQ.todo-create"] in calls
     assert ["REQ.todo-toggle"] in calls
     assert ["REQ.todo-color"] not in calls
+
+
+def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_authority(
+    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Vacant authority blocks update+compile before persistence and auto-accept."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _vacant_success_json(),
+    )
+
+    accept_calls: list[object] = []
+
+    def record_accept_call(**kwargs: object) -> object:
+        accept_calls.append(kwargs)
+        return SimpleNamespace(
+            status="accepted",
+            policy="auto",
+            decided_at=SimpleNamespace(isoformat=lambda: "2026-05-21T00:00:00+00:00"),
+            decided_by="system",
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_ensure_spec_authority_accepted",
+        record_accept_call,
+    )
+
+    result = compiler_service.update_spec_and_compile_authority(
+        {
+            "product_id": require_id(sample_product.product_id, "product_id"),
+            "spec_content": _agileforge_spec_profile_json(),
+        },
+        tool_context=None,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "SPEC_AUTHORITY_VACANT"
+    assert result["reason"] == "NO_INVARIANTS_EXTRACTED"
+    assert result["blocking_gaps"] == ["No invariants extracted from spec"]
+    assert accept_calls == []
+    assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(

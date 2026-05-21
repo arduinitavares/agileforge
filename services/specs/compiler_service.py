@@ -80,6 +80,7 @@ SPEC_AUTHORITY_COMPILER_VERSION = instructions_source.SPEC_AUTHORITY_COMPILER_VE
 _ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
     {RequirementLevel.MUST, RequirementLevel.MUST_NOT}
 )
+_NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
 
 
 class SpecAuthorityAcceptanceError(ValueError):
@@ -983,6 +984,36 @@ def _structured_coverage_failure(
     )
 
 
+def _vacant_authority_blocking_gaps(
+    success: SpecAuthorityCompilationSuccess,
+) -> list[str]:
+    """Return blocking vacancy gaps when compiler output has no usable authority."""
+    standard_gaps = [gap for gap in success.gaps if _NO_INVARIANTS_GAP in gap]
+    if success.invariants and not standard_gaps:
+        return []
+    if standard_gaps:
+        return _dedupe_strings(standard_gaps)
+    if not success.invariants:
+        return [_NO_INVARIANTS_GAP]
+    return []
+
+
+def _authority_postcondition_failure(
+    success: SpecAuthorityCompilationSuccess,
+) -> SpecAuthorityCompilerOutput | None:
+    """Return a failure envelope when normalized authority is not usable."""
+    blocking_gaps = _vacant_authority_blocking_gaps(success)
+    if not blocking_gaps:
+        return None
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationFailure(
+            error="SPEC_AUTHORITY_VACANT",
+            reason="NO_INVARIANTS_EXTRACTED",
+            blocking_gaps=blocking_gaps,
+        )
+    )
+
+
 def _merge_compilation_successes(
     successes: list[SpecAuthorityCompilationSuccess],
 ) -> SpecAuthorityCompilationSuccess:
@@ -996,11 +1027,7 @@ def _merge_compilation_successes(
     merged_payload.update(
         {
             "scope_themes": _dedupe_strings(
-                [
-                    theme
-                    for success in successes
-                    for theme in success.scope_themes
-                ]
+                [theme for success in successes for theme in success.scope_themes]
             ),
             "domain": next(
                 (success.domain for success in successes if success.domain),
@@ -1059,6 +1086,10 @@ def _invoke_and_normalize_spec_authority(
         source_text=spec_content,
         source_format=_detect_spec_source_format(spec_content),
     )
+    if isinstance(normalized.root, SpecAuthorityCompilationSuccess):
+        postcondition_failure = _authority_postcondition_failure(normalized.root)
+        if postcondition_failure is not None:
+            normalized = postcondition_failure
     return _NormalizedCompilerInvocation(raw_json=raw_json, output=normalized)
 
 
@@ -1249,9 +1280,7 @@ def _render_invariant_summary(invariant: Invariant) -> str:
         max_value: Any | Literal[""] = getattr(invariant.parameters, "max_value", "")
         return f"MAX_VALUE:{field_name}<= {max_value}"
     if invariant.type == InvariantType.RELATION_CONSTRAINT:
-        expression: Any | Literal[""] = getattr(
-            invariant.parameters, "expression", ""
-        )
+        expression: Any | Literal[""] = getattr(invariant.parameters, "expression", "")
         return f"RELATION_CONSTRAINT:{expression}"
     return f"INVARIANT:{invariant.type}"
 
