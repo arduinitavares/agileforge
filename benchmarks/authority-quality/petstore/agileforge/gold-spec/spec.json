@@ -1,0 +1,263 @@
+{
+  "artifact_id": "SPEC.petstore-api",
+  "controlled_terms": [
+    {
+      "definition": "An HTTP method and path pair in the Petstore API contract.",
+      "scope": "artifact",
+      "term": "operation"
+    },
+    {
+      "definition": "The reusable Petstore data shape referenced by operations or responses.",
+      "scope": "artifact",
+      "term": "schema"
+    }
+  ],
+  "created_at": "2026-05-21",
+  "external_references": [],
+  "items": [
+    {
+      "id": "GOAL.api-contract-fidelity",
+      "statement": "The compiled authority should preserve the Petstore API's endpoint, parameter, response, and schema contracts closely enough for downstream API planning agents.",
+      "status": "accepted",
+      "title": "API contract fidelity",
+      "type": "GOAL"
+    },
+    {
+      "id": "NON_GOAL.full-openapi-surface",
+      "statement": "The benchmark fixture is not intended to model the full Swagger Petstore surface beyond the listed paths, parameters, responses, and schemas.",
+      "status": "accepted",
+      "title": "Full OpenAPI surface",
+      "type": "NON_GOAL"
+    },
+    {
+      "acceptance": [
+        "The API contract includes a GET operation at /pets.",
+        "The GET /pets success response is 200 and returns the Pets schema.",
+        "The GET /pets default response returns the Error schema."
+      ],
+      "id": "INTERFACE.list-pets",
+      "level": "MUST",
+      "statement": "The API must expose GET /pets to list pets and must define both the expected success response returning Pets and the default error response returning Error.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "operation",
+        "pets"
+      ],
+      "title": "List pets operation",
+      "type": "INTERFACE",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The API contract includes a POST operation at /pets.",
+        "The POST /pets operation accepts a Pet request body.",
+        "The POST /pets success response is 201 and returns the created Pet schema.",
+        "The POST /pets default response returns the Error schema."
+      ],
+      "id": "INTERFACE.create-pet",
+      "level": "MUST",
+      "statement": "The API must expose POST /pets to create a pet from a Pet request body and must define both the expected created-pet success response and the default error response returning Error.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "operation",
+        "pets"
+      ],
+      "title": "Create pet operation",
+      "type": "INTERFACE",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The API contract includes a GET operation at /pets/{petId}.",
+        "The GET /pets/{petId} success response is 200 and returns the Pet schema.",
+        "The GET /pets/{petId} default response returns the Error schema."
+      ],
+      "id": "INTERFACE.get-pet",
+      "level": "MUST",
+      "statement": "The API must expose GET /pets/{petId} to fetch a single pet and must define both the expected success response returning Pet and the default error response returning Error.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "operation",
+        "pets"
+      ],
+      "title": "Get pet operation",
+      "type": "INTERFACE",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The GET /pets operation defines a limit query parameter.",
+        "The limit query parameter maximum value is 100."
+      ],
+      "id": "CONSTRAINT.limit-maximum",
+      "level": "MUST",
+      "statement": "The GET /pets limit query parameter must have a maximum value of 100.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "parameter",
+        "limit"
+      ],
+      "title": "Limit query maximum",
+      "type": "CONSTRAINT",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The GET /pets/{petId} operation defines petId as a path parameter.",
+        "The petId path parameter is required."
+      ],
+      "id": "INTERFACE.pet-id-path-parameter",
+      "level": "MUST",
+      "statement": "The GET /pets/{petId} operation must define petId as a required path parameter.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "parameter",
+        "petId"
+      ],
+      "title": "Required petId path parameter",
+      "type": "INTERFACE",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The Pet schema defines an id field.",
+        "The Pet schema defines a name field.",
+        "The Pet schema marks id and name as required."
+      ],
+      "id": "DATA.pet-schema",
+      "level": "MUST",
+      "statement": "The Pet schema must require the id and name fields.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "schema",
+        "pet"
+      ],
+      "title": "Pet schema required fields",
+      "type": "DATA",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The Pets schema is an array.",
+        "The Pets schema items are Pet objects.",
+        "The Pets schema maxItems value is 100."
+      ],
+      "id": "DATA.pets-array",
+      "level": "MUST",
+      "statement": "The Pets schema must be an array of Pet objects with maxItems equal to 100.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "schema",
+        "pets"
+      ],
+      "title": "Pets array schema",
+      "type": "DATA",
+      "verification": "integration-test"
+    },
+    {
+      "acceptance": [
+        "The Error schema defines a code field.",
+        "The Error schema defines a message field.",
+        "The Error schema marks code and message as required."
+      ],
+      "id": "DATA.error-schema",
+      "level": "MUST",
+      "statement": "The Error schema must require the code and message fields.",
+      "status": "accepted",
+      "tags": [
+        "api",
+        "schema",
+        "error"
+      ],
+      "title": "Error schema required fields",
+      "type": "DATA",
+      "verification": "integration-test"
+    }
+  ],
+  "problem_statement": "A compact Petstore API contract must compile into authority that preserves endpoint, parameter, response, and schema semantics without depending on prose extraction.",
+  "relations": [
+    {
+      "from": "INTERFACE.list-pets",
+      "rationale": "The list operation advances the API contract fidelity goal.",
+      "to": "GOAL.api-contract-fidelity",
+      "type": "satisfies"
+    },
+    {
+      "from": "INTERFACE.create-pet",
+      "rationale": "The create operation advances the API contract fidelity goal.",
+      "to": "GOAL.api-contract-fidelity",
+      "type": "satisfies"
+    },
+    {
+      "from": "INTERFACE.get-pet",
+      "rationale": "The get operation advances the API contract fidelity goal.",
+      "to": "GOAL.api-contract-fidelity",
+      "type": "satisfies"
+    },
+    {
+      "from": "CONSTRAINT.limit-maximum",
+      "rationale": "The maximum constrains the list operation's limit parameter.",
+      "to": "INTERFACE.list-pets",
+      "type": "constrains"
+    },
+    {
+      "from": "INTERFACE.pet-id-path-parameter",
+      "rationale": "The required path parameter constrains the get-pet operation.",
+      "to": "INTERFACE.get-pet",
+      "type": "constrains"
+    },
+    {
+      "from": "INTERFACE.list-pets",
+      "rationale": "The list success response depends on the Pets schema.",
+      "to": "DATA.pets-array",
+      "type": "depends_on"
+    },
+    {
+      "from": "INTERFACE.create-pet",
+      "rationale": "The create operation request and success response depend on the Pet schema.",
+      "to": "DATA.pet-schema",
+      "type": "depends_on"
+    },
+    {
+      "from": "INTERFACE.get-pet",
+      "rationale": "The get success response depends on the Pet schema.",
+      "to": "DATA.pet-schema",
+      "type": "depends_on"
+    },
+    {
+      "from": "INTERFACE.list-pets",
+      "rationale": "The default error response depends on the Error schema.",
+      "to": "DATA.error-schema",
+      "type": "depends_on"
+    },
+    {
+      "from": "INTERFACE.create-pet",
+      "rationale": "The default error response depends on the Error schema.",
+      "to": "DATA.error-schema",
+      "type": "depends_on"
+    },
+    {
+      "from": "INTERFACE.get-pet",
+      "rationale": "The default error response depends on the Error schema.",
+      "to": "DATA.error-schema",
+      "type": "depends_on"
+    }
+  ],
+  "rendering": {
+    "markdown_profile": "agileforge.spec_markdown.v1",
+    "rendered_markdown_sha256": null
+  },
+  "schema_version": "agileforge.spec.v1",
+  "status": "accepted",
+  "summary": "Defines the compact Petstore API contract used by the authority-quality benchmark.",
+  "title": "Petstore API Technical Spec",
+  "updated_at": "2026-05-21",
+  "version": "1.0"
+}

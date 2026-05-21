@@ -1,0 +1,15 @@
+{
+  "fetched_at": "2026-05-21T00:00:00Z",
+  "license_note": "Compact benchmark fixture synthesized for authority-quality evaluation.",
+  "normalization": {
+    "method": "manual-benchmark-synthesis",
+    "notes": "Normalized into compact Gherkin Markdown source with LF line endings.",
+    "tool": "manual",
+    "tool_version": "n/a"
+  },
+  "normalized_artifact": "source/source.md",
+  "normalized_sha256": "sha256:b8f8c0cde2203d9f028252ca84eb5ad9b4f7b2c13a3e4c4ea0eba02b46588473",
+  "raw_artifact": "source/source.md",
+  "raw_sha256": "sha256:b8f8c0cde2203d9f028252ca84eb5ad9b4f7b2c13a3e4c4ea0eba02b46588473",
+  "source_url": "benchmark://authority-quality/gherkin/source"
+}

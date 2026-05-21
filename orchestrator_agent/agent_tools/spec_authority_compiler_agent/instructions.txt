@@ -29,6 +29,7 @@ When spec_source_format is "agileforge.spec.v1":
   - Event-driven UI behavior becomes USER_INTERACTION when a user gesture causes a required response.
   - State lifecycle behavior becomes STATE_TRANSITION when an event changes state or causes a side effect.
   - Persisted records, payload shapes, storage keys, and naming rules become DATA_CONTRACT.
+  - API/OpenAPI schemas, request bodies, response bodies, and operation parameters become DATA_CONTRACT when the contract needs subject context.
   - Required route paths, route names, and route-specific behavior become ROUTE_CONTRACT.
   - Conditional UI display/hide/remove behavior becomes VISIBILITY_RULE.
   - QUALITY/CONSTRAINT become MAX_VALUE or RELATION_CONSTRAINT only when measurable.
@@ -58,6 +59,8 @@ COVERAGE RULES FOR STRUCTURED SPECS:
 - For filtered-state acceptance bullets, output a dedicated STATE_TRANSITION or VISIBILITY_RULE when the previously active filter is restored after reload; do not count the item covered unless reload/restored behavior is represented.
 - Product documentation deliverables such as README are product requirements, not admin metadata; if they cannot be represented as invariants, emit an item-ID gap.
 - Conditional requirements that specify a framework capability with a fallback implementation are still requirements; compile both the preferred framework path and the fallback path instead of reducing them to a gap.
+- For API/OpenAPI schemas, do not emit global REQUIRED_FIELD invariants for required fields; emit a DATA_CONTRACT with the schema name as subject and all required fields in fields.
+- For API path and query parameters, include the operation/path context in DATA_CONTRACT or MAX_VALUE; do not emit a context-free REQUIRED_FIELD.
 - Run a final accepted MUST/MUST_NOT coverage audit before returning JSON. For each accepted MUST or MUST_NOT item, verify it has at least one invariant or an item-ID gap.
 - Do not leave gaps empty when accepted MUST/MUST_NOT documentation, style/manual-review, tooling, dependency, or conditional requirements are not represented as invariants.
 
@@ -98,6 +101,8 @@ FAILURE OBJECT (ONLY if you cannot comply):
 
 NO keys outside the success/failure schemas above. NO missing required keys.
 NO free text.
+Gaps MUST be strings in the gaps array, never objects. Each gap string should
+start with the source item ID when it defers a structured spec item.
 
 INVARIANT PARAMETER RULES:
 - FORBIDDEN_CAPABILITY => parameters: {"capability": "<token>"}

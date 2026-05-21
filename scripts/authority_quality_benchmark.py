@@ -140,6 +140,155 @@ _TODOMVC_SOURCE_IDENTITY_CONCEPTS: Final[dict[str, tuple[str, ...]]] = {
     "REQ.clear-completed": ("clear", "completed"),
     "REQ.filtered-state": ("filter", "route", "selected"),
 }
+_PETSTORE_REQUIRED_CONCEPTS: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
+    "INTERFACE.list-pets": (
+        ("get",),
+        ("/pets",),
+        ("200", "success"),
+        ("pets",),
+        ("default",),
+        ("error",),
+    ),
+    "INTERFACE.create-pet": (
+        ("post",),
+        ("/pets",),
+        ("pet",),
+        ("request", "body"),
+        ("201", "created"),
+        ("default",),
+        ("error",),
+    ),
+    "INTERFACE.get-pet": (
+        ("get",),
+        ("/pets/{petid}", "/pets/{petId}", "petid"),
+        ("200", "success"),
+        ("pet",),
+        ("default",),
+        ("error",),
+    ),
+    "CONSTRAINT.limit-maximum": (
+        ("limit",),
+        ("100",),
+        ("maximum", "max"),
+    ),
+    "INTERFACE.pet-id-path-parameter": (
+        ("petid", "petId"),
+        ("required", "requires"),
+        ("path",),
+        ("parameter",),
+    ),
+    "DATA.pet-schema": (
+        ("pet",),
+        ("id",),
+        ("name",),
+        ("required", "requires"),
+    ),
+    "DATA.pets-array": (
+        ("pets",),
+        ("array",),
+        ("pet",),
+        ("100",),
+        ("maxitems", "maxItems"),
+    ),
+    "DATA.error-schema": (
+        ("error",),
+        ("code",),
+        ("message",),
+        ("required", "requires"),
+    ),
+}
+_PETSTORE_OPERATION_ITEMS: Final[frozenset[str]] = frozenset(
+    {
+        "INTERFACE.list-pets",
+        "INTERFACE.create-pet",
+        "INTERFACE.get-pet",
+    }
+)
+_PETSTORE_SOURCE_IDENTITY_CONCEPTS: Final[dict[str, tuple[str, ...]]] = {
+    "CONSTRAINT.limit-maximum": ("limit", "100"),
+    "DATA.error-schema": ("error", "code", "message"),
+    "DATA.pet-schema": ("pet", "id", "name"),
+    "DATA.pets-array": ("pets", "array", "100"),
+    "INTERFACE.create-pet": ("post", "/pets", "created"),
+    "INTERFACE.get-pet": ("get", "/pets/{petid}", "petid"),
+    "INTERFACE.list-pets": ("get", "/pets", "pets"),
+    "INTERFACE.pet-id-path-parameter": ("petid", "path"),
+}
+_GHERKIN_REQUIRED_CONCEPTS: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
+    "REQ.member-discount-scenario": (
+        ("signed-in", "member"),
+        ("eligible",),
+        ("100.00",),
+        ("checkout",),
+        ("calculated",),
+        ("10 percent", "10"),
+        ("discount",),
+        ("90.00",),
+    ),
+    "REQ.expired-coupon-outline": (
+        ("scenario outline", "outline"),
+        ("examples",),
+        ("code",),
+        ("expired_on", "expired"),
+        ("message",),
+        ("spring10",),
+        ("save20",),
+        ("applies",),
+        ("rejected",),
+        ("coupon expired",),
+    ),
+    "REQ.shipping-address-arguments": (
+        ("doc string", "docstring"),
+        ("100 market street", "market"),
+        ("springfield",),
+        ("data table", "table"),
+        ("sku",),
+        ("quantity",),
+        ("sku-1",),
+        ("sku-2",),
+        ("validated",),
+        ("retained", "retain"),
+    ),
+}
+_GHERKIN_SCENARIO_ITEMS: Final[frozenset[str]] = frozenset(
+    _GHERKIN_REQUIRED_CONCEPTS
+)
+_GHERKIN_SOURCE_IDENTITY_CONCEPTS: Final[dict[str, tuple[str, ...]]] = {
+    "REQ.expired-coupon-outline": ("coupon", "expired", "outline"),
+    "REQ.member-discount-scenario": ("member", "discount", "checkout"),
+    "REQ.shipping-address-arguments": ("address", "doc", "table"),
+}
+
+
+class BenchmarkInputError(RuntimeError):
+    """Raised when benchmark CLI inputs are incomplete or unsupported."""
+
+
+class MissingBenchmarkInputError(BenchmarkInputError):
+    """Raised when a required benchmark input file is absent."""
+
+    def __init__(self, *, label: str, path: Path) -> None:
+        """Build a missing input error for a labeled path."""
+        message = f"{label} not found: {path}"
+        super().__init__(message)
+
+
+class InvalidBenchmarkJsonError(BenchmarkInputError):
+    """Raised when a benchmark input file is not valid JSON."""
+
+    def __init__(self, *, label: str, path: Path) -> None:
+        """Build an invalid JSON error for a labeled path."""
+        message = f"{label} is invalid JSON: {path}"
+        super().__init__(message)
+
+
+class UnsupportedBenchmarkFixtureError(BenchmarkInputError):
+    """Raised when a fixture has no authority-quality evaluator."""
+
+    def __init__(self, fixture_name: str) -> None:
+        """Build an unsupported fixture error."""
+        message = f"no authority evaluator registered for fixture '{fixture_name}'"
+        super().__init__(message)
 
 
 def normalize_source_text(raw_text: str) -> str:
@@ -363,7 +512,10 @@ def evaluate_todomvc_authority_guardrails(
             )
         )
 
-    source_mismatches = _source_ref_semantic_mismatches(authority_items)
+    source_mismatches = _source_ref_semantic_mismatches(
+        authority_items,
+        identity_concepts_by_source_item=_TODOMVC_SOURCE_IDENTITY_CONCEPTS,
+    )
     if source_mismatches:
         findings.append(
             _finding(
@@ -426,6 +578,252 @@ def evaluate_todomvc_authority_guardrails(
 
     return {
         "fixture": "todomvc",
+        "verdict": "REJECT" if _has_blocking_findings(findings) else "ACCEPT",
+        "findings": findings,
+        "weak_or_missing_must_items": weak_or_missing,
+    }
+
+
+def evaluate_petstore_authority_guardrails(
+    *,
+    gold_spec: JsonObject,
+    authority: JsonObject,
+    review_summary: JsonObject,
+) -> JsonObject:
+    """Evaluate Petstore fixture authority against API-contract guardrails.
+
+    This benchmark oracle uses human-adjudicated structured item IDs and
+    Petstore-specific contract concepts. It is not a general OpenAPI parser.
+    """
+    source_items = _gold_items_by_id(gold_spec)
+    authority_items = _authority_invariants(authority)
+    authority_by_source_item = _authority_text_by_source_item(authority_items)
+    weak_or_missing = _weak_or_missing_petstore_must_items(
+        source_items=source_items,
+        authority_by_source_item=authority_by_source_item,
+    )
+    findings: list[JsonObject] = []
+
+    if weak_or_missing:
+        findings.append(
+            _finding(
+                code="MISSING_MUST_AUTHORITY",
+                severity="blocking",
+                message=(
+                    "Petstore MUST-level API contract items are missing or "
+                    "only weakly represented in the compiled authority."
+                ),
+                source_refs=weak_or_missing,
+                details={"items": weak_or_missing},
+            )
+        )
+
+    unsafe_operation_fields = _petstore_operation_required_field_compressions(
+        authority_items
+    )
+    if unsafe_operation_fields:
+        findings.append(
+            _finding(
+                code="UNSAFE_REQUIRED_FIELD_COMPRESSION",
+                severity="blocking",
+                message=(
+                    "Petstore endpoint contracts are compressed into "
+                    "REQUIRED_FIELD existence checks."
+                ),
+                source_refs=_finding_source_refs(unsafe_operation_fields),
+                details={"invariant_ids": _finding_ids(unsafe_operation_fields)},
+            )
+        )
+
+    source_mismatches = _source_ref_semantic_mismatches(
+        authority_items,
+        identity_concepts_by_source_item=_PETSTORE_SOURCE_IDENTITY_CONCEPTS,
+    )
+    if source_mismatches:
+        findings.append(
+            _finding(
+                code="SOURCE_REF_SEMANTIC_MISMATCH",
+                severity="blocking",
+                message=(
+                    "Petstore authority items point to structured source IDs "
+                    "whose core API concepts do not match the authority text."
+                ),
+                source_refs=_finding_source_refs(source_mismatches),
+                details={"invariant_ids": _finding_ids(source_mismatches)},
+            )
+        )
+
+    modality_promotions = _modality_over_promotions(
+        source_items=source_items,
+        authority_items=authority_items,
+    )
+    if modality_promotions:
+        findings.append(
+            _finding(
+                code="MODALITY_OVER_PROMOTION",
+                severity="blocking",
+                message=(
+                    "Non-MUST Petstore source guidance is compiled as hard "
+                    "authority."
+                ),
+                source_refs=_finding_source_refs(modality_promotions),
+                details={"invariant_ids": _finding_ids(modality_promotions)},
+            )
+        )
+
+    example_promotions = _example_used_as_normative_source(authority_items)
+    if example_promotions:
+        findings.append(
+            _finding(
+                code="EXAMPLE_USED_AS_NORMATIVE_SOURCE",
+                severity="blocking",
+                message=(
+                    "Illustrative EXAMPLE items are used as source evidence for "
+                    "normative Petstore authority."
+                ),
+                source_refs=_finding_source_refs(example_promotions),
+                details={"invariant_ids": _finding_ids(example_promotions)},
+            )
+        )
+
+    if _review_summary_status(review_summary) == "accept_ready" and findings:
+        findings.append(
+            _finding(
+                code="FALSE_POSITIVE_ACCEPT_READY",
+                severity="blocking",
+                message=(
+                    "Sanitized review summary reports accept_ready despite "
+                    "Petstore semantic benchmark guardrail failures."
+                ),
+                source_refs=[],
+                details={},
+            )
+        )
+
+    return {
+        "fixture": "petstore",
+        "verdict": "REJECT" if _has_blocking_findings(findings) else "ACCEPT",
+        "findings": findings,
+        "weak_or_missing_must_items": weak_or_missing,
+    }
+
+
+def evaluate_gherkin_authority_guardrails(
+    *,
+    gold_spec: JsonObject,
+    authority: JsonObject,
+    review_summary: JsonObject,
+) -> JsonObject:
+    """Evaluate Gherkin fixture authority against scenario-step guardrails.
+
+    This benchmark oracle uses human-adjudicated REQ scenario item IDs plus
+    step-level concept groups. It is not a general Gherkin parser.
+    """
+    source_items = _gold_items_by_id(gold_spec)
+    authority_items = _authority_invariants(authority)
+    authority_by_source_item = _authority_text_by_source_item(authority_items)
+    weak_or_missing = _weak_or_missing_gherkin_must_items(
+        source_items=source_items,
+        authority_by_source_item=authority_by_source_item,
+    )
+    findings: list[JsonObject] = []
+
+    if weak_or_missing:
+        findings.append(
+            _finding(
+                code="MISSING_MUST_AUTHORITY",
+                severity="blocking",
+                message=(
+                    "Gherkin MUST-level scenarios are missing or only weakly "
+                    "represented in the compiled authority."
+                ),
+                source_refs=weak_or_missing,
+                details={"items": weak_or_missing},
+            )
+        )
+
+    unsafe_required_fields = _gherkin_required_field_compressions(authority_items)
+    if unsafe_required_fields:
+        findings.append(
+            _finding(
+                code="UNSAFE_REQUIRED_FIELD_COMPRESSION",
+                severity="blocking",
+                message=(
+                    "Gherkin scenario behavior is compressed into REQUIRED_FIELD "
+                    "existence checks."
+                ),
+                source_refs=_finding_source_refs(unsafe_required_fields),
+                details={"invariant_ids": _finding_ids(unsafe_required_fields)},
+            )
+        )
+
+    source_mismatches = _source_ref_semantic_mismatches(
+        authority_items,
+        identity_concepts_by_source_item=_GHERKIN_SOURCE_IDENTITY_CONCEPTS,
+    )
+    if source_mismatches:
+        findings.append(
+            _finding(
+                code="SOURCE_REF_SEMANTIC_MISMATCH",
+                severity="blocking",
+                message=(
+                    "Gherkin authority items point to structured source IDs "
+                    "whose core scenario concepts do not match the authority text."
+                ),
+                source_refs=_finding_source_refs(source_mismatches),
+                details={"invariant_ids": _finding_ids(source_mismatches)},
+            )
+        )
+
+    modality_promotions = _modality_over_promotions(
+        source_items=source_items,
+        authority_items=authority_items,
+    )
+    if modality_promotions:
+        findings.append(
+            _finding(
+                code="MODALITY_OVER_PROMOTION",
+                severity="blocking",
+                message=(
+                    "Non-MUST Gherkin source guidance is compiled as hard "
+                    "authority."
+                ),
+                source_refs=_finding_source_refs(modality_promotions),
+                details={"invariant_ids": _finding_ids(modality_promotions)},
+            )
+        )
+
+    example_promotions = _example_used_as_normative_source(authority_items)
+    if example_promotions:
+        findings.append(
+            _finding(
+                code="EXAMPLE_USED_AS_NORMATIVE_SOURCE",
+                severity="blocking",
+                message=(
+                    "Illustrative EXAMPLE items are used as source evidence for "
+                    "normative Gherkin authority."
+                ),
+                source_refs=_finding_source_refs(example_promotions),
+                details={"invariant_ids": _finding_ids(example_promotions)},
+            )
+        )
+
+    if _review_summary_status(review_summary) == "accept_ready" and findings:
+        findings.append(
+            _finding(
+                code="FALSE_POSITIVE_ACCEPT_READY",
+                severity="blocking",
+                message=(
+                    "Sanitized review summary reports accept_ready despite "
+                    "Gherkin semantic benchmark guardrail failures."
+                ),
+                source_refs=[],
+                details={},
+            )
+        )
+
+    return {
+        "fixture": "gherkin",
         "verdict": "REJECT" if _has_blocking_findings(findings) else "ACCEPT",
         "findings": findings,
         "weak_or_missing_must_items": weak_or_missing,
@@ -595,6 +993,44 @@ def _weak_or_missing_todomvc_must_items(
     return sorted(weak_or_missing)
 
 
+def _weak_or_missing_petstore_must_items(
+    *,
+    source_items: dict[str, JsonObject],
+    authority_by_source_item: dict[str, list[str]],
+) -> list[str]:
+    weak_or_missing: list[str] = []
+    for item_id, concept_groups in _PETSTORE_REQUIRED_CONCEPTS.items():
+        source_item = source_items.get(item_id)
+        if source_item is None or source_item.get("level") != "MUST":
+            continue
+        authority_text = " ".join(authority_by_source_item.get(item_id, []))
+        if not authority_text:
+            weak_or_missing.append(item_id)
+            continue
+        if _missing_concept_groups(authority_text, concept_groups):
+            weak_or_missing.append(item_id)
+    return sorted(weak_or_missing)
+
+
+def _weak_or_missing_gherkin_must_items(
+    *,
+    source_items: dict[str, JsonObject],
+    authority_by_source_item: dict[str, list[str]],
+) -> list[str]:
+    weak_or_missing: list[str] = []
+    for item_id, concept_groups in _GHERKIN_REQUIRED_CONCEPTS.items():
+        source_item = source_items.get(item_id)
+        if source_item is None or source_item.get("level") != "MUST":
+            continue
+        authority_text = " ".join(authority_by_source_item.get(item_id, []))
+        if not authority_text:
+            weak_or_missing.append(item_id)
+            continue
+        if _missing_concept_groups(authority_text, concept_groups):
+            weak_or_missing.append(item_id)
+    return sorted(weak_or_missing)
+
+
 def _missing_concept_groups(
     text: str,
     concept_groups: tuple[tuple[str, ...], ...],
@@ -643,8 +1079,52 @@ def _unsafe_required_field_compressions(
     return unsafe
 
 
+def _petstore_operation_required_field_compressions(
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    unsafe: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        if not text.startswith("REQUIRED_FIELD:"):
+            continue
+        source_items = {
+            source_item_id
+            for source_ref in _authority_source_refs(item)
+            if (source_item_id := _source_item_id(source_ref)) is not None
+        }
+        if any(
+            source_item_id in _PETSTORE_OPERATION_ITEMS
+            for source_item_id in source_items
+        ):
+            unsafe.append(item)
+    return unsafe
+
+
+def _gherkin_required_field_compressions(
+    authority_items: list[JsonObject],
+) -> list[JsonObject]:
+    unsafe: list[JsonObject] = []
+    for item in authority_items:
+        text = _authority_text(item)
+        if not text.startswith("REQUIRED_FIELD:"):
+            continue
+        source_items = {
+            source_item_id
+            for source_ref in _authority_source_refs(item)
+            if (source_item_id := _source_item_id(source_ref)) is not None
+        }
+        if any(
+            source_item_id in _GHERKIN_SCENARIO_ITEMS
+            for source_item_id in source_items
+        ):
+            unsafe.append(item)
+    return unsafe
+
+
 def _source_ref_semantic_mismatches(
     authority_items: list[JsonObject],
+    *,
+    identity_concepts_by_source_item: dict[str, tuple[str, ...]],
 ) -> list[JsonObject]:
     mismatches: list[JsonObject] = []
     for item in authority_items:
@@ -653,7 +1133,7 @@ def _source_ref_semantic_mismatches(
             source_item_id = _source_item_id(source_ref)
             if source_item_id is None:
                 continue
-            identity_concepts = _TODOMVC_SOURCE_IDENTITY_CONCEPTS.get(source_item_id)
+            identity_concepts = identity_concepts_by_source_item.get(source_item_id)
             if identity_concepts is None:
                 continue
             if not any(
@@ -759,6 +1239,15 @@ def _load_json(path: Path) -> JsonObject:
     return payload
 
 
+def _required_json(path: Path, label: str) -> JsonObject:
+    if not path.exists():
+        raise MissingBenchmarkInputError(label=label, path=path)
+    try:
+        return _load_json(path)
+    except json.JSONDecodeError as exc:
+        raise InvalidBenchmarkJsonError(label=label, path=path) from exc
+
+
 def _cmd_init_source(args: argparse.Namespace) -> int:
     fixture_dir = Path(args.fixture_dir)
     raw_input = Path(args.raw_input)
@@ -813,8 +1302,37 @@ def _optional_json(path: Path) -> JsonObject:
     return _load_json(path)
 
 
+def _evaluate_authority_for_fixture(
+    *,
+    fixture_name: str,
+    gold_spec: JsonObject,
+    authority: JsonObject,
+    review_summary: JsonObject,
+) -> JsonObject:
+    if fixture_name == "todomvc":
+        return evaluate_todomvc_authority_guardrails(
+            gold_spec=gold_spec,
+            authority=authority,
+            review_summary=review_summary,
+        )
+    if fixture_name == "petstore":
+        return evaluate_petstore_authority_guardrails(
+            gold_spec=gold_spec,
+            authority=authority,
+            review_summary=review_summary,
+        )
+    if fixture_name == "gherkin":
+        return evaluate_gherkin_authority_guardrails(
+            gold_spec=gold_spec,
+            authority=authority,
+            review_summary=review_summary,
+        )
+    raise UnsupportedBenchmarkFixtureError(fixture_name)
+
+
 def _cmd_evaluate_authority(args: argparse.Namespace) -> int:
     fixture_dir = Path(args.fixture_dir)
+    fixture_name = fixture_dir.name.casefold()
     gold_spec_path = Path(args.gold_spec) if args.gold_spec else (
         fixture_dir / "agileforge/gold-spec/spec.json"
     )
@@ -825,9 +1343,10 @@ def _cmd_evaluate_authority(args: argparse.Namespace) -> int:
         fixture_dir / "agileforge/review-summary.json"
     )
 
-    result = evaluate_todomvc_authority_guardrails(
-        gold_spec=_load_json(gold_spec_path),
-        authority=_load_json(authority_path),
+    result = _evaluate_authority_for_fixture(
+        fixture_name=fixture_name,
+        gold_spec=_required_json(gold_spec_path, "gold spec"),
+        authority=_required_json(authority_path, "compiled authority"),
         review_summary=_optional_json(review_summary_path),
     )
 
@@ -879,7 +1398,11 @@ def main(argv: list[str] | None = None) -> int:
     """Run the benchmark helper CLI."""
     parser = _build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except BenchmarkInputError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
 
 
 if __name__ == "__main__":

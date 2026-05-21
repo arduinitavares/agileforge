@@ -1,0 +1,195 @@
+{
+  "artifact_id": "SPEC.gherkin-checkout-discounts",
+  "controlled_terms": [
+    {
+      "definition": "A concrete Gherkin behavior example encoded as a REQ item in this fixture.",
+      "scope": "artifact",
+      "term": "scenario"
+    },
+    {
+      "definition": "A Given, When, Then, And, or But clause that contributes required scenario behavior.",
+      "scope": "artifact",
+      "term": "step"
+    },
+    {
+      "definition": "A Gherkin scenario outline examples table or a step argument table/doc string.",
+      "scope": "artifact",
+      "term": "step argument"
+    }
+  ],
+  "created_at": "2026-05-21",
+  "external_references": [],
+  "items": [
+    {
+      "id": "GOAL.behavior-readable-discounts",
+      "statement": "The fixture should preserve checkout discount behavior as readable Gherkin scenario authority for downstream planning agents.",
+      "status": "accepted",
+      "title": "Behavior-readable discount scenarios",
+      "type": "GOAL"
+    },
+    {
+      "id": "NON_GOAL.full-gherkin-parser",
+      "statement": "The fixture is not intended to model every Gherkin grammar feature beyond Feature, Rule, Scenario or Example, Scenario Outline, step keywords, examples tables, doc strings, data tables, and language keyword support.",
+      "status": "accepted",
+      "title": "Full Gherkin parser",
+      "type": "NON_GOAL"
+    },
+    {
+      "acceptance": [
+        "The source feature context is Checkout discounts.",
+        "The source business rule grouping is Discounts are only applied when eligibility is established.",
+        "Concrete Example and Scenario blocks are represented as REQ scenario items.",
+        "Given, When, Then, And, and But step intent is preserved in scenario acceptance criteria."
+      ],
+      "id": "CONSTRAINT.gherkin-structure",
+      "level": "SHOULD",
+      "statement": "The structured spec should preserve Feature as high-level context, Rule as business-rule grouping, and Example or Scenario blocks as concrete behavior represented by REQ items with step-level acceptance criteria.",
+      "status": "accepted",
+      "tags": [
+        "bdd",
+        "gherkin",
+        "structure"
+      ],
+      "title": "Gherkin structural mapping",
+      "type": "CONSTRAINT",
+      "verification": "manual-review"
+    },
+    {
+      "acceptance": [
+        "Given a signed-in member has an eligible cart totaling 100.00.",
+        "When the checkout total is calculated.",
+        "Then a 10 percent member discount is applied.",
+        "And the final total is shown as 90.00."
+      ],
+      "id": "REQ.member-discount-scenario",
+      "level": "MUST",
+      "statement": "The member-discount Example must preserve the full Given/When/Then/And flow: a signed-in member with an eligible 100.00 cart, checkout total calculation, a 10 percent member discount, and final total 90.00.",
+      "status": "accepted",
+      "tags": [
+        "bdd",
+        "example",
+        "given-when-then",
+        "scenario"
+      ],
+      "title": "Member discount scenario",
+      "type": "REQ",
+      "verification": "acceptance-test"
+    },
+    {
+      "acceptance": [
+        "The Scenario Outline uses placeholders <code>, <expired_on>, and <message>.",
+        "Given a coupon identified by <code> expired on <expired_on>.",
+        "When the shopper applies the coupon.",
+        "Then the coupon is rejected.",
+        "And the error message is <message>.",
+        "The Examples table includes SPRING10 with 2026-03-31 and Coupon expired.",
+        "The Examples table includes SAVE20 with 2026-04-30 and Coupon expired."
+      ],
+      "id": "REQ.expired-coupon-outline",
+      "level": "MUST",
+      "statement": "The expired-coupon Scenario Outline must preserve its placeholders, rejection flow, error-message assertion, and examples table rows for SPRING10 and SAVE20.",
+      "status": "accepted",
+      "tags": [
+        "bdd",
+        "examples-table",
+        "given-when-then",
+        "scenario-outline"
+      ],
+      "title": "Expired coupon scenario outline",
+      "type": "REQ",
+      "verification": "acceptance-test"
+    },
+    {
+      "acceptance": [
+        "Given the shopper provides a shipping address doc string containing 100 Market Street and Springfield, CA 90000.",
+        "And the cart contains a line item data table with sku and quantity columns.",
+        "The line item data table includes SKU-1 with quantity 2.",
+        "The line item data table includes SKU-2 with quantity 1.",
+        "When the order is validated.",
+        "Then the shipping address doc string is retained.",
+        "And the line item data table is retained."
+      ],
+      "id": "REQ.shipping-address-arguments",
+      "level": "MUST",
+      "statement": "The shipping-address Scenario must preserve the doc string address, line item data table, order-validation trigger, and retention outcomes for both step arguments.",
+      "status": "accepted",
+      "tags": [
+        "bdd",
+        "data-table",
+        "doc-string",
+        "given-when-then",
+        "scenario"
+      ],
+      "title": "Shipping address step arguments",
+      "type": "REQ",
+      "verification": "acceptance-test"
+    },
+    {
+      "acceptance": [
+        "Tooling can recognize localized Gherkin keywords when a feature file declares a non-English language header.",
+        "Localized keyword support is treated as tooling compatibility rather than runtime product behavior."
+      ],
+      "id": "CONSTRAINT.localized-keywords",
+      "level": "SHOULD",
+      "statement": "Tooling should support localized Gherkin keywords when a feature file declares a non-English language header.",
+      "status": "accepted",
+      "tags": [
+        "gherkin",
+        "localization",
+        "tooling"
+      ],
+      "title": "Localized Gherkin keywords",
+      "type": "CONSTRAINT",
+      "verification": "manual-review"
+    }
+  ],
+  "problem_statement": "Gherkin-style behavior specifications need compiled authority that preserves scenario flow, step intent, and explicit step arguments without requiring a new AgileForge SCENARIO item type.",
+  "relations": [
+    {
+      "from": "REQ.member-discount-scenario",
+      "rationale": "The scenario provides a concrete behavior example for checkout discounts.",
+      "to": "GOAL.behavior-readable-discounts",
+      "type": "satisfies"
+    },
+    {
+      "from": "REQ.expired-coupon-outline",
+      "rationale": "The scenario outline provides parameterized behavior examples for checkout discounts.",
+      "to": "GOAL.behavior-readable-discounts",
+      "type": "satisfies"
+    },
+    {
+      "from": "REQ.shipping-address-arguments",
+      "rationale": "The scenario preserves step arguments that downstream agents must understand.",
+      "to": "GOAL.behavior-readable-discounts",
+      "type": "satisfies"
+    },
+    {
+      "from": "CONSTRAINT.gherkin-structure",
+      "rationale": "The structure guidance explains why scenarios are encoded as REQ items.",
+      "to": "REQ.member-discount-scenario",
+      "type": "clarifies"
+    },
+    {
+      "from": "CONSTRAINT.gherkin-structure",
+      "rationale": "The structure guidance explains why scenario outlines are encoded as REQ items.",
+      "to": "REQ.expired-coupon-outline",
+      "type": "clarifies"
+    },
+    {
+      "from": "CONSTRAINT.gherkin-structure",
+      "rationale": "The structure guidance explains why argument-heavy scenarios are encoded as REQ items.",
+      "to": "REQ.shipping-address-arguments",
+      "type": "clarifies"
+    }
+  ],
+  "rendering": {
+    "markdown_profile": "agileforge.spec_markdown.v1",
+    "rendered_markdown_sha256": null
+  },
+  "schema_version": "agileforge.spec.v1",
+  "status": "accepted",
+  "summary": "Defines a compact Gherkin checkout-discounts fixture for authority-quality benchmarking.",
+  "title": "Gherkin Checkout Discounts Technical Spec",
+  "updated_at": "2026-05-21",
+  "version": "1.0"
+}

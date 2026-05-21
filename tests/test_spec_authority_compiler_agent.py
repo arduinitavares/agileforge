@@ -127,6 +127,28 @@ def test_compiler_instructions_require_accepted_must_coverage() -> None:
     assert "Do not leave gaps empty" in instructions
 
 
+def test_compiler_instructions_preserve_api_schema_and_parameter_context() -> None:
+    """Compiler prompt must keep API schemas and parameters context-scoped."""
+    instructions = _compiler_instructions()
+
+    assert "For API/OpenAPI schemas" in instructions
+    assert "do not emit global REQUIRED_FIELD invariants for required fields" in (
+        instructions
+    )
+    assert "schema name as subject and all required fields in fields" in instructions
+    assert "For API path and query parameters" in instructions
+    assert "operation/path context" in instructions
+    assert "context-free REQUIRED_FIELD" in instructions
+
+
+def test_compiler_instructions_require_string_gaps() -> None:
+    """Compiler prompt must forbid structured gap objects."""
+    instructions = _compiler_instructions()
+
+    assert "Gaps MUST be strings" in instructions
+    assert "never objects" in instructions
+
+
 def test_compiler_instructions_document_host_semantic_ids() -> None:
     """Compiler prompt must align with host semantic-only invariant IDs."""
     instructions = _compiler_instructions()

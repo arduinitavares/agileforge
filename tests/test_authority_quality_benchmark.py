@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+import scripts.authority_quality_benchmark as aqb
 from scripts.authority_quality_benchmark import (
     build_run_manifest,
     build_source_meta,
@@ -19,10 +20,280 @@ from scripts.authority_quality_benchmark import (
     write_text,
 )
 
+if TYPE_CHECKING:
+    import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REVIEW_FIELD = "review_" "token"
 REDACTED_VALUE = "secret-" "token"
 REDACTED_SHORT_VALUE = "secret"
+CLI_USAGE_ERROR = 2
+
+
+def _petstore_fixture_dir() -> Path:
+    return REPO_ROOT / "benchmarks/authority-quality/petstore"
+
+
+def _gherkin_fixture_dir() -> Path:
+    return REPO_ROOT / "benchmarks/authority-quality/gherkin"
+
+
+def _petstore_gold_spec() -> dict[str, Any]:
+    return json.loads(
+        (_petstore_fixture_dir() / "agileforge/gold-spec/spec.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _complete_petstore_authority() -> dict[str, Any]:
+    return {
+        "invariants": [
+            {
+                "id": "INV-list-pets-route",
+                "type": "ROUTE_CONTRACT",
+                "parameters": {
+                    "source_item_id": "INTERFACE.list-pets",
+                    "source_level": "MUST",
+                    "route": "GET /pets",
+                    "route_name": "list pets",
+                    "behavior": (
+                        "GET /pets lists pets and returns a 200 response with "
+                        "a Pets array; default errors return Error."
+                    ),
+                },
+            },
+            {
+                "id": "INV-create-pet-route",
+                "type": "ROUTE_CONTRACT",
+                "parameters": {
+                    "source_item_id": "INTERFACE.create-pet",
+                    "source_level": "MUST",
+                    "route": "POST /pets",
+                    "route_name": "create pet",
+                    "behavior": (
+                        "POST /pets creates a pet from a Pet request body and "
+                        "returns the created Pet; default errors return Error."
+                    ),
+                },
+            },
+            {
+                "id": "INV-get-pet-route",
+                "type": "ROUTE_CONTRACT",
+                "parameters": {
+                    "source_item_id": "INTERFACE.get-pet",
+                    "source_level": "MUST",
+                    "route": "GET /pets/{petId}",
+                    "route_name": "show pet",
+                    "behavior": (
+                        "GET /pets/{petId} returns the matching Pet on success "
+                        "and default errors return Error."
+                    ),
+                },
+            },
+            {
+                "id": "INV-limit-max",
+                "type": "MAX_VALUE",
+                "parameters": {"field_name": "limit", "max_value": 100},
+                "source_refs": ["CONSTRAINT.limit-maximum.statement"],
+            },
+            {
+                "id": "INV-pet-id-param",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "INTERFACE.pet-id-path-parameter",
+                    "source_level": "MUST",
+                    "subject": "petId path parameter",
+                    "fields": ["petId"],
+                    "rule": "petId is a required path parameter for /pets/{petId}.",
+                },
+            },
+            {
+                "id": "INV-pet-schema",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "DATA.pet-schema",
+                    "source_level": "MUST",
+                    "subject": "Pet schema",
+                    "fields": ["id", "name"],
+                    "rule": "Pet requires id and name fields.",
+                },
+            },
+            {
+                "id": "INV-pets-array",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "DATA.pets-array",
+                    "source_level": "MUST",
+                    "subject": "Pets array",
+                    "fields": ["Pet"],
+                    "rule": "Pets is an array of Pet objects with maxItems 100.",
+                },
+            },
+            {
+                "id": "INV-error-schema",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "DATA.error-schema",
+                    "source_level": "MUST",
+                    "subject": "Error schema",
+                    "fields": ["code", "message"],
+                    "rule": "Error requires code and message fields.",
+                },
+            },
+        ],
+        "source_map": [
+            {
+                "invariant_id": "INV-list-pets-route",
+                "location": "INTERFACE.list-pets.statement",
+                "excerpt": "GET /pets lists pets and returns a Pets array.",
+            },
+            {
+                "invariant_id": "INV-create-pet-route",
+                "location": "INTERFACE.create-pet.statement",
+                "excerpt": "POST /pets creates a pet from a Pet request body.",
+            },
+            {
+                "invariant_id": "INV-get-pet-route",
+                "location": "INTERFACE.get-pet.statement",
+                "excerpt": "GET /pets/{petId} returns a pet.",
+            },
+        ],
+    }
+
+
+def _gherkin_gold_spec() -> dict[str, Any]:
+    return json.loads(
+        (_gherkin_fixture_dir() / "agileforge/gold-spec/spec.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _complete_gherkin_authority() -> dict[str, Any]:
+    return {
+        "invariants": [
+            {
+                "id": "INV-member-discount-given",
+                "type": "STATE_TRANSITION",
+                "parameters": {
+                    "source_item_id": "REQ.member-discount-scenario",
+                    "source_level": "MUST",
+                    "state": "checkout cart",
+                    "trigger": (
+                        "Given a signed-in member has an eligible cart "
+                        "totaling 100.00"
+                    ),
+                    "outcome": (
+                        "eligibility context is established for the member "
+                        "discount scenario"
+                    ),
+                },
+            },
+            {
+                "id": "INV-member-discount-when-then",
+                "type": "STATE_TRANSITION",
+                "parameters": {
+                    "source_item_id": "REQ.member-discount-scenario",
+                    "source_level": "MUST",
+                    "state": "checkout total",
+                    "trigger": "When the checkout total is calculated",
+                    "outcome": (
+                        "Then a 10 percent member discount is applied and "
+                        "the final total is shown as 90.00"
+                    ),
+                },
+            },
+            {
+                "id": "INV-expired-coupon-flow",
+                "type": "USER_INTERACTION",
+                "parameters": {
+                    "source_item_id": "REQ.expired-coupon-outline",
+                    "source_level": "MUST",
+                    "trigger": "When the shopper applies an expired coupon",
+                    "target": "coupon code field",
+                    "expected_response": (
+                        "Then the coupon is rejected and the Coupon expired "
+                        "message is shown for each scenario outline example"
+                    ),
+                },
+            },
+            {
+                "id": "INV-expired-coupon-examples",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "REQ.expired-coupon-outline",
+                    "source_level": "MUST",
+                    "subject": "Scenario Outline Examples table",
+                    "fields": ["code", "expired_on", "message"],
+                    "rule": (
+                        "Examples include SPRING10 and SAVE20 rows with "
+                        "expired_on dates and Coupon expired messages."
+                    ),
+                },
+            },
+            {
+                "id": "INV-address-doc-string",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "REQ.shipping-address-arguments",
+                    "source_level": "MUST",
+                    "subject": "shipping address doc string",
+                    "fields": ["address"],
+                    "rule": (
+                        "The shipping address doc string with 100 Market Street "
+                        "and Springfield, CA 90000 is retained during order "
+                        "validation."
+                    ),
+                },
+            },
+            {
+                "id": "INV-line-items-data-table",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": "REQ.shipping-address-arguments",
+                    "source_level": "MUST",
+                    "subject": "line item data table",
+                    "fields": ["sku", "quantity"],
+                    "rule": (
+                        "The line item data table rows for SKU-1 and SKU-2 "
+                        "are retained during order validation."
+                    ),
+                },
+            },
+            {
+                "id": "INV-address-validation-flow",
+                "type": "STATE_TRANSITION",
+                "parameters": {
+                    "source_item_id": "REQ.shipping-address-arguments",
+                    "source_level": "MUST",
+                    "state": "order validation",
+                    "trigger": "When the order is validated",
+                    "outcome": (
+                        "Then the shipping address doc string and line item "
+                        "data table are retained"
+                    ),
+                },
+            },
+        ],
+        "source_map": [
+            {
+                "invariant_id": "INV-member-discount-given",
+                "location": "REQ.member-discount-scenario.acceptance[0]",
+                "excerpt": "Given a signed-in member has an eligible cart.",
+            },
+            {
+                "invariant_id": "INV-expired-coupon-flow",
+                "location": "REQ.expired-coupon-outline.statement",
+                "excerpt": "Scenario Outline: Expired coupons are rejected.",
+            },
+            {
+                "invariant_id": "INV-address-doc-string",
+                "location": "REQ.shipping-address-arguments.statement",
+                "excerpt": "Given the shopper provides this shipping address.",
+            },
+        ],
+    }
 
 
 def test_normalize_source_text_converts_crlf_and_ensures_trailing_newline() -> None:
@@ -422,6 +693,331 @@ def test_evaluate_authority_command_writes_todomvc_guardrail_result(
     assert result["verdict"] == "REJECT"
     finding_codes = {finding["code"] for finding in result["findings"]}
     assert "MISSING_MUST_AUTHORITY" in finding_codes
+
+
+def test_petstore_fixture_has_first_class_source_and_gold_spec_artifacts() -> None:
+    """Petstore fixture includes committed source and reviewed gold spec artifacts."""
+    fixture_dir = _petstore_fixture_dir()
+
+    expected_files = {
+        "source/source.md",
+        "source/source.meta.json",
+        "source/source.sha256",
+        "agileforge/gold-spec/spec.json",
+        "agileforge/gold-spec/spec.md",
+        "agileforge/gold-spec/change-log.md",
+    }
+
+    present_files = {
+        str(path.relative_to(fixture_dir))
+        for path in fixture_dir.glob("**/*")
+        if path.is_file()
+    }
+    assert expected_files <= present_files
+
+
+def test_evaluate_authority_command_dispatches_petstore_guardrails(
+    tmp_path: Path,
+) -> None:
+    """Petstore fixture evaluation uses Petstore-specific guardrails."""
+    authority_path = tmp_path / "authority.json"
+    output_path = tmp_path / "evaluation.json"
+    authority_path.write_text(
+        json.dumps(_complete_petstore_authority()),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "evaluate-authority",
+            "--fixture-dir",
+            str(_petstore_fixture_dir()),
+            "--authority",
+            str(authority_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["fixture"] == "petstore"
+    assert result["verdict"] == "ACCEPT"
+    assert result["findings"] == []
+    assert result["weak_or_missing_must_items"] == []
+
+
+def test_gherkin_fixture_has_first_class_source_and_gold_spec_artifacts() -> None:
+    """Gherkin fixture includes committed source and reviewed gold spec artifacts."""
+    fixture_dir = _gherkin_fixture_dir()
+
+    expected_files = {
+        "source/source.md",
+        "source/source.meta.json",
+        "source/source.sha256",
+        "agileforge/gold-spec/spec.json",
+        "agileforge/gold-spec/spec.md",
+        "agileforge/gold-spec/change-log.md",
+    }
+
+    present_files = {
+        str(path.relative_to(fixture_dir))
+        for path in fixture_dir.glob("**/*")
+        if path.is_file()
+    }
+    assert expected_files <= present_files
+
+
+def test_evaluate_authority_command_dispatches_gherkin_guardrails(
+    tmp_path: Path,
+) -> None:
+    """Gherkin fixture evaluation uses Gherkin-specific guardrails."""
+    authority_path = tmp_path / "authority.json"
+    output_path = tmp_path / "evaluation.json"
+    authority_path.write_text(
+        json.dumps(_complete_gherkin_authority()),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "evaluate-authority",
+            "--fixture-dir",
+            str(_gherkin_fixture_dir()),
+            "--authority",
+            str(authority_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["fixture"] == "gherkin"
+    assert result["verdict"] == "ACCEPT"
+    assert result["findings"] == []
+    assert result["weak_or_missing_must_items"] == []
+
+
+def test_evaluate_authority_command_fails_without_fixture_evaluator(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fixtures with no registered evaluator fail clearly."""
+    fixture_dir = tmp_path / "unsupported-fixture"
+    (fixture_dir / "agileforge/gold-spec").mkdir(parents=True)
+    (fixture_dir / "agileforge").mkdir(exist_ok=True)
+    (fixture_dir / "agileforge/gold-spec/spec.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (fixture_dir / "agileforge/compiled-authority.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["evaluate-authority", "--fixture-dir", str(fixture_dir)])
+
+    assert exit_code == CLI_USAGE_ERROR
+    captured = capsys.readouterr()
+    assert (
+        "no authority evaluator registered for fixture 'unsupported-fixture'"
+        in captured.err
+    )
+
+
+def test_evaluate_authority_command_fails_without_gold_spec(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fixture evaluation reports missing gold spec artifacts clearly."""
+    fixture_dir = tmp_path / "petstore"
+    (fixture_dir / "agileforge").mkdir(parents=True)
+    (fixture_dir / "agileforge/compiled-authority.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["evaluate-authority", "--fixture-dir", str(fixture_dir)])
+
+    assert exit_code == CLI_USAGE_ERROR
+    assert "gold spec not found" in capsys.readouterr().err
+
+
+def test_petstore_guardrails_accept_complete_api_contract_authority() -> None:
+    """Petstore guardrails accept complete endpoint, parameter, and schema coverage."""
+    result = aqb.evaluate_petstore_authority_guardrails(
+        gold_spec=_petstore_gold_spec(),
+        authority=_complete_petstore_authority(),
+        review_summary={},
+    )
+
+    assert result["fixture"] == "petstore"
+    assert result["verdict"] == "ACCEPT"
+    assert result["findings"] == []
+    assert result["weak_or_missing_must_items"] == []
+
+
+def test_petstore_guardrails_reject_missing_required_contracts() -> None:
+    """Petstore guardrails reject missing required API contract coverage."""
+    result = aqb.evaluate_petstore_authority_guardrails(
+        gold_spec=_petstore_gold_spec(),
+        authority={"invariants": []},
+        review_summary={"review_summary": {"acceptance_status": "accept_ready"}},
+    )
+
+    assert result["verdict"] == "REJECT"
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert "MISSING_MUST_AUTHORITY" in finding_codes
+    assert "FALSE_POSITIVE_ACCEPT_READY" in finding_codes
+    assert {
+        "INTERFACE.list-pets",
+        "INTERFACE.create-pet",
+        "INTERFACE.get-pet",
+        "CONSTRAINT.limit-maximum",
+        "INTERFACE.pet-id-path-parameter",
+        "DATA.pet-schema",
+        "DATA.pets-array",
+        "DATA.error-schema",
+    } <= set(result["weak_or_missing_must_items"])
+
+
+def test_petstore_guardrails_reject_context_free_required_schema_fields() -> None:
+    """Petstore schema and parameter fields need subject context."""
+    authority = _complete_petstore_authority()
+    authority["invariants"] = [
+        invariant
+        for invariant in authority["invariants"]
+        if invariant["id"]
+        not in {"INV-pet-id-param", "INV-pet-schema", "INV-error-schema"}
+    ]
+    authority["invariants"].extend(
+        [
+            {
+                "id": "INV-pet-id-field",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "petId"},
+                "source_refs": ["INTERFACE.pet-id-path-parameter.statement"],
+            },
+            {
+                "id": "INV-pet-id",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "id"},
+                "source_refs": ["DATA.pet-schema.acceptance[0]"],
+            },
+            {
+                "id": "INV-pet-name",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "name"},
+                "source_refs": ["DATA.pet-schema.acceptance[1]"],
+            },
+            {
+                "id": "INV-error-code",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "code"},
+                "source_refs": ["DATA.error-schema.acceptance[0]"],
+            },
+            {
+                "id": "INV-error-message",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "message"},
+                "source_refs": ["DATA.error-schema.acceptance[1]"],
+            },
+        ]
+    )
+
+    result = aqb.evaluate_petstore_authority_guardrails(
+        gold_spec=_petstore_gold_spec(),
+        authority=authority,
+        review_summary={},
+    )
+
+    assert result["verdict"] == "REJECT"
+    assert {
+        "INTERFACE.pet-id-path-parameter",
+        "DATA.pet-schema",
+        "DATA.error-schema",
+    } <= set(result["weak_or_missing_must_items"])
+
+
+def test_gherkin_guardrails_accept_complete_scenario_authority() -> None:
+    """Gherkin guardrails accept complete scenario and step coverage."""
+    result = aqb.evaluate_gherkin_authority_guardrails(
+        gold_spec=_gherkin_gold_spec(),
+        authority=_complete_gherkin_authority(),
+        review_summary={},
+    )
+
+    assert result["fixture"] == "gherkin"
+    assert result["verdict"] == "ACCEPT"
+    assert result["findings"] == []
+    assert result["weak_or_missing_must_items"] == []
+
+
+def test_gherkin_guardrails_reject_missing_scenario_steps() -> None:
+    """Gherkin guardrails reject missing required scenario step coverage."""
+    result = aqb.evaluate_gherkin_authority_guardrails(
+        gold_spec=_gherkin_gold_spec(),
+        authority={"invariants": []},
+        review_summary={"review_summary": {"acceptance_status": "accept_ready"}},
+    )
+
+    assert result["verdict"] == "REJECT"
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert "MISSING_MUST_AUTHORITY" in finding_codes
+    assert "FALSE_POSITIVE_ACCEPT_READY" in finding_codes
+    assert {
+        "REQ.member-discount-scenario",
+        "REQ.expired-coupon-outline",
+        "REQ.shipping-address-arguments",
+    } <= set(result["weak_or_missing_must_items"])
+
+
+def test_gherkin_guardrails_reject_required_field_scenario_compression() -> None:
+    """Gherkin scenarios need behavior mappings, not field existence checks."""
+    result = aqb.evaluate_gherkin_authority_guardrails(
+        gold_spec=_gherkin_gold_spec(),
+        authority={
+            "invariants": [
+                {
+                    "id": "INV-scenario-name",
+                    "type": "REQUIRED_FIELD",
+                    "parameters": {"field_name": "Scenario"},
+                    "source_refs": ["REQ.member-discount-scenario.statement"],
+                }
+            ]
+        },
+        review_summary={},
+    )
+
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert result["verdict"] == "REJECT"
+    assert "UNSAFE_REQUIRED_FIELD_COMPRESSION" in finding_codes
+    assert "REQ.member-discount-scenario" in result["weak_or_missing_must_items"]
+
+
+def test_gherkin_guardrails_accept_step_intent_without_literal_keywords() -> None:
+    """Gherkin coverage is based on step intent, not keyword extraction."""
+    authority = _complete_gherkin_authority()
+    authority["invariants"][0]["parameters"]["trigger"] = (
+        "signed-in member has an eligible cart totaling 100.00"
+    )
+    authority["invariants"][1]["parameters"]["trigger"] = (
+        "checkout total is calculated"
+    )
+    authority["invariants"][1]["parameters"]["outcome"] = (
+        "10 percent member discount is applied and final total is shown as 90.00"
+    )
+
+    result = aqb.evaluate_gherkin_authority_guardrails(
+        gold_spec=_gherkin_gold_spec(),
+        authority=authority,
+        review_summary={},
+    )
+
+    assert "REQ.member-discount-scenario" not in result[
+        "weak_or_missing_must_items"
+    ]
 
 
 def test_benchmark_prompt_forbids_deterministic_extraction_solution() -> None:
