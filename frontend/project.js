@@ -679,6 +679,92 @@ function createInvariantCard(invariant) {
     return card;
 }
 
+function invariantSearchText(invariant) {
+    return [
+        invariant?.id,
+        invariant?.text,
+        invariant?.support,
+        safeArray(invariant?.source_refs).join(' '),
+        invariant?.source_excerpt,
+    ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function filterAuthorityInvariants(invariants, query, supportFilter) {
+    const normalizedQuery = String(query || '').trim().toLowerCase();
+    return safeArray(invariants).filter((invariant) => {
+        const support = invariant?.support || 'inferred';
+        const normalizedSupportFilter = supportFilter || 'all';
+        const supportMatches = normalizedSupportFilter === 'all' || support === normalizedSupportFilter;
+        const queryMatches = !normalizedQuery
+            || invariantSearchText(invariant).includes(normalizedQuery);
+        return supportMatches && queryMatches;
+    });
+}
+
+function renderAuthorityInvariants(artifact) {
+    const domainBadge = document.getElementById('authority-domain-badge');
+    const themesContainer = document.getElementById('authority-themes-container');
+    const invariantsList = document.getElementById('invariants-list');
+    const status = document.getElementById('authority-invariant-filter-status');
+
+    if (domainBadge) domainBadge.textContent = artifact?.domain || 'N/A';
+
+    if (themesContainer) {
+        const themes = safeArray(artifact?.scope_themes);
+        if (themes.length === 0) {
+            themesContainer.replaceChildren(createEmptyState('No scope themes.'));
+        } else {
+            const badges = themes.map((theme) => {
+                const span = document.createElement('span');
+                span.className = 'px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 font-semibold text-xs border border-slate-200 dark:border-slate-700';
+                span.textContent = theme;
+                return span;
+            });
+            themesContainer.replaceChildren(...badges);
+        }
+    }
+
+    const allInvariants = safeArray(artifact?.invariants);
+    const filtered = filterAuthorityInvariants(
+        allInvariants,
+        authorityInvariantSearchQuery,
+        authoritySupportFilter,
+    );
+
+    if (status) {
+        status.textContent = `${filtered.length} of ${allInvariants.length} invariants shown`;
+    }
+
+    if (!invariantsList) return;
+    if (filtered.length === 0) {
+        invariantsList.replaceChildren(createEmptyState('No invariants match the current filters.'));
+        return;
+    }
+
+    invariantsList.replaceChildren(...filtered.map((invariant) => createInvariantCard(invariant)));
+}
+
+function attachAuthorityReviewControls() {
+    const search = document.getElementById('authority-invariant-search');
+    const support = document.getElementById('authority-support-filter');
+
+    if (search && search.dataset.bound !== 'true') {
+        search.dataset.bound = 'true';
+        search.addEventListener('input', () => {
+            authorityInvariantSearchQuery = search.value || '';
+            renderAuthorityReviewCard(Boolean(currentAuthorityReview));
+        });
+    }
+
+    if (support && support.dataset.bound !== 'true') {
+        support.dataset.bound = 'true';
+        support.addEventListener('change', () => {
+            authoritySupportFilter = support.value || 'all';
+            renderAuthorityReviewCard(Boolean(currentAuthorityReview));
+        });
+    }
+}
+
 function createSimpleCard(item, badgeColorClass) {
     const card = document.createElement('div');
     card.className = 'p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/30 text-xs shadow-sm hover:border-slate-300 dark:hover:border-slate-700 transition-all flex items-start gap-2';

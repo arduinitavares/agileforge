@@ -506,3 +506,189 @@ test('renderAuthorityOverview renders explicit empty states without innerHTML', 
         assert.equal(element.innerHTML, '');
     }
 });
+
+test('filterAuthorityInvariants searches ID text support refs and excerpt', () => {
+    const filterAuthorityInvariants = loadAuthorityConsoleFunction(
+        'filterAuthorityInvariants',
+        ['safeArray', 'invariantSearchText', 'filterAuthorityInvariants'],
+    );
+    const invariants = [
+        {
+            id: 'REQ.create',
+            text: 'Create a todo',
+            support: 'direct',
+            source_refs: ['SPEC.1'],
+            source_excerpt: 'Enter key creates item',
+        },
+        {
+            id: 'REQ.archive',
+            text: 'Archive a todo',
+            support: 'inferred',
+            source_refs: ['SPEC.2'],
+            source_excerpt: 'Move old item',
+        },
+        {
+            id: 'DATA.owner',
+            text: 'Owner field is required',
+            support: 'direct',
+            source_refs: ['DATA_MODEL'],
+            source_excerpt: 'Each item stores owner',
+        },
+    ];
+
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'REQ.archive', 'all').map((item) => item.id),
+        ['REQ.archive'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'create a todo', 'all').map((item) => item.id),
+        ['REQ.create'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'direct', 'all').map((item) => item.id),
+        ['REQ.create', 'DATA.owner'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'DATA_MODEL', 'all').map((item) => item.id),
+        ['DATA.owner'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'enter key', 'all').map((item) => item.id),
+        ['REQ.create'],
+    );
+});
+
+test('filterAuthorityInvariants applies direct inferred and combined filters', () => {
+    const filterAuthorityInvariants = loadAuthorityConsoleFunction(
+        'filterAuthorityInvariants',
+        ['safeArray', 'invariantSearchText', 'filterAuthorityInvariants'],
+    );
+    const invariants = [
+        {
+            id: 'REQ.direct',
+            text: 'Direct behavior',
+            support: 'direct',
+            source_refs: ['SPEC.direct'],
+            source_excerpt: 'User can submit',
+        },
+        {
+            id: 'REQ.inferred',
+            text: 'Inferred behavior',
+            support: 'inferred',
+            source_refs: ['SPEC.inferred'],
+            source_excerpt: 'Derived from flow',
+        },
+        {
+            id: 'REQ.default',
+            text: 'Default inferred behavior',
+            source_refs: ['SPEC.default'],
+            source_excerpt: 'Derived by compiler',
+        },
+    ];
+
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, '', 'direct').map((item) => item.id),
+        ['REQ.direct'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, '', 'inferred').map((item) => item.id),
+        ['REQ.inferred', 'REQ.default'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'derived', 'inferred').map((item) => item.id),
+        ['REQ.inferred', 'REQ.default'],
+    );
+    assert.deepEqual(
+        filterAuthorityInvariants(invariants, 'submit', 'inferred').map((item) => item.id),
+        [],
+    );
+});
+
+test('renderAuthorityInvariants writes domain themes filtered count and empty filtered state', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityInvariants = loadAuthorityConsoleFunction(
+        'renderAuthorityInvariants',
+        [
+            'safeArray',
+            'createEmptyState',
+            'invariantSearchText',
+            'filterAuthorityInvariants',
+            'renderAuthorityInvariants',
+        ],
+    );
+
+    globalThis.authorityInvariantSearchQuery = 'missing';
+    globalThis.authoritySupportFilter = 'all';
+
+    renderAuthorityInvariants({
+        domain: 'todo',
+        scope_themes: ['creation', 'archival'],
+        invariants: [
+            {
+                id: 'REQ.create',
+                text: 'Create a todo',
+                support: 'direct',
+                source_refs: ['SPEC.1'],
+                source_excerpt: 'Enter key creates item',
+            },
+        ],
+    });
+
+    assert.equal(documentStub.getElementById('authority-domain-badge').textContent, 'todo');
+    assert.equal(documentStub.getElementById('authority-themes-container').textContent, 'creationarchival');
+    assert.equal(documentStub.getElementById('authority-invariant-filter-status').textContent, '0 of 1 invariants shown');
+    assert.equal(documentStub.getElementById('invariants-list').textContent, 'No invariants match the current filters.');
+    assert.equal(documentStub.getElementById('invariants-list').innerHTML, '');
+});
+
+test('renderAuthorityInvariants uses createInvariantCard for visible invariants', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityInvariants = loadAuthorityConsoleFunction(
+        'renderAuthorityInvariants',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createInvariantCard',
+            'invariantSearchText',
+            'filterAuthorityInvariants',
+            'renderAuthorityInvariants',
+        ],
+    );
+
+    globalThis.authorityInvariantSearchQuery = 'enter';
+    globalThis.authoritySupportFilter = 'direct';
+
+    renderAuthorityInvariants({
+        domain: 'todo',
+        scope_themes: [],
+        invariants: [
+            {
+                id: 'REQ.create',
+                text: 'Create a todo',
+                support: 'direct',
+                source_refs: ['SPEC.1'],
+                source_excerpt: 'Enter key creates item',
+            },
+            {
+                id: 'REQ.archive',
+                text: 'Archive a todo',
+                support: 'inferred',
+                source_refs: ['SPEC.2'],
+                source_excerpt: 'Move old item',
+            },
+        ],
+    });
+
+    const invariantsList = documentStub.getElementById('invariants-list');
+
+    assert.equal(documentStub.getElementById('authority-themes-container').textContent, 'No scope themes.');
+    assert.equal(documentStub.getElementById('authority-invariant-filter-status').textContent, '1 of 2 invariants shown');
+    assert.equal(invariantsList.children.length, 1);
+    assert.match(invariantsList.textContent, /REQ\.create/);
+    assert.doesNotMatch(invariantsList.textContent, /REQ\.archive/);
+    assert.equal(invariantsList.innerHTML, '');
+});
