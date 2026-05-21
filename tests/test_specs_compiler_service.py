@@ -685,6 +685,60 @@ def test_preview_spec_authority_rejects_unaccounted_iterative_must_items(
     ]
 
 
+def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Focused item passes can succeed even when the full orienting pass fails."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[list[str]] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        item_ids = [item["id"] for item in items]
+        calls.append(item_ids)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        source_item_id = first_item["id"]
+        source_level = first_item["level"]
+        assert isinstance(source_item_id, str)
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=source_item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    compiled = SpecAuthorityCompilerOutput.model_validate_json(
+        result["compiled_authority"]
+    )
+    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    covered_item_ids = {
+        invariant.parameters.source_item_id
+        for invariant in compiled.root.invariants
+        if isinstance(invariant.parameters, UserInteractionParams)
+    }
+    assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
+    assert calls[0] == ["REQ.todo-create", "REQ.todo-toggle", "REQ.todo-color"]
+
+
 def test_preview_spec_authority_returns_failure_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

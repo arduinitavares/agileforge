@@ -275,7 +275,7 @@ def get_sprint_planner_max_tokens(default: int = 8192) -> int:
 
 def is_spec_compiler_schema_disabled() -> bool:
     """Return whether the spec compiler should skip output schema enforcement."""
-    return get_bool_env("SPEC_COMPILER_DISABLE_SCHEMA", default=False)
+    return get_bool_env("SPEC_COMPILER_DISABLE_SCHEMA", default=True)
 
 
 def get_default_validation_mode(default: str = "deterministic") -> str:

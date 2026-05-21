@@ -1081,14 +1081,17 @@ def _compile_spec_authority_output(
         return full_invocation
 
     item_ids = _iterative_authority_item_ids(artifact)
-    if not item_ids or isinstance(
-        full_invocation.output.root,
-        SpecAuthorityCompilationFailure,
-    ):
+    if not item_ids:
         return full_invocation
 
-    full_success = cast("SpecAuthorityCompilationSuccess", full_invocation.output.root)
-    successes = [full_success]
+    successes: list[SpecAuthorityCompilationSuccess] = []
+    if not isinstance(full_invocation.output.root, SpecAuthorityCompilationFailure):
+        full_success = cast(
+            "SpecAuthorityCompilationSuccess",
+            full_invocation.output.root,
+        )
+        successes.append(full_success)
+
     for item_id in item_ids:
         focused_content = _focused_structured_spec_content(
             artifact,
@@ -1107,6 +1110,9 @@ def _compile_spec_authority_output(
             item_invocation.output.root,
         )
         successes.append(item_success)
+
+    if not successes:
+        return full_invocation
 
     merged_success = _merge_compilation_successes(successes)
     missing_item_ids = _missing_iterative_authority_item_ids(

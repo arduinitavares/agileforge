@@ -399,6 +399,31 @@ def test_extract_review_command_writes_compiled_authority_and_summary(
     assert REDACTED_SHORT_VALUE not in json.dumps(summary)
 
 
+def test_evaluate_authority_command_writes_todomvc_guardrail_result(
+    tmp_path: Path,
+) -> None:
+    """The evaluate-authority command writes semantic guardrail results."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc"
+    output_path = tmp_path / "evaluation.json"
+
+    exit_code = main(
+        [
+            "evaluate-authority",
+            "--fixture-dir",
+            str(fixture_dir),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["fixture"] == "todomvc"
+    assert result["verdict"] == "REJECT"
+    finding_codes = {finding["code"] for finding in result["findings"]}
+    assert "MISSING_MUST_AUTHORITY" in finding_codes
+
+
 def test_benchmark_prompt_forbids_deterministic_extraction_solution() -> None:
     """Shared external review prompt forbids deterministic extraction advice."""
     prompt = (

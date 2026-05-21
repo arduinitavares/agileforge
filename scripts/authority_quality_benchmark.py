@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Final
 
@@ -805,6 +806,38 @@ def _cmd_extract_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _optional_json(path: Path) -> JsonObject:
+    """Load optional JSON, returning an empty object when absent."""
+    if not path.exists():
+        return {}
+    return _load_json(path)
+
+
+def _cmd_evaluate_authority(args: argparse.Namespace) -> int:
+    fixture_dir = Path(args.fixture_dir)
+    gold_spec_path = Path(args.gold_spec) if args.gold_spec else (
+        fixture_dir / "agileforge/gold-spec/spec.json"
+    )
+    authority_path = Path(args.authority) if args.authority else (
+        fixture_dir / "agileforge/compiled-authority.json"
+    )
+    review_summary_path = Path(args.review_summary) if args.review_summary else (
+        fixture_dir / "agileforge/review-summary.json"
+    )
+
+    result = evaluate_todomvc_authority_guardrails(
+        gold_spec=_load_json(gold_spec_path),
+        authority=_load_json(authority_path),
+        review_summary=_optional_json(review_summary_path),
+    )
+
+    if args.output:
+        write_json(Path(args.output), result)
+    else:
+        sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build AgileForge authority quality benchmark artifacts."
@@ -830,6 +863,14 @@ def _build_parser() -> argparse.ArgumentParser:
     extract_review.add_argument("--fixture-dir", required=True)
     extract_review.add_argument("--review-packet", required=True)
     extract_review.set_defaults(func=_cmd_extract_review)
+
+    evaluate_authority = subparsers.add_parser("evaluate-authority")
+    evaluate_authority.add_argument("--fixture-dir", required=True)
+    evaluate_authority.add_argument("--gold-spec")
+    evaluate_authority.add_argument("--authority")
+    evaluate_authority.add_argument("--review-summary")
+    evaluate_authority.add_argument("--output")
+    evaluate_authority.set_defaults(func=_cmd_evaluate_authority)
 
     return parser
 

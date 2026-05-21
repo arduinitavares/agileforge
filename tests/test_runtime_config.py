@@ -12,6 +12,7 @@ from utils.runtime_config import (
     get_business_db_target,
     get_database_echo,
     get_session_db_target,
+    is_spec_compiler_schema_disabled,
     resolve_database_target,
 )
 
@@ -126,3 +127,21 @@ def test_database_echo_honors_true_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGILEFORGE_DB_ECHO", "true")
 
     assert get_database_echo() is True
+
+
+def test_spec_compiler_agent_schema_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec compiler defaults to host-side normalizer validation."""
+    monkeypatch.delenv("SPEC_COMPILER_DISABLE_SCHEMA", raising=False)
+
+    assert is_spec_compiler_schema_disabled() is True
+
+
+def test_spec_compiler_agent_schema_can_be_reenabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit env opt-in can re-enable ADK schema validation."""
+    monkeypatch.setenv("SPEC_COMPILER_DISABLE_SCHEMA", "false")
+
+    assert is_spec_compiler_schema_disabled() is False
