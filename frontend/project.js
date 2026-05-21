@@ -696,6 +696,99 @@ function createSimpleCard(item, badgeColorClass) {
     return card;
 }
 
+function createEmptyState(text) {
+    const empty = document.createElement('div');
+    empty.className = 'text-xs text-slate-500 font-medium italic p-2';
+    empty.textContent = text;
+    return empty;
+}
+
+function createFindingCard(finding) {
+    const card = document.createElement('div');
+    card.className = 'p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/30 text-xs shadow-sm space-y-2';
+
+    const header = document.createElement('div');
+    header.className = 'flex flex-wrap items-center gap-1.5';
+
+    const codeBadge = document.createElement('span');
+    codeBadge.className = 'px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
+    codeBadge.textContent = finding?.code || 'Finding';
+    header.appendChild(codeBadge);
+
+    const severityBadge = document.createElement('span');
+    severityBadge.className = 'px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200';
+    severityBadge.textContent = finding?.severity || 'info';
+    header.appendChild(severityBadge);
+
+    const overrideBadge = document.createElement('span');
+    overrideBadge.className = finding?.override_allowed === false
+        ? 'px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200'
+        : 'px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200';
+    overrideBadge.textContent = finding?.override_allowed === false ? 'No override' : 'Override allowed';
+    header.appendChild(overrideBadge);
+
+    card.appendChild(header);
+
+    const message = finding?.message || finding?.detail || finding?.text || '';
+    if (message) {
+        const messageEl = document.createElement('div');
+        messageEl.className = 'text-slate-700 dark:text-slate-300 whitespace-pre-wrap font-medium';
+        messageEl.textContent = message;
+        card.appendChild(messageEl);
+    }
+
+    return card;
+}
+
+function renderListSection(containerId, items, emptyText, createItem) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const normalizedItems = safeArray(items);
+    if (normalizedItems.length === 0) {
+        container.replaceChildren(createEmptyState(emptyText));
+        return;
+    }
+
+    container.replaceChildren(...normalizedItems.map((item) => createItem(item)));
+}
+
+function renderAuthorityOverview(review) {
+    const pending = review?.pending_authority || {};
+    const artifact = pending.artifact || {};
+
+    renderListSection(
+        'overview-findings-list',
+        pending.review_findings,
+        'No review findings.',
+        createFindingCard,
+    );
+    renderListSection(
+        'overview-gaps-list',
+        artifact.gaps,
+        'No identified gaps.',
+        (gap) => createSimpleCard(gap, 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'),
+    );
+    renderListSection(
+        'overview-assumptions-list',
+        artifact.assumptions,
+        'No compiler assumptions.',
+        (assumption) => createSimpleCard(assumption, 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200'),
+    );
+    renderListSection(
+        'overview-exclusions-list',
+        artifact.rejected_features,
+        'No excluded features.',
+        (exclusion) => createSimpleCard(exclusion, 'bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200'),
+    );
+    renderListSection(
+        'overview-eligible-rules-list',
+        artifact.eligible_feature_rules,
+        'No eligible feature rules.',
+        (rule) => createSimpleCard(rule, 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200'),
+    );
+}
+
 function renderAuthorityReviewCard(visible) {
     const card = document.getElementById('authority-review-card');
     if (!card) return;

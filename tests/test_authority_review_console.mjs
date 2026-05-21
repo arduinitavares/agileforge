@@ -97,6 +97,7 @@ function createDocumentStub() {
             this.children = [];
             this.className = '';
             this.disabled = false;
+            this._innerHTML = '';
             this._textContent = '';
             this.classList = {
                 add: (...classes) => {
@@ -137,7 +138,18 @@ function createDocumentStub() {
 
         set textContent(value) {
             this.children = [];
+            this._innerHTML = '';
             this._textContent = value == null ? '' : String(value);
+        }
+
+        get innerHTML() {
+            return this._innerHTML;
+        }
+
+        set innerHTML(value) {
+            this.children = [];
+            this._textContent = '';
+            this._innerHTML = value == null ? '' : String(value);
         }
 
         appendChild(child) {
@@ -147,6 +159,7 @@ function createDocumentStub() {
 
         replaceChildren(...children) {
             this._textContent = '';
+            this._innerHTML = '';
             this.children = children;
         }
     }
@@ -364,4 +377,96 @@ test('renderAuthoritySummary hides actions and findings after accept', () => {
     assert.equal(documentStub.getElementById('btn-accept-authority').disabled, true);
     assert.equal(documentStub.getElementById('authority-review-actions-container').classList.contains('hidden'), true);
     assert.equal(documentStub.getElementById('authority-review-findings').classList.contains('hidden'), true);
+});
+
+test('renderAuthorityOverview renders findings and assumptions as literal text without innerHTML', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityOverview = loadAuthorityConsoleFunction(
+        'renderAuthorityOverview',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createSimpleCard',
+            'createFindingCard',
+            'renderListSection',
+            'renderAuthorityOverview',
+        ],
+    );
+
+    renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [
+                {
+                    code: '<script>alert("x")</script>',
+                    severity: 'blocking',
+                    override_allowed: false,
+                    message: 'Finding message',
+                },
+            ],
+            artifact: {
+                gaps: [],
+                assumptions: [
+                    {
+                        id: 'ASM.html',
+                        text: '<img src=x onerror=alert(1)>',
+                    },
+                ],
+                rejected_features: [],
+                eligible_feature_rules: [],
+            },
+        },
+    });
+
+    const findingsList = documentStub.getElementById('overview-findings-list');
+    const assumptionsList = documentStub.getElementById('overview-assumptions-list');
+
+    assert.match(findingsList.textContent, /<script>alert\("x"\)<\/script>/);
+    assert.match(assumptionsList.textContent, /<img src=x onerror=alert\(1\)>/);
+    assert.equal(findingsList.innerHTML, '');
+    assert.equal(assumptionsList.innerHTML, '');
+});
+
+test('renderAuthorityOverview renders explicit empty states without innerHTML', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityOverview = loadAuthorityConsoleFunction(
+        'renderAuthorityOverview',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createSimpleCard',
+            'createFindingCard',
+            'renderListSection',
+            'renderAuthorityOverview',
+        ],
+    );
+
+    renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                gaps: [],
+                assumptions: [],
+                rejected_features: [],
+                eligible_feature_rules: [],
+            },
+        },
+    });
+
+    const expectedStates = [
+        ['overview-findings-list', 'No review findings.'],
+        ['overview-gaps-list', 'No identified gaps.'],
+        ['overview-assumptions-list', 'No compiler assumptions.'],
+        ['overview-exclusions-list', 'No excluded features.'],
+        ['overview-eligible-rules-list', 'No eligible feature rules.'],
+    ];
+
+    for (const [id, expectedText] of expectedStates) {
+        const element = documentStub.getElementById(id);
+        assert.equal(element.textContent, expectedText);
+        assert.equal(element.innerHTML, '');
+    }
 });
