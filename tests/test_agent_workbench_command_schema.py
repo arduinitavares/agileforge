@@ -48,6 +48,12 @@ EXPECTED_PHASE_2C_COMMAND_NAMES = {
     "agileforge authority reject",
 }
 
+EXPECTED_PHASE_2D_COMMAND_NAMES = {
+    "agileforge vision generate",
+    "agileforge vision history",
+    "agileforge vision save",
+}
+
 EXPECTED_PHASE_2E_COMMAND_NAMES = {
     "agileforge spec profile schema",
     "agileforge spec profile validate",
@@ -293,10 +299,7 @@ def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     assert "expected_disk_spec_hash" in accept_schema["input"]["optional"]
     assert "expected_state" in accept_schema["input"]["optional"]
     assert "expected_setup_status" in accept_schema["input"]["optional"]
-    assert (
-        "expected_coverage_summary_fingerprint"
-        in accept_schema["input"]["optional"]
-    )
+    assert "expected_coverage_summary_fingerprint" in accept_schema["input"]["optional"]
     assert "review_token" in accept_schema["guard_policy"]
     assert "expected_coverage_summary_fingerprint" in accept_schema["guard_policy"]
     assert accept_schema["guard_policy_is_authoritative"] is True
@@ -351,6 +354,30 @@ def test_phase_2c_authority_commands_are_registered_and_available() -> None:
         assert command_is_available(command_name) is True
         assert command_name in capabilities
         assert capabilities[command_name]["installed"] is True
+
+
+def test_vision_commands_are_registered_and_available() -> None:
+    """Expose Vision phase commands as installed CLI capabilities."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert EXPECTED_PHASE_2D_COMMAND_NAMES.issubset(names)
+    for command_name in EXPECTED_PHASE_2D_COMMAND_NAMES:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    generate = command_schema_payload("agileforge vision generate")
+    history = command_schema_payload("agileforge vision history")
+    save = command_schema_payload("agileforge vision save")
+
+    assert generate["mutates"] is True
+    assert generate["input"]["required"] == ["project_id"]
+    assert generate["input"]["optional"] == ["input"]
+    assert history["mutates"] is False
+    assert history["input"]["required"] == ["project_id"]
+    assert save["mutates"] is True
+    assert save["input"]["required"] == ["project_id"]
 
 
 def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:

@@ -164,6 +164,32 @@ class _SprintReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _VisionInterviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Vision interview state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Vision interview workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "VISION_INTERVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _VisionReviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Vision review state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Vision review workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "VISION_REVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
 class _AuthorityPendingReviewReadProjection(_FakeReadProjection):
     """Fake read projection for setup blocked on authority review."""
 
@@ -369,6 +395,53 @@ class _FakeAuthorityDecisionRunner:
         }
 
 
+class _FakeVisionRunner:
+    """Fake Vision runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Vision generation."""
+        self.calls.append(
+            (
+                "generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Record Vision history lookup."""
+        self.calls.append(("history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save(self, *, project_id: int) -> dict[str, Any]:
+        """Record Vision save."""
+        self.calls.append(("save", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "VISION_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
     app = AgentWorkbenchApplication(
@@ -515,6 +588,29 @@ def test_application_authority_reject_delegates_to_decision_runner() -> None:
     assert runner.calls == [("reject", request)]
 
 
+def test_application_routes_vision_commands_to_runner() -> None:
+    """Verify Vision facade methods delegate to the configured runner."""
+    runner = _FakeVisionRunner()
+    app = AgentWorkbenchApplication(vision_runner=runner)
+
+    assert (
+        app.vision_generate(
+            project_id=PROJECT_ID,
+            user_input="tighten goals",
+        )["data"]["is_complete"]
+        is False
+    )
+    assert app.vision_history(project_id=PROJECT_ID)["data"]["items"] == []
+    assert app.vision_save(project_id=PROJECT_ID)["data"]["fsm_state"] == (
+        "VISION_PERSISTENCE"
+    )
+    assert runner.calls == [
+        ("generate", {"project_id": PROJECT_ID, "user_input": "tighten goals"}),
+        ("history", {"project_id": PROJECT_ID}),
+        ("save", {"project_id": PROJECT_ID}),
+    ]
+
+
 def test_application_keeps_falsey_injected_dependencies() -> None:
     """Verify explicit None checks preserve falsey injected projections."""
     app = AgentWorkbenchApplication(
@@ -605,6 +701,39 @@ def test_application_status_fingerprint_changes_with_child_inputs() -> None:
     assert first["data"]["source_fingerprint"] != changed["data"]["source_fingerprint"]
 
 
+def test_application_workflow_next_routes_vision_interview_to_generate() -> None:
+    """Expose installed Vision generation while in Vision interview."""
+    app = AgentWorkbenchApplication(
+        read_projection=_VisionInterviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge vision generate --project-id 7"
+    ]
+    assert result["data"]["blocked_commands"] == []
+
+
+def test_application_workflow_next_routes_vision_review_to_save_and_refine() -> None:
+    """Expose installed Vision save and refinement commands in Vision review."""
+    app = AgentWorkbenchApplication(
+        read_projection=_VisionReviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge vision save --project-id 7",
+        "agileforge vision generate --project-id 7 --input <feedback>",
+    ]
+    assert result["data"]["blocked_commands"] == []
+
+
 def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
     """Verify workflow next facade exposes installed and blocked next commands."""
     app = AgentWorkbenchApplication(
@@ -631,7 +760,9 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
     assert result["data"]["source_fingerprint"].startswith("sha256:")
 
 
-def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> None:  # noqa: E501
+def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (
+    None
+):
     """Route setup pending review to authority review before decision commands."""
     review = _FakeAuthorityReview()
     app = AgentWorkbenchApplication(
@@ -665,8 +796,7 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     assert accept_action["after_review"] is True
     assert accept_action["requires"] == []
     assert (
-        accept_action["reason"]
-        == "Record accepted authority only after review passes."
+        accept_action["reason"] == "Record accepted authority only after review passes."
     )
     assert reject_action == {
         "command": (
@@ -736,7 +866,9 @@ def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() 
     assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]
 
 
-def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation() -> None:  # noqa: E501
+def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation() -> (
+    None
+):
     """Do not publish an uninstalled recompile command as an actionable next step."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityRejectedReadProjection(),

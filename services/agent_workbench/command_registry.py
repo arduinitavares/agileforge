@@ -324,6 +324,47 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge vision generate",
+        mutates=True,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("input",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge vision history",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge vision save",
+        mutates=True,
+        phase="phase_2d",
+        input_required=("project_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+)
+
+
 _PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge spec profile schema",
@@ -352,6 +393,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2A_COMMANDS,
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
+        *_PHASE_2D_COMMANDS,
         *_PHASE_2E_COMMANDS,
     )
 

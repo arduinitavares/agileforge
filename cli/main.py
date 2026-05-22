@@ -54,6 +54,8 @@ Examples:
   agileforge authority accept --project-id 1
   agileforge authority reject --project-id 1 --review-token <review_token> """
     """--reason "..." --idempotency-key reject-001
+  agileforge vision generate --project-id 1 --input "optional guidance"
+  agileforge vision save --project-id 1
   agileforge sprint candidates --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
@@ -196,6 +198,23 @@ class _Application(Protocol):
 
     def authority_reject(self, request: AuthorityRejectRequest) -> JsonObject:
         """Reject pending authority from a guarded request."""
+        ...
+
+    def vision_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Generate or refine a Vision draft."""
+        ...
+
+    def vision_history(self, *, project_id: int) -> JsonObject:
+        """Return Vision attempt history."""
+        ...
+
+    def vision_save(self, *, project_id: int) -> JsonObject:
+        """Persist the current Vision draft."""
         ...
 
     def story_show(self, *, story_id: int) -> JsonObject:
@@ -645,6 +664,32 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_reject.add_argument("--changed-by")
     authority_reject.set_defaults(command_handler=_authority_reject)
 
+    vision = subparsers.add_parser("vision", help="Run Vision phase commands.")
+    vision_sub = vision.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    vision_generate = vision_sub.add_parser(
+        "generate",
+        help="Generate or refine a Vision draft.",
+    )
+    vision_generate.add_argument("--project-id", type=int, required=True)
+    vision_generate.add_argument("--input", dest="user_input")
+    vision_generate.set_defaults(command_handler=_vision_generate)
+    vision_history = vision_sub.add_parser(
+        "history",
+        help="Show Vision attempt history.",
+    )
+    vision_history.add_argument("--project-id", type=int, required=True)
+    vision_history.set_defaults(command_handler=_vision_history)
+    vision_save = vision_sub.add_parser(
+        "save",
+        help="Persist the current complete Vision draft.",
+    )
+    vision_save.add_argument("--project-id", type=int, required=True)
+    vision_save.set_defaults(command_handler=_vision_save)
+
     story = subparsers.add_parser("story", help="Inspect user stories.")
     story_sub = story.add_subparsers(
         dest="action",
@@ -800,7 +845,6 @@ def _validate_mutation_idempotency_args(
     if not args.dry_run and not args.idempotency_key:
         args.idempotency_key = f"auto-{uuid4()}"
     return None
-
 
 
 def _project_create(
@@ -1398,9 +1442,7 @@ def _interactive_authority_accept(
     _print_authority_review_summary(review)
     omission = guards.get("expected_omission_assessment")
     phrase = (
-        "ACCEPT AUTHORITY"
-        if omission == "complete"
-        else "ACCEPT INCOMPLETE AUTHORITY"
+        "ACCEPT AUTHORITY" if omission == "complete" else "ACCEPT INCOMPLETE AUTHORITY"
     )
     typed = _input_from_stderr(f'Type "{phrase}" to continue: ')
     if typed != phrase:
@@ -1472,6 +1514,37 @@ def _input_from_stderr(prompt: str) -> str:
     sys.stderr.write(prompt)
     sys.stderr.flush()
     return input()
+
+
+def _vision_generate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Vision generate to the application facade."""
+    return "agileforge vision generate", application.vision_generate(
+        project_id=args.project_id,
+        user_input=args.user_input,
+    )
+
+
+def _vision_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Vision history to the application facade."""
+    return "agileforge vision history", application.vision_history(
+        project_id=args.project_id,
+    )
+
+
+def _vision_save(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Vision save to the application facade."""
+    return "agileforge vision save", application.vision_save(
+        project_id=args.project_id,
+    )
 
 
 def _story_show(args: argparse.Namespace, application: _Application) -> CommandResult:

@@ -15,7 +15,10 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_review import AuthorityReviewService
-from services.agent_workbench.command_registry import installed_command_names
+from services.agent_workbench.command_registry import (
+    command_is_available,
+    installed_command_names,
+)
 from services.agent_workbench.command_schema import (
     capabilities_payload,
     command_schema_payload,
@@ -35,6 +38,7 @@ from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
 )
+from services.agent_workbench.vision_phase import VisionPhaseRunner
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
@@ -119,10 +123,31 @@ class _AuthorityDecisionRunner(Protocol):
         ...
 
 
+class _VisionPhaseRunner(Protocol):
+    """Vision phase commands exposed through the facade."""
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Vision draft."""
+        ...
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Vision attempt history."""
+        ...
+
+    def save(self, *, project_id: int) -> dict[str, Any]:
+        """Persist the current Vision draft."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         read_projection: _ReadProjection | None = None,
@@ -130,6 +155,7 @@ class AgentWorkbenchApplication:
         project_setup_runner: _ProjectSetupRunner | None = None,
         authority_review: _AuthorityReview | None = None,
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
+        vision_runner: _VisionPhaseRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -137,6 +163,7 @@ class AgentWorkbenchApplication:
         self._project_setup_runner = project_setup_runner
         self._authority_review = authority_review
         self._authority_decision_runner = authority_decision_runner
+        self._vision_runner = vision_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -257,6 +284,13 @@ class AgentWorkbenchApplication:
                 authority=authority,
                 review=review,
             )
+
+        vision_next = _vision_workflow_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
+        if vision_next is not None:
+            return vision_next
 
         pack = self.context_pack(project_id=project_id, phase="sprint-planning")
         if not pack.get("ok"):
@@ -466,6 +500,26 @@ class AgentWorkbenchApplication:
             spec_version_id=spec_version_id,
         )
 
+    def vision_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Vision draft."""
+        return self._get_vision_runner().generate(
+            project_id=project_id,
+            user_input=user_input,
+        )
+
+    def vision_history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Vision attempt history."""
+        return self._get_vision_runner().history(project_id=project_id)
+
+    def vision_save(self, *, project_id: int) -> dict[str, Any]:
+        """Persist the current complete Vision draft."""
+        return self._get_vision_runner().save(project_id=project_id)
+
     def _get_read_projection(self) -> _ReadProjection:
         """Return the read projection, constructing the default lazily."""
         if self._read_projection is None:
@@ -504,6 +558,12 @@ class AgentWorkbenchApplication:
         if self._authority_decision_runner is None:
             self._authority_decision_runner = AuthorityDecisionRunner()
         return self._authority_decision_runner
+
+    def _get_vision_runner(self) -> _VisionPhaseRunner:
+        """Return the Vision runner, constructing the default lazily."""
+        if self._vision_runner is None:
+            self._vision_runner = VisionPhaseRunner()
+        return self._vision_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -686,6 +746,82 @@ def _setup_workflow_next(
     }
 
 
+def _vision_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return Vision phase commands for Vision workflow states."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    if fsm_state not in {"VISION_INTERVIEW", "VISION_REVIEW"}:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[str] = []
+    command_candidates = _vision_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+    )
+    for command_name, command_text in command_candidates:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+    }
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _vision_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str,
+) -> list[tuple[str, str]]:
+    """Return Vision command candidates for the current Vision state."""
+    if fsm_state == "VISION_INTERVIEW":
+        return [
+            (
+                "agileforge vision generate",
+                f"agileforge vision generate --project-id {project_id}",
+            )
+        ]
+    return [
+        (
+            "agileforge vision save",
+            f"agileforge vision save --project-id {project_id}",
+        ),
+        (
+            "agileforge vision generate",
+            f"agileforge vision generate --project-id {project_id} --input <feedback>",
+        ),
+    ]
+
+
 def _authority_review_summary(review: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return a compact authority review summary from a review envelope."""
     if review is None or review.get("ok") is not True:
@@ -728,10 +864,13 @@ def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _mutation_ledger_repository() -> tuple[MutationLedgerRepository, None] | tuple[
-    None,
-    dict[str, Any],
-]:
+def _mutation_ledger_repository() -> (
+    tuple[MutationLedgerRepository, None]
+    | tuple[
+        None,
+        dict[str, Any],
+    ]
+):
     """Return a mutation ledger repo or a schema-not-ready envelope."""
     engine = get_engine()
     readiness = check_schema_readiness(engine, MUTATION_LEDGER_REQUIREMENTS)

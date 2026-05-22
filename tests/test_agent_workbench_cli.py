@@ -171,6 +171,46 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def vision_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a vision generate payload."""
+        self.calls.append(
+            (
+                "vision_generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def vision_history(self, *, project_id: int) -> JsonObject:
+        """Return a vision history payload."""
+        self.calls.append(("vision_history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def vision_save(self, *, project_id: int) -> JsonObject:
+        """Return a vision save payload."""
+        self.calls.append(("vision_save", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "VISION_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def story_show(self, *, story_id: int) -> JsonObject:
         """Return a story detail payload."""
         self.calls.append(("story_show", {"story_id": story_id}))
@@ -198,9 +238,7 @@ class _FakeApplication:
         phase: str = "overview",
     ) -> JsonObject:
         """Return a context pack payload."""
-        self.calls.append(
-            ("context_pack", {"project_id": project_id, "phase": phase})
-        )
+        self.calls.append(("context_pack", {"project_id": project_id, "phase": phase}))
         return {
             "ok": True,
             "data": {"project_id": project_id, "phase": phase},
@@ -910,6 +948,53 @@ def test_cli_routes_authority_status(
 @pytest.mark.parametrize(
     ("argv", "expected_call", "expected_command"),
     [
+        (
+            [
+                "vision",
+                "generate",
+                "--project-id",
+                str(PROJECT_ID),
+                "--input",
+                "clarify target users",
+            ],
+            (
+                "vision_generate",
+                {"project_id": PROJECT_ID, "user_input": "clarify target users"},
+            ),
+            "agileforge vision generate",
+        ),
+        (
+            ["vision", "history", "--project-id", str(PROJECT_ID)],
+            ("vision_history", {"project_id": PROJECT_ID}),
+            "agileforge vision history",
+        ),
+        (
+            ["vision", "save", "--project-id", str(PROJECT_ID)],
+            ("vision_save", {"project_id": PROJECT_ID}),
+            "agileforge vision save",
+        ),
+    ],
+)
+def test_cli_routes_vision_commands(
+    argv: list[str],
+    expected_call: tuple[str, dict[str, object]],
+    expected_command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify Vision phase commands route through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(argv, application=app)
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == expected_command
+    assert app.calls == [expected_call]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_call", "expected_command"),
+    [
         (["doctor"], ("doctor", {}), "agileforge doctor"),
         (["schema", "check"], ("schema_check", {}), "agileforge schema check"),
         (["capabilities"], ("capabilities", {}), "agileforge capabilities"),
@@ -1137,12 +1222,11 @@ def test_top_level_help_describes_agent_workbench_commands(
     assert "agileforge authority review --project-id 1" in captured.out
     assert "agileforge authority accept --project-id 1" in captured.out
     assert (
-        'agileforge authority reject --project-id 1 --review-token <review_token> '
+        "agileforge authority reject --project-id 1 --review-token <review_token> "
         '--reason "..."'
     ) in captured.out
     assert (
-        "agileforge context pack --project-id 1 --phase sprint-planning"
-        in captured.out
+        "agileforge context pack --project-id 1 --phase sprint-planning" in captured.out
     )
 
 
