@@ -52,6 +52,20 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge vision generate",
     "agileforge vision history",
     "agileforge vision save",
+    "agileforge backlog generate",
+    "agileforge backlog history",
+    "agileforge backlog save",
+    "agileforge backlog reconcile",
+    "agileforge roadmap generate",
+    "agileforge roadmap history",
+    "agileforge roadmap save",
+    "agileforge story pending",
+    "agileforge story generate",
+    "agileforge story retry",
+    "agileforge story history",
+    "agileforge story save",
+    "agileforge story complete",
+    "agileforge story reopen",
 }
 
 EXPECTED_PHASE_2E_COMMAND_NAMES = {
@@ -361,8 +375,13 @@ def test_vision_commands_are_registered_and_available() -> None:
     names = installed_command_names()
     capabilities = _capability_by_name()
 
-    assert EXPECTED_PHASE_2D_COMMAND_NAMES.issubset(names)
-    for command_name in EXPECTED_PHASE_2D_COMMAND_NAMES:
+    vision_command_names = {
+        "agileforge vision generate",
+        "agileforge vision history",
+        "agileforge vision save",
+    }
+    assert vision_command_names.issubset(names)
+    for command_name in vision_command_names:
         assert command_is_available(command_name) is True
         assert command_name in capabilities
         assert capabilities[command_name]["installed"] is True
@@ -378,6 +397,158 @@ def test_vision_commands_are_registered_and_available() -> None:
     assert history["input"]["required"] == ["project_id"]
     assert save["mutates"] is True
     assert save["input"]["required"] == ["project_id"]
+
+
+def test_backlog_commands_are_registered_and_available() -> None:
+    """Expose Backlog phase commands as installed CLI capabilities."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+    backlog_command_names = {
+        "agileforge backlog generate",
+        "agileforge backlog history",
+        "agileforge backlog save",
+        "agileforge backlog reconcile",
+    }
+
+    assert backlog_command_names.issubset(names)
+    for command_name in backlog_command_names:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    generate = command_schema_payload("agileforge backlog generate")
+    history = command_schema_payload("agileforge backlog history")
+    save = command_schema_payload("agileforge backlog save")
+    reconcile = command_schema_payload("agileforge backlog reconcile")
+
+    assert generate["mutates"] is True
+    assert generate["input"]["required"] == ["project_id"]
+    assert generate["input"]["optional"] == ["input"]
+    assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
+    assert history["mutates"] is False
+    assert history["input"]["required"] == ["project_id"]
+    assert save["mutates"] is True
+    assert save["input"]["required"] == [
+        "project_id",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save["idempotency_required"] is True
+    assert ErrorCode.MUTATION_FAILED.value in save["errors"]
+    assert reconcile["mutates"] is True
+    assert reconcile["input"]["required"] == ["project_id", "idempotency_key"]
+    assert reconcile["idempotency_required"] is True
+    assert ErrorCode.MUTATION_FAILED.value in reconcile["errors"]
+
+
+def test_roadmap_commands_are_registered_and_available() -> None:
+    """Expose Roadmap phase commands as installed CLI capabilities."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+    roadmap_command_names = {
+        "agileforge roadmap generate",
+        "agileforge roadmap history",
+        "agileforge roadmap save",
+    }
+
+    assert roadmap_command_names.issubset(names)
+    for command_name in roadmap_command_names:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    generate = command_schema_payload("agileforge roadmap generate")
+    history = command_schema_payload("agileforge roadmap history")
+    save = command_schema_payload("agileforge roadmap save")
+
+    assert generate["mutates"] is True
+    assert generate["input"]["required"] == ["project_id"]
+    assert generate["input"]["optional"] == ["input"]
+    assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
+    assert history["mutates"] is False
+    assert history["input"]["required"] == ["project_id"]
+    assert save["mutates"] is True
+    assert save["input"]["required"] == [
+        "project_id",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save["idempotency_required"] is True
+    assert ErrorCode.MUTATION_FAILED.value in save["errors"]
+
+
+def test_story_phase_commands_are_registered_and_available() -> None:
+    """Expose Story phase commands as installed CLI capabilities."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+    story_command_names = {
+        "agileforge story pending",
+        "agileforge story generate",
+        "agileforge story retry",
+        "agileforge story history",
+        "agileforge story save",
+        "agileforge story complete",
+        "agileforge story reopen",
+    }
+
+    assert story_command_names.issubset(names)
+    for command_name in story_command_names:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    pending = command_schema_payload("agileforge story pending")
+    generate = command_schema_payload("agileforge story generate")
+    retry = command_schema_payload("agileforge story retry")
+    history = command_schema_payload("agileforge story history")
+    save = command_schema_payload("agileforge story save")
+    complete = command_schema_payload("agileforge story complete")
+    reopen = command_schema_payload("agileforge story reopen")
+
+    assert pending["mutates"] is False
+    assert pending["input"]["required"] == ["project_id"]
+    assert generate["mutates"] is True
+    assert generate["input"]["required"] == ["project_id", "parent_requirement"]
+    assert generate["input"]["optional"] == ["input"]
+    assert retry["mutates"] is True
+    assert retry["input"]["required"] == ["project_id", "parent_requirement"]
+    assert history["mutates"] is False
+    assert history["input"]["required"] == ["project_id", "parent_requirement"]
+    assert save["mutates"] is True
+    assert save["input"]["required"] == [
+        "project_id",
+        "parent_requirement",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save["idempotency_required"] is True
+    assert complete["mutates"] is True
+    assert complete["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert complete["idempotency_required"] is True
+    assert reopen["mutates"] is True
+    assert reopen["input"]["required"] == [
+        "project_id",
+        "parent_requirement",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert reopen["idempotency_required"] is True
+    for schema in (generate, retry, save, complete, reopen):
+        assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
+        assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in schema["errors"]
+        assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
+        assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
+        assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
 
 
 def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:

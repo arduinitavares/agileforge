@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -27,6 +28,11 @@ def vision_state_from_complete(is_complete: bool) -> str:
         review_state=OrchestratorState.VISION_REVIEW.value,
         interview_state=OrchestratorState.VISION_INTERVIEW.value,
     )
+
+
+def vision_fingerprint(statement: str) -> str:
+    """Return a stable fingerprint for saved Vision text."""
+    return f"sha256:{hashlib.sha256(statement.encode('utf-8')).hexdigest()}"
 
 
 def ensure_vision_attempts(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -93,13 +99,13 @@ async def generate_vision_draft(
         raise VisionPhaseError(f"Setup required: {setup_blocker}")
 
     state = await load_state()
-    attempts = ensure_vision_attempts(state)
-    has_attempts = len(attempts) > 0
+    has_refinable_draft = isinstance(state.get("vision_components"), dict)
     normalized_user_input = (user_input or "").strip()
-    if has_attempts and not normalized_user_input:
+    if has_refinable_draft and not normalized_user_input:
         raise VisionPhaseError(
             "Feedback is required for Vision refinement attempts",
         )
+    trigger = "manual_refine" if normalized_user_input else "initial_generate"
 
     vision_result = await run_vision_agent(
         state,
@@ -114,7 +120,7 @@ async def generate_vision_draft(
 
     attempt_count = record_vision_attempt(
         state,
-        trigger="manual_refine",
+        trigger=trigger,
         input_context=vision_result.get("input_context") or {},
         output_artifact=vision_result.get("output_artifact") or {},
         is_complete=is_complete,
@@ -133,10 +139,11 @@ async def generate_vision_draft(
         "is_complete": is_complete,
         "vision_run_success": bool(vision_result.get("success")),
         "error": vision_result.get("error"),
-        "trigger": "manual_refine",
+        "trigger": trigger,
         "input_context": vision_result.get("input_context"),
         "output_artifact": vision_result.get("output_artifact"),
         "attempt_count": attempt_count,
+        "model_info": vision_result.get("model_info"),
         **workflow_state.failure_meta(
             vision_result, fallback_summary=vision_result.get("error")
         ),
@@ -205,4 +212,6 @@ async def save_vision_draft(
     return {
         "fsm_state": OrchestratorState.VISION_PERSISTENCE.value,
         "save_result": result,
+        "saved_vision": statement,
+        "vision_fingerprint": vision_fingerprint(statement),
     }

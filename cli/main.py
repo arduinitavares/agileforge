@@ -56,6 +56,15 @@ Examples:
     """--reason "..." --idempotency-key reject-001
   agileforge vision generate --project-id 1 --input "optional guidance"
   agileforge vision save --project-id 1
+  agileforge backlog generate --project-id 1 --input "optional guidance"
+  agileforge backlog save --project-id 1 --attempt-id <attempt_id> """
+    """--expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW """
+    """--idempotency-key save-backlog-001
+  agileforge backlog reconcile --project-id 1 --idempotency-key reconcile-backlog-001
+  agileforge roadmap generate --project-id 1 --input "optional guidance"
+  agileforge roadmap save --project-id 1 --attempt-id <attempt_id> """
+    """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
+    """--idempotency-key save-roadmap-001
   agileforge sprint candidates --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
@@ -217,8 +226,128 @@ class _Application(Protocol):
         """Persist the current Vision draft."""
         ...
 
+    def backlog_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Generate or refine a Backlog draft."""
+        ...
+
+    def backlog_history(self, *, project_id: int) -> JsonObject:
+        """Return Backlog attempt history."""
+        ...
+
+    def backlog_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Persist the current Backlog draft."""
+        ...
+
+    def backlog_reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Repair legacy duplicate active Backlog seed rows."""
+        ...
+
+    def roadmap_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Generate or refine a Roadmap draft."""
+        ...
+
+    def roadmap_history(self, *, project_id: int) -> JsonObject:
+        """Return Roadmap attempt history."""
+        ...
+
+    def roadmap_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Persist the current Roadmap draft."""
+        ...
+
     def story_show(self, *, story_id: int) -> JsonObject:
         """Return story detail projection."""
+        ...
+
+    def story_pending(self, *, project_id: int) -> JsonObject:
+        """Return Story pending roadmap requirements."""
+        ...
+
+    def story_generate(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Generate or refine a Story draft."""
+        ...
+
+    def story_retry(self, *, project_id: int, parent_requirement: str) -> JsonObject:
+        """Retry the latest retryable Story request."""
+        ...
+
+    def story_history(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> JsonObject:
+        """Return Story attempt history."""
+        ...
+
+    def story_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Persist the current Story draft."""
+        ...
+
+    def story_complete(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Complete the Story phase."""
+        ...
+
+    def story_reopen(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Reopen one saved Story requirement before Sprint work exists."""
         ...
 
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
@@ -690,6 +819,73 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     vision_save.add_argument("--project-id", type=int, required=True)
     vision_save.set_defaults(command_handler=_vision_save)
 
+    backlog = subparsers.add_parser("backlog", help="Run Backlog phase commands.")
+    backlog_sub = backlog.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    backlog_generate = backlog_sub.add_parser(
+        "generate",
+        help="Generate or refine a Backlog draft.",
+    )
+    backlog_generate.add_argument("--project-id", type=int, required=True)
+    backlog_generate.add_argument("--input", dest="user_input")
+    backlog_generate.set_defaults(command_handler=_backlog_generate)
+    backlog_history = backlog_sub.add_parser(
+        "history",
+        help="Show Backlog attempt history.",
+    )
+    backlog_history.add_argument("--project-id", type=int, required=True)
+    backlog_history.set_defaults(command_handler=_backlog_history)
+    backlog_save = backlog_sub.add_parser(
+        "save",
+        help="Persist the current complete Backlog draft.",
+    )
+    backlog_save.add_argument("--project-id", type=int, required=True)
+    backlog_save.add_argument("--attempt-id", required=True)
+    backlog_save.add_argument("--expected-artifact-fingerprint", required=True)
+    backlog_save.add_argument("--expected-state", required=True)
+    backlog_save.add_argument("--idempotency-key", required=True)
+    backlog_save.set_defaults(command_handler=_backlog_save)
+    backlog_reconcile = backlog_sub.add_parser(
+        "reconcile",
+        help="Repair legacy duplicate active Backlog seed rows.",
+    )
+    backlog_reconcile.add_argument("--project-id", type=int, required=True)
+    backlog_reconcile.add_argument("--idempotency-key", required=True)
+    backlog_reconcile.set_defaults(command_handler=_backlog_reconcile)
+
+    roadmap = subparsers.add_parser("roadmap", help="Run Roadmap phase commands.")
+    roadmap_sub = roadmap.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    roadmap_generate = roadmap_sub.add_parser(
+        "generate",
+        help="Generate or refine a Roadmap draft.",
+    )
+    roadmap_generate.add_argument("--project-id", type=int, required=True)
+    roadmap_generate.add_argument("--input", dest="user_input")
+    roadmap_generate.set_defaults(command_handler=_roadmap_generate)
+    roadmap_history = roadmap_sub.add_parser(
+        "history",
+        help="Show Roadmap attempt history.",
+    )
+    roadmap_history.add_argument("--project-id", type=int, required=True)
+    roadmap_history.set_defaults(command_handler=_roadmap_history)
+    roadmap_save = roadmap_sub.add_parser(
+        "save",
+        help="Persist the current complete Roadmap draft.",
+    )
+    roadmap_save.add_argument("--project-id", type=int, required=True)
+    roadmap_save.add_argument("--attempt-id", required=True)
+    roadmap_save.add_argument("--expected-artifact-fingerprint", required=True)
+    roadmap_save.add_argument("--expected-state", required=True)
+    roadmap_save.add_argument("--idempotency-key", required=True)
+    roadmap_save.set_defaults(command_handler=_roadmap_save)
+
     story = subparsers.add_parser("story", help="Inspect user stories.")
     story_sub = story.add_subparsers(
         dest="action",
@@ -699,6 +895,58 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_show = story_sub.add_parser("show", help="Show one story.")
     story_show.add_argument("--story-id", type=int, required=True)
     story_show.set_defaults(command_handler=_story_show)
+    story_pending = story_sub.add_parser(
+        "pending",
+        help="List roadmap requirements pending Story coverage.",
+    )
+    story_pending.add_argument("--project-id", type=int, required=True)
+    story_pending.set_defaults(command_handler=_story_pending)
+    story_generate = story_sub.add_parser(
+        "generate",
+        help="Generate or refine Story drafts.",
+    )
+    story_generate.add_argument("--project-id", type=int, required=True)
+    story_generate.add_argument("--parent-requirement", required=True)
+    story_generate.add_argument("--input", dest="user_input")
+    story_generate.set_defaults(command_handler=_story_generate)
+    story_retry = story_sub.add_parser(
+        "retry",
+        help="Retry the latest retryable Story request.",
+    )
+    story_retry.add_argument("--project-id", type=int, required=True)
+    story_retry.add_argument("--parent-requirement", required=True)
+    story_retry.set_defaults(command_handler=_story_retry)
+    story_history = story_sub.add_parser(
+        "history",
+        help="Show Story attempt history.",
+    )
+    story_history.add_argument("--project-id", type=int, required=True)
+    story_history.add_argument("--parent-requirement", required=True)
+    story_history.set_defaults(command_handler=_story_history)
+    story_save = story_sub.add_parser("save", help="Persist a reviewed Story draft.")
+    story_save.add_argument("--project-id", type=int, required=True)
+    story_save.add_argument("--parent-requirement", required=True)
+    story_save.add_argument("--attempt-id", required=True)
+    story_save.add_argument("--expected-artifact-fingerprint", required=True)
+    story_save.add_argument("--expected-state", required=True)
+    story_save.add_argument("--idempotency-key", required=True)
+    story_save.set_defaults(command_handler=_story_save)
+    story_complete = story_sub.add_parser("complete", help="Complete the Story phase.")
+    story_complete.add_argument("--project-id", type=int, required=True)
+    story_complete.add_argument("--expected-state", required=True)
+    story_complete.add_argument("--idempotency-key", required=True)
+    story_complete.set_defaults(command_handler=_story_complete)
+    story_reopen = story_sub.add_parser(
+        "reopen",
+        help=(
+            "Reopen a saved Story requirement for correction before Sprint work exists."
+        ),
+    )
+    story_reopen.add_argument("--project-id", type=int, required=True)
+    story_reopen.add_argument("--parent-requirement", required=True)
+    story_reopen.add_argument("--expected-state", required=True)
+    story_reopen.add_argument("--idempotency-key", required=True)
+    story_reopen.set_defaults(command_handler=_story_reopen)
 
     sprint = subparsers.add_parser("sprint", help="Inspect sprint planning inputs.")
     sprint_sub = sprint.add_subparsers(
@@ -1547,9 +1795,174 @@ def _vision_save(
     )
 
 
+def _backlog_generate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog generate to the application facade."""
+    return "agileforge backlog generate", application.backlog_generate(
+        project_id=args.project_id,
+        user_input=args.user_input,
+    )
+
+
+def _backlog_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog history to the application facade."""
+    return "agileforge backlog history", application.backlog_history(
+        project_id=args.project_id,
+    )
+
+
+def _backlog_save(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog save to the application facade."""
+    return "agileforge backlog save", application.backlog_save(
+        project_id=args.project_id,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _backlog_reconcile(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog reconcile to the application facade."""
+    return "agileforge backlog reconcile", application.backlog_reconcile(
+        project_id=args.project_id,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _roadmap_generate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Roadmap generate to the application facade."""
+    return "agileforge roadmap generate", application.roadmap_generate(
+        project_id=args.project_id,
+        user_input=args.user_input,
+    )
+
+
+def _roadmap_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Roadmap history to the application facade."""
+    return "agileforge roadmap history", application.roadmap_history(
+        project_id=args.project_id,
+    )
+
+
+def _roadmap_save(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Roadmap save to the application facade."""
+    return "agileforge roadmap save", application.roadmap_save(
+        project_id=args.project_id,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
 def _story_show(args: argparse.Namespace, application: _Application) -> CommandResult:
     """Route story show to the application facade."""
     return "agileforge story show", application.story_show(story_id=args.story_id)
+
+
+def _story_pending(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story pending to the application facade."""
+    return "agileforge story pending", application.story_pending(
+        project_id=args.project_id,
+    )
+
+
+def _story_generate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story generation to the application facade."""
+    return "agileforge story generate", application.story_generate(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+        user_input=args.user_input,
+    )
+
+
+def _story_retry(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story retry to the application facade."""
+    return "agileforge story retry", application.story_retry(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+    )
+
+
+def _story_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story history to the application facade."""
+    return "agileforge story history", application.story_history(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+    )
+
+
+def _story_save(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story save to the application facade."""
+    return "agileforge story save", application.story_save(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_complete(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story complete to the application facade."""
+    return "agileforge story complete", application.story_complete(
+        project_id=args.project_id,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_reopen(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story reopen to the application facade."""
+    return "agileforge story reopen", application.story_reopen(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
 
 
 def _sprint_candidates(

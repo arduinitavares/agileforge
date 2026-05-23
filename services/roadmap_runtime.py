@@ -80,6 +80,13 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
     return normalized
 
 
+def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
+    questions = artifact.get("clarifying_questions")
+    return isinstance(questions, list) and any(
+        isinstance(question, str) and bool(question.strip()) for question in questions
+    )
+
+
 def build_roadmap_input_context(
     state: dict[str, Any],
     *,
@@ -253,6 +260,8 @@ async def run_roadmap_agent_from_state(
         )
 
     output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
+    if _has_clarifying_questions(output_artifact):
+        output_artifact["is_complete"] = False
     return {
         "success": True,
         "input_context": input_context,

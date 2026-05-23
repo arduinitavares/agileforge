@@ -80,6 +80,16 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
     return normalized
 
 
+def _vision_model_info() -> dict[str, Any]:
+    """Return the configured Vision model metadata."""
+    model_info = {
+        **get_agent_model_info(vision_agent),
+        "app_name": VISION_RUNNER_IDENTITY.app_name,
+        "user_id": VISION_RUNNER_IDENTITY.user_id,
+    }
+    return {key: value for key, value in model_info.items() if value is not None}
+
+
 def build_vision_input_context(
     state: dict[str, Any],
     *,
@@ -113,6 +123,7 @@ def _failure(
     details: _FailureDetails,
 ) -> dict[str, Any]:
     message: str = details.message
+    model_info = _vision_model_info()
     artifact_result: FailureArtifactResult = write_failure_artifact(
         phase="vision",
         project_id=project_id,
@@ -120,11 +131,7 @@ def _failure(
         failure_summary=message,
         raw_output=details.raw_text,
         context={"input_context": input_context},
-        model_info={
-            **get_agent_model_info(vision_agent),
-            "app_name": VISION_RUNNER_IDENTITY.app_name,
-            "user_id": VISION_RUNNER_IDENTITY.user_id,
-        },
+        model_info=model_info,
         validation_errors=details.validation_errors,
         exception=details.exception,
     )
@@ -154,6 +161,7 @@ def _failure(
         "failure_summary": metadata["failure_summary"],
         "raw_output_preview": metadata["raw_output_preview"],
         "has_full_artifact": metadata["has_full_artifact"],
+        "model_info": model_info,
     }
 
     return {
@@ -167,6 +175,7 @@ def _failure(
         "failure_summary": metadata["failure_summary"],
         "raw_output_preview": metadata["raw_output_preview"],
         "has_full_artifact": metadata["has_full_artifact"],
+        "model_info": model_info,
     }
 
 
@@ -258,4 +267,5 @@ async def run_vision_agent_from_state(
         "failure_summary": None,
         "raw_output_preview": None,
         "has_full_artifact": False,
+        "model_info": _vision_model_info(),
     }

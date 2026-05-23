@@ -18,14 +18,18 @@ The installed CLI supports:
 - Project setup retry for interrupted creation/setup recovery.
 - Workflow and status inspection.
 - Spec Authority status, review, accept, reject, and invariant inspection.
-- Story and sprint read projections.
+- Vision generate, history, and save.
+- Backlog generate, history, and save.
+- Roadmap generate, history, and save.
+- Story pending, generate, retry, history, save, complete, and read projections.
+- Sprint planning read projections.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
 
 The installed CLI does not yet support:
 
-- Generating or saving vision, backlog, roadmap, story, or sprint drafts.
+- Generating or saving sprint drafts.
 - Starting, logging, closing, deleting, or resetting workflow artifacts from the
   CLI.
 
@@ -91,6 +95,12 @@ command -v agileforge
 agileforge --help
 ```
 
+On the standard local development machine, `command -v agileforge` should return
+`/Users/aaat/.local/bin/agileforge`, and that shim should call the central repo.
+Agents should still invoke `agileforge ...` directly. Do not introduce shell
+aliases such as `$AF` into task instructions unless the user explicitly asks for
+one.
+
 Confirm caller-relative file behavior from another repository:
 
 ```sh
@@ -120,6 +130,429 @@ agileforge schema check
 `doctor` checks runtime readiness. `schema check` verifies storage readiness for
 the CLI contract. If either command returns `ok: false`, agents should stop and
 surface the structured error.
+
+## Project Setup Through Story
+
+This is the current canonical CLI flow for starting a project from an
+`agileforge.spec.v1` JSON spec, reviewing and accepting compiled authority, and
+running Vision, Backlog, Roadmap, and Story. Run these commands from the caller
+repository, not from the AgileForge repo, so relative paths such as
+`specs/spec.json` resolve correctly.
+
+Validate the structured spec and rendered Markdown pair when both are present:
+
+```sh
+cd /path/to/caller-project
+
+agileforge spec profile validate \
+  --spec-file specs/spec.json \
+  --render-md specs/spec.md
+```
+
+Create the AgileForge project:
+
+```sh
+agileforge project create \
+  --name "Project Name" \
+  --spec-file specs/spec.json \
+  --idempotency-key "create-project-$(date +%Y%m%d%H%M%S)" \
+  --changed-by codex > project-create.json
+```
+
+Read the project id from the JSON envelope:
+
+```sh
+PROJECT_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("project-create.json").read_text())
+if not payload.get("ok"):
+    raise SystemExit(json.dumps(payload.get("errors", payload), indent=2))
+print(payload["data"]["project_id"])
+PY
+)"
+```
+
+Ask AgileForge for the next installed command:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+For a newly created project, the next step should be authority review. Produce a
+full review packet:
+
+```sh
+agileforge authority review \
+  --project-id "$PROJECT_ID" \
+  --include-spec full > authority-review.json
+```
+
+Agents must inspect `authority-review.json` before acceptance. The review is not
+a shell command. Do not type review prose into the terminal. The agent should
+read the JSON packet and verify accepted spec items, invariants, source-map
+evidence, gaps, assumptions, and rejected features. If the compiled authority
+misses, distorts, or weakens accepted normative requirements, reject it.
+
+Accept only after review passes:
+
+```sh
+agileforge authority accept \
+  --project-id "$PROJECT_ID" \
+  --changed-by codex > authority-accept.json
+```
+
+Confirm authority is current and ask for the next step:
+
+```sh
+agileforge authority status --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+After authority acceptance, the next installed command should be Vision
+generation:
+
+```sh
+agileforge vision generate --project-id "$PROJECT_ID" > vision-generate.json
+```
+
+If the Vision command returns `ok: false`, stop and report the first error code,
+message, and details. Provider/runtime failures are hard CLI failures and should
+not be hidden.
+
+If the Vision command returns `ok: true` with `data.is_complete: false`, inspect
+`data.output_artifact.clarifying_questions`. Answer the actual questions through
+`--input`:
+
+```sh
+agileforge vision generate \
+  --project-id "$PROJECT_ID" \
+  --input "Answer the questions here." > vision-refine.json
+```
+
+Use `--input` only for real clarification answers or explicit user feedback. Do
+not add generic prompting text to make the command run.
+
+If the Vision command returns `ok: true` with `data.is_complete: true`, save it:
+
+```sh
+agileforge vision save --project-id "$PROJECT_ID" > vision-save.json
+```
+
+The save response includes `data.saved_vision` and `data.vision_fingerprint` so
+agents can confirm exactly what became canonical.
+
+Then ask for the next installed command again:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+Use history only for inspection/debugging:
+
+```sh
+agileforge vision history --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+After Vision save, the next installed command should be Backlog generation:
+
+```sh
+agileforge backlog generate --project-id "$PROJECT_ID" > backlog-generate.json
+```
+
+If the Backlog command returns `ok: false`, stop and report the first error code,
+message, and details. Backlog runtime and persistence failures are hard CLI
+failures and should not be hidden.
+
+If the Backlog command returns `ok: true` with `data.is_complete: false`, inspect
+`data.output_artifact.clarifying_questions`. Answer the actual questions through
+`--input`:
+
+```sh
+agileforge backlog generate \
+  --project-id "$PROJECT_ID" \
+  --input "Answer the questions here." > backlog-refine.json
+```
+
+Use `--input` only for real clarification answers or explicit user feedback. Do
+not add generic prompting text to make the command run.
+
+If the Backlog command returns `ok: true` with `data.is_complete: true`, save
+that exact reviewed draft. Use the `attempt_id` and `artifact_fingerprint` from
+the successful generate/refine response:
+
+```sh
+ATTEMPT_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("backlog-generate.json").read_text())
+print(payload["data"]["attempt_id"])
+PY
+)"
+
+ARTIFACT_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("backlog-generate.json").read_text())
+print(payload["data"]["artifact_fingerprint"])
+PY
+)"
+
+agileforge backlog save \
+  --project-id "$PROJECT_ID" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state BACKLOG_REVIEW \
+  --idempotency-key "save-backlog-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > backlog-save.json
+```
+
+If the saved draft came from a refinement file such as `backlog-refine.json`,
+read `attempt_id` and `artifact_fingerprint` from that latest file instead.
+Never save an older attempt after a newer refinement.
+
+Backlog save enforces one canonical active backlog. A new reviewed save
+supersedes replaceable active `backlog_seed` rows before inserting the new
+draft. If any active backlog row has already progressed downstream, save fails
+closed with `MUTATION_FAILED`.
+
+For projects affected by older CLI versions that appended multiple active
+Backlog seed sets, use the supported reconciliation command. It keeps the latest
+saved active seed cohort and supersedes older replaceable seed rows:
+
+```sh
+agileforge backlog reconcile \
+  --project-id "$PROJECT_ID" \
+  --idempotency-key "reconcile-backlog-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > backlog-reconcile.json
+```
+
+If reconciliation returns `ok: false`, stop. It means replacement is unsafe,
+usually because an active backlog row was refined, linked to sprint planning, or
+moved out of `To Do`.
+
+Then ask for the next installed command again:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+After Backlog save, the next installed command should be Roadmap generation:
+
+```sh
+agileforge roadmap generate --project-id "$PROJECT_ID" > roadmap-generate.json
+```
+
+If the Roadmap command returns `ok: false`, stop and report the first error
+code, message, and details. Roadmap runtime and persistence failures are hard
+CLI failures and should not be hidden.
+
+If the Roadmap command returns `ok: true` with `data.is_complete: false`,
+inspect `data.output_artifact.clarifying_questions`. Answer the actual
+questions through `--input`:
+
+```sh
+agileforge roadmap generate \
+  --project-id "$PROJECT_ID" \
+  --input "Answer the questions here." > roadmap-refine.json
+```
+
+If the Roadmap command returns `ok: true` with `data.is_complete: true`, save
+that exact reviewed draft. Use the `attempt_id` and `artifact_fingerprint` from
+the latest successful generate/refine response:
+
+```sh
+ATTEMPT_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("roadmap-generate.json").read_text())
+print(payload["data"]["attempt_id"])
+PY
+)"
+
+ARTIFACT_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("roadmap-generate.json").read_text())
+print(payload["data"]["artifact_fingerprint"])
+PY
+)"
+
+agileforge roadmap save \
+  --project-id "$PROJECT_ID" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state ROADMAP_REVIEW \
+  --idempotency-key "save-roadmap-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > roadmap-save.json
+```
+
+Roadmap save enforces exact coverage of the canonical active Backlog. Every
+active backlog item must appear exactly once in the saved roadmap releases. If
+an item is missing, unknown, or duplicated, save fails closed.
+
+Then ask for the next installed command again:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+Use history only for inspection/debugging:
+
+```sh
+agileforge backlog history --project-id "$PROJECT_ID" | python -m json.tool
+agileforge roadmap history --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+After Roadmap save, the next installed command should be Story pending:
+
+```sh
+agileforge story pending --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+Story generation is per Roadmap requirement. Pick an exact pending requirement
+from `story pending`, then generate:
+
+```sh
+agileforge story generate \
+  --project-id "$PROJECT_ID" \
+  --parent-requirement "Requirement title from story pending" \
+  > story-generate.json
+```
+
+Story generate, history, and save payloads are flattened at the CLI envelope
+`data` level. Do not read a second nested `data` object under that envelope.
+
+Generate:
+
+- attempt id: `data.current_draft.attempt_id`
+- fingerprint: `data.current_draft.artifact_fingerprint`
+- draft artifact: `data.output_artifact`
+- save guard: `data.save`
+
+Save:
+
+- save result: `data.save_result`
+- saved attempt: `data.attempt_id`
+- saved fingerprint: `data.artifact_fingerprint`
+
+If the Story command returns `ok: false`, stop and report the first error code,
+message, and details. Story runtime and persistence failures are hard CLI
+failures and should not be hidden.
+
+If the Story command returns `ok: true` with a retryable runtime failure in
+history, retry the same frozen request without inventing feedback:
+
+```sh
+agileforge story retry \
+  --project-id "$PROJECT_ID" \
+  --parent-requirement "Requirement title from story pending" \
+  > story-retry.json
+```
+
+If the Story command returns `ok: true` with `data.output_artifact.is_complete:
+false`, inspect `data.output_artifact.clarifying_questions`. Answer the actual
+questions through `--input`:
+
+```sh
+agileforge story generate \
+  --project-id "$PROJECT_ID" \
+  --parent-requirement "Requirement title from story pending" \
+  --input "Answer the questions here." \
+  > story-refine.json
+```
+
+If the Story command returns a complete reviewed draft, save that exact attempt:
+
+```sh
+ATTEMPT_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("story-generate.json").read_text())
+print(payload["data"]["save"]["attempt_id"])
+PY
+)"
+
+ARTIFACT_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("story-generate.json").read_text())
+print(payload["data"]["save"]["artifact_fingerprint"])
+PY
+)"
+
+agileforge story save \
+  --project-id "$PROJECT_ID" \
+  --parent-requirement "Requirement title from story pending" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state STORY_REVIEW \
+  --idempotency-key "save-story-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > story-save.json
+```
+
+If the saved draft came from `story-refine.json` or `story-retry.json`, read the
+attempt id and artifact fingerprint from that latest reviewed file instead.
+Never save an older attempt after a newer refinement.
+
+Repeat `story pending`, `story generate`, review, and guarded `story save` until
+every Roadmap requirement is saved or explicitly merged by Story resolution
+state. Then complete the Story phase:
+
+```sh
+agileforge story complete \
+  --project-id "$PROJECT_ID" \
+  --expected-state STORY_PERSISTENCE \
+  --idempotency-key "complete-story-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > story-complete.json
+```
+
+Story complete fails closed unless all Roadmap requirements are covered. On
+success, it moves the workflow to Sprint setup:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+### Correcting a Saved Story Before Sprint
+
+Use this only when Story is complete but Sprint work has not started.
+
+```sh
+agileforge story reopen \
+  --project-id 2 \
+  --parent-requirement "Live Pre-Lock Recommendation Workflow with Risk-Audited Artifact" \
+  --expected-state SPRINT_SETUP \
+  --idempotency-key reopen-story-2-live-budget-001
+```
+
+Then regenerate with explicit feedback:
+
+```sh
+agileforge story generate \
+  --project-id 2 \
+  --parent-requirement "Live Pre-Lock Recommendation Workflow with Risk-Audited Artifact" \
+  --input "Correct the budget contract: accepted spec REQ.budget-bound says missing available budget must require an explicit operator-provided budget. Do not preserve a default budget fallback for live recommendation." \
+  > story-generate-corrected-live-budget.json
+```
+
+Review `data.output_artifact`, then save with the returned
+`data.save.attempt_id` and `data.save.artifact_fingerprint`.
 
 ## JSON Envelope Contract
 
@@ -307,13 +740,64 @@ Use `authority review` before any decision. The normal accept path uses the
 reviewed pending authority for the project and does not require agents to pass
 review tokens or idempotency keys in the command text.
 
+### Vision Commands
+
+```sh
+agileforge vision generate --project-id 1
+agileforge vision generate --project-id 1 --input "answers or review feedback"
+agileforge vision history --project-id 1
+agileforge vision save --project-id 1
+```
+
+Use `vision generate` without `--input` for the initial Vision run. Use
+`--input` only after a prior draft asks clarifying questions or the user gives
+explicit refinement feedback. `vision save` is valid only after the current
+Vision draft is complete.
+
+### Backlog Commands
+
+```sh
+agileforge backlog generate --project-id 1
+agileforge backlog generate --project-id 1 --input "answers or review feedback"
+agileforge backlog history --project-id 1
+agileforge backlog save --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW --idempotency-key save-backlog-001
+agileforge backlog reconcile --project-id 1 --idempotency-key reconcile-backlog-001
+```
+
+Use `backlog generate` without `--input` for the initial Backlog run. Save only
+the reviewed current draft, using its returned attempt id and artifact
+fingerprint.
+
+### Roadmap Commands
+
+```sh
+agileforge roadmap generate --project-id 1
+agileforge roadmap generate --project-id 1 --input "answers or review feedback"
+agileforge roadmap history --project-id 1
+agileforge roadmap save --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW --idempotency-key save-roadmap-001
+```
+
+Use `roadmap generate` after Backlog persistence. Save only the reviewed current
+draft. Roadmap save is guarded and must exactly cover the active backlog.
+
 ### Story Commands
 
 ```sh
 agileforge story show --story-id 42
+agileforge story pending --project-id 1
+agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement"
+agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement" --input "answers or review feedback"
+agileforge story retry --project-id 1 --parent-requirement "Roadmap requirement"
+agileforge story history --project-id 1 --parent-requirement "Roadmap requirement"
+agileforge story save --project-id 1 --parent-requirement "Roadmap requirement" --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state STORY_REVIEW --idempotency-key save-story-001
+agileforge story complete --project-id 1 --expected-state STORY_PERSISTENCE --idempotency-key complete-story-001
+agileforge story reopen --project-id 1 --parent-requirement "Roadmap requirement" --expected-state SPRINT_SETUP --idempotency-key reopen-story-001
 ```
 
-Read-only.
+`story show`, `story pending`, and `story history` are read-only. `story
+generate`, `story retry`, `story save`, `story complete`, and `story reopen`
+mutate workflow state. Save, complete, and reopen are guarded and require
+explicit idempotency keys.
 
 ### Sprint Commands
 
@@ -364,6 +848,11 @@ Installed domain mutations:
 
 - `agileforge project create`
 - `agileforge project setup retry`
+- `agileforge backlog save`
+- `agileforge backlog reconcile`
+- `agileforge roadmap save`
+- `agileforge story save`
+- `agileforge story complete`
 
 For `project create` and `project setup retry`, the parser enforces:
 
@@ -1127,18 +1616,13 @@ The skill must stop and surface state when:
 - Do not use browser automation as the agent interface.
 - Do not edit SQLite directly.
 - Do not treat generated or compiled authority as accepted.
-- Do not call roadmap commands that are not installed.
 - Do not mutate after a stale guard without refreshing state.
 - Do not retry with a changed request and the same idempotency key.
 
-## Roadmap Commands Not Yet Installed
+## Future Commands Not Yet Installed
 
 The broader CLI roadmap includes commands such as:
 
-- `agileforge vision generate`
-- `agileforge backlog generate`
-- `agileforge roadmap generate`
-- `agileforge story generate`
 - `agileforge sprint generate`
 - `agileforge sprint start`
 - `agileforge task log`
@@ -1147,4 +1631,4 @@ The broader CLI roadmap includes commands such as:
 
 These are not part of the current installed command set unless they appear in
 `agileforge capabilities`. Agent skills must check capabilities at runtime and
-must not assume roadmap commands exist.
+must not assume future commands exist.

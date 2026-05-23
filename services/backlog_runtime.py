@@ -248,6 +248,8 @@ async def run_backlog_agent_from_state(
         )
 
     output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
+    if _has_clarifying_questions(output_artifact):
+        output_artifact["is_complete"] = False
     return {
         "success": True,
         "input_context": input_context,
@@ -260,3 +262,11 @@ async def run_backlog_agent_from_state(
         "raw_output_preview": None,
         "has_full_artifact": False,
     }
+
+
+def _has_clarifying_questions(output_artifact: dict[str, Any]) -> bool:
+    """Return whether output still contains blocking clarification questions."""
+    questions = output_artifact.get("clarifying_questions")
+    return isinstance(questions, list) and any(
+        isinstance(question, str) and bool(question.strip()) for question in questions
+    )

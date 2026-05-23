@@ -28,6 +28,7 @@ class _FakeApplication:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.results: dict[str, JsonObject] = {}
 
     def __bool__(self) -> bool:
         """Return false to catch truthiness-based dependency selection."""
@@ -211,12 +212,317 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def backlog_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a backlog generate payload."""
+        self.calls.append(
+            (
+                "backlog_generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_history(self, *, project_id: int) -> JsonObject:
+        """Return a backlog history payload."""
+        self.calls.append(("backlog_history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a backlog save payload."""
+        self.calls.append(
+            (
+                "backlog_save",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a backlog reconcile payload."""
+        self.calls.append(
+            (
+                "backlog_reconcile",
+                {
+                    "project_id": project_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "active_after": 2},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def roadmap_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a roadmap generate payload."""
+        self.calls.append(
+            (
+                "roadmap_generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def roadmap_history(self, *, project_id: int) -> JsonObject:
+        """Return a roadmap history payload."""
+        self.calls.append(("roadmap_history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def roadmap_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a roadmap save payload."""
+        self.calls.append(
+            (
+                "roadmap_save",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "ROADMAP_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def story_show(self, *, story_id: int) -> JsonObject:
         """Return a story detail payload."""
         self.calls.append(("story_show", {"story_id": story_id}))
         return {
             "ok": True,
             "data": {"story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_pending(self, *, project_id: int) -> JsonObject:
+        """Return a story pending payload."""
+        self.calls.append(("story_pending", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "pending": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_generate(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a story generate payload."""
+        self.calls.append(
+            (
+                "story_generate",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "user_input": user_input,
+                },
+            )
+        )
+        return self.results.get("story_generate") or {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_retry(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> JsonObject:
+        """Return a story retry payload."""
+        self.calls.append(
+            (
+                "story_retry",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "retry_started": True},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_history(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> JsonObject:
+        """Return a story history payload."""
+        self.calls.append(
+            (
+                "story_history",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story save payload."""
+        self.calls.append(
+            (
+                "story_save",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return self.results.get("story_save") or {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_complete(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story complete payload."""
+        self.calls.append(
+            (
+                "story_complete",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_SETUP"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_reopen(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story reopen payload."""
+        self.calls.append(
+            (
+                "story_reopen",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_INTERVIEW"},
             "warnings": [],
             "errors": [],
         }
@@ -990,6 +1296,474 @@ def test_cli_routes_vision_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_call", "expected_command"),
+    [
+        (
+            [
+                "backlog",
+                "generate",
+                "--project-id",
+                str(PROJECT_ID),
+                "--input",
+                "split MVP and future bets",
+            ],
+            (
+                "backlog_generate",
+                {"project_id": PROJECT_ID, "user_input": "split MVP and future bets"},
+            ),
+            "agileforge backlog generate",
+        ),
+        (
+            ["backlog", "history", "--project-id", str(PROJECT_ID)],
+            ("backlog_history", {"project_id": PROJECT_ID}),
+            "agileforge backlog history",
+        ),
+        (
+            [
+                "backlog",
+                "save",
+                "--project-id",
+                str(PROJECT_ID),
+                "--attempt-id",
+                "backlog-attempt-1",
+                "--expected-artifact-fingerprint",
+                "sha256:" + "a" * 64,
+                "--expected-state",
+                "BACKLOG_REVIEW",
+                "--idempotency-key",
+                "save-backlog-1",
+            ],
+            (
+                "backlog_save",
+                {
+                    "project_id": PROJECT_ID,
+                    "attempt_id": "backlog-attempt-1",
+                    "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                    "expected_state": "BACKLOG_REVIEW",
+                    "idempotency_key": "save-backlog-1",
+                },
+            ),
+            "agileforge backlog save",
+        ),
+        (
+            [
+                "backlog",
+                "reconcile",
+                "--project-id",
+                str(PROJECT_ID),
+                "--idempotency-key",
+                "reconcile-backlog-1",
+            ],
+            (
+                "backlog_reconcile",
+                {
+                    "project_id": PROJECT_ID,
+                    "idempotency_key": "reconcile-backlog-1",
+                },
+            ),
+            "agileforge backlog reconcile",
+        ),
+    ],
+)
+def test_cli_routes_backlog_commands(
+    argv: list[str],
+    expected_call: tuple[str, dict[str, object]],
+    expected_command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify Backlog phase commands route through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(argv, application=app)
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == expected_command
+    assert app.calls == [expected_call]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_call", "expected_command"),
+    [
+        (
+            [
+                "roadmap",
+                "generate",
+                "--project-id",
+                str(PROJECT_ID),
+                "--input",
+                "split foundation and decision UX",
+            ],
+            (
+                "roadmap_generate",
+                {
+                    "project_id": PROJECT_ID,
+                    "user_input": "split foundation and decision UX",
+                },
+            ),
+            "agileforge roadmap generate",
+        ),
+        (
+            ["roadmap", "history", "--project-id", str(PROJECT_ID)],
+            ("roadmap_history", {"project_id": PROJECT_ID}),
+            "agileforge roadmap history",
+        ),
+        (
+            [
+                "roadmap",
+                "save",
+                "--project-id",
+                str(PROJECT_ID),
+                "--attempt-id",
+                "roadmap-attempt-1",
+                "--expected-artifact-fingerprint",
+                "sha256:" + "a" * 64,
+                "--expected-state",
+                "ROADMAP_REVIEW",
+                "--idempotency-key",
+                "save-roadmap-1",
+            ],
+            (
+                "roadmap_save",
+                {
+                    "project_id": PROJECT_ID,
+                    "attempt_id": "roadmap-attempt-1",
+                    "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                    "expected_state": "ROADMAP_REVIEW",
+                    "idempotency_key": "save-roadmap-1",
+                },
+            ),
+            "agileforge roadmap save",
+        ),
+    ],
+)
+def test_cli_routes_roadmap_commands(
+    argv: list[str],
+    expected_call: tuple[str, dict[str, object]],
+    expected_command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify Roadmap phase commands route through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(argv, application=app)
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == expected_command
+    assert app.calls == [expected_call]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_call", "expected_command"),
+    [
+        (
+            ["story", "pending", "--project-id", str(PROJECT_ID)],
+            ("story_pending", {"project_id": PROJECT_ID}),
+            "agileforge story pending",
+        ),
+        (
+            [
+                "story",
+                "generate",
+                "--project-id",
+                str(PROJECT_ID),
+                "--parent-requirement",
+                "REQ.checkout",
+                "--input",
+                "focus payment errors",
+            ],
+            (
+                "story_generate",
+                {
+                    "project_id": PROJECT_ID,
+                    "parent_requirement": "REQ.checkout",
+                    "user_input": "focus payment errors",
+                },
+            ),
+            "agileforge story generate",
+        ),
+        (
+            [
+                "story",
+                "retry",
+                "--project-id",
+                str(PROJECT_ID),
+                "--parent-requirement",
+                "REQ.checkout",
+            ],
+            (
+                "story_retry",
+                {
+                    "project_id": PROJECT_ID,
+                    "parent_requirement": "REQ.checkout",
+                },
+            ),
+            "agileforge story retry",
+        ),
+        (
+            [
+                "story",
+                "history",
+                "--project-id",
+                str(PROJECT_ID),
+                "--parent-requirement",
+                "REQ.checkout",
+            ],
+            (
+                "story_history",
+                {
+                    "project_id": PROJECT_ID,
+                    "parent_requirement": "REQ.checkout",
+                },
+            ),
+            "agileforge story history",
+        ),
+        (
+            [
+                "story",
+                "save",
+                "--project-id",
+                str(PROJECT_ID),
+                "--parent-requirement",
+                "REQ.checkout",
+                "--attempt-id",
+                "story-attempt-1",
+                "--expected-artifact-fingerprint",
+                "sha256:" + "a" * 64,
+                "--expected-state",
+                "STORY_REVIEW",
+                "--idempotency-key",
+                "save-story-1",
+            ],
+            (
+                "story_save",
+                {
+                    "project_id": PROJECT_ID,
+                    "parent_requirement": "REQ.checkout",
+                    "attempt_id": "story-attempt-1",
+                    "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                    "expected_state": "STORY_REVIEW",
+                    "idempotency_key": "save-story-1",
+                },
+            ),
+            "agileforge story save",
+        ),
+        (
+            [
+                "story",
+                "complete",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "STORY_PERSISTENCE",
+                "--idempotency-key",
+                "complete-story-1",
+            ],
+            (
+                "story_complete",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "STORY_PERSISTENCE",
+                    "idempotency_key": "complete-story-1",
+                },
+            ),
+            "agileforge story complete",
+        ),
+        (
+            [
+                "story",
+                "reopen",
+                "--project-id",
+                str(PROJECT_ID),
+                "--parent-requirement",
+                "REQ.checkout",
+                "--expected-state",
+                "SPRINT_SETUP",
+                "--idempotency-key",
+                "reopen-story-1",
+            ],
+            (
+                "story_reopen",
+                {
+                    "project_id": PROJECT_ID,
+                    "parent_requirement": "REQ.checkout",
+                    "expected_state": "SPRINT_SETUP",
+                    "idempotency_key": "reopen-story-1",
+                },
+            ),
+            "agileforge story reopen",
+        ),
+    ],
+)
+def test_cli_routes_story_phase_commands(
+    argv: list[str],
+    expected_call: tuple[str, dict[str, object]],
+    expected_command: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify Story phase commands route through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(argv, application=app)
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == expected_command
+    assert app.calls == [expected_call]
+
+
+def test_story_reopen_cli_routes_guard_fields() -> None:
+    """Story reopen routes guarded fields to the application facade."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "story",
+            "reopen",
+            "--project-id",
+            "7",
+            "--parent-requirement",
+            "Requirement A",
+            "--expected-state",
+            "SPRINT_SETUP",
+            "--idempotency-key",
+            "reopen-story-7-a",
+        ],
+        application=app,
+    )
+
+    assert exit_code == 0
+    assert app.calls[-1] == (
+        "story_reopen",
+        {
+            "project_id": 7,
+            "parent_requirement": "Requirement A",
+            "expected_state": "SPRINT_SETUP",
+            "idempotency_key": "reopen-story-7-a",
+        },
+    )
+
+
+def test_story_generate_cli_flattens_phase_data(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story generate CLI prints flattened phase service data."""
+    app = _FakeApplication()
+    app.results["story_generate"] = {
+        "ok": True,
+        "data": {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": "Requirement A",
+            "output_artifact": {"parent_requirement": "Requirement A"},
+            "current_draft": {"attempt_id": "attempt-1"},
+            "save": {"available": True},
+            "retry": {"available": False},
+            "resolution": {"available": False},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+    exit_code = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            "7",
+            "--parent-requirement",
+            "Requirement A",
+        ],
+        application=app,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["output_artifact"]["parent_requirement"] == "Requirement A"
+    assert "data" not in payload["data"]
+
+
+def test_story_save_cli_flattens_save_result(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story save CLI prints flattened save result."""
+    app = _FakeApplication()
+    app.results["story_save"] = {
+        "ok": True,
+        "data": {
+            "parent_requirement": "Requirement A",
+            "attempt_id": "attempt-1",
+            "artifact_fingerprint": "sha256:abc",
+            "fsm_state": "STORY_PERSISTENCE",
+            "save_result": {"success": True, "saved_count": 1},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+    exit_code = main(
+        [
+            "story",
+            "save",
+            "--project-id",
+            "7",
+            "--parent-requirement",
+            "Requirement A",
+            "--attempt-id",
+            "attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:abc",
+            "--expected-state",
+            "STORY_REVIEW",
+            "--idempotency-key",
+            "story-save-7-a",
+        ],
+        application=app,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["save_result"]["saved_count"] == 1
+    assert "data" not in payload["data"]
+
+
+def test_cli_requires_backlog_save_guards(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Backlog save must be explicitly tied to a reviewed draft attempt."""
+    app = _FakeApplication()
+
+    rc = main(
+        ["backlog", "save", "--project-id", str(PROJECT_ID)],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+def test_cli_requires_roadmap_save_guards(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Roadmap save must be explicitly tied to a reviewed draft attempt."""
+    app = _FakeApplication()
+
+    rc = main(
+        ["roadmap", "save", "--project-id", str(PROJECT_ID)],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
 
 
 @pytest.mark.parametrize(

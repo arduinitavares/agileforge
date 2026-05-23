@@ -329,12 +329,21 @@ def test_backlog_save_succeeds_when_complete(
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_vision_persisted_project(repo, workflow)
 
-    client.post(
+    generate_response = client.post(
         f"/api/projects/{project_id}/backlog/generate",
         json={"user_input": "complete this backlog"},
     )
+    draft = generate_response.json()["data"]
 
-    response = client.post(f"/api/projects/{project_id}/backlog/save")
+    response = client.post(
+        f"/api/projects/{project_id}/backlog/save",
+        json={
+            "attempt_id": draft["attempt_id"],
+            "expected_artifact_fingerprint": draft["artifact_fingerprint"],
+            "expected_state": "BACKLOG_REVIEW",
+            "idempotency_key": "save-backlog-api-1",
+        },
+    )
     assert response.status_code == HTTP_OK
 
     payload = response.json()
@@ -353,7 +362,28 @@ def test_backlog_save_rejects_incomplete_assessment(
     workflow.states[str(project_id)]["product_backlog_assessment"] = {
         "backlog_items": [{"title": "Seed backlog item"}],
         "is_complete": False,
+        "attempt_id": "backlog-attempt-1",
+        "artifact_fingerprint": "sha256:test",
     }
+    workflow.states[str(project_id)]["backlog_attempts"] = [
+        {
+            "attempt_id": "backlog-attempt-1",
+            "artifact_fingerprint": "sha256:test",
+            "output_artifact": {
+                "backlog_items": [{"title": "Seed backlog item"}],
+                "is_complete": False,
+            },
+        }
+    ]
+    workflow.states[str(project_id)]["fsm_state"] = "BACKLOG_REVIEW"
 
-    response = client.post(f"/api/projects/{project_id}/backlog/save")
+    response = client.post(
+        f"/api/projects/{project_id}/backlog/save",
+        json={
+            "attempt_id": "backlog-attempt-1",
+            "expected_artifact_fingerprint": "sha256:test",
+            "expected_state": "BACKLOG_REVIEW",
+            "idempotency_key": "save-backlog-api-2",
+        },
+    )
     assert response.status_code == HTTP_CONFLICT

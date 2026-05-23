@@ -22,6 +22,22 @@ def _base_state() -> dict[str, Any]:
     }
 
 
+def _valid_story(title: str) -> dict[str, Any]:
+    return {
+        "story_title": title,
+        "statement": (
+            "As a Cartola operator, I want a validated live recommendation, "
+            "so that I can review it before market lock."
+        ),
+        "acceptance_criteria": [
+            "Verify that the recommendation artifact records the selected squad."
+        ],
+        "invest_score": "High",
+        "estimated_effort": "M",
+        "produced_artifacts": ["recommendation_artifact"],
+    }
+
+
 def _valid_story_output(
     parent_requirement: str,
     *,
@@ -279,6 +295,224 @@ async def test_run_story_agent_from_state_does_not_crash_on_unserializable_reusa
         "--- PREVIOUS DRAFT TO REFINE ---"
         not in captured["payload"].requirement_context
     )
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_forces_incomplete_when_clarifying_questions_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify clarifying questions force an incomplete story draft."""
+
+    async def fake_invoke_story_agent(payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": payload.parent_requirement,
+                "user_stories": [
+                    {
+                        "story_title": "Live lineup decision",
+                        "statement": "As a Cartola manager, I want a recommended lineup so that I can act before market lock.",  # noqa: E501
+                        "acceptance_criteria": [
+                            "Given eligible players exist, when the recommendation is generated, then a lineup is returned with player names and positions."  # noqa: E501
+                        ],
+                        "invest_score": "High",
+                        "estimated_effort": "M",
+                        "produced_artifacts": ["lineup_recommendation"],
+                    }
+                ],
+                "is_complete": True,
+                "clarifying_questions": [
+                    "Which live-lock cutoff should the story use?"
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [{"items": ["Live weekly recommendation MVP"]}],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Live weekly recommendation MVP",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert result["is_complete"] is False
+    assert result["draft_kind"] == "incomplete_draft"
+    assert result["output_artifact"]["is_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_rejects_incomplete_without_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify incomplete story drafts need clarifying questions."""
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Budget-bound live workflow",
+                "user_stories": [_valid_story("Budget story")],
+                "is_complete": False,
+                "clarifying_questions": [],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [{"items": ["Budget-bound live workflow"]}],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Budget-bound live workflow",
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["classification"] == "nonreusable_schema_failure"
+    assert result["failure_stage"] == "output_validation"
+    assert "clarifying question" in result["failure_summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_rejects_complete_with_generic_clarifying_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify generic clarifying questions fail before complete draft demotion."""
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Budget-bound live workflow",
+                "user_stories": [_valid_story("Budget story")],
+                "is_complete": True,
+                "clarifying_questions": ["Please clarify the requirements."],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [{"items": ["Budget-bound live workflow"]}],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Budget-bound live workflow",
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["classification"] == "nonreusable_schema_failure"
+    assert result["failure_stage"] == "output_validation"
+
+
+@pytest.mark.parametrize(
+    "clarifying_question",
+    [
+        "   ",
+        "Clarify?",
+        "Please clarify the requirements.",
+        "Can you please clarify the requirements?",
+        "Can you provide more details?",
+        "Can you tell me what should happen for this workflow?",
+        "Can you explain what is expected for this requirement?",
+        "Can you give me more details about this story?",
+        "Can you clarify requirements for this item?",
+    ],
+)
+@pytest.mark.asyncio
+async def test_story_runtime_rejects_generic_clarifying_questions(
+    clarifying_question: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify generic clarifying questions are not accepted."""
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Budget-bound live workflow",
+                "user_stories": [_valid_story("Budget story")],
+                "is_complete": False,
+                "clarifying_questions": [clarifying_question],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [{"items": ["Budget-bound live workflow"]}],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Budget-bound live workflow",
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["classification"] == "nonreusable_schema_failure"
+    assert result["failure_stage"] == "output_validation"
+    assert "actionable" in result["failure_summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_accepts_concrete_clarifying_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify concrete clarifying questions keep incomplete drafts reusable."""
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Budget-bound live workflow",
+                "user_stories": [_valid_story("Budget story")],
+                "is_complete": False,
+                "clarifying_questions": [
+                    "Which budget source should the live command require when no account balance is available?"  # noqa: E501
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [{"items": ["Budget-bound live workflow"]}],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Budget-bound live workflow",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert result["draft_kind"] == "incomplete_draft"
+    assert result["is_reusable"] is True
 
 
 @pytest.mark.asyncio

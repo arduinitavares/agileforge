@@ -1230,6 +1230,9 @@ def _compile_spec_authority_output(
     if not item_ids:
         return full_invocation
 
+    if _unrecoverable_structured_full_failure(full_invocation.output.root):
+        return full_invocation
+
     successes: list[SpecAuthorityCompilationSuccess] = []
     focused_failures: list[_FocusedItemCompilationFailure] = []
     if not isinstance(full_invocation.output.root, SpecAuthorityCompilationFailure):
@@ -1284,6 +1287,16 @@ def _compile_spec_authority_output(
     return _NormalizedCompilerInvocation(
         raw_json=full_invocation.raw_json,
         output=SpecAuthorityCompilerOutput(root=merged_success),
+    )
+
+
+def _unrecoverable_structured_full_failure(
+    output: SpecAuthorityCompilationSuccess | SpecAuthorityCompilationFailure,
+) -> bool:
+    """Return whether focused item passes must not mask a full-spec failure."""
+    return (
+        isinstance(output, SpecAuthorityCompilationFailure)
+        and output.error == "SPEC_COMPILATION_FAILED"
     )
 
 

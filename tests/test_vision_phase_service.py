@@ -1,5 +1,6 @@
 """Tests for vision phase service."""
 
+import hashlib
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -18,6 +19,7 @@ from services.phases.vision_service import (
 )
 
 JsonDict = dict[str, Any]
+SECOND_ATTEMPT_COUNT = 2
 
 
 def test_record_vision_attempt_updates_state_and_failure_metadata() -> None:
@@ -121,6 +123,10 @@ async def test_generate_vision_draft_allows_empty_input_on_first_attempt() -> No
             "failure_artifact_id": None,
             "failure_stage": None,
             "failure_summary": None,
+            "model_info": {
+                "agent_name": "product_vision_tool",
+                "model_id": "openrouter/openai/gpt-5.4-mini",
+            },
             "raw_output_preview": None,
             "has_full_artifact": False,
         }
@@ -139,7 +145,12 @@ async def test_generate_vision_draft_allows_empty_input_on_first_attempt() -> No
     assert payload["fsm_state"] == "VISION_INTERVIEW"
     assert payload["is_complete"] is False
     assert payload["attempt_count"] == 1
-    assert saved["state"]["vision_attempts"][0]["trigger"] == "manual_refine"
+    assert payload["trigger"] == "initial_generate"
+    assert payload["model_info"] == {
+        "agent_name": "product_vision_tool",
+        "model_id": "openrouter/openai/gpt-5.4-mini",
+    }
+    assert saved["state"]["vision_attempts"][0]["trigger"] == "initial_generate"
 
 
 @pytest.mark.asyncio
@@ -148,6 +159,7 @@ async def test_generate_vision_draft_requires_feedback_after_first_attempt() -> 
     state: JsonDict = {
         "fsm_state": "VISION_INTERVIEW",
         "vision_attempts": [{"created_at": "2026-04-03T00:00:00Z"}],
+        "vision_components": {"project_name": "Vision Project"},
     }
 
     async def load_state() -> JsonDict:
@@ -170,6 +182,124 @@ async def test_generate_vision_draft_requires_feedback_after_first_attempt() -> 
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert "Feedback is required" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_generate_vision_draft_allows_empty_retry_after_failed_attempt() -> None:
+    """Failed runtime attempts must not force fake refinement input."""
+    state: JsonDict = {
+        "fsm_state": "VISION_INTERVIEW",
+        "vision_attempts": [
+            {
+                "created_at": "2026-04-03T00:00:00Z",
+                "failure_stage": "invocation_exception",
+                "failure_summary": "provider rejected model",
+                "is_complete": False,
+            }
+        ],
+    }
+    captured: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_vision_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state
+        captured["project_id"] = project_id
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {
+                "user_raw_text": user_input or "",
+                "prior_vision_state": "NO_HISTORY",
+                "specification_content": "SPEC",
+                "compiled_authority": '{"ok": true}',
+            },
+            "output_artifact": {
+                "updated_components": {"project_name": "Vision Project"},
+                "product_vision_statement": "Draft vision",
+                "is_complete": False,
+                "clarifying_questions": ["Need more detail"],
+            },
+            "is_complete": False,
+            "error": None,
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        }
+
+    payload = await generate_vision_draft(
+        project_id=7,
+        setup_blocker=None,
+        load_state=load_state,
+        save_state=lambda _state: None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_vision_agent=fake_run_vision_agent_from_state,
+        user_input=None,
+    )
+
+    assert captured["user_input"] == ""
+    assert payload["attempt_count"] == SECOND_ATTEMPT_COUNT
+    assert payload["trigger"] == "initial_generate"
+
+
+@pytest.mark.asyncio
+async def test_generate_vision_draft_marks_user_input_as_manual_refine() -> None:
+    """User feedback refinements should be marked distinctly from initial runs."""
+    state: JsonDict = {
+        "fsm_state": "VISION_REVIEW",
+        "vision_components": {"project_name": "Vision Project"},
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_vision_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id
+        return {
+            "success": True,
+            "input_context": {
+                "user_raw_text": user_input or "",
+                "prior_vision_state": '{"project_name": "Vision Project"}',
+                "specification_content": "SPEC",
+                "compiled_authority": '{"ok": true}',
+            },
+            "output_artifact": {
+                "updated_components": {"project_name": "Vision Project"},
+                "product_vision_statement": "Updated vision",
+                "is_complete": True,
+            },
+            "is_complete": True,
+            "error": None,
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        }
+
+    payload = await generate_vision_draft(
+        project_id=7,
+        setup_blocker=None,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_vision_agent=fake_run_vision_agent_from_state,
+        user_input="Tighten the scope.",
+    )
+
+    assert payload["trigger"] == "manual_refine"
+    assert saved["state"]["vision_attempts"][0]["trigger"] == "manual_refine"
 
 
 @pytest.mark.asyncio
@@ -263,6 +393,10 @@ async def test_save_vision_draft_persists_persistence_state() -> None:
 
     assert payload["fsm_state"] == "VISION_PERSISTENCE"
     assert payload["save_result"]["success"] is True
+    assert payload["saved_vision"] == "Final vision"
+    assert payload["vision_fingerprint"] == (
+        "sha256:" + hashlib.sha256(b"Final vision").hexdigest()
+    )
     assert captured["vision_input"].product_vision_statement == "Final vision"
     assert saved["state"]["fsm_state"] == "VISION_PERSISTENCE"
     assert saved["state"]["vision_saved_at"] == "2026-04-04T00:00:00Z"

@@ -138,6 +138,78 @@ async def test_runtime_invalid_json_writes_full_failure_artifact(
 
 
 @pytest.mark.asyncio
+async def test_backlog_runtime_forces_incomplete_when_questions_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog runtime must not accept complete artifacts with open questions."""
+
+    async def fake_invoke(_payload: object) -> str:
+        return (
+            '{"backlog_items":[{"priority":1,"requirement":"Team selection",'
+            '"value_driver":"Customer Satisfaction","justification":"Core value",'
+            '"estimated_effort":"M"}],"is_complete":true,'
+            '"clarifying_questions":["Which risk threshold should block a pick?"]}'
+        )
+
+    monkeypatch.setattr(backlog_runtime, "_invoke_backlog_agent", fake_invoke)
+
+    result = await backlog_runtime.run_backlog_agent_from_state(
+        _backlog_state(),
+        project_id=1,
+        user_input="",
+    )
+
+    assert result["success"] is True
+    assert result["is_complete"] is False
+    assert result["output_artifact"]["is_complete"] is False
+    assert result["output_artifact"]["clarifying_questions"] == [
+        "Which risk threshold should block a pick?"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_roadmap_runtime_forces_incomplete_when_questions_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roadmap runtime must not accept complete artifacts with open questions."""
+
+    async def fake_invoke(_payload: object) -> str:
+        return (
+            '{"roadmap_releases":[{"release_name":"Milestone 1",'
+            '"theme":"Foundation","focus_area":"Technical Foundation",'
+            '"items":["Team selection"],"reasoning":"Start here"}],'
+            '"roadmap_summary":"Draft roadmap","is_complete":true,'
+            '"clarifying_questions":["Which release must own simulations?"]}'
+        )
+
+    monkeypatch.setattr(roadmap_runtime, "_invoke_roadmap_agent", fake_invoke)
+
+    result = await roadmap_runtime.run_roadmap_agent_from_state(
+        {
+            **_roadmap_state(),
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Team selection",
+                    "value_driver": "Strategic",
+                    "justification": "Core value",
+                    "estimated_effort": "M",
+                }
+            ],
+        },
+        project_id=1,
+        user_input="",
+    )
+
+    assert result["success"] is True
+    assert result["is_complete"] is False
+    assert result["output_artifact"]["is_complete"] is False
+    assert result["output_artifact"]["clarifying_questions"] == [
+        "Which release must own simulations?"
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("case", RUNTIME_CASES, ids=lambda case: case["phase"])
 async def test_runtime_output_validation_writes_full_failure_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: RuntimeCase
@@ -185,6 +257,9 @@ async def test_runtime_invocation_exception_persists_partial_output(
     assert result["failure_stage"] == "invocation_exception"
     assert result["failure_artifact_id"] is not None
     assert result["raw_output_preview"] == '{"partial": true}'
+    if case["phase"] == "vision":
+        assert result["model_info"]["agent_name"] == "product_vision_tool"
+        assert result["model_info"]["model_id"]
 
     artifact = failure_artifacts.read_failure_artifact(result["failure_artifact_id"])
     assert artifact is not None

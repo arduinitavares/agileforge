@@ -10,6 +10,7 @@ from sqlmodel import Session as SqlSession
 from sqlmodel import SQLModel, create_engine, select
 
 from agile_sqlmodel import Product, UserStory
+from models.enums import StoryStatus
 from orchestrator_agent.agent_tools.backlog_primer.schemes import (
     BacklogItem,
     InputSchema,
@@ -229,10 +230,10 @@ class TestSaveBacklogTool:
             assert story.is_superseded is False
 
     @pytest.mark.asyncio
-    async def test_backlog_resave_after_refinement_does_not_insert_duplicates(
+    async def test_backlog_resave_after_refinement_blocks_when_story_progressed(
         self,
     ) -> None:
-        """Verify backlog resave after refinement does not insert duplicates."""
+        """Backlog replacement must block if a prior seed was already refined."""
         mock_context = MagicMock()
         mock_context.state = {}
         test_engine = create_engine("sqlite://", echo=False)
@@ -274,10 +275,123 @@ class TestSaveBacklogTool:
         ):
             result = await save_backlog_tool(save_input, tool_context=mock_context)
 
-        assert result["success"] is True
-        assert result["saved_count"] == 0
+        assert result["success"] is False
+        assert result["error"] == "BACKLOG_REPLACEMENT_BLOCKED"
+        assert result["blocked_count"] == 1
         with SqlSession(test_engine) as session:
             count = len(
                 session.exec(select(UserStory).where(UserStory.product_id == 1)).all()
             )
             assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_backlog_resave_supersedes_prior_backlog_seed_rows(self) -> None:
+        """Refined Backlog save replaces earlier active seed rows atomically."""
+        mock_context = MagicMock()
+        mock_context.state = {}
+        test_engine = create_engine("sqlite://", echo=False)
+        SQLModel.metadata.create_all(test_engine)
+        with SqlSession(test_engine) as session:
+            session.add(Product(name="Test Product"))
+            session.commit()
+            session.add(
+                UserStory(
+                    product_id=1,
+                    title="Old authentication",
+                    status=StoryStatus.TO_DO,
+                    story_description="Old seed",
+                    source_requirement=normalize_requirement_key("Old authentication"),
+                    refinement_slot=1,
+                    story_origin="backlog_seed",
+                    is_refined=False,
+                    is_superseded=False,
+                )
+            )
+            session.commit()
+
+        save_input = SaveBacklogInput(
+            product_id=1,
+            idempotency_key="save-backlog-2",
+            backlog_items=[
+                {
+                    "priority": 1,
+                    "requirement": "New authentication",
+                    "value_driver": "Customer Satisfaction",
+                    "justification": "Security baseline",
+                    "estimated_effort": "M",
+                },
+                {
+                    "priority": 2,
+                    "requirement": "Lineup comparison",
+                    "value_driver": "Strategic",
+                    "justification": "Improves weekly decision quality",
+                    "estimated_effort": "L",
+                },
+            ],
+        )
+
+        with patch(
+            "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+            return_value=test_engine,
+        ):
+            result = await save_backlog_tool(save_input, tool_context=mock_context)
+
+        assert result["success"] is True
+        assert result["saved_count"] == 2  # noqa: PLR2004
+        assert result["superseded_count"] == 1
+        with SqlSession(test_engine) as session:
+            rows = session.exec(
+                select(UserStory)
+                .where(UserStory.product_id == 1)
+                .order_by(UserStory.story_id)
+            ).all()
+            assert len(rows) == 3  # noqa: PLR2004
+            assert rows[0].is_superseded is True
+            assert [row.title for row in rows if not row.is_superseded] == [
+                "New authentication",
+                "Lineup comparison",
+            ]
+
+    @pytest.mark.asyncio
+    async def test_backlog_save_idempotency_key_replays_without_replacing_again(
+        self,
+    ) -> None:
+        """Repeated Backlog save with the same idempotency key is non-mutating."""
+        mock_context = MagicMock()
+        mock_context.state = {}
+        test_engine = create_engine("sqlite://", echo=False)
+        SQLModel.metadata.create_all(test_engine)
+        with SqlSession(test_engine) as session:
+            session.add(Product(name="Test Product"))
+            session.commit()
+
+        save_input = SaveBacklogInput(
+            product_id=1,
+            idempotency_key="save-backlog-3",
+            backlog_items=[
+                {
+                    "priority": 1,
+                    "requirement": "User authentication",
+                    "value_driver": "Customer Satisfaction",
+                    "justification": "Security baseline",
+                    "estimated_effort": "M",
+                },
+            ],
+        )
+
+        with patch(
+            "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+            return_value=test_engine,
+        ):
+            first = await save_backlog_tool(save_input, tool_context=mock_context)
+            second = await save_backlog_tool(save_input, tool_context=mock_context)
+
+        assert first["success"] is True
+        assert second["success"] is True
+        assert second["idempotent_replay"] is True
+        with SqlSession(test_engine) as session:
+            rows = session.exec(
+                select(UserStory).where(UserStory.product_id == 1)
+            ).all()
+            assert len(rows) == 1
+            assert rows[0].is_superseded is False

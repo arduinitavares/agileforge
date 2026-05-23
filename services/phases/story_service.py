@@ -15,6 +15,7 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     SaveStoriesInput,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
+from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import hydrate_story_runtime_from_legacy
 
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
@@ -48,6 +49,25 @@ def ensure_story_runtime(
         state,
         parent_requirement=parent_requirement,
     )
+
+
+def existing_story_runtime(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> dict[str, Any] | None:
+    interview_runtime = state.get("interview_runtime")
+    if not isinstance(interview_runtime, dict):
+        return None
+
+    story_runtime = interview_runtime.get("story")
+    if not isinstance(story_runtime, dict):
+        return None
+
+    runtime = story_runtime.get(parent_requirement)
+    if not isinstance(runtime, dict):
+        return None
+    return runtime
 
 
 def story_retryable(classification: str | None) -> bool:
@@ -86,6 +106,50 @@ def _story_current_draft_artifact(
     if not isinstance(stories, list) or len(stories) == 0:
         return None
     return artifact
+
+
+def _story_artifact_fingerprint(
+    parent_requirement: str,
+    output_artifact: dict[str, Any],
+) -> str:
+    fingerprint_artifact = {
+        key: value
+        for key, value in output_artifact.items()
+        if key not in {"attempt_id", "artifact_fingerprint"}
+    }
+    return canonical_hash(
+        {
+            "phase": "story",
+            "parent_requirement": parent_requirement,
+            "output_artifact": fingerprint_artifact,
+        }
+    )
+
+
+def _attach_story_attempt_guards(
+    runtime: dict[str, Any],
+    *,
+    attempt_id: str,
+    parent_requirement: str,
+) -> None:
+    attempt = _find_attempt_by_id(runtime, attempt_id)
+    if not isinstance(attempt, dict):
+        return
+
+    output_artifact = attempt.get("output_artifact")
+    if not isinstance(output_artifact, dict):
+        return
+
+    artifact_fingerprint = _story_artifact_fingerprint(
+        parent_requirement,
+        output_artifact,
+    )
+    attempt["artifact_fingerprint"] = artifact_fingerprint
+    output_artifact["artifact_fingerprint"] = artifact_fingerprint
+
+    draft_projection = runtime.get("draft_projection")
+    if isinstance(draft_projection, dict):
+        draft_projection["artifact_fingerprint"] = artifact_fingerprint
 
 
 def _story_merge_recommendation_from_artifact(
@@ -156,6 +220,101 @@ def story_save_payload(runtime: dict[str, Any]) -> dict[str, Any] | None:
     if not artifact.get("is_complete"):
         return None
     return artifact
+
+
+def _validate_story_save_required_guards(
+    *,
+    attempt_id: str | None,
+    expected_artifact_fingerprint: str | None,
+    expected_state: str | None,
+    idempotency_key: str | None,
+) -> None:
+    if attempt_id is None or not attempt_id.strip():
+        raise StoryPhaseError("story save requires --attempt-id", status_code=400)
+    if (
+        expected_artifact_fingerprint is None
+        or not expected_artifact_fingerprint.strip()
+    ):
+        raise StoryPhaseError(
+            "story save requires --expected-artifact-fingerprint",
+            status_code=400,
+        )
+    if expected_state != OrchestratorState.STORY_REVIEW.value:
+        raise StoryPhaseError(
+            "story save requires --expected-state STORY_REVIEW",
+            status_code=400,
+        )
+    if idempotency_key is None or not idempotency_key.strip():
+        raise StoryPhaseError(
+            "story save requires --idempotency-key",
+            status_code=400,
+        )
+
+
+def _story_save_replay_payload(
+    state: dict[str, Any],
+    *,
+    idempotency_key: str,
+    parent_requirement: str,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+) -> dict[str, Any] | None:
+    idempotency_registry = state.get("story_save_idempotency")
+    if not isinstance(idempotency_registry, dict):
+        return None
+
+    existing = idempotency_registry.get(idempotency_key)
+    if not isinstance(existing, dict):
+        return None
+
+    if existing.get("attempt_id") != attempt_id:
+        raise StoryPhaseError(
+            "story save attempt mismatch; refresh history and review the current draft",
+            status_code=409,
+        )
+    if existing.get("artifact_fingerprint") != expected_artifact_fingerprint:
+        raise StoryPhaseError(
+            "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+    if existing.get("parent_requirement") != parent_requirement:
+        raise StoryPhaseError(
+            "story save idempotency key does not match this requirement",
+            status_code=409,
+        )
+    return dict(existing)
+
+
+def _validate_story_save_current_attempt_artifact(
+    runtime: dict[str, Any],
+    *,
+    parent_requirement: str,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+) -> None:
+    attempt = _find_attempt_by_id(runtime, attempt_id)
+    output_artifact = (attempt or {}).get("output_artifact")
+    if not isinstance(attempt, dict) or not isinstance(output_artifact, dict):
+        raise StoryPhaseError(
+            "story save attempt mismatch; refresh history and review the current draft",
+            status_code=409,
+        )
+
+    if attempt.get("artifact_fingerprint") != expected_artifact_fingerprint:
+        raise StoryPhaseError(
+            "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+
+    current_artifact_fingerprint = _story_artifact_fingerprint(
+        parent_requirement,
+        output_artifact,
+    )
+    if current_artifact_fingerprint != expected_artifact_fingerprint:
+        raise StoryPhaseError(
+            "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
 
 
 def story_current_resolution(
@@ -253,6 +412,7 @@ def story_retry_target_attempt_id(runtime: dict[str, Any]) -> str | None:
 def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
     draft_projection = runtime.get("draft_projection") or {}
     retry_target_attempt_id = story_retry_target_attempt_id(runtime)
+    save_payload = story_save_payload(runtime)
 
     current_draft = None
     if draft_projection:
@@ -261,6 +421,29 @@ def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
             "kind": draft_projection.get("kind"),
             "is_complete": bool(draft_projection.get("is_complete", False)),
         }
+        artifact_fingerprint = draft_projection.get("artifact_fingerprint")
+        if isinstance(artifact_fingerprint, str) and artifact_fingerprint:
+            current_draft["artifact_fingerprint"] = artifact_fingerprint
+
+    save_summary: dict[str, Any] = {
+        "available": bool(save_payload),
+    }
+    draft_attempt_id = draft_projection.get("latest_reusable_attempt_id")
+    draft_fingerprint = draft_projection.get("artifact_fingerprint")
+    if (
+        save_payload
+        and isinstance(draft_attempt_id, str)
+        and draft_attempt_id
+        and isinstance(draft_fingerprint, str)
+        and draft_fingerprint
+    ):
+        save_summary.update(
+            {
+                "attempt_id": draft_attempt_id,
+                "artifact_fingerprint": draft_fingerprint,
+                "expected_state": OrchestratorState.STORY_REVIEW.value,
+            }
+        )
 
     return {
         "current_draft": current_draft,
@@ -268,9 +451,7 @@ def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
             "available": bool(retry_target_attempt_id),
             "target_attempt_id": retry_target_attempt_id,
         },
-        "save": {
-            "available": bool(story_save_payload(runtime)),
-        },
+        "save": save_summary,
         "resolution": story_resolution_summary(runtime),
     }
 
@@ -335,8 +516,11 @@ def _normalize_story_requirement(
         return parent_requirement
 
     if isinstance(normalized_parent_requirement, str) and normalized_parent_requirement:
+        normalized_parent_key = normalize_requirement_key(normalized_parent_requirement)
         for candidate in candidate_names:
             if candidate.strip() == normalized_parent_requirement:
+                return candidate
+            if normalize_requirement_key(candidate) == normalized_parent_key:
                 return candidate
 
         if not candidate_names:
@@ -597,15 +781,27 @@ async def generate_story_draft(
             feedback_ids=included_feedback_ids,
             attempt_id=attempt_id,
         )
+        _attach_story_attempt_guards(
+            runtime,
+            attempt_id=attempt_id,
+            parent_requirement=normalized_parent_requirement,
+        )
 
     sync_story_legacy_mirrors(
         state,
         parent_requirement=normalized_parent_requirement,
         runtime=runtime,
     )
+    next_state = (
+        OrchestratorState.STORY_REVIEW.value
+        if story_save_payload(runtime)
+        else OrchestratorState.STORY_INTERVIEW.value
+    )
+    state["fsm_state"] = next_state
     save_state(state)
 
     return {
+        "fsm_state": next_state,
         "parent_requirement": normalized_parent_requirement,
         "data": {
             "output_artifact": story_result.get("output_artifact"),
@@ -692,15 +888,27 @@ async def retry_story_draft(
             feedback_ids=included_feedback_ids,
             attempt_id=attempt_id,
         )
+        _attach_story_attempt_guards(
+            runtime,
+            attempt_id=attempt_id,
+            parent_requirement=normalized_parent_requirement,
+        )
 
     sync_story_legacy_mirrors(
         state,
         parent_requirement=normalized_parent_requirement,
         runtime=runtime,
     )
+    next_state = (
+        OrchestratorState.STORY_REVIEW.value
+        if story_save_payload(runtime)
+        else OrchestratorState.STORY_INTERVIEW.value
+    )
+    state["fsm_state"] = next_state
     save_state(state)
 
     return {
+        "fsm_state": next_state,
         "parent_requirement": normalized_parent_requirement,
         "data": {
             "output_artifact": story_result.get("output_artifact"),
@@ -738,6 +946,10 @@ async def save_story_draft(
     *,
     project_id: int,
     parent_requirement: str,
+    attempt_id: str | None,
+    expected_artifact_fingerprint: str | None,
+    expected_state: str | None,
+    idempotency_key: str | None,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     hydrate_context: Callable[[str, int], Awaitable[Any]],
@@ -753,6 +965,51 @@ async def save_story_draft(
         state,
         parent_requirement=normalized_parent_requirement,
     )
+    _validate_story_save_required_guards(
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        expected_state=expected_state,
+        idempotency_key=idempotency_key,
+    )
+
+    replay_payload = _story_save_replay_payload(
+        state,
+        idempotency_key=idempotency_key,
+        parent_requirement=normalized_parent_requirement,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+    if replay_payload is not None:
+        return replay_payload
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.STORY_REVIEW.value:
+        raise StoryPhaseError(
+            "story save requires FSM state STORY_REVIEW",
+            status_code=409,
+        )
+
+    draft_projection = runtime.get("draft_projection") or {}
+    current_attempt_id = draft_projection.get("latest_reusable_attempt_id")
+    if current_attempt_id != attempt_id:
+        raise StoryPhaseError(
+            "story save attempt mismatch; refresh history and review the current draft",
+            status_code=409,
+        )
+
+    current_fingerprint = draft_projection.get("artifact_fingerprint")
+    if current_fingerprint != expected_artifact_fingerprint:
+        raise StoryPhaseError(
+            "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+    _validate_story_save_current_attempt_artifact(
+        runtime,
+        parent_requirement=normalized_parent_requirement,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+
     assessment = story_save_payload(runtime)
 
     if not assessment:
@@ -770,12 +1027,20 @@ async def save_story_draft(
         SaveStoriesInput(
             product_id=project_id,
             parent_requirement=normalized_parent_requirement,
+            idempotency_key=idempotency_key,
             stories=stories,
         ),
         build_tool_context(context),
     )
 
     if not result.get("success"):
+        error_code = result.get("error_code")
+        if error_code == "STORY_REPLACEMENT_UNSAFE":
+            message = result.get("error", "Story replacement is unsafe")
+            raise StoryPhaseError(
+                f"{error_code}: {message}",
+                status_code=409,
+            )
         raise StoryPhaseError(
             result.get("error", "Failed to save stories"),
             status_code=500,
@@ -786,19 +1051,30 @@ async def save_story_draft(
         saved_reqs_dict = {}
     saved_reqs_dict[normalized_parent_requirement] = True
     context.state["story_saved"] = saved_reqs_dict
+    context.state["fsm_state"] = OrchestratorState.STORY_PERSISTENCE.value
     sync_story_legacy_mirrors(
         context.state,
         parent_requirement=normalized_parent_requirement,
         runtime=runtime,
     )
 
-    save_state(context.state)
-    return {
+    idempotency_registry = context.state.get("story_save_idempotency")
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        context.state["story_save_idempotency"] = idempotency_registry
+
+    payload = {
         "parent_requirement": normalized_parent_requirement,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": expected_artifact_fingerprint,
+        "fsm_state": OrchestratorState.STORY_PERSISTENCE.value,
         "data": {
             "save_result": result,
         },
     }
+    idempotency_registry[idempotency_key] = payload
+    save_state(context.state)
+    return payload
 
 
 async def merge_story_resolution(
@@ -896,39 +1172,177 @@ async def delete_story_requirement(
     }
 
 
+async def reopen_story_requirement(
+    *,
+    parent_requirement: str,
+    expected_state: str | None,
+    idempotency_key: str | None,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    now_iso: Callable[[], str],
+    assert_reopen_safe: Callable[[str], None],
+    reset_subject_working_set: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """Reopen one saved Story requirement before Sprint work exists."""
+    if expected_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "story reopen requires --expected-state SPRINT_SETUP",
+            status_code=400,
+        )
+    if idempotency_key is None or not idempotency_key.strip():
+        raise StoryPhaseError(
+            "story reopen requires --idempotency-key",
+            status_code=400,
+        )
+
+    state = await load_state()
+    normalized_idempotency_key = idempotency_key.strip()
+    idempotency_registry = state.get("story_reopen_idempotency")
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            return dict(existing)
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "Story correction can reopen only from SPRINT_SETUP.",
+            status_code=409,
+        )
+
+    normalized_parent_requirement = _normalize_story_requirement(
+        state,
+        parent_requirement,
+    )
+
+    story_saved = state.get("story_saved")
+    if not (
+        isinstance(story_saved, dict)
+        and story_saved.get(normalized_parent_requirement)
+    ):
+        raise StoryPhaseError(
+            "Story correction can reopen only saved Story requirements.",
+            status_code=409,
+        )
+
+    assert_reopen_safe(normalized_parent_requirement)
+
+    if isinstance(story_saved, dict):
+        story_saved.pop(normalized_parent_requirement, None)
+
+    story_outputs = state.get("story_outputs")
+    if isinstance(story_outputs, dict):
+        story_outputs.pop(normalized_parent_requirement, None)
+
+    reopened_at = now_iso()
+    runtime = ensure_story_runtime(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
+    reset_subject_working_set(
+        runtime,
+        created_at=reopened_at,
+        summary="Story reopened for correction before Sprint planning.",
+    )
+    sync_story_legacy_mirrors(
+        state,
+        parent_requirement=normalized_parent_requirement,
+        runtime=runtime,
+    )
+
+    state["fsm_state"] = OrchestratorState.STORY_INTERVIEW.value
+    state["fsm_state_entered_at"] = reopened_at
+    payload = {
+        "parent_requirement": normalized_parent_requirement,
+        "fsm_state": OrchestratorState.STORY_INTERVIEW.value,
+        "idempotency_key": normalized_idempotency_key,
+    }
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        state["story_reopen_idempotency"] = idempotency_registry
+    idempotency_registry[normalized_idempotency_key] = payload
+    save_state(state)
+    return payload
+
+
 async def complete_story_phase(
     *,
+    expected_state: str | None,
+    idempotency_key: str | None,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
 ) -> dict[str, Any]:
+    if expected_state != OrchestratorState.STORY_PERSISTENCE.value:
+        raise StoryPhaseError(
+            "story complete requires --expected-state STORY_PERSISTENCE",
+            status_code=400,
+        )
+    if idempotency_key is None or not idempotency_key.strip():
+        raise StoryPhaseError(
+            "story complete requires --idempotency-key",
+            status_code=400,
+        )
+
     state = await load_state()
+    normalized_idempotency_key = idempotency_key.strip()
+
+    idempotency_registry = state.get("story_complete_idempotency")
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            return dict(existing)
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.STORY_PERSISTENCE.value:
+        raise StoryPhaseError(
+            "Story phase cannot complete unless current state is STORY_PERSISTENCE.",
+            status_code=409,
+        )
+
     req_names = get_all_roadmap_requirements(state)
     saved_reqs_dict = state.get("story_saved", {})
     if not isinstance(saved_reqs_dict, dict):
         saved_reqs_dict = {}
 
-    saved = [
-        requirement for requirement in req_names if saved_reqs_dict.get(requirement)
-    ]
-    if len(saved) == 0:
+    saved_count = 0
+    merged_count = 0
+    for requirement in req_names:
+        if saved_reqs_dict.get(requirement) is True:
+            saved_count += 1
+            continue
+
+        runtime = existing_story_runtime(state, parent_requirement=requirement)
+        if runtime is not None and story_current_resolution(runtime):
+            merged_count += 1
+
+    total_count = len(req_names)
+    covered_count = saved_count + merged_count
+    if covered_count != total_count:
         raise StoryPhaseError(
-            "Cannot complete phase. No requirements have saved stories.",
+            "Story phase cannot complete: "
+            f"{covered_count} of {total_count} roadmap requirements are saved "
+            "or merged.",
             status_code=409,
         )
 
-    current_state = _normalize_fsm_state(state.get("fsm_state"))
-    if current_state not in (
-        OrchestratorState.SPRINT_SETUP.value,
-        OrchestratorState.SPRINT_DRAFT.value,
-        OrchestratorState.SPRINT_PERSISTENCE.value,
-        OrchestratorState.SPRINT_COMPLETE.value,
-    ):
-        state["fsm_state"] = OrchestratorState.SPRINT_SETUP.value
-        state["fsm_state_entered_at"] = now_iso()
-        state["story_phase_completed_at"] = now_iso()
-        save_state(state)
+    completed_at = now_iso()
+    state["fsm_state"] = OrchestratorState.SPRINT_SETUP.value
+    state["fsm_state_entered_at"] = completed_at
+    state["story_phase_completed_at"] = completed_at
 
-    return {
-        "fsm_state": state.get("fsm_state"),
+    payload = {
+        "fsm_state": OrchestratorState.SPRINT_SETUP.value,
+        "coverage": {
+            "saved": saved_count,
+            "merged": merged_count,
+            "total": total_count,
+        },
+        "idempotency_key": normalized_idempotency_key,
     }
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        state["story_complete_idempotency"] = idempotency_registry
+    idempotency_registry[normalized_idempotency_key] = payload
+    save_state(state)
+    return payload

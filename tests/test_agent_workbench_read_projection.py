@@ -113,6 +113,26 @@ def test_project_list_returns_counts_and_fingerprint(session: Session) -> None:
     assert result["data"]["source_fingerprint"].startswith("sha256:")
 
 
+def test_project_list_counts_only_active_user_stories(session: Session) -> None:
+    """Superseded backlog rows are audit history, not active project structure."""
+    product_id, _story_id, _sprint_id, _task_id = _seed_project_with_story(session)
+    session.add(
+        UserStory(
+            product_id=product_id,
+            title="Superseded backlog seed",
+            status=StoryStatus.TO_DO,
+            is_superseded=True,
+        )
+    )
+    session.commit()
+    service = ReadProjectionService(engine=_engine(session))
+
+    result = service.project_list()
+
+    assert result["ok"] is True
+    assert result["data"]["items"][0]["user_stories_count"] == 1
+
+
 def test_project_show_returns_structure_counts_and_latest_approved_spec(
     session: Session,
 ) -> None:
@@ -128,6 +148,26 @@ def test_project_show_returns_structure_counts_and_latest_approved_spec(
     assert result["data"]["structure_counts"]["sprints"] == 1
     assert result["data"]["latest_approved_spec"] is None
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_project_show_counts_only_active_user_stories(session: Session) -> None:
+    """Project status should not present superseded backlog rows as active."""
+    product_id, _story_id, _sprint_id, _task_id = _seed_project_with_story(session)
+    session.add(
+        UserStory(
+            product_id=product_id,
+            title="Superseded backlog seed",
+            status=StoryStatus.TO_DO,
+            is_superseded=True,
+        )
+    )
+    session.commit()
+    service = ReadProjectionService(engine=_engine(session))
+
+    result = service.project_show(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["structure_counts"]["user_stories"] == 1
 
 
 def test_workflow_state_uses_injected_read_only_session_reader(
@@ -224,9 +264,7 @@ def test_sprint_candidates_counts_excluded_story_reasons(
     result = service.sprint_candidates(project_id=product_id)
 
     assert result["ok"] is True
-    assert [item["story_id"] for item in result["data"]["items"]] == [
-        eligible.story_id
-    ]
+    assert [item["story_id"] for item in result["data"]["items"]] == [eligible.story_id]
     assert result["data"]["excluded_counts"] == {
         "non_refined": 1,
         "superseded": 1,
@@ -299,15 +337,10 @@ def test_sprint_candidates_fingerprint_changes_when_open_sprint_link_moves(
     assert [item["story_id"] for item in before["data"]["items"]] == [
         candidate_story_id
     ]
-    assert [item["story_id"] for item in after["data"]["items"]] == [
-        blocked_story_id
-    ]
+    assert [item["story_id"] for item in after["data"]["items"]] == [blocked_story_id]
     assert before["data"]["count"] == after["data"]["count"] == 1
     assert before["data"]["excluded_counts"] == after["data"]["excluded_counts"]
-    assert (
-        before["data"]["source_fingerprint"]
-        != after["data"]["source_fingerprint"]
-    )
+    assert before["data"]["source_fingerprint"] != after["data"]["source_fingerprint"]
 
 
 def test_sprint_candidates_fingerprint_changes_when_candidate_row_state_changes(
@@ -336,10 +369,7 @@ def test_sprint_candidates_fingerprint_changes_when_candidate_row_state_changes(
     after = service.sprint_candidates(project_id=product_id)
 
     assert before["data"]["items"] == after["data"]["items"]
-    assert (
-        before["data"]["source_fingerprint"]
-        != after["data"]["source_fingerprint"]
-    )
+    assert before["data"]["source_fingerprint"] != after["data"]["source_fingerprint"]
 
 
 def test_read_projection_reports_schema_not_ready_without_creating_database(

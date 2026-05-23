@@ -1,4 +1,4 @@
-"""Agent workbench Vision phase command runner."""
+"""Agent workbench Backlog phase command runner."""
 
 from __future__ import annotations
 
@@ -8,16 +8,20 @@ from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
-from orchestrator_agent.agent_tools.product_vision_tool.tools import save_vision_tool
+from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
-from services.agent_workbench.error_codes import ErrorCode, workbench_error
-from services.phases.vision_service import (
-    VisionPhaseError,
-    generate_vision_draft,
-    get_vision_history,
-    save_vision_draft,
+from services.agent_workbench.backlog_reconciliation import (
+    BacklogReconciliationError,
+    reconcile_active_backlog,
 )
-from services.vision_runtime import run_vision_agent_from_state
+from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.backlog_runtime import run_backlog_agent_from_state
+from services.phases.backlog_service import (
+    BacklogPhaseError,
+    generate_backlog_draft,
+    get_backlog_history,
+    save_backlog_draft,
+)
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
 
@@ -29,8 +33,8 @@ else:
     ToolContext = Any
 
 
-class VisionPhaseRunner:
-    """Run Vision phase commands through the same service boundary as the API."""
+class BacklogPhaseRunner:
+    """Run Backlog phase commands through the same service boundary as the API."""
 
     def __init__(
         self,
@@ -38,7 +42,7 @@ class VisionPhaseRunner:
         product_repo: ProductRepository | None = None,
         workflow_service: WorkflowService | None = None,
     ) -> None:
-        """Initialize repositories for CLI Vision commands."""
+        """Initialize repositories for CLI Backlog commands."""
         self._product_repo = product_repo or ProductRepository()
         self._workflow_service = workflow_service or WorkflowService()
 
@@ -48,16 +52,61 @@ class VisionPhaseRunner:
         project_id: int,
         user_input: str | None = None,
     ) -> dict[str, Any]:
-        """Generate or refine a Vision draft."""
+        """Generate or refine a Backlog draft."""
         return anyio.run(self._generate, project_id, user_input)
 
     def history(self, *, project_id: int) -> dict[str, Any]:
-        """Return Vision draft attempt history."""
+        """Return Backlog draft attempt history."""
         return anyio.run(self._history, project_id)
 
-    def save(self, *, project_id: int) -> dict[str, Any]:
-        """Persist the current complete Vision draft."""
-        return anyio.run(self._save, project_id)
+    def save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current complete Backlog draft."""
+        return anyio.run(
+            self._save,
+            project_id,
+            attempt_id,
+            expected_artifact_fingerprint,
+            expected_state,
+            idempotency_key,
+        )
+
+    def reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Repair legacy duplicate active Backlog seed rows."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+        try:
+            data = reconcile_active_backlog(
+                project_id=project_id,
+                idempotency_key=idempotency_key,
+            )
+        except BacklogReconciliationError as exc:
+            return _error_envelope(
+                ErrorCode.MUTATION_FAILED,
+                exc.detail,
+                details=exc.details,
+                remediation=[
+                    "Inspect active backlog rows before retrying reconciliation.",
+                    (
+                        "If any row has progressed downstream, do not replace the "
+                        "backlog; resolve downstream state first."
+                    ),
+                ],
+            )
+        return _data_envelope(data)
 
     async def _generate(
         self,
@@ -69,23 +118,24 @@ class VisionPhaseRunner:
             return product
 
         try:
-            data = await generate_vision_draft(
+            data = await generate_backlog_draft(
                 project_id=project_id,
-                setup_blocker=_setup_blocker(product),
-                load_state=lambda: self._load_vision_state(str(project_id), project_id),
+                load_state=lambda: self._load_backlog_state(
+                    str(project_id), project_id
+                ),
                 save_state=lambda state: self._save_session_state(
                     str(project_id), state
                 ),
                 now_iso=_now_iso,
-                run_vision_agent=run_vision_agent_from_state,
+                run_backlog_agent=run_backlog_agent_from_state,
                 user_input=user_input,
             )
-        except VisionPhaseError as exc:
+        except BacklogPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
             return _workflow_error(exc)
-        if data.get("vision_run_success") is False:
-            return _vision_runtime_error(project_id=project_id, data=data)
+        if data.get("backlog_run_success") is False:
+            return _backlog_runtime_error(project_id=project_id, data=data)
         return _data_envelope(data)
 
     async def _history(self, project_id: int) -> dict[str, Any]:
@@ -94,25 +144,35 @@ class VisionPhaseRunner:
             return product
 
         try:
-            data = await get_vision_history(
+            data = await get_backlog_history(
                 load_state=lambda: self._ensure_session(str(project_id))
             )
-        except VisionPhaseError as exc:
+        except BacklogPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _save(self, project_id: int) -> dict[str, Any]:
+    async def _save(
+        self,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
 
         try:
-            data = await save_vision_draft(
+            data = await save_backlog_draft(
                 project_id=project_id,
                 project_name=product.name,
-                setup_blocker=_setup_blocker(product),
+                attempt_id=attempt_id,
+                expected_artifact_fingerprint=expected_artifact_fingerprint,
+                expected_state=expected_state,
+                idempotency_key=idempotency_key,
                 save_state=lambda state: self._save_session_state(
                     str(project_id), state
                 ),
@@ -121,9 +181,9 @@ class VisionPhaseRunner:
                     str(project_id), project_id
                 ),
                 build_tool_context=_build_tool_context,
-                save_vision_tool=save_vision_tool,
+                save_backlog_tool=save_backlog_tool,
             )
-        except VisionPhaseError as exc:
+        except BacklogPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
             return _workflow_error(exc)
@@ -147,7 +207,7 @@ class VisionPhaseRunner:
             state = self._workflow_service.get_session_status(session_id) or {}
         return state
 
-    async def _load_vision_state(
+    async def _load_backlog_state(
         self,
         session_id: str,
         project_id: int,
@@ -163,7 +223,13 @@ class VisionPhaseRunner:
     ) -> SimpleNamespace:
         state = await self._ensure_session(session_id)
         context = SimpleNamespace(state=dict(state), session_id=session_id)
-        select_project(project_id, _build_tool_context(context))
+        result = select_project(project_id, _build_tool_context(context))
+        if not result.get("success"):
+            raise BacklogPhaseError(
+                str(result.get("error", "Project hydration failed"))
+            )
+        _hydrate_vision_assessment_from_active_project(context.state)
+        _assert_required_context(context.state)
         return context
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
@@ -180,13 +246,40 @@ def _build_tool_context(context: object) -> ToolContext:
     return cast("ToolContext", context)
 
 
-def _setup_blocker(product: Product) -> str | None:
-    """Return why Vision must remain blocked, or None when setup passed."""
-    if not getattr(product, "spec_file_path", None):
-        return "Specification file path is required."
-    if not getattr(product, "compiled_authority_json", None):
-        return "Specification authority is missing. Run setup retry."
-    return None
+def _hydrate_vision_assessment_from_active_project(state: dict[str, Any]) -> None:
+    """Backfill the saved Vision text into runtime context when needed."""
+    if isinstance(state.get("product_vision_assessment"), dict):
+        return
+    active_project = state.get("active_project")
+    if not isinstance(active_project, dict):
+        return
+    vision = active_project.get("vision")
+    if isinstance(vision, str) and vision.strip():
+        state["product_vision_assessment"] = {
+            "product_vision_statement": vision,
+            "is_complete": True,
+        }
+
+
+def _assert_required_context(state: dict[str, Any]) -> None:
+    """Block Backlog runtime if hydrated context is missing semantic inputs."""
+    missing: list[str] = []
+    if not state.get("pending_spec_content"):
+        missing.append("pending_spec_content")
+    if not state.get("compiled_authority_cached"):
+        missing.append("compiled_authority_cached")
+    assessment = state.get("product_vision_assessment")
+    vision = (
+        assessment.get("product_vision_statement")
+        if isinstance(assessment, dict)
+        else None
+    )
+    if not isinstance(vision, str) or not vision.strip():
+        missing.append("product_vision_assessment.product_vision_statement")
+    if missing:
+        raise BacklogPhaseError(
+            "Setup required: Backlog context hydration missing " + ", ".join(missing)
+        )
 
 
 def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
@@ -217,12 +310,12 @@ def _error_envelope(
     }
 
 
-def _phase_error(exc: VisionPhaseError) -> dict[str, Any]:
-    """Map Vision phase errors onto registered CLI errors."""
+def _phase_error(exc: BacklogPhaseError) -> dict[str, Any]:
+    """Map Backlog phase errors onto registered CLI errors."""
     message = exc.detail
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
-        if message.startswith("Setup required:")
+        if message.startswith("Setup required")
         else ErrorCode.INVALID_COMMAND
     )
     return _error_envelope(code, message)
@@ -233,26 +326,25 @@ def _workflow_error(exc: RuntimeError) -> dict[str, Any]:
     return _error_envelope(ErrorCode.WORKFLOW_SESSION_FAILED, str(exc))
 
 
-def _vision_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str, Any]:
-    """Map a recorded Vision runtime failure onto a hard CLI failure."""
+def _backlog_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    """Map a recorded Backlog runtime failure onto a hard CLI failure."""
     message = str(
-        data.get("failure_summary") or data.get("error") or "Vision generation failed."
+        data.get("failure_summary") or data.get("error") or "Backlog generation failed."
     )
     details = {
         "project_id": project_id,
-        "vision_run_success": False,
+        "backlog_run_success": False,
         "failure_stage": data.get("failure_stage"),
         "failure_artifact_id": data.get("failure_artifact_id"),
         "attempt_count": data.get("attempt_count"),
         "fsm_state": data.get("fsm_state"),
-        "model_info": data.get("model_info"),
     }
     return _error_envelope(
         ErrorCode.MUTATION_FAILED,
         message,
         details={key: value for key, value in details.items() if value is not None},
         remediation=[
-            "Inspect agileforge vision history --project-id <project_id>.",
-            "Fix the Vision runtime/provider configuration or refine the input.",
+            "Inspect agileforge backlog history --project-id <project_id>.",
+            "Fix the Backlog runtime/provider configuration or refine the input.",
         ],
     )

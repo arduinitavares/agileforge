@@ -57,9 +57,9 @@ def get_project_details(product_id: int) -> dict[str, Any]:
             .where(Theme.product_id == product_id)
         ).one()
         story_count = session.exec(
-            select(func.count(cast("Any", UserStory.story_id))).where(
-                UserStory.product_id == product_id
-            )
+            select(func.count(cast("Any", UserStory.story_id)))
+            .where(UserStory.product_id == product_id)
+            .where(UserStory.is_superseded == False)  # noqa: E712
         ).one()
         sprint_count = session.exec(
             select(func.count(cast("Any", Sprint.sprint_id))).where(

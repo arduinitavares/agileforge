@@ -9,6 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 import api as api_module
+from services.phases.story_service import _story_artifact_fingerprint
 
 
 @dataclass
@@ -263,16 +264,25 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
     assert response.status_code == 200  # noqa: PLR2004
     payload = response.json()["data"]
     assert payload["output_artifact"]["user_stories"][0]["story_title"] == "Story A"
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", payload["output_artifact"]
+    )
     assert payload["current_draft"] == {
         "attempt_id": "attempt-1",
         "kind": "complete_draft",
         "is_complete": True,
+        "artifact_fingerprint": artifact_fingerprint,
     }
     assert payload["retry"] == {
         "available": False,
         "target_attempt_id": None,
     }
-    assert payload["save"] == {"available": True}
+    assert payload["save"] == {
+        "available": True,
+        "attempt_id": "attempt-1",
+        "artifact_fingerprint": artifact_fingerprint,
+        "expected_state": "STORY_REVIEW",
+    }
 
     state = workflow.states[str(product.product_id)]
     runtime = state["interview_runtime"]["story"]["Requirement A"]
@@ -285,6 +295,7 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         "latest_reusable_attempt_id": "attempt-1",
         "kind": "complete_draft",
         "is_complete": True,
+        "artifact_fingerprint": artifact_fingerprint,
         "updated_at": runtime["draft_projection"]["updated_at"],
     }
     assert runtime["attempt_history"][0]["included_feedback_ids"] == [
@@ -584,16 +595,25 @@ def test_story_retry_promotes_reusable_draft_and_absorbs_frozen_feedback_ids(  #
 
     assert response.status_code == 200  # noqa: PLR2004
     payload = response.json()["data"]
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", retry_artifact
+    )
     assert payload["current_draft"] == {
         "attempt_id": "attempt-3",
         "kind": "complete_draft",
         "is_complete": True,
+        "artifact_fingerprint": artifact_fingerprint,
     }
     assert payload["retry"] == {
         "available": False,
         "target_attempt_id": None,
     }
-    assert payload["save"] == {"available": True}
+    assert payload["save"] == {
+        "available": True,
+        "attempt_id": "attempt-3",
+        "artifact_fingerprint": artifact_fingerprint,
+        "expected_state": "STORY_REVIEW",
+    }
 
     runtime = workflow.states[str(product.product_id)]["interview_runtime"]["story"][
         "Requirement A"
@@ -602,6 +622,7 @@ def test_story_retry_promotes_reusable_draft_and_absorbs_frozen_feedback_ids(  #
         "latest_reusable_attempt_id": "attempt-3",
         "kind": "complete_draft",
         "is_complete": True,
+        "artifact_fingerprint": artifact_fingerprint,
         "updated_at": runtime["draft_projection"]["updated_at"],
     }
     assert runtime["attempt_history"][-1]["attempt_id"] == "attempt-3"
@@ -711,8 +732,12 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
     client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Story Project")
     reusable_artifact = _story_artifact("Requirement A", "Saved draft")
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", reusable_artifact
+    )
+    reusable_artifact["artifact_fingerprint"] = artifact_fingerprint
     workflow.states[str(product.product_id)] = {
-        "fsm_state": "STORY_INTERVIEW",
+        "fsm_state": "STORY_REVIEW",
         "interview_runtime": {
             "story": {
                 "Requirement A": {
@@ -725,6 +750,7 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
                             "is_reusable": True,
                             "retryable": False,
                             "draft_kind": "complete_draft",
+                            "artifact_fingerprint": artifact_fingerprint,
                             "output_artifact": reusable_artifact,
                         },
                         {
@@ -744,6 +770,7 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
                         "latest_reusable_attempt_id": "attempt-1",
                         "kind": "complete_draft",
                         "is_complete": True,
+                        "artifact_fingerprint": artifact_fingerprint,
                     },
                     "feedback_projection": {"items": [], "next_feedback_sequence": 0},
                     "request_projection": {},
@@ -762,6 +789,7 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
 
     def fake_save_stories_tool(save_input, _context):  # noqa: ANN001, ANN202
         assert save_input.parent_requirement == "Requirement A"
+        assert save_input.idempotency_key == "story-save-api-requirement-a"
         assert save_input.stories == reusable_artifact["user_stories"]
         return {"success": True, "saved_count": 1}
 
@@ -771,6 +799,12 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
     response = client.post(
         f"/api/projects/{product.product_id}/story/save",
         params={"parent_requirement": "Requirement A"},
+        json={
+            "attempt_id": "attempt-1",
+            "expected_artifact_fingerprint": artifact_fingerprint,
+            "expected_state": "STORY_REVIEW",
+            "idempotency_key": "story-save-api-requirement-a",
+        },
     )
 
     assert response.status_code == 200  # noqa: PLR2004
@@ -781,18 +815,98 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
     )
 
 
-def test_story_save_returns_409_without_complete_reusable_draft_projection(monkeypatch):  # noqa: ANN001, ANN201, D103
+def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Story Project")
     workflow.states[str(product.product_id)] = {
-        "fsm_state": "STORY_INTERVIEW",
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Requirement A"]}],
+        "story_saved": {"Requirement A": True},
+    }
+
+    missing_body_response = client.post(
+        f"/api/projects/{product.product_id}/story/complete_phase"
+    )
+    assert missing_body_response.status_code == 422  # noqa: PLR2004
+
+    async def fake_complete_story_phase_service(
+        *,
+        expected_state: str,
+        idempotency_key: str,
+        load_state: object,
+        save_state: object,
+        now_iso: object,
+    ) -> dict[str, object]:
+        assert expected_state == "STORY_PERSISTENCE"
+        assert idempotency_key == "story-complete-api"
+        assert load_state is not None
+        assert save_state is not None
+        assert now_iso is not None
+        return {
+            "fsm_state": "SPRINT_SETUP",
+            "coverage": {"saved": 1, "merged": 0, "total": 1},
+            "idempotency_key": "story-complete-api",
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "complete_story_phase_service",
+        fake_complete_story_phase_service,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/complete_phase",
+        json={
+            "expected_state": "STORY_PERSISTENCE",
+            "idempotency_key": "story-complete-api",
+        },
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    assert response.json() == {
+        "status": "success",
+        "data": {
+            "fsm_state": "SPRINT_SETUP",
+            "coverage": {"saved": 1, "merged": 0, "total": 1},
+            "idempotency_key": "story-complete-api",
+        },
+    }
+
+
+def test_story_save_returns_409_without_complete_reusable_draft_projection(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+    incomplete_artifact = _story_artifact(
+        "Requirement A", "Incomplete draft", is_complete=False
+    )
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", incomplete_artifact
+    )
+    incomplete_artifact["artifact_fingerprint"] = artifact_fingerprint
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "STORY_REVIEW",
         "interview_runtime": {
             "story": {
                 "Requirement A": {
                     "phase": "story",
                     "subject_key": "Requirement A",
-                    "attempt_history": [],
-                    "draft_projection": {},
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "reusable_content_result",
+                            "is_reusable": True,
+                            "retryable": False,
+                            "draft_kind": "incomplete_draft",
+                            "artifact_fingerprint": artifact_fingerprint,
+                            "output_artifact": incomplete_artifact,
+                        }
+                    ],
+                    "draft_projection": {
+                        "latest_reusable_attempt_id": "attempt-1",
+                        "kind": "incomplete_draft",
+                        "is_complete": False,
+                        "artifact_fingerprint": artifact_fingerprint,
+                    },
                     "feedback_projection": {"items": [], "next_feedback_sequence": 0},
                     "request_projection": {},
                 }
@@ -803,10 +917,28 @@ def test_story_save_returns_409_without_complete_reusable_draft_projection(monke
     response = client.post(
         f"/api/projects/{product.product_id}/story/save",
         params={"parent_requirement": "Requirement A"},
+        json={
+            "attempt_id": "attempt-1",
+            "expected_artifact_fingerprint": artifact_fingerprint,
+            "expected_state": "STORY_REVIEW",
+            "idempotency_key": "story-save-api-requirement-a",
+        },
     )
 
     assert response.status_code == 409  # noqa: PLR2004
     assert response.json()["detail"] == "No story draft available for 'Requirement A'"
+
+
+def test_story_save_requires_guard_request_body(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/save",
+        params={"parent_requirement": "Requirement A"},
+    )
+
+    assert response.status_code == 422  # noqa: PLR2004
 
 
 def test_story_history_returns_projection_attempt_history_and_summary(monkeypatch):  # noqa: ANN001, ANN201, D103
@@ -1182,10 +1314,14 @@ def test_story_generate_allows_fresh_run_after_reset_without_manual_refinement_i
 
     assert response.status_code == 200  # noqa: PLR2004
     payload = response.json()["data"]
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", payload["output_artifact"]
+    )
     assert payload["current_draft"] == {
         "attempt_id": "attempt-3",
         "kind": "complete_draft",
         "is_complete": True,
+        "artifact_fingerprint": artifact_fingerprint,
     }
     runtime = workflow.states[str(product.product_id)]["interview_runtime"]["story"][
         "Requirement A"

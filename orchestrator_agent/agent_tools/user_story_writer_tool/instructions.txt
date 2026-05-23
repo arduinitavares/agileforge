@@ -67,6 +67,9 @@ Produce a set of **independent, valuable, and releasable user stories** that col
     * Populate `decomposition_warning` with the specific reason.
 * Never include `decomposition_warning` on a story scored `High` or `Medium`.
 * If you feel a caveat, assumption, dependency, or "until confirmed" note is necessary, the story is not `High` or `Medium`; score it `Low` and put the reason in `decomposition_warning`.
+* If output is incomplete, set `is_complete` to false and include at least one concrete clarifying question that the reviewer can answer directly.
+* Do NOT use generic questions such as "Please clarify the requirements" or "What should happen?".
+* A valid clarifying question must name the missing decision, artifact, command, contract, threshold, or source of truth needed to finish the story safely.
 
 ## HARD RULES
 * Describe **what the system does**, never **how it is implemented** (No "Create table X in SQL").

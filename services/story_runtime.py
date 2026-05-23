@@ -33,6 +33,26 @@ from utils.runtime_config import STORY_RUNNER_IDENTITY
 logger: logging.Logger = logging.getLogger(name=__name__)
 
 
+_GENERIC_CLARIFYING_QUESTIONS: set[str] = {
+    "please clarify the requirements",
+    "please clarify the requirement",
+    "what should happen",
+    "what is expected",
+    "need more details",
+    "clarify requirements",
+    "clarify the requirements",
+}
+_GENERIC_CLARIFYING_QUESTION_PHRASES: tuple[str, ...] = (
+    "clarify the requirements",
+    "clarify the requirement",
+    "clarify requirements",
+    "what should happen",
+    "what is expected",
+    "more details",
+)
+_MIN_ACTIONABLE_QUESTION_WORDS: int = 5
+
+
 class StoryInputContext(TypedDict):
     """Serialized request payload expected by the story-generation agent."""
 
@@ -79,6 +99,36 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
             continue
         normalized.append({str(key): value for key, value in error.items()})
     return normalized
+
+
+def _has_clarifying_questions(output: UserStoryWriterOutput) -> bool:
+    return any(question.strip() for question in output.clarifying_questions)
+
+
+def _normalized_question_text(question: str) -> str:
+    return " ".join(question.strip().rstrip(".?").lower().split())
+
+
+def _actionable_clarifying_questions(questions: list[str]) -> list[str]:
+    actionable: list[str] = []
+    for question in questions:
+        if not isinstance(question, str):
+            continue
+        stripped = question.strip()
+        if not stripped:
+            continue
+        normalized = _normalized_question_text(stripped)
+        if normalized in _GENERIC_CLARIFYING_QUESTIONS:
+            continue
+        if any(
+            phrase in normalized
+            for phrase in _GENERIC_CLARIFYING_QUESTION_PHRASES
+        ):
+            continue
+        if len(stripped.split()) < _MIN_ACTIONABLE_QUESTION_WORDS:
+            continue
+        actionable.append(stripped)
+    return actionable
 
 
 def _as_object_dict(value: object) -> dict[str, object] | None:
@@ -304,6 +354,89 @@ def _with_failure_metadata(
     return result
 
 
+def _validate_story_output_consistency(
+    output: UserStoryWriterOutput,
+    *,
+    raw_text: str,
+    project_id: int,
+    parent_requirement: str,
+    input_context: StoryInputContext,
+) -> dict[str, Any] | None:
+    has_questions = _has_clarifying_questions(output)
+    will_be_incomplete = not output.is_complete or has_questions
+    if not will_be_incomplete:
+        return None
+
+    actionable_questions = _actionable_clarifying_questions(
+        output.clarifying_questions
+    )
+    if actionable_questions:
+        return None
+
+    return _with_failure_metadata(
+        _failure(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            input_context=input_context,
+            failure_stage="output_validation",
+            details=_FailureDetails(
+                message=(
+                    "Story output validation failed: incomplete drafts must include "
+                    "at least one actionable clarifying question."
+                ),
+                raw_text=raw_text,
+            ),
+        ),
+        classification="nonreusable_schema_failure",
+        draft_kind=None,
+        is_reusable=False,
+        request_payload=input_context,
+    )
+
+
+def _story_success_result(
+    output: UserStoryWriterOutput,
+    *,
+    raw_text: str,
+    project_id: int,
+    parent_requirement: str,
+    request_payload: StoryInputContext,
+) -> dict[str, Any]:
+    consistency_failure = _validate_story_output_consistency(
+        output,
+        raw_text=raw_text,
+        project_id=project_id,
+        parent_requirement=parent_requirement,
+        input_context=request_payload,
+    )
+    if consistency_failure is not None:
+        return consistency_failure
+
+    output_artifact: dict[str, Any] = output.model_dump(exclude_none=True)
+    effective_is_complete: bool = (
+        output.is_complete and not _has_clarifying_questions(output)
+    )
+    output_artifact["is_complete"] = effective_is_complete
+    return {
+        "success": True,
+        "input_context": request_payload,
+        "output_artifact": output_artifact,
+        "classification": "reusable_content_result",
+        "draft_kind": (
+            "complete_draft" if effective_is_complete else "incomplete_draft"
+        ),
+        "is_reusable": True,
+        "is_complete": effective_is_complete,
+        "request_payload": request_payload,
+        "error": None,
+        "failure_artifact_id": None,
+        "failure_stage": None,
+        "failure_summary": None,
+        "raw_output_preview": None,
+        "has_full_artifact": False,
+    }
+
+
 def _get_latest_reusable_story_artifact(
     state: dict[str, Any],
     *,
@@ -504,27 +637,13 @@ async def run_story_agent_request(
             request_payload=request_payload,
         )
 
-    output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
-    return {
-        "success": True,
-        "input_context": request_payload,
-        "output_artifact": output_artifact,
-        "classification": "reusable_content_result",
-        "draft_kind": (
-            "complete_draft"
-            if bool(output_artifact.get("is_complete", False))
-            else "incomplete_draft"
-        ),
-        "is_reusable": True,
-        "is_complete": bool(output_artifact.get("is_complete", False)),
-        "request_payload": request_payload,
-        "error": None,
-        "failure_artifact_id": None,
-        "failure_stage": None,
-        "failure_summary": None,
-        "raw_output_preview": None,
-        "has_full_artifact": False,
-    }
+    return _story_success_result(
+        output_model,
+        raw_text=raw_text,
+        project_id=project_id,
+        parent_requirement=parent_requirement,
+        request_payload=request_payload,
+    )
 
 
 async def run_story_agent_from_state(

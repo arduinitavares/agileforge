@@ -38,7 +38,6 @@ from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
 )
-from services.agent_workbench.vision_phase import VisionPhaseRunner
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
@@ -144,6 +143,138 @@ class _VisionPhaseRunner(Protocol):
         ...
 
 
+class _BacklogPhaseRunner(Protocol):
+    """Backlog phase commands exposed through the facade."""
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Backlog draft."""
+        ...
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog attempt history."""
+        ...
+
+    def save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current Backlog draft."""
+        ...
+
+    def reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Repair legacy duplicate active Backlog seed rows."""
+        ...
+
+
+class _RoadmapPhaseRunner(Protocol):
+    """Roadmap phase commands exposed through the facade."""
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Roadmap draft."""
+        ...
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Roadmap attempt history."""
+        ...
+
+    def save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current Roadmap draft."""
+        ...
+
+
+class _StoryPhaseRunner(Protocol):
+    """Story phase commands exposed through the facade."""
+
+    def pending(self, *, project_id: int) -> dict[str, Any]:
+        """Return roadmap requirements grouped by Story completion status."""
+        ...
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Story draft."""
+        ...
+
+    def retry(self, *, project_id: int, parent_requirement: str) -> dict[str, Any]:
+        """Retry the latest retryable Story request."""
+        ...
+
+    def history(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> dict[str, Any]:
+        """Return Story attempt history."""
+        ...
+
+    def save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current Story draft."""
+        ...
+
+    def complete(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Complete the Story phase."""
+        ...
+
+    def reopen(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Reopen one saved Story requirement before Sprint work exists."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
@@ -156,6 +287,9 @@ class AgentWorkbenchApplication:
         authority_review: _AuthorityReview | None = None,
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
         vision_runner: _VisionPhaseRunner | None = None,
+        backlog_runner: _BacklogPhaseRunner | None = None,
+        roadmap_runner: _RoadmapPhaseRunner | None = None,
+        story_runner: _StoryPhaseRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -164,6 +298,9 @@ class AgentWorkbenchApplication:
         self._authority_review = authority_review
         self._authority_decision_runner = authority_decision_runner
         self._vision_runner = vision_runner
+        self._backlog_runner = backlog_runner
+        self._roadmap_runner = roadmap_runner
+        self._story_runner = story_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -285,12 +422,17 @@ class AgentWorkbenchApplication:
                 review=review,
             )
 
-        vision_next = _vision_workflow_next(
-            project_id=project_id,
-            workflow=workflow,
+        phase_next_handlers = (
+            _vision_workflow_next,
+            _backlog_workflow_next,
+            _roadmap_workflow_next,
+            _story_workflow_next,
+            _uninstalled_phase_workflow_next,
         )
-        if vision_next is not None:
-            return vision_next
+        for phase_next_handler in phase_next_handlers:
+            phase_next = phase_next_handler(project_id=project_id, workflow=workflow)
+            if phase_next is not None:
+                return phase_next
 
         pack = self.context_pack(project_id=project_id, phase="sprint-planning")
         if not pack.get("ok"):
@@ -520,6 +662,178 @@ class AgentWorkbenchApplication:
         """Persist the current complete Vision draft."""
         return self._get_vision_runner().save(project_id=project_id)
 
+    def backlog_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Backlog draft."""
+        return self._get_backlog_runner().generate(
+            project_id=project_id,
+            user_input=user_input,
+        )
+
+    def backlog_history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog attempt history."""
+        return self._get_backlog_runner().history(project_id=project_id)
+
+    def backlog_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current complete Backlog draft."""
+        return self._get_backlog_runner().save(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def backlog_reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Repair legacy duplicate active Backlog seed rows."""
+        return self._get_backlog_runner().reconcile(
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def roadmap_generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Roadmap draft."""
+        return self._get_roadmap_runner().generate(
+            project_id=project_id,
+            user_input=user_input,
+        )
+
+    def roadmap_history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Roadmap attempt history."""
+        return self._get_roadmap_runner().history(project_id=project_id)
+
+    def roadmap_save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current complete Roadmap draft."""
+        return self._get_roadmap_runner().save(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def story_pending(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story pending roadmap requirements."""
+        return self._get_story_runner().pending(project_id=project_id)
+
+    def story_generate(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate or refine a Story draft."""
+        return self._get_story_runner().generate(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            user_input=user_input,
+        )
+
+    def story_retry(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> dict[str, Any]:
+        """Retry the latest retryable Story request."""
+        return self._get_story_runner().retry(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+        )
+
+    def story_history(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> dict[str, Any]:
+        """Return Story attempt history."""
+        return self._get_story_runner().history(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+        )
+
+    def story_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current complete Story draft."""
+        return self._get_story_runner().save(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def story_complete(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Complete the Story phase."""
+        return self._get_story_runner().complete(
+            project_id=project_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def story_reopen(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Reopen one saved Story requirement before Sprint work exists."""
+        return self._get_story_runner().reopen(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
     def _get_read_projection(self) -> _ReadProjection:
         """Return the read projection, constructing the default lazily."""
         if self._read_projection is None:
@@ -562,8 +876,42 @@ class AgentWorkbenchApplication:
     def _get_vision_runner(self) -> _VisionPhaseRunner:
         """Return the Vision runner, constructing the default lazily."""
         if self._vision_runner is None:
+            from services.agent_workbench.vision_phase import (  # noqa: PLC0415
+                VisionPhaseRunner,
+            )
+
             self._vision_runner = VisionPhaseRunner()
         return self._vision_runner
+
+    def _get_backlog_runner(self) -> _BacklogPhaseRunner:
+        """Return the Backlog runner, constructing the default lazily."""
+        if self._backlog_runner is None:
+            from services.agent_workbench.backlog_phase import (  # noqa: PLC0415
+                BacklogPhaseRunner,
+            )
+
+            self._backlog_runner = BacklogPhaseRunner()
+        return self._backlog_runner
+
+    def _get_roadmap_runner(self) -> _RoadmapPhaseRunner:
+        """Return the Roadmap runner, constructing the default lazily."""
+        if self._roadmap_runner is None:
+            from services.agent_workbench.roadmap_phase import (  # noqa: PLC0415
+                RoadmapPhaseRunner,
+            )
+
+            self._roadmap_runner = RoadmapPhaseRunner()
+        return self._roadmap_runner
+
+    def _get_story_runner(self) -> _StoryPhaseRunner:
+        """Return the Story runner, constructing the default lazily."""
+        if self._story_runner is None:
+            from services.agent_workbench.story_phase import (  # noqa: PLC0415
+                StoryPhaseRunner,
+            )
+
+            self._story_runner = StoryPhaseRunner()
+        return self._story_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -753,11 +1101,27 @@ def _vision_workflow_next(
 ) -> dict[str, Any] | None:
     """Return Vision phase commands for Vision workflow states."""
     fsm_state = _fsm_state_from_envelope(workflow)
-    if fsm_state not in {"VISION_INTERVIEW", "VISION_REVIEW"}:
+    if fsm_state not in {"VISION_INTERVIEW", "VISION_REVIEW", "VISION_PERSISTENCE"}:
         return None
 
     next_valid_commands: list[str] = []
-    blocked_future_commands: list[str] = []
+    blocked_future_commands: list[Any] = []
+    status: str | None = None
+    if fsm_state == "VISION_PERSISTENCE":
+        backlog_command = f"agileforge backlog generate --project-id {project_id}"
+        if command_is_available("agileforge backlog generate"):
+            next_valid_commands.append(backlog_command)
+            status = "next_phase_available"
+        else:
+            blocked_future_commands.append(
+                {
+                    "command": backlog_command,
+                    "installed": False,
+                    "reason": "Backlog CLI is not installed yet.",
+                }
+            )
+            status = "blocked_by_uninstalled_next_phase"
+
     command_candidates = _vision_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
@@ -774,6 +1138,8 @@ def _vision_workflow_next(
         "blocked_commands": [],
         "blocked_future_commands": blocked_future_commands,
     }
+    if status is not None:
+        data["status"] = status
     data["source_fingerprint"] = canonical_hash(
         {
             "command": WORKFLOW_NEXT_COMMAND,
@@ -783,6 +1149,7 @@ def _vision_workflow_next(
             "next_valid_commands": data["next_valid_commands"],
             "blocked_commands": data["blocked_commands"],
             "blocked_future_commands": data["blocked_future_commands"],
+            "status": data.get("status"),
         }
     )
     return {
@@ -810,6 +1177,8 @@ def _vision_command_candidates(
                 f"agileforge vision generate --project-id {project_id}",
             )
         ]
+    if fsm_state == "VISION_PERSISTENCE":
+        return []
     return [
         (
             "agileforge vision save",
@@ -819,6 +1188,505 @@ def _vision_command_candidates(
             "agileforge vision generate",
             f"agileforge vision generate --project-id {project_id} --input <feedback>",
         ),
+    ]
+
+
+def _backlog_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return Backlog phase commands for Backlog workflow states."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    if fsm_state not in {
+        "BACKLOG_INTERVIEW",
+        "BACKLOG_REVIEW",
+        "BACKLOG_PERSISTENCE",
+    }:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[Any] = []
+    status: str | None = None
+    if fsm_state == "BACKLOG_PERSISTENCE":
+        roadmap_command = f"agileforge roadmap generate --project-id {project_id}"
+        if command_is_available("agileforge roadmap generate"):
+            next_valid_commands.append(roadmap_command)
+            status = "next_phase_available"
+        else:
+            blocked_future_commands.append(
+                {
+                    "command": roadmap_command,
+                    "installed": False,
+                    "reason": "Roadmap CLI is not installed yet.",
+                }
+            )
+            status = "blocked_by_uninstalled_next_phase"
+
+    command_candidates = _backlog_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+    )
+    for command_name, command_text in command_candidates:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+
+    if status is None:
+        status = "next_phase_available" if next_valid_commands else None
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+    }
+    if status is not None:
+        data["status"] = status
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "status": data.get("status"),
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _backlog_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str,
+) -> list[tuple[str, str]]:
+    """Return Backlog command candidates for the current Backlog state."""
+    if fsm_state == "BACKLOG_INTERVIEW":
+        return [
+            (
+                "agileforge backlog generate",
+                f"agileforge backlog generate --project-id {project_id}",
+            )
+        ]
+    if fsm_state == "BACKLOG_PERSISTENCE":
+        return []
+    return [
+        (
+            "agileforge backlog save",
+            (
+                f"agileforge backlog save --project-id {project_id} "
+                "--attempt-id <attempt_id> "
+                "--expected-artifact-fingerprint <artifact_fingerprint> "
+                "--expected-state BACKLOG_REVIEW "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge backlog generate",
+            (
+                f"agileforge backlog generate --project-id {project_id} "
+                "--input <feedback>"
+            ),
+        ),
+    ]
+
+
+def _roadmap_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return Roadmap phase commands for Roadmap workflow states."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    if fsm_state not in {
+        "ROADMAP_INTERVIEW",
+        "ROADMAP_REVIEW",
+        "ROADMAP_PERSISTENCE",
+    }:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[Any] = []
+    status: str | None = None
+    if fsm_state == "ROADMAP_PERSISTENCE":
+        story_commands = [
+            (
+                "agileforge story pending",
+                f"agileforge story pending --project-id {project_id}",
+            ),
+            (
+                "agileforge story generate",
+                (
+                    f"agileforge story generate --project-id {project_id} "
+                    "--parent-requirement <parent_requirement>"
+                ),
+            ),
+        ]
+        for command_name, command_text in story_commands:
+            if command_is_available(command_name):
+                next_valid_commands.append(command_text)
+        if next_valid_commands:
+            status = "next_phase_available"
+        else:
+            blocked_future_commands.append(
+                {
+                    "command": (
+                        f"agileforge story pending --project-id {project_id}"
+                    ),
+                    "installed": False,
+                    "reason": "Story phase CLI is not installed yet.",
+                }
+            )
+            status = "blocked_by_uninstalled_next_phase"
+
+    command_candidates = _roadmap_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+    )
+    for command_name, command_text in command_candidates:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+
+    if status is None:
+        status = "next_phase_available" if next_valid_commands else None
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+    }
+    if status is not None:
+        data["status"] = status
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "status": data.get("status"),
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _roadmap_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str,
+) -> list[tuple[str, str]]:
+    """Return Roadmap command candidates for the current Roadmap state."""
+    if fsm_state == "ROADMAP_INTERVIEW":
+        return [
+            (
+                "agileforge roadmap generate",
+                f"agileforge roadmap generate --project-id {project_id}",
+            )
+        ]
+    if fsm_state == "ROADMAP_PERSISTENCE":
+        return []
+    return [
+        (
+            "agileforge roadmap save",
+            (
+                f"agileforge roadmap save --project-id {project_id} "
+                "--attempt-id <attempt_id> "
+                "--expected-artifact-fingerprint <artifact_fingerprint> "
+                "--expected-state ROADMAP_REVIEW "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge roadmap generate",
+            (
+                f"agileforge roadmap generate --project-id {project_id} "
+                "--input <feedback>"
+            ),
+        ),
+    ]
+
+
+def _story_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return Story phase commands for Story workflow states."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    if fsm_state not in {
+        "STORY_INTERVIEW",
+        "STORY_REVIEW",
+        "STORY_PERSISTENCE",
+    }:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[Any] = []
+    for command_name, command_text in _story_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+        workflow=workflow,
+    ):
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+        "status": "next_phase_available" if next_valid_commands else None,
+    }
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "status": data["status"],
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _story_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str,
+    workflow: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return Story command candidates for the current Story state."""
+    pending_command = (
+        "agileforge story pending",
+        f"agileforge story pending --project-id {project_id}",
+    )
+    generate_command = (
+        "agileforge story generate",
+        (
+            f"agileforge story generate --project-id {project_id} "
+            "--parent-requirement <parent_requirement>"
+        ),
+    )
+    if fsm_state == "STORY_INTERVIEW":
+        return [pending_command, generate_command]
+    if fsm_state == "STORY_PERSISTENCE":
+        if not _story_coverage_is_complete(workflow):
+            return [pending_command, generate_command]
+        return [
+            pending_command,
+            (
+                "agileforge story complete",
+                (
+                    f"agileforge story complete --project-id {project_id} "
+                    "--expected-state STORY_PERSISTENCE "
+                    "--idempotency-key <idempotency_key>"
+                ),
+            ),
+        ]
+    return [
+        (
+            "agileforge story history",
+            (
+                f"agileforge story history --project-id {project_id} "
+                "--parent-requirement <parent_requirement>"
+            ),
+        ),
+        (
+            "agileforge story save",
+            (
+                f"agileforge story save --project-id {project_id} "
+                "--parent-requirement <parent_requirement> "
+                "--attempt-id <attempt_id> "
+                "--expected-artifact-fingerprint <artifact_fingerprint> "
+                "--expected-state STORY_REVIEW "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge story generate",
+            (
+                f"agileforge story generate --project-id {project_id} "
+                "--parent-requirement <parent_requirement> "
+                "--input <feedback>"
+            ),
+        ),
+    ]
+
+
+def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
+    """Return whether all Roadmap requirements have Story coverage."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    requirements = _roadmap_requirements_from_state(state_data)
+    if not requirements:
+        return False
+
+    saved = state_data.get("story_saved")
+    saved_map = saved if isinstance(saved, dict) else {}
+    return all(
+        bool(saved_map.get(requirement))
+        or _story_requirement_has_merge_resolution(
+            state_data,
+            parent_requirement=requirement,
+        )
+        for requirement in requirements
+    )
+
+
+def _roadmap_requirements_from_state(state: dict[str, Any]) -> list[str]:
+    """Return Roadmap requirement titles from workflow state."""
+    releases = state.get("roadmap_releases")
+    if not isinstance(releases, list):
+        return []
+    requirements: list[str] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        items = release.get("items")
+        if not isinstance(items, list):
+            continue
+        requirements.extend(item for item in items if isinstance(item, str) and item)
+    return requirements
+
+
+def _story_requirement_has_merge_resolution(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> bool:
+    """Return whether a Story requirement has an accepted merge resolution."""
+    interview_runtime = state.get("interview_runtime")
+    if not isinstance(interview_runtime, dict):
+        return False
+    story_runtime = interview_runtime.get("story")
+    if not isinstance(story_runtime, dict):
+        return False
+    runtime = story_runtime.get(parent_requirement)
+    if not isinstance(runtime, dict):
+        return False
+    resolution = runtime.get("resolution_projection")
+    if not isinstance(resolution, dict):
+        return False
+    return resolution.get("status") == "merged"
+
+
+def _uninstalled_phase_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return explicit blocked commands for known phases without CLI runners."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    command_candidates = _uninstalled_phase_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+    )
+    if command_candidates is None:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[dict[str, Any]] = []
+    for command_name, command_text, reason in command_candidates:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(
+                {
+                    "command": command_text,
+                    "installed": False,
+                    "reason": reason,
+                }
+            )
+
+    status = (
+        "next_phase_available"
+        if next_valid_commands
+        else "blocked_by_uninstalled_next_phase"
+    )
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+        "status": status,
+    }
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "status": data["status"],
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _uninstalled_phase_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str | None,
+) -> list[tuple[str, str, str]] | None:
+    """Return command templates for workflow phases not yet exposed in the CLI."""
+    phase_commands: dict[str, list[tuple[str, str, str]]] = {
+    }
+    candidates = phase_commands.get(str(fsm_state or ""))
+    if candidates is None:
+        return None
+    return [
+        (command_name, command_text.format(project_id=project_id), reason)
+        for command_name, command_text, reason in candidates
     ]
 
 

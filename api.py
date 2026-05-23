@@ -373,16 +373,50 @@ class BacklogGenerateRequest(BaseModel):
     user_input: str | None = None
 
 
+class BacklogSaveRequest(BaseModel):
+    """Request body for guarded Backlog persistence."""
+
+    attempt_id: str
+    expected_artifact_fingerprint: str
+    expected_state: str
+    idempotency_key: str
+
+
 class RoadmapGenerateRequest(BaseModel):
     """Request body for generating product roadmap."""
 
     user_input: str | None = None
 
 
+class RoadmapSaveRequest(BaseModel):
+    """Request body for guarded Roadmap persistence."""
+
+    attempt_id: str
+    expected_artifact_fingerprint: str
+    expected_state: str
+    idempotency_key: str
+
+
 class StoryGenerateRequest(BaseModel):
     """Request body for generating user stories."""
 
     user_input: str | None = None
+
+
+class StorySaveRequest(BaseModel):
+    """Request body for guarded Story persistence."""
+
+    attempt_id: str
+    expected_artifact_fingerprint: str
+    expected_state: str
+    idempotency_key: str
+
+
+class StoryCompleteRequest(BaseModel):
+    """Request body for guarded Story completion."""
+
+    expected_state: str
+    idempotency_key: str
 
 
 class SprintGenerateRequest(BaseModel):
@@ -1713,9 +1747,7 @@ async def create_project(
         )
     except Exception as exc:
         logger.exception("Error creating project")
-        raise HTTPException(
-            status_code=500, detail="Failed to create project"
-        ) from exc
+        raise HTTPException(status_code=500, detail="Failed to create project") from exc
 
     if not result.get("ok"):
         data = result.get("data") or {}
@@ -1856,6 +1888,7 @@ async def retry_project_setup(
     expected_state = str(state.get("fsm_state") or "SETUP_REQUIRED")
 
     try:
+
         def _compute() -> str:
             resolved = Path(req.spec_file_path).expanduser().resolve()
             return setup_retry_context_fingerprint(
@@ -1864,9 +1897,9 @@ async def retry_project_setup(
                 workflow_state=state,
             )
 
-        expected_context_fingerprint = await cast(
-            "Any", anyio.to_thread
-        ).run_sync(_compute)
+        expected_context_fingerprint = await cast("Any", anyio.to_thread).run_sync(
+            _compute
+        )
     except Exception:
         # If the spec file path is invalid/missing/unreadable, the fingerprint
         # cannot be computed. Fall back to a non-empty sentinel string. This avoids
@@ -1902,8 +1935,7 @@ async def retry_project_setup(
             "setup_error": data.get("setup_error") or err_msg,
             "setup_failure_artifact_id": data.get("setup_failure_artifact_id"),
             "setup_failure_stage": (
-                data.get("setup_failure_stage")
-                or data.get("failure_artifact_stage")
+                data.get("setup_failure_stage") or data.get("failure_artifact_stage")
             ),
             "setup_failure_summary": data.get("setup_failure_summary") or err_msg,
             "setup_raw_output_preview": data.get("raw_output_preview"),
@@ -2001,9 +2033,7 @@ async def get_project_authority_review(
             and product.spec_file_path
         ):
             with Session(get_engine()) as session:
-                selection = _load_authority_selection(
-                    session, project_id=project_id
-                )
+                selection = _load_authority_selection(session, project_id=project_id)
                 accepted_spec = selection.accepted_spec
                 authority = selection.authority
 
@@ -2221,7 +2251,10 @@ async def get_project_backlog_history(project_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/projects/{project_id}/backlog/save")
-async def save_project_backlog(project_id: int) -> dict[str, Any]:
+async def save_project_backlog(
+    project_id: int,
+    req: BacklogSaveRequest,
+) -> dict[str, Any]:
     """Save the current product backlog for a project."""
     product = product_repo.get_by_id(project_id)
     if not product:
@@ -2232,6 +2265,10 @@ async def save_project_backlog(project_id: int) -> dict[str, Any]:
         data = await save_backlog_draft_service(
             project_id=project_id,
             project_name=product.name,
+            attempt_id=req.attempt_id,
+            expected_artifact_fingerprint=req.expected_artifact_fingerprint,
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
             save_state=lambda state: _save_session_state(session_id, state),
             now_iso=_now_iso,
             hydrate_context=lambda: _hydrate_context(session_id, project_id),
@@ -2297,7 +2334,10 @@ async def get_project_roadmap_history(project_id: int) -> dict[str, Any]:
 
 
 @app.post("/api/projects/{project_id}/roadmap/save")
-async def save_project_roadmap(project_id: int) -> dict[str, Any]:
+async def save_project_roadmap(
+    project_id: int,
+    req: RoadmapSaveRequest,
+) -> dict[str, Any]:
     """Save the current product roadmap for a project."""
     product = product_repo.get_by_id(project_id)
     if not product:
@@ -2307,6 +2347,10 @@ async def save_project_roadmap(project_id: int) -> dict[str, Any]:
     try:
         data = await save_roadmap_draft_service(
             project_id=project_id,
+            attempt_id=req.attempt_id,
+            expected_artifact_fingerprint=req.expected_artifact_fingerprint,
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
             save_state=lambda state: _save_session_state(session_id, state),
             now_iso=_now_iso,
             hydrate_context=lambda: _hydrate_context(session_id, project_id),
@@ -2447,7 +2491,7 @@ async def get_project_story_history(
 
 @app.post("/api/projects/{project_id}/story/save")
 async def save_project_story(
-    project_id: int, parent_requirement: str
+    project_id: int, parent_requirement: str, req: StorySaveRequest
 ) -> dict[str, Any]:
     """Save the current user story draft for a specific requirement."""
     product = product_repo.get_by_id(project_id)
@@ -2459,6 +2503,10 @@ async def save_project_story(
         data = await save_story_draft_service(
             project_id=project_id,
             parent_requirement=parent_requirement,
+            attempt_id=req.attempt_id,
+            expected_artifact_fingerprint=req.expected_artifact_fingerprint,
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             hydrate_context=_hydrate_context,
@@ -2545,7 +2593,9 @@ async def delete_project_story(
 
 
 @app.post("/api/projects/{project_id}/story/complete_phase")
-async def complete_story_phase(project_id: int) -> dict[str, Any]:
+async def complete_story_phase(
+    project_id: int, req: StoryCompleteRequest
+) -> dict[str, Any]:
     """Complete the story phase and transition to sprint setup."""
     product = product_repo.get_by_id(project_id)
     if not product:
@@ -2554,6 +2604,8 @@ async def complete_story_phase(project_id: int) -> dict[str, Any]:
     session_id = str(project_id)
     try:
         data = await complete_story_phase_service(
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             now_iso=_now_iso,

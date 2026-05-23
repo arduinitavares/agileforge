@@ -1,5 +1,6 @@
 """Tools for the User Story Writer agent."""
 
+import hashlib
 import json
 import logging
 import re
@@ -13,7 +14,7 @@ from sqlmodel import Session, select
 
 from models.core import Product, UserStory
 from models.db import get_engine
-from models.enums import WorkflowEventType
+from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.story_linkage import (
     normalize_requirement_key,
@@ -28,6 +29,10 @@ logger = logging.getLogger(__name__)
 class SaveStoriesInput(BaseModel):
     """Input schema for save_stories_tool."""
 
+    idempotency_key: Annotated[
+        str,
+        Field(description="Stable key used to safely replay the same persistence call."),
+    ]
     product_id: Annotated[
         int,
         Field(description="The product ID to attach stories to."),
@@ -66,23 +71,191 @@ def _format_acceptance_criteria(criteria: list[str]) -> str:
     return "\n".join(f"- {c}" if not c.startswith("- ") else c for c in criteria)
 
 
-def _upsert_refined_story(
+def _metadata_json(metadata: str | None) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    try:
+        parsed = json.loads(metadata)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _acquire_story_save_write_lock(session: Session) -> None:
+    """Acquire a SQLite writer lock before idempotency-sensitive reads."""
+    connection = session.connection()
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def _find_story_save_event(
+    session: Session,
+    *,
+    product_id: int,
+    idempotency_key: str,
+) -> WorkflowEvent | None:
+    events = session.exec(
+        select(WorkflowEvent)
+        .where(WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED)
+        .where(WorkflowEvent.product_id == product_id)
+        .order_by(WorkflowEvent.timestamp.desc(), WorkflowEvent.event_id.desc())
+    ).all()
+    for event in events:
+        metadata = _metadata_json(event.event_metadata)
+        if metadata.get("idempotency_key") == idempotency_key:
+            return event
+    return None
+
+
+def _story_request_payload_hash(validated: list[UserStoryItem]) -> str:
+    payload = [item.model_dump(mode="json") for item in validated]
+    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"sha256:{hashlib.sha256(canonical_payload.encode()).hexdigest()}"
+
+
+def _story_save_request_identity(
+    *,
+    normalized_req: str,
+    validated: list[UserStoryItem],
+) -> dict[str, str]:
+    return {
+        "normalized_requirement": normalized_req,
+        "story_payload_hash": _story_request_payload_hash(validated),
+    }
+
+
+def _idempotency_key_reused_response(
+    *,
+    input_data: SaveStoriesInput,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "idempotency_replayed": False,
+        "error_code": "IDEMPOTENCY_KEY_REUSED",
+        "error": "Idempotency key was already used for a different story save request.",
+    }
+
+
+def _story_save_event_matches_request(
+    event: WorkflowEvent,
+    *,
+    request_identity: dict[str, str],
+) -> bool:
+    metadata = _metadata_json(event.event_metadata)
+    return (
+        metadata.get("normalized_requirement")
+        == request_identity["normalized_requirement"]
+        and metadata.get("story_payload_hash") == request_identity["story_payload_hash"]
+    )
+
+
+def _story_replacement_blockers(stories: list[UserStory]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for story in stories:
+        reasons: list[str] = []
+        if len(story.sprints or []) > 0:
+            reasons.append("linked_sprint")
+        status_value = getattr(story.status, "value", story.status)
+        if story.status != StoryStatus.TO_DO and status_value != StoryStatus.TO_DO.value:
+            reasons.append("status_progressed")
+        if reasons:
+            blockers.append(
+                {
+                    "story_id": story.story_id,
+                    "refinement_slot": story.refinement_slot,
+                    "title": story.title,
+                    "status": status_value,
+                    "reasons": reasons,
+                }
+            )
+    return blockers
+
+
+def _validate_story_items(
+    stories: list[dict[str, Any]],
+) -> tuple[list[UserStoryItem], list[str]]:
+    validated: list[UserStoryItem] = []
+    validation_errors: list[str] = []
+
+    for idx, story_dict in enumerate(stories):
+        try:
+            item = UserStoryItem.model_validate(story_dict)
+            validated.append(item)
+        except ValidationError as e:
+            errors = []
+            for err in e.errors():
+                loc = err.get("loc", ())
+                prefix = str(loc[0]) if loc else "(model)"
+                errors.append(f"{prefix}: {err['msg']}")
+            validation_errors.append(f"Story {idx + 1}: {'; '.join(errors)}")
+
+    return validated, validation_errors
+
+
+def _active_stories_for_requirement(
     session: Session,
     *,
     product_id: int,
     normalized_req: str,
-    slot: int,
-    item: UserStoryItem,
-) -> tuple[int, str]:
-    """Upsert a refined story by deterministic linkage key."""
-    existing = session.exec(
+) -> list[UserStory]:
+    return session.exec(
         select(UserStory)
         .where(UserStory.product_id == product_id)
         .where(UserStory.source_requirement == normalized_req)
-        .where(UserStory.refinement_slot == slot)
         .where(UserStory.is_superseded == False)  # noqa: E712
-    ).first()
+        .order_by(UserStory.refinement_slot, UserStory.story_id)
+    ).all()
 
+
+def _replay_response(
+    *,
+    input_data: SaveStoriesInput,
+    event: WorkflowEvent,
+) -> dict[str, Any]:
+    metadata = _metadata_json(event.event_metadata)
+    return {
+        "success": True,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "idempotency_replayed": True,
+        "saved_count": metadata.get("saved_count", 0),
+        "updated_count": metadata.get("updated_count", 0),
+        "created_count": metadata.get("created_count", 0),
+        "superseded_count": metadata.get("superseded_count", 0),
+        "updated_story_ids": metadata.get("updated_story_ids", []),
+        "created_story_ids": metadata.get("created_story_ids", []),
+        "superseded_story_ids": metadata.get("superseded_story_ids", []),
+        "story_ids": metadata.get("story_ids", []),
+        "message": f"Replayed previous save for '{input_data.parent_requirement}'.",
+    }
+
+
+def _unsafe_replacement_response(blockers: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": "STORY_REPLACEMENT_UNSAFE",
+        "error": (
+            "Existing active stories for this requirement have progressed "
+            "downstream and cannot be replaced."
+        ),
+        "blockers": blockers,
+    }
+
+
+def _upsert_refined_story(
+    session: Session,
+    *,
+    linkage: tuple[int, str],
+    slot: int,
+    item: UserStoryItem,
+    existing: UserStory | None,
+) -> tuple[int, str]:
+    """Upsert a refined story by deterministic linkage key."""
+    product_id, normalized_req = linkage
     persona = _extract_persona(item.statement)
     ac_text = _format_acceptance_criteria(item.acceptance_criteria)
 
@@ -139,6 +312,144 @@ def _upsert_refined_story(
     return story_id, "created"
 
 
+def _story_save_metadata(
+    *,
+    input_data: SaveStoriesInput,
+    request_identity: dict[str, str],
+    updated_ids: list[int],
+    created_ids: list[int],
+    superseded_ids: list[int],
+) -> dict[str, Any]:
+    return {
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        **request_identity,
+        "saved_count": len(updated_ids) + len(created_ids),
+        "updated_count": len(updated_ids),
+        "created_count": len(created_ids),
+        "superseded_count": len(superseded_ids),
+        "updated_story_ids": updated_ids,
+        "created_story_ids": created_ids,
+        "story_ids": sorted(updated_ids + created_ids),
+        "superseded_story_ids": superseded_ids,
+    }
+
+
+def _success_response(
+    *,
+    input_data: SaveStoriesInput,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "success": True,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "idempotency_replayed": False,
+        "saved_count": metadata["saved_count"],
+        "updated_count": metadata["updated_count"],
+        "created_count": metadata["created_count"],
+        "superseded_count": metadata["superseded_count"],
+        "updated_story_ids": metadata["updated_story_ids"],
+        "created_story_ids": metadata["created_story_ids"],
+        "superseded_story_ids": metadata["superseded_story_ids"],
+        "story_ids": metadata["story_ids"],
+        "message": (
+            f"{metadata['saved_count']} user stories saved for "
+            f"'{input_data.parent_requirement}'."
+        ),
+    }
+
+
+def _persist_validated_stories(
+    session: Session,
+    *,
+    input_data: SaveStoriesInput,
+    normalized_req: str,
+    validated: list[UserStoryItem],
+    existing_active: list[UserStory],
+) -> dict[str, Any]:
+    created_ids: list[int] = []
+    updated_ids: list[int] = []
+    superseded_ids: list[int] = []
+    existing_by_slot = {
+        story.refinement_slot: story
+        for story in existing_active
+        if story.refinement_slot is not None
+    }
+
+    for idx, item in enumerate(validated, start=1):
+        story_id, action = _upsert_refined_story(
+            session,
+            linkage=(input_data.product_id, normalized_req),
+            slot=idx,
+            item=item,
+            existing=existing_by_slot.get(idx),
+        )
+        target = created_ids if action == "created" else updated_ids
+        target.append(story_id)
+
+    active_slots = set(range(1, len(validated) + 1))
+    for story in existing_active:
+        if story.refinement_slot in active_slots:
+            continue
+        story.is_superseded = True
+        session.add(story)
+        if story.story_id is None:
+            raise RuntimeError("Existing story ID was not generated.")
+        superseded_ids.append(story.story_id)
+
+    if len(validated) < len(existing_active):
+        logger.warning(
+            "refinement.slot_underflow product_id=%s requirement=%s refined_count=%s seeded_count=%s",
+            input_data.product_id,
+            input_data.parent_requirement,
+            len(validated),
+            len(existing_active),
+        )
+
+    return _story_save_metadata(
+        input_data=input_data,
+        request_identity=_story_save_request_identity(
+            normalized_req=normalized_req,
+            validated=validated,
+        ),
+        updated_ids=updated_ids,
+        created_ids=created_ids,
+        superseded_ids=superseded_ids,
+    )
+
+
+def _story_refinement_duration(
+    *,
+    tool_context: ToolContext | None,
+    start_ts: float,
+) -> float:
+    duration_seconds = None
+    if tool_context and tool_context.state:
+        duration_seconds = tool_context.state.get("story_refinement_duration")
+    if duration_seconds is None:
+        duration_seconds = round(time.perf_counter() - start_ts, 3)
+    return float(duration_seconds)
+
+
+def _store_story_context(
+    *,
+    tool_context: ToolContext | None,
+    input_data: SaveStoriesInput,
+    metadata: dict[str, Any],
+) -> None:
+    if not tool_context:
+        return
+    saved_key = f"stories_{input_data.parent_requirement}"
+    tool_context.state[saved_key] = {
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "story_ids": metadata["story_ids"],
+        "count": metadata["saved_count"],
+    }
+
+
 def save_stories_tool(
     input_data: SaveStoriesInput,
     tool_context: ToolContext | None = None,
@@ -160,6 +471,8 @@ def save_stories_tool(
     start_ts = time.perf_counter()
 
     with Session(engine) as session:
+        _acquire_story_save_write_lock(session)
+
         # Verify product exists
         product = session.exec(
             select(Product).where(Product.product_id == input_data.product_id)
@@ -172,20 +485,7 @@ def save_stories_tool(
             }
 
         # Validate each story against schema
-        validated: list[UserStoryItem] = []
-        validation_errors: list[str] = []
-
-        for idx, story_dict in enumerate(input_data.stories):
-            try:
-                item = UserStoryItem.model_validate(story_dict)
-                validated.append(item)
-            except ValidationError as e:
-                errors = []
-                for err in e.errors():
-                    loc = err.get("loc", ())
-                    prefix = str(loc[0]) if loc else "(model)"
-                    errors.append(f"{prefix}: {err['msg']}")
-                validation_errors.append(f"Story {idx + 1}: {'; '.join(errors)}")
+        validated, validation_errors = _validate_story_items(input_data.stories)
 
         if validation_errors:
             return {
@@ -197,52 +497,45 @@ def save_stories_tool(
 
         # Persist to database via deterministic linkage upsert
         normalized_req = normalize_requirement_key(input_data.parent_requirement)
-        created_ids: list[int] = []
-        updated_ids: list[int] = []
-
-        seeded_slots = session.exec(
-            select(UserStory.story_id)
-            .where(UserStory.product_id == input_data.product_id)
-            .where(UserStory.source_requirement == normalized_req)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-        ).all()
-
-        for idx, item in enumerate(validated, start=1):
-            story_id, action = _upsert_refined_story(
-                session,
-                product_id=input_data.product_id,
-                normalized_req=normalized_req,
-                slot=idx,
-                item=item,
-            )
-            if action == "created":
-                created_ids.append(story_id)
-            else:
-                updated_ids.append(story_id)
-
-        if len(validated) < len(seeded_slots):
-            logger.warning(
-                "refinement.slot_underflow product_id=%s requirement=%s refined_count=%s seeded_count=%s",
-                input_data.product_id,
-                input_data.parent_requirement,
-                len(validated),
-                len(seeded_slots),
-            )
-
-        duration_seconds = None
-        if tool_context and tool_context.state:
-            duration_seconds = tool_context.state.get("story_refinement_duration")
-        if duration_seconds is None:
-            duration_seconds = round(time.perf_counter() - start_ts, 3)
-        session_id = getattr(tool_context, "session_id", None) if tool_context else None
-        event_metadata = json.dumps(
-            {
-                "parent_requirement": input_data.parent_requirement,
-                "saved_count": len(updated_ids) + len(created_ids),
-                "updated_count": len(updated_ids),
-                "created_count": len(created_ids),
-            }
+        request_identity = _story_save_request_identity(
+            normalized_req=normalized_req,
+            validated=validated,
         )
+        previous_event = _find_story_save_event(
+            session,
+            product_id=input_data.product_id,
+            idempotency_key=input_data.idempotency_key,
+        )
+        if previous_event is not None:
+            if not _story_save_event_matches_request(
+                previous_event,
+                request_identity=request_identity,
+            ):
+                return _idempotency_key_reused_response(input_data=input_data)
+            return _replay_response(input_data=input_data, event=previous_event)
+
+        existing_active = _active_stories_for_requirement(
+            session,
+            product_id=input_data.product_id,
+            normalized_req=normalized_req,
+        )
+        blockers = _story_replacement_blockers(existing_active)
+        if blockers:
+            return _unsafe_replacement_response(blockers)
+
+        metadata = _persist_validated_stories(
+            session,
+            input_data=input_data,
+            normalized_req=normalized_req,
+            validated=validated,
+            existing_active=existing_active,
+        )
+        duration_seconds = _story_refinement_duration(
+            tool_context=tool_context,
+            start_ts=start_ts,
+        )
+        session_id = getattr(tool_context, "session_id", None) if tool_context else None
+        event_metadata = json.dumps(metadata)
         session.add(
             WorkflowEvent(
                 event_type=WorkflowEventType.STORIES_SAVED,
@@ -255,36 +548,19 @@ def save_stories_tool(
         session.commit()
 
         # Optionally store in session state for downstream use
-        if tool_context:
-            saved_key = f"stories_{input_data.parent_requirement}"
-            tool_context.state[saved_key] = {
-                "product_id": input_data.product_id,
-                "parent_requirement": input_data.parent_requirement,
-                "story_ids": sorted(updated_ids + created_ids),
-                "count": len(updated_ids) + len(created_ids),
-            }
+        _store_story_context(
+            tool_context=tool_context,
+            input_data=input_data,
+            metadata=metadata,
+        )
 
         print(
             f"\n\033[92m[Stories Saved]\033[0m "
-            f"{len(updated_ids) + len(created_ids)} stories for '{input_data.parent_requirement}' "
-            f"(updated={len(updated_ids)}, created={len(created_ids)})"
+            f"{metadata['saved_count']} stories for '{input_data.parent_requirement}' "
+            f"(updated={metadata['updated_count']}, created={metadata['created_count']})"
         )
 
-        return {
-            "success": True,
-            "product_id": input_data.product_id,
-            "parent_requirement": input_data.parent_requirement,
-            "saved_count": len(updated_ids) + len(created_ids),
-            "updated_count": len(updated_ids),
-            "created_count": len(created_ids),
-            "updated_story_ids": updated_ids,
-            "created_story_ids": created_ids,
-            "story_ids": sorted(updated_ids + created_ids),
-            "message": (
-                f"{len(updated_ids) + len(created_ids)} user stories saved for "
-                f"'{input_data.parent_requirement}'."
-            ),
-        }
+        return _success_response(input_data=input_data, metadata=metadata)
 
 
 __all__ = ["SaveStoriesInput", "save_stories_tool"]

@@ -464,7 +464,13 @@ def test_complete_story_phase_moves_to_sprint_setup(monkeypatch):  # noqa: ANN00
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_story_phase_project(repo, workflow)
 
-    response = client.post(f"/api/projects/{project_id}/story/complete_phase")
+    response = client.post(
+        f"/api/projects/{project_id}/story/complete_phase",
+        json={
+            "expected_state": "STORY_PERSISTENCE",
+            "idempotency_key": "complete-story-phase-sprint-flow",
+        },
+    )
 
     assert response.status_code == 200  # noqa: PLR2004
     payload = response.json()

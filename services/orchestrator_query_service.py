@@ -95,6 +95,7 @@ def _build_projects_payload(
     story_counts_query = (
         select(UserStory.product_id, func.count(cast("Any", UserStory.story_id)))
         .where(cast("Any", UserStory.product_id).in_(product_ids))
+        .where(UserStory.is_superseded == False)  # noqa: E712
         .group_by(cast("Any", UserStory.product_id))
     )
     sprint_counts_query = (

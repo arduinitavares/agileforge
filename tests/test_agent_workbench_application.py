@@ -39,6 +39,7 @@ PROJECT_ID = 7
 SPEC_VERSION_ID = 3
 STORY_ID = 12
 RECOVERY_MUTATION_EVENT_ID = 42
+ACTIVE_BACKLOG_COUNT = 2
 WORKFLOW_FINGERPRINT = "sha256:" + "1" * 64
 CANDIDATES_FINGERPRINT = "sha256:" + "2" * 64
 AUTHORITY_FINGERPRINT = "sha256:" + "3" * 64
@@ -186,6 +187,167 @@ class _VisionReviewReadProjection(_FakeReadProjection):
         result["data"]["state"] = {
             "fsm_state": "VISION_REVIEW",
             "setup_status": "passed",
+        }
+        return result
+
+
+class _VisionPersistenceReadProjection(_FakeReadProjection):
+    """Fake read projection for saved Vision state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Vision persistence workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "VISION_PERSISTENCE",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _BacklogInterviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Backlog interview state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog interview workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "BACKLOG_INTERVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _BacklogReviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Backlog review state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog review workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "BACKLOG_REVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _BacklogPersistenceReadProjection(_FakeReadProjection):
+    """Fake read projection for saved Backlog state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog persistence workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "BACKLOG_PERSISTENCE",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _RoadmapInterviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Roadmap interview state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Roadmap interview workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "ROADMAP_INTERVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _RoadmapReviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Roadmap review state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Roadmap review workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "ROADMAP_REVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _RoadmapPersistenceReadProjection(_FakeReadProjection):
+    """Fake read projection for saved Roadmap state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Roadmap persistence workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "ROADMAP_PERSISTENCE",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _StoryInterviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Story interview state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story interview workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_INTERVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _StoryReopenedReadProjection(_FakeReadProjection):
+    """Fake read projection for a reopened Story interview state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return reopened Story interview workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_INTERVIEW",
+            "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+            "story_saved": {"Requirement B": True},
+        }
+        return result
+
+
+class _StoryReviewReadProjection(_FakeReadProjection):
+    """Fake read projection for the Story review state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story review workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_REVIEW",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _StoryPersistenceReadProjection(_FakeReadProjection):
+    """Fake read projection for saved Story state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story persistence workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_PERSISTENCE",
+            "setup_status": "passed",
+            "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+            "story_saved": {"Requirement A": True},
+        }
+        return result
+
+
+class _StoryCompleteReadyReadProjection(_FakeReadProjection):
+    """Fake read projection for fully covered Story state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story persistence workflow state with full coverage."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_PERSISTENCE",
+            "setup_status": "passed",
+            "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+            "story_saved": {"Requirement A": True, "Requirement B": True},
         }
         return result
 
@@ -442,6 +604,327 @@ class _FakeVisionRunner:
         }
 
 
+class _FakeBacklogRunner:
+    """Fake Backlog runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Backlog generation."""
+        self.calls.append(
+            (
+                "generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Record Backlog history lookup."""
+        self.calls.append(("history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Backlog save."""
+        self.calls.append(
+            (
+                "save",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reconcile(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Backlog reconciliation."""
+        self.calls.append(
+            (
+                "reconcile",
+                {
+                    "project_id": project_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "active_after": 2},
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _FakeRoadmapRunner:
+    """Fake Roadmap runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Roadmap generation."""
+        self.calls.append(
+            (
+                "generate",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Record Roadmap history lookup."""
+        self.calls.append(("history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Roadmap save."""
+        self.calls.append(
+            (
+                "save",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "ROADMAP_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _FakeStoryRunner:
+    """Fake Story runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def pending(self, *, project_id: int) -> dict[str, Any]:
+        """Record Story pending lookup."""
+        self.calls.append(("pending", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "pending": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def generate(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Story generation."""
+        self.calls.append(
+            (
+                "generate",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "user_input": user_input,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def retry(self, *, project_id: int, parent_requirement: str) -> dict[str, Any]:
+        """Record Story retry."""
+        self.calls.append(
+            (
+                "retry",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "retry_started": True},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def history(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> dict[str, Any]:
+        """Record Story history lookup."""
+        self.calls.append(
+            (
+                "history",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story save."""
+        self.calls.append(
+            (
+                "save",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def complete(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story completion."""
+        self.calls.append(
+            (
+                "complete",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_SETUP"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reopen(
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story reopen."""
+        self.calls.append(
+            (
+                "reopen",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_INTERVIEW"},
+            "warnings": [],
+            "errors": [],
+        }
+
+
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
     app = AgentWorkbenchApplication(
@@ -611,6 +1094,209 @@ def test_application_routes_vision_commands_to_runner() -> None:
     ]
 
 
+def test_application_routes_backlog_commands_to_runner() -> None:
+    """Verify Backlog facade methods delegate to the configured runner."""
+    runner = _FakeBacklogRunner()
+    app = AgentWorkbenchApplication(backlog_runner=runner)
+
+    assert (
+        app.backlog_generate(
+            project_id=PROJECT_ID,
+            user_input="tighten themes",
+        )["data"]["is_complete"]
+        is False
+    )
+    assert app.backlog_history(project_id=PROJECT_ID)["data"]["items"] == []
+    assert (
+        app.backlog_save(
+            project_id=PROJECT_ID,
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint="sha256:" + "a" * 64,
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-backlog-1",
+        )["data"]["fsm_state"]
+        == "BACKLOG_PERSISTENCE"
+    )
+    assert (
+        app.backlog_reconcile(
+            project_id=PROJECT_ID,
+            idempotency_key="reconcile-backlog-1",
+        )["data"]["active_after"]
+        == ACTIVE_BACKLOG_COUNT
+    )
+    assert runner.calls == [
+        ("generate", {"project_id": PROJECT_ID, "user_input": "tighten themes"}),
+        ("history", {"project_id": PROJECT_ID}),
+        (
+            "save",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "backlog-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                "expected_state": "BACKLOG_REVIEW",
+                "idempotency_key": "save-backlog-1",
+            },
+        ),
+        (
+            "reconcile",
+            {
+                "project_id": PROJECT_ID,
+                "idempotency_key": "reconcile-backlog-1",
+            },
+        ),
+    ]
+
+
+def test_application_routes_roadmap_commands_to_runner() -> None:
+    """Verify Roadmap facade methods delegate to the configured runner."""
+    runner = _FakeRoadmapRunner()
+    app = AgentWorkbenchApplication(roadmap_runner=runner)
+
+    assert (
+        app.roadmap_generate(
+            project_id=PROJECT_ID,
+            user_input="tighten milestones",
+        )["data"]["is_complete"]
+        is False
+    )
+    assert app.roadmap_history(project_id=PROJECT_ID)["data"]["items"] == []
+    assert (
+        app.roadmap_save(
+            project_id=PROJECT_ID,
+            attempt_id="roadmap-attempt-1",
+            expected_artifact_fingerprint="sha256:" + "a" * 64,
+            expected_state="ROADMAP_REVIEW",
+            idempotency_key="save-roadmap-1",
+        )["data"]["fsm_state"]
+        == "ROADMAP_PERSISTENCE"
+    )
+    assert runner.calls == [
+        ("generate", {"project_id": PROJECT_ID, "user_input": "tighten milestones"}),
+        ("history", {"project_id": PROJECT_ID}),
+        (
+            "save",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "roadmap-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                "expected_state": "ROADMAP_REVIEW",
+                "idempotency_key": "save-roadmap-1",
+            },
+        ),
+    ]
+
+
+def test_application_routes_story_commands_to_runner() -> None:
+    """Verify Story facade methods delegate to the configured runner."""
+    runner = _FakeStoryRunner()
+    app = AgentWorkbenchApplication(story_runner=runner)
+
+    assert app.story_pending(project_id=PROJECT_ID)["data"]["pending"] == []
+    assert (
+        app.story_generate(
+            project_id=PROJECT_ID,
+            parent_requirement="REQ.checkout",
+            user_input="focus payment errors",
+        )["data"]["is_complete"]
+        is False
+    )
+    assert (
+        app.story_retry(
+            project_id=PROJECT_ID,
+            parent_requirement="REQ.checkout",
+        )["data"]["retry_started"]
+        is True
+    )
+    assert (
+        app.story_history(
+            project_id=PROJECT_ID,
+            parent_requirement="REQ.checkout",
+        )["data"]["items"]
+        == []
+    )
+    assert (
+        app.story_save(
+            project_id=PROJECT_ID,
+            parent_requirement="REQ.checkout",
+            attempt_id="story-attempt-1",
+            expected_artifact_fingerprint="sha256:" + "a" * 64,
+            expected_state="STORY_REVIEW",
+            idempotency_key="save-story-1",
+        )["data"]["fsm_state"]
+        == "STORY_PERSISTENCE"
+    )
+    assert (
+        app.story_complete(
+            project_id=PROJECT_ID,
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-1",
+        )["data"]["fsm_state"]
+        == "SPRINT_SETUP"
+    )
+    assert (
+        app.story_reopen(
+            project_id=PROJECT_ID,
+            parent_requirement="REQ.checkout",
+            expected_state="SPRINT_SETUP",
+            idempotency_key="reopen-story-1",
+        )["data"]["fsm_state"]
+        == "STORY_INTERVIEW"
+    )
+    assert runner.calls == [
+        ("pending", {"project_id": PROJECT_ID}),
+        (
+            "generate",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+                "user_input": "focus payment errors",
+            },
+        ),
+        (
+            "retry",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+            },
+        ),
+        (
+            "history",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+            },
+        ),
+        (
+            "save",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+                "attempt_id": "story-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                "expected_state": "STORY_REVIEW",
+                "idempotency_key": "save-story-1",
+            },
+        ),
+        (
+            "complete",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "STORY_PERSISTENCE",
+                "idempotency_key": "complete-story-1",
+            },
+        ),
+        (
+            "reopen",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+                "expected_state": "SPRINT_SETUP",
+                "idempotency_key": "reopen-story-1",
+            },
+        ),
+    ]
+
+
 def test_application_keeps_falsey_injected_dependencies() -> None:
     """Verify explicit None checks preserve falsey injected projections."""
     app = AgentWorkbenchApplication(
@@ -732,6 +1418,268 @@ def test_application_workflow_next_routes_vision_review_to_save_and_refine() -> 
         "agileforge vision generate --project-id 7 --input <feedback>",
     ]
     assert result["data"]["blocked_commands"] == []
+
+
+def test_application_workflow_next_routes_vision_persistence_to_backlog() -> None:
+    """Expose installed Backlog generation after Vision has been saved."""
+    app = AgentWorkbenchApplication(
+        read_projection=_VisionPersistenceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge backlog generate --project-id 7"
+    ]
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_backlog_interview_to_generate() -> None:
+    """Expose installed Backlog generation while in Backlog interview."""
+    app = AgentWorkbenchApplication(
+        read_projection=_BacklogInterviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge backlog generate --project-id 7"
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_backlog_review_to_save_and_refine() -> None:
+    """Expose installed Backlog save and refinement commands in Backlog review."""
+    app = AgentWorkbenchApplication(
+        read_projection=_BacklogReviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge backlog save --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state BACKLOG_REVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "agileforge backlog generate --project-id 7 --input <feedback>",
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_application_workflow_next_reports_roadmap_after_backlog_save() -> None:
+    """Expose installed Roadmap generation after Backlog has been saved."""
+    app = AgentWorkbenchApplication(
+        read_projection=_BacklogPersistenceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge roadmap generate --project-id 7"
+    ]
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_roadmap_interview_to_generate() -> None:
+    """Expose installed Roadmap generation while in Roadmap interview."""
+    app = AgentWorkbenchApplication(
+        read_projection=_RoadmapInterviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge roadmap generate --project-id 7"
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_roadmap_review_to_save_and_refine() -> None:
+    """Expose installed Roadmap save and refinement commands in Roadmap review."""
+    app = AgentWorkbenchApplication(
+        read_projection=_RoadmapReviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge roadmap save --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state ROADMAP_REVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "agileforge roadmap generate --project-id 7 --input <feedback>",
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_application_workflow_next_routes_story_after_roadmap_save() -> None:
+    """Roadmap persistence should point to installed Story commands."""
+    app = AgentWorkbenchApplication(
+        read_projection=_RoadmapPersistenceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+    ]
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_story_interview_to_pending_and_generate() -> (
+    None
+):
+    """Expose installed Story pending and generation commands in Story interview."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryInterviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
+
+
+def test_workflow_next_routes_reopened_story_to_generate_not_sprint() -> None:
+    """Route reopened Story correction to Story commands instead of Sprint."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryReopenedReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+    ]
+
+
+def test_application_workflow_next_routes_story_review_to_history_save_and_refine() -> (
+    None
+):
+    """Expose installed Story review commands without uninstalled messaging."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryReviewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge story history --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+        (
+            "agileforge story save --project-id 7 "
+            "--parent-requirement <parent_requirement> "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state STORY_REVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement> "
+            "--input <feedback>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_application_workflow_next_routes_story_persistence_to_next_pending_story() -> (
+    None
+):
+    """Keep Story completion hidden until every Roadmap requirement is covered."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryPersistenceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> None:
+    """Expose Story completion only after all Roadmap requirements are covered."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryCompleteReadyReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
 
 
 def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:

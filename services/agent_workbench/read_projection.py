@@ -402,6 +402,7 @@ class ReadProjectionService:
                 _int_column(UserStory.product_id),
                 _int_column(UserStory.story_id),
                 product_ids,
+                active_user_stories_only=True,
             )
             sprint_counts = self._count_by_product(
                 session,
@@ -470,9 +471,9 @@ class ReadProjectionService:
                 ),
                 "user_stories": _count(
                     session,
-                    select(func.count(cast("Any", UserStory.story_id))).where(
-                        UserStory.product_id == project_id
-                    ),
+                    select(func.count(cast("Any", UserStory.story_id)))
+                    .where(UserStory.product_id == project_id)
+                    .where(UserStory.is_superseded == False),  # noqa: E712
                 ),
                 "sprints": _count(
                     session,
@@ -651,15 +652,18 @@ class ReadProjectionService:
         product_column: InstrumentedAttribute[int | None],
         counted_column: InstrumentedAttribute[int | None],
         product_ids: list[int],
+        *,
+        active_user_stories_only: bool = False,
     ) -> dict[int, int]:
         """Return grouped row counts by product id."""
         if not product_ids:
             return {}
-        rows = session.exec(
-            select(product_column, func.count(counted_column))
-            .where(product_column.in_(product_ids))
-            .group_by(product_column)
-        ).all()
+        statement = select(product_column, func.count(counted_column)).where(
+            product_column.in_(product_ids)
+        )
+        if active_user_stories_only:
+            statement = statement.where(UserStory.is_superseded == False)  # noqa: E712
+        rows = session.exec(statement.group_by(product_column)).all()
         return {int(product_id): int(count) for product_id, count in rows}
 
     def _open_sprint_story_ids(
@@ -682,9 +686,7 @@ class ReadProjectionService:
             ).all()
         )
         open_sprint_ids = [
-            sprint.sprint_id
-            for sprint in open_sprints
-            if sprint.sprint_id is not None
+            sprint.sprint_id for sprint in open_sprints if sprint.sprint_id is not None
         ]
         if not open_sprint_ids:
             return set(), []

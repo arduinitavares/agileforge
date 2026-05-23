@@ -231,11 +231,30 @@ def _seed_backlog_persisted_project(
             "product_vision_statement": "A clear vision",
             "is_complete": True,
         },
-        "backlog_items": [{"title": "Seed backlog item"}],
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Seed backlog item",
+                "value_driver": "Strategic",
+                "justification": "Start here",
+                "estimated_effort": "M",
+            }
+        ],
         "pending_spec_content": "SPEC",
         "compiled_authority_cached": '{"ok": true}',
     }
     return product.product_id
+
+
+def _roadmap_save_body(payload: dict[str, object]) -> dict[str, object]:
+    data = payload["data"]
+    assert isinstance(data, dict)
+    return {
+        "attempt_id": data["attempt_id"],
+        "expected_artifact_fingerprint": data["artifact_fingerprint"],
+        "expected_state": "ROADMAP_REVIEW",
+        "idempotency_key": "save-roadmap-api-1",
+    }
 
 
 def test_roadmap_generate_allows_empty_input_on_first_attempt(
@@ -391,12 +410,15 @@ def test_roadmap_save_succeeds_when_complete(
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_backlog_persisted_project(repo, workflow)
 
-    client.post(
+    generate_response = client.post(
         f"/api/projects/{project_id}/roadmap/generate",
         json={"user_input": "complete this roadmap"},
     )
 
-    response = client.post(f"/api/projects/{project_id}/roadmap/save")
+    response = client.post(
+        f"/api/projects/{project_id}/roadmap/save",
+        json=_roadmap_save_body(generate_response.json()),
+    )
     assert response.status_code == HTTP_OK
 
     payload = response.json()
@@ -425,10 +447,44 @@ def test_roadmap_save_rejects_incomplete_assessment(
         "roadmap_summary": "Draft roadmap",
         "is_complete": False,
         "clarifying_questions": ["Need more detail"],
+        "attempt_id": "roadmap-attempt-1",
+        "artifact_fingerprint": "sha256:" + "a" * 64,
     }
+    workflow.states[str(project_id)]["roadmap_attempts"] = [
+        {
+            "attempt_id": "roadmap-attempt-1",
+            "artifact_fingerprint": "sha256:" + "a" * 64,
+        }
+    ]
+    workflow.states[str(project_id)]["fsm_state"] = "ROADMAP_REVIEW"
 
-    response = client.post(f"/api/projects/{project_id}/roadmap/save")
+    response = client.post(
+        f"/api/projects/{project_id}/roadmap/save",
+        json={
+            "attempt_id": "roadmap-attempt-1",
+            "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+            "expected_state": "ROADMAP_REVIEW",
+            "idempotency_key": "save-roadmap-api-1",
+        },
+    )
     assert response.status_code == HTTP_CONFLICT
     assert response.json()["detail"] == (
         "Roadmap cannot be saved until is_complete is true"
     )
+
+
+def test_roadmap_save_requires_review_attempt_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject unguarded Roadmap save requests at the API boundary."""
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_backlog_persisted_project(repo, workflow)
+
+    client.post(
+        f"/api/projects/{project_id}/roadmap/generate",
+        json={"user_input": "complete this roadmap"},
+    )
+
+    response = client.post(f"/api/projects/{project_id}/roadmap/save", json={})
+
+    assert response.status_code == 422  # noqa: PLR2004

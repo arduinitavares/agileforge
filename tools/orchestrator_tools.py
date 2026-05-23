@@ -51,10 +51,12 @@ from services.orchestrator_query_service import (
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
 else:
+
     class ToolContext:
         """Runtime placeholder so ADK can resolve type hints for ignored params."""
 
         state: dict[str, Any]
+
 
 logger: logging.Logger = logging.getLogger(name=__name__)
 _MAX_SPEC_FILE_SIZE_KB = 100
@@ -330,6 +332,7 @@ def fetch_product_backlog(product_id: int) -> dict[str, Any]:
                 select(UserStory)
                 .where(UserStory.product_id == product_id)
                 .where(UserStory.status == StoryStatus.TO_DO)
+                .where(UserStory.is_superseded == False)  # noqa: E712
                 .order_by(
                     cast("Any", UserStory.rank),
                     cast("Any", UserStory.story_id),

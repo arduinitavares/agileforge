@@ -232,7 +232,7 @@ def test_generate_first_attempt_allows_empty_input(
 
     payload = response.json()
     assert payload["status"] == "success"
-    assert payload["data"]["trigger"] == "manual_refine"
+    assert payload["data"]["trigger"] == "initial_generate"
     assert payload["data"]["is_complete"] is False
     assert payload["data"]["fsm_state"] == "VISION_INTERVIEW"
 
@@ -240,7 +240,7 @@ def test_generate_first_attempt_allows_empty_input(
     assert isinstance(history, list)
     assert len(history) == 1
     first_attempt = cast("dict[str, object]", history[0])
-    assert first_attempt["trigger"] == "manual_refine"
+    assert first_attempt["trigger"] == "initial_generate"
 
 
 def test_generate_refine_requires_feedback_after_first_attempt(
@@ -402,7 +402,10 @@ def test_vision_history_endpoint_returns_attempts(
     assert payload["status"] == "success"
     assert payload["data"]["count"] == 2  # noqa: PLR2004
     items = payload["data"]["items"]
-    assert all(item.get("trigger") == "manual_refine" for item in items)
+    assert [item.get("trigger") for item in items] == [
+        "initial_generate",
+        "manual_refine",
+    ]
 
 
 def test_save_vision_rejects_when_latest_is_incomplete(
