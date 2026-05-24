@@ -272,6 +272,40 @@ def test_sprint_candidates_counts_excluded_story_reasons(
     }
 
 
+def test_sprint_candidates_reports_readiness_blockers(
+    session: Session,
+) -> None:
+    """Read projection should surface candidate readiness blockers."""
+    product = Product(name="Readiness Project", description="Demo")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    candidate = UserStory(
+        product_id=product_id,
+        title="Legacy refined story",
+        story_description="As a user, I want a thing.",
+        acceptance_criteria="- Verify behavior.",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=False,
+        story_points=None,
+        rank=None,
+    )
+    session.add(candidate)
+    session.commit()
+    service = ReadProjectionService(engine=_engine(session))
+
+    payload = service.sprint_candidates(project_id=product_id)
+
+    assert payload["ok"] is True
+    assert payload["data"]["readiness"]["status"] == "blocked"
+    assert payload["data"]["readiness"]["blocking_codes"] == [
+        "SPRINT_CANDIDATES_UNSIZED",
+        "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+    ]
+
+
 def test_sprint_candidates_match_canonical_session_helper(
     session: Session,
 ) -> None:

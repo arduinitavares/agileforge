@@ -41,6 +41,16 @@ class SaveStoriesInput(BaseModel):
         str,
         Field(description="The roadmap requirement these stories decompose."),
     ]
+    parent_rank: Annotated[
+        int | None,
+        Field(
+            default=None,
+            ge=1,
+            description=(
+                "1-based Roadmap parent order used to derive deterministic child story rank."
+            ),
+        ),
+    ]
     stories: Annotated[
         list[dict[str, Any]],
         Field(
@@ -69,6 +79,54 @@ def _extract_persona(statement: str) -> str | None:
 
 def _format_acceptance_criteria(criteria: list[str]) -> str:
     return "\n".join(f"- {c}" if not c.startswith("- ") else c for c in criteria)
+
+
+_EFFORT_TO_STORY_POINTS: dict[str, int] = {
+    "XS": 1,
+    "S": 2,
+    "M": 3,
+    "L": 5,
+    "XL": 8,
+}
+_RANK_CHILD_SCALE = 100
+
+
+def _story_points_from_effort(estimated_effort: str) -> int:
+    return _EFFORT_TO_STORY_POINTS[estimated_effort]
+
+
+def _rank_to_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _parent_rank_from_existing(existing_active: list[UserStory]) -> int | None:
+    ranks = [
+        parsed
+        for parsed in (_rank_to_int(story.rank) for story in existing_active)
+        if parsed is not None
+    ]
+    derived_ranks = [rank for rank in ranks if rank >= (_RANK_CHILD_SCALE + 1)]
+    if not derived_ranks:
+        return None
+    return max(1, min(derived_ranks) // _RANK_CHILD_SCALE)
+
+
+def _refined_story_rank(
+    *,
+    parent_rank: int | None,
+    existing_active: list[UserStory],
+    slot: int,
+) -> str:
+    base = parent_rank or _parent_rank_from_existing(existing_active)
+    if base is None:
+        return str(slot)
+    return str((base * _RANK_CHILD_SCALE) + slot)
 
 
 def _metadata_json(metadata: str | None) -> dict[str, Any]:
@@ -116,10 +174,12 @@ def _story_request_payload_hash(validated: list[UserStoryItem]) -> str:
 def _story_save_request_identity(
     *,
     normalized_req: str,
+    parent_rank: int | None,
     validated: list[UserStoryItem],
 ) -> dict[str, str]:
     return {
         "normalized_requirement": normalized_req,
+        "parent_rank": "" if parent_rank is None else str(parent_rank),
         "story_payload_hash": _story_request_payload_hash(validated),
     }
 
@@ -148,6 +208,7 @@ def _story_save_event_matches_request(
     return (
         metadata.get("normalized_requirement")
         == request_identity["normalized_requirement"]
+        and str(metadata.get("parent_rank", "")) == request_identity["parent_rank"]
         and metadata.get("story_payload_hash") == request_identity["story_payload_hash"]
     )
 
@@ -246,13 +307,14 @@ def _unsafe_replacement_response(blockers: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _upsert_refined_story(
+def _upsert_refined_story(  # noqa: PLR0913
     session: Session,
     *,
     linkage: tuple[int, str],
     slot: int,
     item: UserStoryItem,
     existing: UserStory | None,
+    rank: str,
 ) -> tuple[int, str]:
     """Upsert a refined story by deterministic linkage key."""
     product_id, normalized_req = linkage
@@ -282,6 +344,8 @@ def _upsert_refined_story(
         existing.story_origin = "refined"
         existing.is_refined = True
         existing.is_superseded = False
+        existing.story_points = _story_points_from_effort(item.estimated_effort)
+        existing.rank = rank
         existing.ac_updated_at = datetime.now(UTC)
         existing.ac_update_reason = "user_story_refinement"
         session.add(existing)
@@ -302,6 +366,8 @@ def _upsert_refined_story(
         story_origin="refined",
         is_refined=True,
         is_superseded=False,
+        story_points=_story_points_from_effort(item.estimated_effort),
+        rank=rank,
         ac_update_reason="user_story_refinement",
     )
     session.add(story)
@@ -379,12 +445,18 @@ def _persist_validated_stories(
     }
 
     for idx, item in enumerate(validated, start=1):
+        rank = _refined_story_rank(
+            parent_rank=input_data.parent_rank,
+            existing_active=existing_active,
+            slot=idx,
+        )
         story_id, action = _upsert_refined_story(
             session,
             linkage=(input_data.product_id, normalized_req),
             slot=idx,
             item=item,
             existing=existing_by_slot.get(idx),
+            rank=rank,
         )
         target = created_ids if action == "created" else updated_ids
         target.append(story_id)
@@ -412,6 +484,7 @@ def _persist_validated_stories(
         input_data=input_data,
         request_identity=_story_save_request_identity(
             normalized_req=normalized_req,
+            parent_rank=input_data.parent_rank,
             validated=validated,
         ),
         updated_ids=updated_ids,
@@ -499,6 +572,7 @@ def save_stories_tool(
         normalized_req = normalize_requirement_key(input_data.parent_requirement)
         request_identity = _story_save_request_identity(
             normalized_req=normalized_req,
+            parent_rank=input_data.parent_rank,
             validated=validated,
         )
         previous_event = _find_story_save_event(

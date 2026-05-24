@@ -614,6 +614,13 @@ class ReadProjectionService:
 
         items = raw.get("stories", [])
         excluded_counts = raw.get("excluded_counts", {})
+        readiness = raw.get("readiness") or {
+            "status": "ready",
+            "unsized_count": 0,
+            "default_priority_count": 0,
+            "blocking_codes": [],
+            "blocking_story_ids": [],
+        }
         source_payload = {
             "command": SPRINT_CANDIDATES_COMMAND,
             "project_id": project_id,
@@ -624,12 +631,14 @@ class ReadProjectionService:
             "candidate_items": items,
             "count": raw.get("count", 0),
             "excluded_counts": excluded_counts,
+            "readiness": readiness,
             "message": raw.get("message"),
         }
         data = {
             "items": items,
             "count": raw.get("count", 0),
             "excluded_counts": excluded_counts,
+            "readiness": readiness,
             "message": raw.get("message"),
             "source_fingerprint": canonical_hash(source_payload),
         }

@@ -8,6 +8,14 @@ import json
 from typing import Any, NotRequired, Protocol, TypedDict, Unpack
 
 from services.orchestrator_query_service import fetch_sprint_candidates
+from services.sprint_selection import (
+    SprintSelectionError,
+    derive_group_slot,
+    derive_parent_group,
+    select_sprint_story_rows,
+)
+
+DEFAULT_PRIORITY: int = 999
 
 
 class _SprintCandidateFetcher(Protocol):
@@ -70,6 +78,34 @@ def coerce_priority(value: object, fallback: int) -> int:
     """Ensure priority is always an integer >= 1."""
     parsed = normalize_positive_int(value)
     return parsed if parsed is not None else max(1, fallback)
+
+
+def _sprint_candidate_readiness(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return planning-readiness diagnostics for normalized sprint candidates."""
+    unsized_ids = [
+        int(candidate["story_id"])
+        for candidate in candidates
+        if candidate.get("story_id") is not None
+        and candidate.get("story_points") is None
+    ]
+    default_priority_ids = [
+        int(candidate["story_id"])
+        for candidate in candidates
+        if candidate.get("story_id") is not None
+        and candidate.get("priority") == DEFAULT_PRIORITY
+    ]
+    blocking_codes: list[str] = []
+    if unsized_ids:
+        blocking_codes.append("SPRINT_CANDIDATES_UNSIZED")
+    if default_priority_ids:
+        blocking_codes.append("SPRINT_CANDIDATES_DEFAULT_PRIORITY")
+    return {
+        "status": "blocked" if blocking_codes else "ready",
+        "unsized_count": len(unsized_ids),
+        "default_priority_count": len(default_priority_ids),
+        "blocking_codes": blocking_codes,
+        "blocking_story_ids": sorted(set(unsized_ids + default_priority_ids)),
+    }
 
 
 def normalize_selected_story_ids(value: object) -> list[int]:
@@ -166,6 +202,9 @@ def load_sprint_candidates(
         "success": True,
         "count": len(stories),
         "stories": stories,
+        "readiness": raw_result.get("readiness")
+        if isinstance(raw_result.get("readiness"), dict)
+        else _sprint_candidate_readiness(stories),
         "excluded_counts": raw_result.get("excluded_counts") or {},
         "message": raw_result.get("message")
         or f"Found {len(stories)} sprint candidates.",
@@ -210,7 +249,6 @@ def prepare_sprint_input_context(
     normalized_selected_ids = normalize_selected_story_ids(
         options.get("selected_story_ids")
     )
-    selected_rows = candidate_rows
     if normalized_selected_ids:
         by_id = {
             int(row["story_id"]): row
@@ -233,7 +271,25 @@ def prepare_sprint_input_context(
                 "candidate_result": candidate_result,
                 "input_context": {},
             }
-        selected_rows = [by_id[story_id] for story_id in normalized_selected_ids]
+
+    team_velocity_assumption = normalize_velocity(options["team_velocity_assumption"])
+    max_story_points = normalize_positive_int(options["max_story_points"])
+    try:
+        selection = select_sprint_story_rows(
+            candidate_rows,
+            team_velocity_assumption=team_velocity_assumption,
+            max_story_points=max_story_points,
+            selected_story_ids=normalized_selected_ids,
+        )
+    except SprintSelectionError as exc:
+        return {
+            "success": False,
+            "error_code": exc.code,
+            "message": str(exc),
+            "selection_details": exc.details,
+            "candidate_result": candidate_result,
+            "input_context": {},
+        }
 
     input_context: dict[str, Any] = {
         "available_stories": [
@@ -241,6 +297,8 @@ def prepare_sprint_input_context(
                 "story_id": int(row["story_id"]),
                 "story_title": row["story_title"],
                 "priority": int(row["priority"]),
+                "parent_group": derive_parent_group(int(row["priority"])),
+                "group_slot": derive_group_slot(int(row["priority"])),
                 "story_points": row.get("story_points"),
                 "story_description": row.get("story_description", ""),
                 "acceptance_criteria_items": list(
@@ -255,16 +313,14 @@ def prepare_sprint_input_context(
                     row.get("story_compliance_boundary_summaries") or []
                 ),
             }
-            for row in selected_rows
+            for row in selection.selected_rows
             if isinstance(row, dict)
         ],
-        "team_velocity_assumption": normalize_velocity(
-            options["team_velocity_assumption"]
-        ),
+        "team_velocity_assumption": team_velocity_assumption,
         "sprint_duration_days": normalize_duration_days(
             options["sprint_duration_days"]
         ),
-        "max_story_points": normalize_positive_int(options["max_story_points"]),
+        "max_story_points": max_story_points,
         "include_task_decomposition": bool(options["include_task_decomposition"]),
     }
 
@@ -276,5 +332,15 @@ def prepare_sprint_input_context(
         "success": True,
         "input_context": input_context,
         "candidate_result": candidate_result,
-        "selected_story_ids": normalized_selected_ids,
+        "selected_story_ids": selection.selected_story_ids,
+        "selection_policy": {
+            "mode": selection.mode,
+            "selected_story_ids": selection.selected_story_ids,
+            "excluded_story_ids": selection.excluded_story_ids,
+            "story_points_used": selection.story_points_used,
+            "max_story_points": selection.max_story_points,
+            "team_velocity_assumption": selection.team_velocity_assumption,
+            "story_limit": selection.story_limit,
+            "warnings": selection.warnings,
+        },
     }

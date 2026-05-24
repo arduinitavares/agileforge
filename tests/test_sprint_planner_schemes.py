@@ -102,6 +102,8 @@ def test_input_schema_accepts_optional_fields() -> None:
                 "source_requirement": "Req 1",
                 "priority": 1,
                 "story_points": 3,
+                "parent_group": 1,
+                "group_slot": 1,
                 "evaluated_invariant_ids": ["INV-123"],
                 "story_compliance_boundary_summaries": ["Must log in"],
             }
@@ -115,6 +117,8 @@ def test_input_schema_accepts_optional_fields() -> None:
     model = SprintPlannerInput.model_validate(input_payload)
     assert model.max_story_points == 8  # noqa: PLR2004
     assert model.include_task_decomposition is False
+    assert model.available_stories[0].parent_group == 1
+    assert model.available_stories[0].group_slot == 1
 
 
 def test_input_schema_requires_duration_days() -> None:
@@ -145,9 +149,7 @@ def test_input_schema_requires_duration_days() -> None:
         assert "sprint_duration_days" in str(exc)  # noqa: PT017
     else:
         msg = "Expected ValidationError for missing sprint_duration_days"
-        raise AssertionError(
-            msg
-        )
+        raise AssertionError(msg)
 
 
 def test_selected_story_requires_reason() -> None:

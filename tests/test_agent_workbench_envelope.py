@@ -216,11 +216,10 @@ def test_registry_exposes_phase_1_and_phase_2a_commands() -> None:
     assert isinstance(names, set)
     assert EXPECTED_PHASE_1_COMMAND_NAMES.issubset(names)
     assert EXPECTED_PHASE_2A_COMMAND_NAMES.issubset(names)
-    assert "agileforge sprint generate" not in names
     assert command_is_available("agileforge sprint candidates") is True
+    assert command_is_available("agileforge sprint generate") is True
     assert command_is_available("agileforge context pack") is True
     assert command_is_available("agileforge capabilities") is True
-    assert command_is_available("agileforge sprint generate") is False
 
 
 def test_registry_metadata_has_phase_1_shape() -> None:

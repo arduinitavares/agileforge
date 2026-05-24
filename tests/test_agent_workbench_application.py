@@ -165,6 +165,19 @@ class _SprintReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintDraftReadProjection(_FakeReadProjection):
+    """Fake read projection for a reviewed Sprint draft state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return sprint draft workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_DRAFT",
+            "setup_status": "passed",
+        }
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -924,6 +937,35 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
+    def repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story readiness repair."""
+        self.calls.append(
+            (
+                "repair_readiness",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "fsm_state": "SPRINT_SETUP",
+                "repair_result": {"repaired_count": 1, "story_ids": [66]},
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
 
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
@@ -1242,6 +1284,11 @@ def test_application_routes_story_commands_to_runner() -> None:
         )["data"]["fsm_state"]
         == "STORY_INTERVIEW"
     )
+    assert app.story_repair_readiness(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="repair-story-readiness-7",
+    )["data"]["repair_result"] == {"repaired_count": 1, "story_ids": [66]}
     assert runner.calls == [
         ("pending", {"project_id": PROJECT_ID}),
         (
@@ -1294,6 +1341,14 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "idempotency_key": "reopen-story-1",
             },
         ),
+        (
+            "repair_readiness",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "SPRINT_SETUP",
+                "idempotency_key": "repair-story-readiness-7",
+            },
+        ),
     ]
 
 
@@ -1329,11 +1384,10 @@ def test_application_context_pack_facade_composes_sprint_planning_pack() -> None
     ]
     assert data["next_valid_commands"] == [
         "agileforge sprint candidates --project-id 7",
+        "agileforge sprint generate --project-id 7",
     ]
     assert data["blocked_commands"] == []
-    assert data["blocked_future_commands"] == [
-        "agileforge sprint generate --project-id 7 --selected-story-ids 1,2,3",
-    ]
+    assert data["blocked_future_commands"] == []
 
 
 def test_application_status_combines_project_workflow_and_authority() -> None:
@@ -1683,7 +1737,7 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
 
 
 def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
-    """Verify workflow next facade exposes installed and blocked next commands."""
+    """Verify workflow next facade exposes Sprint setup commands."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintReadyReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -1695,17 +1749,45 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
         "ok": True,
         "data": {
             "project_id": PROJECT_ID,
-            "next_valid_commands": ["agileforge sprint candidates --project-id 7"],
-            "blocked_commands": [],
-            "blocked_future_commands": [
-                "agileforge sprint generate --project-id 7 --selected-story-ids 1,2,3",
+            "next_valid_commands": [
+                "agileforge sprint candidates --project-id 7",
+                "agileforge sprint generate --project-id 7",
             ],
+            "blocked_commands": [],
+            "blocked_future_commands": [],
             "source_fingerprint": result["data"]["source_fingerprint"],
         },
         "warnings": [],
         "errors": [],
     }
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
+    """Expose Sprint review commands after a complete Sprint draft exists."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintDraftReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge sprint history --project-id 7",
+        (
+            "agileforge sprint save --project-id 7 "
+            "--team-name <team_name> "
+            "--sprint-start-date <YYYY-MM-DD> "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state SPRINT_DRAFT "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "agileforge sprint generate --project-id 7 --input <feedback>",
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

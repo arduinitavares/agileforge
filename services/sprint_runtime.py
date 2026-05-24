@@ -228,6 +228,102 @@ def _compact_public_validation_errors(
     return hints
 
 
+def _expected_locked_story_ids(prepared: _PreparedSprintPayload) -> list[int]:
+    return [int(story.story_id) for story in prepared.payload.available_stories]
+
+
+def _actual_selected_story_ids(output_model: SprintPlannerOutput) -> list[int]:
+    return [int(story.story_id) for story in output_model.selected_stories]
+
+
+def _locked_selection_validation_error(
+    *,
+    expected_story_ids: list[int],
+    actual_story_ids: list[int],
+) -> ValidationErrorItem:
+    return {
+        "msg": (
+            "selected stories do not match locked Sprint selection: "
+            f"expected {expected_story_ids}, actual {actual_story_ids}"
+        ),
+        "expected_story_ids": expected_story_ids,
+        "actual_story_ids": actual_story_ids,
+    }
+
+
+def _locked_capacity_validation_errors(
+    *,
+    prepared: _PreparedSprintPayload,
+    output_model: SprintPlannerOutput,
+) -> ValidationErrors:
+    capacity = output_model.capacity_analysis
+    expected_selected_count = len(prepared.payload.available_stories)
+    expected_story_points_used = sum(
+        story.story_points or 0 for story in prepared.payload.available_stories
+    )
+    expected_max_story_points = prepared.payload.max_story_points
+    errors: ValidationErrors = []
+
+    if capacity.selected_count != expected_selected_count:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    f"selected_count expected {expected_selected_count}, "
+                    f"actual {capacity.selected_count}"
+                ),
+                "field": "capacity_analysis.selected_count",
+                "expected": expected_selected_count,
+                "actual": capacity.selected_count,
+            }
+        )
+    if capacity.story_points_used != expected_story_points_used:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    f"story_points_used expected {expected_story_points_used}, "
+                    f"actual {capacity.story_points_used}"
+                ),
+                "field": "capacity_analysis.story_points_used",
+                "expected": expected_story_points_used,
+                "actual": capacity.story_points_used,
+            }
+        )
+    if capacity.max_story_points != expected_max_story_points:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    f"max_story_points expected {expected_max_story_points}, "
+                    f"actual {capacity.max_story_points}"
+                ),
+                "field": "capacity_analysis.max_story_points",
+                "expected": expected_max_story_points,
+                "actual": capacity.max_story_points,
+            }
+        )
+    return errors
+
+
+def _locked_deselected_stories_validation_errors(
+    output_model: SprintPlannerOutput,
+) -> ValidationErrors:
+    if not output_model.deselected_stories:
+        return []
+    return [
+        {
+            "msg": (
+                "deselected stories are not allowed for locked Sprint selection: "
+                f"actual count {len(output_model.deselected_stories)}"
+            ),
+            "field": "deselected_stories",
+            "expected": [],
+            "actual_count": len(output_model.deselected_stories),
+        }
+    ]
+
+
 def _failure(
     *,
     project_id: int,
@@ -381,6 +477,83 @@ async def _invoke_prepared_sprint_payload(
     return raw_text
 
 
+def _locked_selection_output_failure(
+    *,
+    project_id: int,
+    prepared: _PreparedSprintPayload,
+    output_model: SprintPlannerOutput,
+    raw_text: str,
+) -> dict[str, Any] | None:
+    input_context = prepared.input_context
+    expected_story_ids = _expected_locked_story_ids(prepared)
+    actual_story_ids = _actual_selected_story_ids(output_model)
+    if actual_story_ids != expected_story_ids:
+        structured_errors = [
+            _locked_selection_validation_error(
+                expected_story_ids=expected_story_ids,
+                actual_story_ids=actual_story_ids,
+            )
+        ]
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="output_validation",
+            details=_FailureDetails(
+                message=(
+                    "Sprint output validation failed: selected stories do not match "
+                    "locked Sprint selection"
+                ),
+                raw_text=raw_text,
+                validation_errors=_normalize_validation_errors(structured_errors),
+                public_validation_errors=_compact_public_validation_errors(
+                    structured_errors
+                ),
+            ),
+        )
+
+    capacity_errors = _locked_capacity_validation_errors(
+        prepared=prepared,
+        output_model=output_model,
+    )
+    if capacity_errors:
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="output_validation",
+            details=_FailureDetails(
+                message=(
+                    "Sprint output validation failed: capacity analysis does not "
+                    "match locked Sprint selection"
+                ),
+                raw_text=raw_text,
+                validation_errors=_normalize_validation_errors(capacity_errors),
+                public_validation_errors=_compact_public_validation_errors(
+                    capacity_errors
+                ),
+            ),
+        )
+
+    deselected_errors = _locked_deselected_stories_validation_errors(output_model)
+    if deselected_errors:
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="output_validation",
+            details=_FailureDetails(
+                message=(
+                    "Sprint output validation failed: deselected stories are not "
+                    "allowed for locked Sprint selection"
+                ),
+                raw_text=raw_text,
+                validation_errors=_normalize_validation_errors(deselected_errors),
+                public_validation_errors=_compact_public_validation_errors(
+                    deselected_errors
+                ),
+            ),
+        )
+    return None
+
+
 def _validate_sprint_output(
     *,
     project_id: int,
@@ -420,6 +593,15 @@ def _validate_sprint_output(
                 exception=exc,
             ),
         )
+
+    locked_selection_failure = _locked_selection_output_failure(
+        project_id=project_id,
+        prepared=prepared,
+        output_model=output_model,
+        raw_text=raw_text,
+    )
+    if locked_selection_failure is not None:
+        return locked_selection_failure
 
     has_acceptance_criteria_by_story = {
         story.story_id: bool(story.acceptance_criteria_items)

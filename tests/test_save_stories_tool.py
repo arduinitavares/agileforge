@@ -161,6 +161,147 @@ class TestSaveStoriesTool:
         assert result["saved_count"] == 1
         assert len(result["story_ids"]) == 1
 
+    def test_valid_stories_persist_story_points_from_estimated_effort(
+        self,
+        session: Session,
+    ) -> None:
+        """Persist story points from each refined story estimated effort."""
+        _seed_product(session)
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-persist-story-points",
+            parent_rank=2,
+            stories=[
+                {
+                    **_valid_story(),
+                    "estimated_effort": "XS",
+                },
+                {
+                    **_alternate_valid_story(),
+                    "estimated_effort": "XL",
+                },
+            ],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        rows = session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == 1)
+            .order_by(UserStory.refinement_slot)
+        ).all()
+        assert [row.story_points for row in rows] == [1, 8]
+
+    def test_valid_stories_persist_rank_from_parent_rank_and_slot(
+        self,
+        session: Session,
+    ) -> None:
+        """Persist deterministic child ranks from parent rank and refinement slot."""
+        _seed_product(session)
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-persist-refined-rank",
+            parent_rank=3,
+            stories=[_valid_story(), _alternate_valid_story()],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        rows = session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == 1)
+            .order_by(UserStory.refinement_slot)
+        ).all()
+        assert [row.rank for row in rows] == ["301", "302"]
+
+    def test_refinement_update_refreshes_story_points_and_rank(
+        self,
+        session: Session,
+    ) -> None:
+        """Refresh story points and rank when updating an existing refined story."""
+        _seed_product(session)
+        seed = UserStory(
+            product_id=1,
+            title="Attestation Gate",
+            story_description="Backlog seed",
+            acceptance_criteria=None,
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            story_origin="backlog_seed",
+            is_refined=False,
+            is_superseded=False,
+            story_points=None,
+            rank=None,
+        )
+        session.add(seed)
+        session.commit()
+        session.refresh(seed)
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-update-points-rank",
+            parent_rank=4,
+            stories=[_valid_story()],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        session.expire_all()
+        refreshed = session.get(UserStory, seed.story_id)
+        expected_story_points = 3
+        assert refreshed is not None
+        assert refreshed.story_points == expected_story_points
+        assert refreshed.rank == "401"
+
+    def test_save_without_parent_rank_preserves_child_slot_fallback_rank(
+        self,
+        session: Session,
+    ) -> None:
+        """Do not treat old child-slot ranks as parent rank evidence."""
+        _seed_product(session)
+        for slot in (1, 2):
+            session.add(
+                UserStory(
+                    product_id=1,
+                    title=f"Seed {slot}",
+                    story_description="Backlog seed",
+                    acceptance_criteria=None,
+                    source_requirement=normalize_requirement_key("Attestation Gate"),
+                    refinement_slot=slot,
+                    story_origin="refined",
+                    is_refined=True,
+                    is_superseded=False,
+                    story_points=2,
+                    rank=str(slot),
+                )
+            )
+        session.commit()
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-no-parent-rank-fallback",
+            stories=[_valid_story(), _alternate_valid_story()],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        rows = session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == 1)
+            .order_by(UserStory.refinement_slot)
+        ).all()
+        assert [row.rank for row in rows] == ["1", "2"]
+
     def test_nonexistent_product_returns_error(self, session: Session) -> None:
         """Calling with a product_id that does not exist returns structured error."""
         del session
@@ -389,6 +530,36 @@ class TestSaveStoriesTool:
             idempotency_key="test-reused-key-payload",
             stories=[_alternate_valid_story()],
         )
+        first = save_stories_tool(input_data=first_payload, tool_context=None)
+        second = save_stories_tool(input_data=second_payload, tool_context=None)
+
+        assert first["success"] is True
+        assert second["success"] is False
+        assert second["error_code"] == "IDEMPOTENCY_KEY_REUSED"
+        assert second["idempotency_replayed"] is False
+
+    def test_save_stories_tool_rejects_reused_key_for_different_parent_rank(
+        self,
+        session: Session,
+    ) -> None:
+        """Reject same idempotency key when parent rank differs."""
+        _seed_product(session)
+
+        first_payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-reused-key-parent-rank",
+            parent_rank=1,
+            stories=[_valid_story()],
+        )
+        second_payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-reused-key-parent-rank",
+            parent_rank=2,
+            stories=[_valid_story()],
+        )
+
         first = save_stories_tool(input_data=first_payload, tool_context=None)
         second = save_stories_tool(input_data=second_payload, tool_context=None)
 

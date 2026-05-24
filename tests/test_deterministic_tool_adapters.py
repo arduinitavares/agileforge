@@ -293,6 +293,8 @@ async def test_sprint_adapter_injects_refined_candidates_from_state(
             "persona": None,
             "source_requirement": "REQ-23",
             "priority": 2,
+            "parent_group": None,
+            "group_slot": None,
             "story_points": 3,
             "evaluated_invariant_ids": [],
             "story_compliance_boundary_summaries": [],

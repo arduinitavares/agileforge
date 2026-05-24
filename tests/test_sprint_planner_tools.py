@@ -738,6 +738,56 @@ def test_fetch_sprint_candidates_excludes_stories_in_open_sprints(
     }
 
 
+def test_fetch_sprint_candidates_reports_blocked_readiness_for_unsized_rows(
+    session: Session,
+) -> None:
+    """Candidate diagnostics should block planning for legacy unsized rows."""
+    product = Product(name="Test Product", vision="Vision", description="Desc")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+
+    unsized = UserStory(
+        product_id=product.product_id,
+        title="Unsized story",
+        story_description="As a user, I want a thing, so that I get value.",
+        acceptance_criteria="- Verify behavior.",
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=None,
+        rank=None,
+    )
+    sized = UserStory(
+        product_id=product.product_id,
+        title="Sized story",
+        story_description="As a user, I want another thing, so that I get value.",
+        acceptance_criteria="- Verify behavior.",
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=3,
+        rank="101",
+    )
+    session.add_all([unsized, sized])
+    session.commit()
+    session.refresh(unsized)
+
+    result = fetch_sprint_candidates(product.product_id)
+
+    assert result["success"] is True
+    assert result["readiness"] == {
+        "status": "blocked",
+        "unsized_count": 1,
+        "default_priority_count": 1,
+        "blocking_codes": [
+            "SPRINT_CANDIDATES_UNSIZED",
+            "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+        ],
+        "blocking_story_ids": [unsized.story_id],
+    }
+
+
 def test_save_sprint_plan_rejects_out_of_scope_task_invariants(
     session: Session,
 ) -> None:

@@ -19,6 +19,13 @@ from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import hydrate_story_runtime_from_legacy
 
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
+_EFFORT_TO_STORY_POINTS: dict[str, int] = {
+    "XS": 1,
+    "S": 2,
+    "M": 3,
+    "L": 5,
+    "XL": 8,
+}
 
 
 class StoryPhaseError(Exception):
@@ -38,6 +45,149 @@ def get_all_roadmap_requirements(state: dict[str, Any]) -> list[str]:
         items = release.get("items") or []
         reqs.extend(items)
     return reqs
+
+
+def story_parent_rank(state: dict[str, Any], parent_requirement: str) -> int | None:
+    """Return 1-based Roadmap order for a parent requirement."""
+    parent_key = normalize_requirement_key(parent_requirement)
+    roadmap_releases = state.get("roadmap_releases")
+    if not isinstance(roadmap_releases, list):
+        return None
+
+    rank = 0
+    for release in roadmap_releases:
+        if not isinstance(release, dict):
+            continue
+        items = release.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            rank += 1
+            if normalize_requirement_key(item) == parent_key:
+                return rank
+    return None
+
+
+def _story_points_from_effort(estimated_effort: object) -> int:
+    if not isinstance(estimated_effort, str):
+        raise StoryPhaseError(
+            "Story readiness repair requires estimated_effort for every story.",
+            status_code=409,
+        )
+    effort = estimated_effort.strip().upper()
+    story_points = _EFFORT_TO_STORY_POINTS.get(effort)
+    if story_points is None:
+        raise StoryPhaseError(
+            f"Story readiness repair cannot map estimated_effort {estimated_effort!r}.",
+            status_code=409,
+        )
+    return story_points
+
+
+def _story_output_parent_requirement(
+    output_key: object,
+    output: dict[str, Any],
+) -> str:
+    parent_requirement = output.get("parent_requirement")
+    if isinstance(parent_requirement, str) and parent_requirement.strip():
+        return parent_requirement.strip()
+    if isinstance(output_key, str) and output_key.strip():
+        return output_key.strip()
+    raise StoryPhaseError(
+        "Story readiness repair requires parent_requirement for saved Story outputs.",
+        status_code=409,
+    )
+
+
+def _ordered_story_outputs(state: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    story_outputs = state.get("story_outputs")
+    if not isinstance(story_outputs, dict):
+        raise StoryPhaseError(
+            "Story readiness repair requires saved Story outputs.",
+            status_code=409,
+        )
+    if not story_outputs:
+        raise StoryPhaseError(
+            "Story readiness repair requires saved Story outputs.",
+            status_code=409,
+        )
+
+    available: list[tuple[str, dict[str, Any]]] = []
+    for output_key, output in story_outputs.items():
+        if not isinstance(output, dict):
+            raise StoryPhaseError(
+                "Story readiness repair found malformed saved Story output.",
+                status_code=409,
+            )
+        available.append((_story_output_parent_requirement(output_key, output), output))
+
+    ordered: list[tuple[str, dict[str, Any]]] = []
+    used_indexes: set[int] = set()
+    for roadmap_requirement in get_all_roadmap_requirements(state):
+        roadmap_key = normalize_requirement_key(roadmap_requirement)
+        for index, (parent_requirement, output) in enumerate(available):
+            if index in used_indexes:
+                continue
+            if normalize_requirement_key(parent_requirement) != roadmap_key:
+                continue
+            ordered.append((parent_requirement, output))
+            used_indexes.add(index)
+            break
+
+    ordered.extend(
+        item for index, item in enumerate(available) if index not in used_indexes
+    )
+    return ordered
+
+
+def _story_readiness_repair_items(
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    repair_items: list[dict[str, Any]] = []
+    for parent_requirement, output in _ordered_story_outputs(state):
+        parent_rank = story_parent_rank(state, parent_requirement)
+        if parent_rank is None:
+            message = (
+                "Story readiness repair requires Roadmap order for saved Story outputs."
+            )
+            raise StoryPhaseError(
+                message,
+                status_code=409,
+            )
+
+        user_stories = output.get("user_stories")
+        if not isinstance(user_stories, list):
+            raise StoryPhaseError(
+                "Story readiness repair requires user_stories in saved Story outputs.",
+                status_code=409,
+            )
+
+        for slot, story in enumerate(user_stories, start=1):
+            if not isinstance(story, dict):
+                raise StoryPhaseError(
+                    "Story readiness repair found malformed saved Story item.",
+                    status_code=409,
+                )
+            repair_items.append(
+                {
+                    "parent_requirement": parent_requirement,
+                    "parent_rank": parent_rank,
+                    "slot": slot,
+                    "story_points": _story_points_from_effort(
+                        story.get("estimated_effort")
+                    ),
+                    "rank": str(parent_rank * 100 + slot),
+                }
+            )
+
+    if not repair_items:
+        raise StoryPhaseError(
+            "Story readiness repair requires saved Story outputs.",
+            status_code=409,
+        )
+    return repair_items
 
 
 def ensure_story_runtime(
@@ -1027,6 +1177,7 @@ async def save_story_draft(
         SaveStoriesInput(
             product_id=project_id,
             parent_requirement=normalized_parent_requirement,
+            parent_rank=story_parent_rank(state, normalized_parent_requirement),
             idempotency_key=idempotency_key,
             stories=stories,
         ),
@@ -1260,6 +1411,64 @@ async def reopen_story_requirement(
     if not isinstance(idempotency_registry, dict):
         idempotency_registry = {}
         state["story_reopen_idempotency"] = idempotency_registry
+    idempotency_registry[normalized_idempotency_key] = payload
+    save_state(state)
+    return payload
+
+
+async def repair_story_readiness(
+    *,
+    project_id: int,
+    expected_state: str | None,
+    idempotency_key: str | None,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    repair_rows: Callable[[dict[str, Any]], dict[str, Any]],
+    assert_repair_safe: Callable[[int], None],
+) -> dict[str, Any]:
+    """Backfill Story planning metadata before Sprint work starts."""
+    if expected_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "story repair-readiness requires --expected-state SPRINT_SETUP",
+            status_code=400,
+        )
+    if idempotency_key is None or not idempotency_key.strip():
+        raise StoryPhaseError(
+            "story repair-readiness requires --idempotency-key",
+            status_code=400,
+        )
+
+    state = await load_state()
+    normalized_idempotency_key = idempotency_key.strip()
+    idempotency_registry = state.get("story_readiness_repair_idempotency")
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            return dict(existing)
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "Story readiness repair can run only from SPRINT_SETUP.",
+            status_code=409,
+        )
+
+    assert_repair_safe(project_id)
+    repair_result = repair_rows(
+        {
+            "project_id": project_id,
+            "items": _story_readiness_repair_items(state),
+        }
+    )
+    payload = {
+        "project_id": project_id,
+        "fsm_state": OrchestratorState.SPRINT_SETUP.value,
+        "idempotency_key": normalized_idempotency_key,
+        "repair_result": repair_result,
+    }
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        state["story_readiness_repair_idempotency"] = idempotency_registry
     idempotency_registry[normalized_idempotency_key] = payload
     save_state(state)
     return payload

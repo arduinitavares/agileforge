@@ -17,8 +17,10 @@ from services.phases.story_service import (
     get_story_history,
     get_story_pending,
     merge_story_resolution,
+    repair_story_readiness,
     retry_story_draft,
     save_story_draft,
+    story_parent_rank,
 )
 
 JsonDict = dict[str, Any]
@@ -116,6 +118,27 @@ def test_story_artifact_fingerprint_ignores_existing_guard_metadata() -> None:
     assert _story_artifact_fingerprint(parent_requirement, guarded_artifact) == (
         _story_artifact_fingerprint(parent_requirement, artifact)
     )
+
+
+def test_story_parent_rank_uses_roadmap_order() -> None:
+    """Verify story parent rank follows flattened Roadmap order."""
+    state = {
+        "roadmap_releases": [
+            {"items": ["Requirement A", "Requirement B"]},
+            {"items": ["Requirement C"]},
+        ]
+    }
+
+    assert story_parent_rank(state, "Requirement A") == 1
+    assert story_parent_rank(state, "Requirement B") == 2  # noqa: PLR2004
+    assert story_parent_rank(state, "Requirement C") == 3  # noqa: PLR2004
+
+
+def test_story_parent_rank_matches_normalized_requirement() -> None:
+    """Verify story parent rank matches normalized requirement names."""
+    state = {"roadmap_releases": [{"items": ["Live Pre-Lock Recommendation"]}]}
+
+    assert story_parent_rank(state, " live   pre-lock recommendation ") == 1
 
 
 def _pending_state() -> JsonDict:
@@ -955,6 +978,7 @@ async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> 
 
     def fake_save_stories_tool(save_input: object, _context: object) -> JsonDict:
         assert hasattr(save_input, "stories")
+        captured["save_input"] = save_input
         captured["stories"] = save_input.stories
         captured["idempotency_key"] = save_input.idempotency_key
         return {"success": True, "saved_count": 1}
@@ -986,6 +1010,7 @@ async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> 
     )
     assert captured["stories"] == artifact["user_stories"]
     assert captured["idempotency_key"] == "story-save-7-requirement-a"
+    assert captured["save_input"].parent_rank == 1
     assert len(saved_states) == 1
 
 
@@ -1727,6 +1752,135 @@ async def test_reopen_story_requirement_blocks_when_downstream_work_exists() -> 
     assert excinfo.value.status_code == 409  # noqa: PLR2004
     assert "unsafe" in excinfo.value.detail.lower()
     assert state["fsm_state"] == "SPRINT_SETUP"
+
+
+@pytest.mark.asyncio
+async def test_repair_story_readiness_backfills_rank_and_points_from_saved_outputs() -> None:  # noqa: E501
+    """Verify Story readiness repair computes metadata without rewriting stories."""
+    parent_requirement = "Requirement A"
+    state: dict[str, Any] = {
+        "fsm_state": "SPRINT_SETUP",
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "story_saved": {parent_requirement: True},
+        "story_outputs": {
+            parent_requirement: {
+                "parent_requirement": parent_requirement,
+                "is_complete": True,
+                "user_stories": [
+                    {
+                        "story_title": "Story A",
+                        "statement": "As a user, I want alpha, so that I get value.",
+                        "acceptance_criteria": ["Verify alpha."],
+                        "invest_score": "High",
+                        "estimated_effort": "L",
+                    }
+                ],
+            }
+        },
+    }
+    repaired: list[dict[str, Any]] = []
+
+    payload = await repair_story_readiness(
+        project_id=2,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="repair-story-readiness-2",
+        load_state=lambda: _async_value(state),
+        save_state=state.update,
+        repair_rows=lambda request: repaired.append(request)
+        or {
+            "repaired_count": 1,
+            "story_ids": [66],
+        },
+        assert_repair_safe=lambda _project_id: None,
+    )
+
+    assert payload["fsm_state"] == "SPRINT_SETUP"
+    assert payload["repair_result"]["repaired_count"] == 1
+    assert repaired[0]["items"] == [
+        {
+            "parent_requirement": parent_requirement,
+            "parent_rank": 1,
+            "slot": 1,
+            "story_points": 5,
+            "rank": "101",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repair_story_readiness_blocks_after_sprint_work_exists() -> None:
+    """Verify Story readiness repair fails closed after Sprint work starts."""
+    state = {"fsm_state": "SPRINT_SETUP"}
+
+    with pytest.raises(StoryPhaseError) as excinfo:
+        await repair_story_readiness(
+            project_id=2,
+            expected_state="SPRINT_SETUP",
+            idempotency_key="repair-story-readiness-2",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            repair_rows=lambda _request: {},
+            assert_repair_safe=lambda _project_id: (_ for _ in ()).throw(
+                StoryPhaseError(
+                    "Story readiness repair is unsafe after Sprint work exists.",
+                    status_code=409,
+                )
+            ),
+        )
+
+    assert excinfo.value.status_code == 409  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_repair_story_readiness_replays_after_state_advances() -> None:
+    """Verify Story readiness repair idempotency survives later FSM changes."""
+    payload = {
+        "project_id": 2,
+        "fsm_state": "SPRINT_SETUP",
+        "idempotency_key": "repair-story-readiness-2",
+        "repair_result": {"repaired_count": 1, "story_ids": [66]},
+    }
+    state = {
+        "fsm_state": "SPRINT_PLANNING",
+        "story_readiness_repair_idempotency": {
+            "repair-story-readiness-2": payload,
+        },
+    }
+
+    result = await repair_story_readiness(
+        project_id=2,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="repair-story-readiness-2",
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        repair_rows=lambda _request: pytest.fail("repair should replay"),
+        assert_repair_safe=lambda _project_id: pytest.fail("guard should replay"),
+    )
+
+    assert result == payload
+
+
+@pytest.mark.asyncio
+async def test_repair_story_readiness_blocks_without_saved_outputs() -> None:
+    """Verify Story readiness repair cannot record a no-op success."""
+    state = {
+        "fsm_state": "SPRINT_SETUP",
+        "roadmap_releases": [{"items": ["Requirement A"]}],
+    }
+
+    with pytest.raises(StoryPhaseError) as excinfo:
+        await repair_story_readiness(
+            project_id=2,
+            expected_state="SPRINT_SETUP",
+            idempotency_key="repair-story-readiness-2",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            repair_rows=lambda _request: {},
+            assert_repair_safe=lambda _project_id: None,
+        )
+
+    assert excinfo.value.status_code == 409  # noqa: PLR2004
+    assert "saved Story outputs" in excinfo.value.detail
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@ CONTEXT_PACK_COMMAND: Final[str] = "agileforge context pack"
 SPRINT_CANDIDATES_COMMAND: Final[str] = "agileforge sprint candidates"
 SPRINT_GENERATE_COMMAND: Final[str] = "agileforge sprint generate"
 SPRINT_PLANNING_STATES: Final[frozenset[str]] = frozenset(
-    {"SPRINT_SETUP", "SPRINT_PLANNING"}
+    {"SPRINT_SETUP", "SPRINT_DRAFT", "SPRINT_PLANNING"}
 )
 SETUP_READY_STATUSES: Final[frozenset[str]] = frozenset({"passed", "ready"})
 AUTHORITY_BLOCKING_STATUSES: Final[frozenset[str]] = frozenset(
@@ -266,10 +266,7 @@ def _sprint_planning_commands(
 ) -> tuple[list[str], list[JsonDict], list[str]]:
     """Return installed and future commands relevant to sprint planning."""
     candidate_command = f"{SPRINT_CANDIDATES_COMMAND} --project-id {project_id}"
-    generate_command = (
-        f"{SPRINT_GENERATE_COMMAND} --project-id {project_id} "
-        "--selected-story-ids 1,2,3"
-    )
+    generate_command = f"{SPRINT_GENERATE_COMMAND} --project-id {project_id}"
     next_valid: list[str] = []
     blocked_commands: list[JsonDict] = []
     blocked_future: list[str] = []

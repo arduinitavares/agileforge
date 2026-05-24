@@ -21,15 +21,14 @@ The installed CLI supports:
 - Vision generate, history, and save.
 - Backlog generate, history, and save.
 - Roadmap generate, history, and save.
-- Story pending, generate, retry, history, save, complete, and read projections.
-- Sprint planning read projections.
+- Story pending, generate, retry, history, save, complete, repair, and read projections.
+- Sprint candidates, generate, history, and save.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
 
 The installed CLI does not yet support:
 
-- Generating or saving sprint drafts.
 - Starting, logging, closing, deleting, or resetting workflow artifacts from the
   CLI.
 
@@ -529,6 +528,37 @@ agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
 agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
 ```
 
+Story save persists Sprint planning metadata:
+
+| `estimated_effort` | `story_points` |
+| --- | ---: |
+| `XS` | 1 |
+| `S` | 2 |
+| `M` | 3 |
+| `L` | 5 |
+| `XL` | 8 |
+
+Refined child story rank is derived from Roadmap parent order plus child slot.
+For example, the first child of the second Roadmap item receives rank `201`.
+
+### Repairing Story Readiness Before Sprint
+
+Use this when refined stories were saved before AgileForge persisted
+`story_points` and rank.
+
+```sh
+agileforge story repair-readiness \
+  --project-id "$PROJECT_ID" \
+  --expected-state SPRINT_SETUP \
+  --idempotency-key "repair-story-readiness-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > story-repair-readiness.json
+```
+
+This command only backfills `story_points` and `rank`. It does not rewrite story
+title, description, acceptance criteria, status, validation evidence, or
+workflow phase. It fails closed if Sprint work has already started for any
+active refined story.
+
 ### Correcting a Saved Story Before Sprint
 
 Use this only when Story is complete but Sprint work has not started.
@@ -553,6 +583,94 @@ agileforge story generate \
 
 Review `data.output_artifact`, then save with the returned
 `data.save.attempt_id` and `data.save.artifact_fingerprint`.
+
+## Sprint Phase
+
+After Story completion, inspect candidate readiness before invoking the model:
+
+```sh
+agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+Do not generate a Sprint while `data.readiness.status` is `blocked`. Resolve the
+reported blockers first; Sprint generation fails closed when candidates are
+unsized or still carry default priority.
+
+Generate a Sprint draft from the reviewed candidate set:
+
+```sh
+agileforge sprint generate \
+  --project-id "$PROJECT_ID" \
+  --selected-story-ids 66,85 \
+  --team-velocity-assumption Medium \
+  --sprint-duration-days 14 \
+  > sprint-generate.json
+```
+
+Use `--selected-story-ids` only when intentionally constraining scope; otherwise
+omit it and let AgileForge lock a deterministic cohort from all ready
+candidates. Use `--input` for real refinement feedback only.
+
+#### Sprint Selection Contract
+
+`agileforge sprint generate` does not ask the model to choose arbitrary Sprint
+scope. AgileForge first locks a deterministic story cohort from planning-ready
+candidates:
+
+- Default mode selects the priority/rank prefix, bounded by
+  `--max-story-points` when provided and the velocity story-count band.
+- Manual mode uses the exact `--selected-story-ids` list and preserves caller
+  order.
+
+The Sprint Planner receives only the locked cohort. Its job is to write the
+Sprint Goal, explain cohesion, and decompose the selected stories into tasks. If
+the model adds, drops, or changes selected story IDs, AgileForge fails the run
+with `MUTATION_FAILED`.
+
+The current selector uses rank/group order as a temporary planning policy. Rank
+is not dependency truth. Explicit story dependency graphs are planned next.
+
+If generation returns `ok: false`, stop and report the first error code, message,
+and details. Sprint runtime failures are hard CLI failures and should not be
+hidden.
+
+When generation returns a complete reviewed draft, save that exact attempt:
+
+```sh
+ATTEMPT_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("sprint-generate.json").read_text())
+print(payload["data"]["attempt_id"])
+PY
+)"
+
+ARTIFACT_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("sprint-generate.json").read_text())
+print(payload["data"]["artifact_fingerprint"])
+PY
+)"
+
+agileforge sprint save \
+  --project-id "$PROJECT_ID" \
+  --team-name "Delivery" \
+  --sprint-start-date "2026-05-25" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state SPRINT_DRAFT \
+  --idempotency-key "save-sprint-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > sprint-save.json
+```
+
+If the saved draft came from a refinement file, read `attempt_id` and
+`artifact_fingerprint` from that latest reviewed file instead. Never save an
+older attempt after a newer refinement.
 
 ## JSON Envelope Contract
 
@@ -792,11 +910,13 @@ agileforge story history --project-id 1 --parent-requirement "Roadmap requiremen
 agileforge story save --project-id 1 --parent-requirement "Roadmap requirement" --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state STORY_REVIEW --idempotency-key save-story-001
 agileforge story complete --project-id 1 --expected-state STORY_PERSISTENCE --idempotency-key complete-story-001
 agileforge story reopen --project-id 1 --parent-requirement "Roadmap requirement" --expected-state SPRINT_SETUP --idempotency-key reopen-story-001
+agileforge story repair-readiness --project-id 1 --expected-state SPRINT_SETUP --idempotency-key repair-story-readiness-001
 ```
 
 `story show`, `story pending`, and `story history` are read-only. `story
-generate`, `story retry`, `story save`, `story complete`, and `story reopen`
-mutate workflow state. Save, complete, and reopen are guarded and require
+generate`, `story retry`, `story save`, `story complete`, `story reopen`, and
+`story repair-readiness` mutate workflow state. Save, complete, reopen, and
+repair-readiness are guarded and require
 explicit idempotency keys.
 
 ### Sprint Commands

@@ -78,9 +78,7 @@ def _structured_spec_content() -> str:
                     "statement": "The CLI must expose read-only project context.",
                     "level": "MUST",
                     "verification": "inspection",
-                    "acceptance": [
-                        "The CLI exposes read-only project context."
-                    ],
+                    "acceptance": ["The CLI exposes read-only project context."],
                 }
             ],
         }
@@ -357,7 +355,10 @@ def test_phase1_cli_drives_real_application_facade(
             "agileforge workflow next",
             lambda data: (
                 data["next_valid_commands"]
-                == [f"agileforge sprint candidates --project-id {project_id}"]
+                == [
+                    f"agileforge sprint candidates --project-id {project_id}",
+                    f"agileforge sprint generate --project-id {project_id}",
+                ]
             ),
         ),
         (
@@ -404,12 +405,11 @@ def test_phase1_cli_drives_real_application_facade(
             "agileforge context pack",
             lambda data: (
                 data["next_valid_commands"]
-                == [f"agileforge sprint candidates --project-id {project_id}"]
-                and data["blocked_future_commands"]
                 == [
-                    f"agileforge sprint generate --project-id {project_id} "
-                    "--selected-story-ids 1,2,3"
+                    f"agileforge sprint candidates --project-id {project_id}",
+                    f"agileforge sprint generate --project-id {project_id}",
                 ]
+                and data["blocked_future_commands"] == []
                 and data["blocked_commands"] == []
                 and _mapping(_mapping(data["phase_data"])["sprint_candidates"])["count"]
                 == 1

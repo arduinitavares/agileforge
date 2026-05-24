@@ -527,12 +527,117 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def story_repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story readiness repair payload."""
+        self.calls.append(
+            (
+                "story_repair_readiness",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "fsm_state": "SPRINT_SETUP",
+                "repair_result": {"repaired_count": 1, "story_ids": [66]},
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return a sprint candidates payload."""
         self.calls.append(("sprint_candidates", {"project_id": project_id}))
         return {
             "ok": True,
             "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_generate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+        selected_story_ids: list[int] | None = None,
+        team_velocity_assumption: str = "Medium",
+        sprint_duration_days: int = 14,
+        max_story_points: int | None = None,
+        include_task_decomposition: bool = True,
+    ) -> JsonObject:
+        """Return a sprint generate payload."""
+        self.calls.append(
+            (
+                "sprint_generate",
+                {
+                    "project_id": project_id,
+                    "user_input": user_input,
+                    "selected_story_ids": selected_story_ids,
+                    "team_velocity_assumption": team_velocity_assumption,
+                    "sprint_duration_days": sprint_duration_days,
+                    "max_story_points": max_story_points,
+                    "include_task_decomposition": include_task_decomposition,
+                },
+            )
+        )
+        return self.results.get("sprint_generate") or {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_DRAFT"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_history(self, *, project_id: int) -> JsonObject:
+        """Return a sprint history payload."""
+        self.calls.append(("sprint_history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        team_name: str,
+        sprint_start_date: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a sprint save payload."""
+        self.calls.append(
+            (
+                "sprint_save",
+                {
+                    "project_id": project_id,
+                    "team_name": team_name,
+                    "sprint_start_date": sprint_start_date,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return self.results.get("sprint_save") or {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_PERSISTENCE"},
             "warnings": [],
             "errors": [],
         }
@@ -1597,6 +1702,27 @@ def test_cli_routes_roadmap_commands(
             ),
             "agileforge story reopen",
         ),
+        (
+            [
+                "story",
+                "repair-readiness",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "SPRINT_SETUP",
+                "--idempotency-key",
+                "repair-story-readiness-2",
+            ],
+            (
+                "story_repair_readiness",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "SPRINT_SETUP",
+                    "idempotency_key": "repair-story-readiness-2",
+                },
+            ),
+            "agileforge story repair-readiness",
+        ),
     ],
 )
 def test_cli_routes_story_phase_commands(
@@ -1648,6 +1774,42 @@ def test_story_reopen_cli_routes_guard_fields() -> None:
     )
 
 
+def test_story_repair_readiness_cli_routes_guard_fields(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story readiness repair routes guarded fields to the application facade."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "story",
+            "repair-readiness",
+            "--project-id",
+            "7",
+            "--expected-state",
+            "SPRINT_SETUP",
+            "--idempotency-key",
+            "repair-story-readiness-7",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["repair_result"] == {
+        "repaired_count": 1,
+        "story_ids": [66],
+    }
+    assert app.calls[-1] == (
+        "story_repair_readiness",
+        {
+            "project_id": 7,
+            "expected_state": "SPRINT_SETUP",
+            "idempotency_key": "repair-story-readiness-7",
+        },
+    )
+
+
 def test_story_generate_cli_flattens_phase_data(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1684,6 +1846,109 @@ def test_story_generate_cli_flattens_phase_data(
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["output_artifact"]["parent_requirement"] == "Requirement A"
     assert "data" not in payload["data"]
+
+
+def test_sprint_generate_cli_routes_generation_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint generate CLI routes selected stories and capacity options."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "sprint",
+            "generate",
+            "--project-id",
+            "7",
+            "--selected-story-ids",
+            "66,85",
+            "--team-velocity-assumption",
+            "High",
+            "--sprint-duration-days",
+            "10",
+            "--max-story-points",
+            "8",
+            "--input",
+            "Focus on live command hardening.",
+            "--no-task-decomposition",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["fsm_state"] == "SPRINT_DRAFT"
+    assert app.calls[-1] == (
+        "sprint_generate",
+        {
+            "project_id": 7,
+            "user_input": "Focus on live command hardening.",
+            "selected_story_ids": [66, 85],
+            "team_velocity_assumption": "High",
+            "sprint_duration_days": 10,
+            "max_story_points": 8,
+            "include_task_decomposition": False,
+        },
+    )
+
+
+def test_sprint_history_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint history CLI routes to the application facade."""
+    app = _FakeApplication()
+
+    exit_code = main(["sprint", "history", "--project-id", "7"], application=app)
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["items"] == []
+    assert app.calls[-1] == ("sprint_history", {"project_id": 7})
+
+
+def test_sprint_save_cli_requires_review_guards(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint save CLI routes guard fields to the application facade."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "sprint",
+            "save",
+            "--project-id",
+            "7",
+            "--team-name",
+            "Delivery",
+            "--sprint-start-date",
+            "2026-05-25",
+            "--attempt-id",
+            "sprint-attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:abc",
+            "--expected-state",
+            "SPRINT_DRAFT",
+            "--idempotency-key",
+            "save-sprint-7-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["fsm_state"] == "SPRINT_PERSISTENCE"
+    assert app.calls[-1] == (
+        "sprint_save",
+        {
+            "project_id": 7,
+            "team_name": "Delivery",
+            "sprint_start_date": "2026-05-25",
+            "attempt_id": "sprint-attempt-1",
+            "expected_artifact_fingerprint": "sha256:abc",
+            "expected_state": "SPRINT_DRAFT",
+            "idempotency_key": "save-sprint-7-001",
+        },
+    )
 
 
 def test_story_save_cli_flattens_save_result(

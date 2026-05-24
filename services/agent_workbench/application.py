@@ -274,6 +274,52 @@ class _StoryPhaseRunner(Protocol):
         """Reopen one saved Story requirement before Sprint work exists."""
         ...
 
+    def repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Backfill Story planning metadata before Sprint work starts."""
+        ...
+
+
+class _SprintPhaseRunner(Protocol):
+    """Sprint phase commands exposed through the facade."""
+
+    def generate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+        selected_story_ids: list[int] | None = None,
+        team_velocity_assumption: str = "Medium",
+        sprint_duration_days: int = 14,
+        max_story_points: int | None = None,
+        include_task_decomposition: bool = True,
+    ) -> dict[str, Any]:
+        """Generate or refine a Sprint draft."""
+        ...
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Sprint attempt history."""
+        ...
+
+    def save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        team_name: str,
+        sprint_start_date: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current Sprint draft."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -290,6 +336,7 @@ class AgentWorkbenchApplication:
         backlog_runner: _BacklogPhaseRunner | None = None,
         roadmap_runner: _RoadmapPhaseRunner | None = None,
         story_runner: _StoryPhaseRunner | None = None,
+        sprint_runner: _SprintPhaseRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -301,6 +348,7 @@ class AgentWorkbenchApplication:
         self._backlog_runner = backlog_runner
         self._roadmap_runner = roadmap_runner
         self._story_runner = story_runner
+        self._sprint_runner = sprint_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -427,6 +475,7 @@ class AgentWorkbenchApplication:
             _backlog_workflow_next,
             _roadmap_workflow_next,
             _story_workflow_next,
+            _sprint_workflow_next,
             _uninstalled_phase_workflow_next,
         )
         for phase_next_handler in phase_next_handlers:
@@ -834,6 +883,68 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
+    def story_repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Backfill Story planning metadata before Sprint work starts."""
+        return self._get_story_runner().repair_readiness(
+            project_id=project_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def sprint_generate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+        selected_story_ids: list[int] | None = None,
+        team_velocity_assumption: str = "Medium",
+        sprint_duration_days: int = 14,
+        max_story_points: int | None = None,
+        include_task_decomposition: bool = True,
+    ) -> dict[str, Any]:
+        """Generate or refine a Sprint draft."""
+        return self._get_sprint_runner().generate(
+            project_id=project_id,
+            user_input=user_input,
+            selected_story_ids=selected_story_ids,
+            team_velocity_assumption=team_velocity_assumption,
+            sprint_duration_days=sprint_duration_days,
+            max_story_points=max_story_points,
+            include_task_decomposition=include_task_decomposition,
+        )
+
+    def sprint_history(self, *, project_id: int) -> dict[str, Any]:
+        """Return Sprint attempt history."""
+        return self._get_sprint_runner().history(project_id=project_id)
+
+    def sprint_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        team_name: str,
+        sprint_start_date: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Persist the current complete Sprint draft."""
+        return self._get_sprint_runner().save(
+            project_id=project_id,
+            team_name=team_name,
+            sprint_start_date=sprint_start_date,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
     def _get_read_projection(self) -> _ReadProjection:
         """Return the read projection, constructing the default lazily."""
         if self._read_projection is None:
@@ -912,6 +1023,16 @@ class AgentWorkbenchApplication:
 
             self._story_runner = StoryPhaseRunner()
         return self._story_runner
+
+    def _get_sprint_runner(self) -> _SprintPhaseRunner:
+        """Return the Sprint runner, constructing the default lazily."""
+        if self._sprint_runner is None:
+            from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+                SprintPhaseRunner,
+            )
+
+            self._sprint_runner = SprintPhaseRunner()
+        return self._sprint_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -1342,9 +1463,7 @@ def _roadmap_workflow_next(
         else:
             blocked_future_commands.append(
                 {
-                    "command": (
-                        f"agileforge story pending --project-id {project_id}"
-                    ),
+                    "command": (f"agileforge story pending --project-id {project_id}"),
                     "installed": False,
                     "reason": "Story phase CLI is not installed yet.",
                 }
@@ -1609,6 +1728,109 @@ def _story_requirement_has_merge_resolution(
     return resolution.get("status") == "merged"
 
 
+def _sprint_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return Sprint phase commands for Sprint workflow states."""
+    fsm_state = _fsm_state_from_envelope(workflow)
+    if fsm_state not in {"SPRINT_DRAFT", "SPRINT_PERSISTENCE"}:
+        return None
+
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[Any] = []
+    for command_name, command_text in _sprint_command_candidates(
+        project_id=project_id,
+        fsm_state=fsm_state,
+    ):
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": [],
+        "blocked_future_commands": blocked_future_commands,
+        "status": "next_phase_available" if next_valid_commands else None,
+    }
+    data["source_fingerprint"] = canonical_hash(
+        {
+            "command": WORKFLOW_NEXT_COMMAND,
+            "project_id": project_id,
+            "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "installed_command_names": sorted(installed_command_names()),
+            "next_valid_commands": data["next_valid_commands"],
+            "blocked_commands": data["blocked_commands"],
+            "blocked_future_commands": data["blocked_future_commands"],
+            "status": data["status"],
+        }
+    )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _sprint_command_candidates(
+    *,
+    project_id: int,
+    fsm_state: str,
+) -> list[tuple[str, str]]:
+    """Return Sprint command candidates for the current Sprint state."""
+    if fsm_state == "SPRINT_SETUP":
+        return [
+            (
+                "agileforge sprint candidates",
+                f"agileforge sprint candidates --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint generate",
+                f"agileforge sprint generate --project-id {project_id}",
+            ),
+        ]
+    if fsm_state == "SPRINT_DRAFT":
+        return [
+            (
+                "agileforge sprint history",
+                f"agileforge sprint history --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint save",
+                (
+                    f"agileforge sprint save --project-id {project_id} "
+                    "--team-name <team_name> "
+                    "--sprint-start-date <YYYY-MM-DD> "
+                    "--attempt-id <attempt_id> "
+                    "--expected-artifact-fingerprint <artifact_fingerprint> "
+                    "--expected-state SPRINT_DRAFT "
+                    "--idempotency-key <idempotency_key>"
+                ),
+            ),
+            (
+                "agileforge sprint generate",
+                (
+                    f"agileforge sprint generate --project-id {project_id} "
+                    "--input <feedback>"
+                ),
+            ),
+        ]
+    return [
+        (
+            "agileforge sprint history",
+            f"agileforge sprint history --project-id {project_id}",
+        )
+    ]
+
+
 def _uninstalled_phase_workflow_next(
     *,
     project_id: int,
@@ -1679,8 +1901,7 @@ def _uninstalled_phase_command_candidates(
     fsm_state: str | None,
 ) -> list[tuple[str, str, str]] | None:
     """Return command templates for workflow phases not yet exposed in the CLI."""
-    phase_commands: dict[str, list[tuple[str, str, str]]] = {
-    }
+    phase_commands: dict[str, list[tuple[str, str, str]]] = {}
     candidates = phase_commands.get(str(fsm_state or ""))
     if candidates is None:
         return None

@@ -16,6 +16,7 @@ from models.enums import SprintStatus, StoryStatus
 from utils.spec_schemas import ValidationEvidence
 
 CACHE_TTL_MINUTES: int = 5
+DEFAULT_PRIORITY: int = 999
 logger: logging.Logger = logging.getLogger(name=__name__)
 
 
@@ -68,17 +69,47 @@ def _story_compliance_boundary_summaries(story: UserStory) -> list[str]:
 def _priority_to_int(rank: str | None) -> int:
     """Convert legacy string rank to a comparable integer."""
     if rank is None:
-        return 999
+        return DEFAULT_PRIORITY
     try:
         return int(rank)
     except (TypeError, ValueError):
-        return 999
+        return DEFAULT_PRIORITY
 
 
 def _story_order_key(story: UserStory) -> tuple[int, int]:
     """Stable ordering for story query results."""
     story_id = cast("int", story.story_id or 0)
     return (_priority_to_int(story.rank), story_id)
+
+
+def _sprint_candidate_readiness(
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return planning-readiness diagnostics for sprint candidate rows."""
+    unsized_ids = [
+        int(candidate["story_id"])
+        for candidate in candidates
+        if candidate.get("story_id") is not None
+        and candidate.get("story_points") is None
+    ]
+    default_priority_ids = [
+        int(candidate["story_id"])
+        for candidate in candidates
+        if candidate.get("story_id") is not None
+        and candidate.get("priority") == DEFAULT_PRIORITY
+    ]
+    blocking_codes: list[str] = []
+    if unsized_ids:
+        blocking_codes.append("SPRINT_CANDIDATES_UNSIZED")
+    if default_priority_ids:
+        blocking_codes.append("SPRINT_CANDIDATES_DEFAULT_PRIORITY")
+    return {
+        "status": "blocked" if blocking_codes else "ready",
+        "unsized_count": len(unsized_ids),
+        "default_priority_count": len(default_priority_ids),
+        "blocking_codes": blocking_codes,
+        "blocking_story_ids": sorted(set(unsized_ids + default_priority_ids)),
+    }
 
 
 def _build_projects_payload(
@@ -188,6 +219,7 @@ def fetch_sprint_candidates_from_session(
             "success": True,
             "count": 0,
             "stories": [],
+            "readiness": _sprint_candidate_readiness([]),
             "excluded_counts": {
                 "non_refined": 0,
                 "superseded": 0,
@@ -249,6 +281,7 @@ def fetch_sprint_candidates_from_session(
         "success": True,
         "count": len(candidate_list),
         "stories": candidate_list,
+        "readiness": _sprint_candidate_readiness(candidate_list),
         "excluded_counts": {
             "non_refined": excluded_non_refined,
             "superseded": excluded_superseded,

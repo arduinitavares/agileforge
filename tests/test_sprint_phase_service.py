@@ -187,6 +187,8 @@ async def test_generate_sprint_plan_updates_state_and_returns_payload() -> None:
 
     assert payload["fsm_state"] == "SPRINT_DRAFT"
     assert payload["attempt_count"] == 1
+    assert payload["attempt_id"] == "sprint-attempt-1"
+    assert str(payload["artifact_fingerprint"]).startswith("sha256:")
     assert payload["trigger"] == "auto_transition"
     assert payload["output_artifact"]["validation_errors"][0].startswith(
         "Unsupported task_kind 'other'."
@@ -194,6 +196,16 @@ async def test_generate_sprint_plan_updates_state_and_returns_payload() -> None:
     assert state["fsm_state"] == "SPRINT_DRAFT"
     assert state["fsm_state_entered_at"] == "2026-04-04T00:00:00Z"
     assert state["sprint_attempts"][0]["trigger"] == "auto_transition"
+    assert state["sprint_attempts"][0]["attempt_id"] == "sprint-attempt-1"
+    assert (
+        state["sprint_attempts"][0]["artifact_fingerprint"]
+        == payload["artifact_fingerprint"]
+    )
+    assert state["sprint_plan_assessment"]["attempt_id"] == "sprint-attempt-1"
+    assert (
+        state["sprint_plan_assessment"]["artifact_fingerprint"]
+        == payload["artifact_fingerprint"]
+    )
     assert captured["project_id"] == 7  # noqa: PLR2004
     assert captured["selected_story_ids"] == [12]
 
@@ -300,6 +312,140 @@ async def test_generate_sprint_plan_rejects_invalid_fsm_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_sprint_plan_blocks_unready_candidates_before_runtime() -> None:
+    """Verify blocked candidate readiness prevents sprint runtime invocation."""
+    state: JsonDict = {"fsm_state": "SPRINT_SETUP"}
+    saved: list[JsonDict] = []
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved.append(dict(updated))
+
+    async def fake_run_sprint_agent(*_args: object, **_kwargs: object) -> Never:
+        msg = "runtime should not run"
+        raise AssertionError(msg)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await generate_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            current_planned_sprint_id=None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            run_sprint_agent=fake_run_sprint_agent,
+            failure_meta_builder=_failure_meta_builder,
+            team_velocity_assumption="Medium",
+            sprint_duration_days=14,
+            max_story_points=None,
+            include_task_decomposition=True,
+            selected_story_ids=None,
+            user_input=None,
+            load_candidates=lambda: {
+                "success": True,
+                "count": 1,
+                "stories": [
+                    {
+                        "story_id": 1,
+                        "story_title": "Unsized",
+                        "priority": 999,
+                        "story_points": None,
+                    }
+                ],
+                "readiness": {
+                    "status": "blocked",
+                    "unsized_count": 1,
+                    "default_priority_count": 1,
+                    "blocking_codes": [
+                        "SPRINT_CANDIDATES_UNSIZED",
+                        "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+                    ],
+                    "blocking_story_ids": [1],
+                },
+            },
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert "SPRINT_CANDIDATES_UNSIZED" in exc_info.value.detail
+    assert "SPRINT_CANDIDATES_DEFAULT_PRIORITY" in exc_info.value.detail
+    assert state == {"fsm_state": "SPRINT_SETUP"}
+    assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_failed_sprint_refinement_preserves_previous_complete_draft() -> None:
+    """Verify failed refinement records history without replacing reviewed draft."""
+    previous_assessment: JsonDict = {
+        "attempt_id": "sprint-attempt-1",
+        "artifact_fingerprint": "sha256:reviewed",
+        "sprint_goal": "Ship live workflow",
+        "is_complete": True,
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_last_input_context": {"available_stories": [{"story_id": 1}]},
+        "sprint_plan_assessment": dict(previous_assessment),
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+                "output_artifact": dict(previous_assessment),
+            }
+        ],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        return {
+            "success": False,
+            "input_context": {"available_stories": [{"story_id": 1}]},
+            "output_artifact": {
+                "error": "SPRINT_GENERATION_FAILED",
+                "message": "Provider rate limited",
+                "is_complete": False,
+            },
+            "is_complete": False,
+            "error": "Provider rate limited",
+            "failure_stage": "invocation_exception",
+            "failure_summary": "Provider rate limited",
+        }
+
+    payload = await generate_sprint_plan(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda _state: None,
+        current_planned_sprint_id=None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_sprint_agent=fake_run_sprint_agent,
+        failure_meta_builder=_failure_meta_builder,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        max_story_points=None,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        user_input="Refine the draft",
+        load_candidates=lambda: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 1}],
+            "readiness": {"status": "ready"},
+        },
+    )
+
+    assert payload["sprint_run_success"] is False
+    assert payload["fsm_state"] == "SPRINT_DRAFT"
+    assert state["fsm_state"] == "SPRINT_DRAFT"
+    assert state["sprint_plan_assessment"] == previous_assessment
+    assert len(state["sprint_attempts"]) == 2  # noqa: PLR2004
+    assert state["sprint_attempts"][1]["is_complete"] is False
+    assert state["sprint_attempts"][1]["failure_stage"] == "invocation_exception"
+
+
+@pytest.mark.asyncio
 async def test_get_sprint_history_normalizes_and_persists_legacy_attempts() -> None:
     """Verify get sprint history normalizes and persists legacy attempts."""
     state: JsonDict = {
@@ -347,6 +493,69 @@ async def test_get_sprint_history_normalizes_and_persists_legacy_attempts() -> N
         "Unsupported task_kind 'review'. Use one of: analysis, design, implementation, testing, documentation, refactor."  # noqa: E501
     ]
     assert len(saves) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_sprint_history_restores_complete_draft_after_failed_refine() -> None:
+    """Verify history can repair legacy failed-refinement working state."""
+    complete_artifact: JsonDict = {
+        "sprint_goal": "Ship live workflow",
+        "sprint_number": 1,
+        "duration_days": 14,
+        "selected_stories": [],
+        "deselected_stories": [],
+        "capacity_analysis": {
+            "velocity_assumption": "Medium",
+            "capacity_band": "4-5 stories",
+            "selected_count": 0,
+            "story_points_used": 0,
+            "max_story_points": None,
+            "commitment_note": "Fits",
+            "reasoning": "Fits",
+        },
+        "is_complete": True,
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_SETUP",
+        "sprint_plan_assessment": {
+            "error": "SPRINT_GENERATION_FAILED",
+            "is_complete": False,
+        },
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+                "input_context": {"available_stories": [{"story_id": 1}]},
+                "output_artifact": dict(complete_artifact),
+            },
+            {
+                "attempt_id": "sprint-attempt-2",
+                "artifact_fingerprint": "sha256:failed",
+                "is_complete": False,
+                "output_artifact": {"error": "SPRINT_GENERATION_FAILED"},
+            },
+        ],
+    }
+    saved_states: list[JsonDict] = []
+
+    async def load_state() -> JsonDict:
+        return state
+
+    payload = await get_sprint_history(
+        load_state=load_state,
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        current_planned_sprint_id=None,
+    )
+
+    assert payload["count"] == 2  # noqa: PLR2004
+    assert state["fsm_state"] == "SPRINT_DRAFT"
+    assert state["sprint_plan_assessment"]["attempt_id"] == "sprint-attempt-1"
+    assert state["sprint_plan_assessment"]["artifact_fingerprint"] == "sha256:reviewed"
+    assert state["sprint_last_input_context"] == {
+        "available_stories": [{"story_id": 1}]
+    }
+    assert saved_states
 
 
 @pytest.mark.asyncio
@@ -609,6 +818,115 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
     assert captured["input_data"].sprint_start_date == "2026-03-15"
     assert captured["tool_context"].state["sprint_plan"]["duration_days"] == 14  # noqa: PLR2004
     assert "is_complete" not in captured["tool_context"].state["sprint_plan"]
+
+
+@pytest.mark.asyncio
+async def test_save_sprint_plan_enforces_reviewed_attempt_guards() -> None:
+    """Verify guarded sprint save requires the reviewed draft fingerprint."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+            }
+        ],
+        "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-1",
+            "artifact_fingerprint": "sha256:reviewed",
+            "sprint_goal": "Persist safely",
+            "sprint_number": 1,
+            "duration_days": 14,
+            "selected_stories": [],
+            "deselected_stories": [],
+            "capacity_analysis": {
+                "velocity_assumption": "Medium",
+                "capacity_band": "4-5 stories",
+                "selected_count": 0,
+                "story_points_used": 0,
+                "max_story_points": 13,
+                "commitment_note": "Fits",
+                "reasoning": "Fits",
+            },
+            "is_complete": True,
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await save_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            current_planned_sprint_id=None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_plan_tool=lambda _input_data, _tool_context: {
+                "success": True,
+                "sprint_id": 9,
+            },
+            team_name="Team Alpha",
+            sprint_start_date="2026-03-15",
+            attempt_id="sprint-attempt-1",
+            expected_artifact_fingerprint="sha256:stale",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key="save-sprint-7-001",
+        )
+
+    assert "save guard mismatch" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_sprint_plan_replays_matching_idempotency_key() -> None:
+    """Verify repeat guarded save returns the recorded payload without mutation."""
+    replay_payload: JsonDict = {
+        "fsm_state": "SPRINT_PERSISTENCE",
+        "save_result": {"success": True, "sprint_id": 9},
+        "attempt_id": "sprint-attempt-1",
+        "artifact_fingerprint": "sha256:reviewed",
+        "idempotency_key": "save-sprint-7-001",
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_PERSISTENCE",
+        "sprint_save_idempotency_keys": {
+            "save-sprint-7-001": replay_payload,
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    def save_plan_tool(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for idempotency replay"
+        raise AssertionError(msg)
+
+    payload = await save_sprint_plan(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda _state: None,
+        current_planned_sprint_id=9,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_plan_tool=save_plan_tool,
+        team_name="Team Alpha",
+        sprint_start_date="2026-03-15",
+        attempt_id="sprint-attempt-1",
+        expected_artifact_fingerprint="sha256:reviewed",
+        expected_state="SPRINT_DRAFT",
+        idempotency_key="save-sprint-7-001",
+    )
+
+    assert payload == replay_payload
 
 
 @pytest.mark.asyncio

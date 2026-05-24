@@ -24,7 +24,7 @@ class MockToolContext:
         self.state = state
 
 
-def _valid_sprint_output() -> str:
+def _valid_sprint_output(*, max_story_points: int | None = 13) -> str:
     return json.dumps(
         {
             "sprint_goal": "Deliver onboarding-ready login flow",
@@ -60,20 +60,57 @@ def _valid_sprint_output() -> str:
                     "reason_for_selection": "Supports the sprint goal.",
                 }
             ],
-            "deselected_stories": [
-                {
-                    "story_id": 11,
-                    "reason": "Fits a later sprint better.",
-                }
-            ],
+            "deselected_stories": [],
             "capacity_analysis": {
                 "velocity_assumption": "High",
                 "capacity_band": "6-7 stories",
                 "selected_count": 1,
                 "story_points_used": 3,
-                "max_story_points": 13,
+                "max_story_points": max_story_points,
                 "commitment_note": "Does this scope feel achievable in 2 weeks?",
                 "reasoning": "This scope fits the chosen capacity band.",
+            },
+        }
+    )
+
+
+def _sprint_output_for_story_ids(
+    story_ids: list[int],
+    *,
+    selected_count: int | None = None,
+    story_points_used: int | None = None,
+    max_story_points: int | None = 10,
+    deselected_stories: list[dict[str, object]] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "sprint_goal": "Deliver locked sprint scope",
+            "sprint_number": 1,
+            "duration_days": 14,
+            "selected_stories": [
+                {
+                    "story_id": story_id,
+                    "story_title": f"Story {story_id}",
+                    "tasks": [],
+                    "reason_for_selection": "Supports the locked sprint scope.",
+                }
+                for story_id in story_ids
+            ],
+            "deselected_stories": deselected_stories or [],
+            "capacity_analysis": {
+                "velocity_assumption": "Medium",
+                "capacity_band": "2 stories",
+                "selected_count": (
+                    len(story_ids) if selected_count is None else selected_count
+                ),
+                "story_points_used": (
+                    2 * len(story_ids)
+                    if story_points_used is None
+                    else story_points_used
+                ),
+                "max_story_points": max_story_points,
+                "commitment_note": "Does this scope feel achievable in 2 weeks?",
+                "reasoning": "The selected work fits the locked sprint scope.",
             },
         }
     )
@@ -116,6 +153,148 @@ def test_prepare_sprint_input_context_rejects_invalid_selected_story_ids(
     assert prepared["success"] is False
     assert prepared["error_code"] == "SPRINT_SELECTION_INVALID"
     assert prepared["invalid_selected_ids"] == [999]
+
+
+def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify sprint input auto-selects a locked priority prefix."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 3,
+            "stories": [
+                {
+                    "story_id": 66,
+                    "story_title": "Budget",
+                    "priority": 101,
+                    "story_points": 1,
+                },
+                {
+                    "story_id": 85,
+                    "story_title": "Live workflow",
+                    "priority": 102,
+                    "story_points": 3,
+                },
+                {
+                    "story_id": 67,
+                    "story_title": "Capture",
+                    "priority": 201,
+                    "story_points": 3,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+    )
+
+    assert prepared["success"] is True
+    assert prepared["selected_story_ids"] == [66, 85]
+    assert prepared["selection_policy"]["mode"] == "auto"
+    assert [
+        story["story_id"] for story in prepared["input_context"]["available_stories"]
+    ] == [66, 85]
+    assert prepared["input_context"]["available_stories"][0]["parent_group"] == 1
+    assert prepared["input_context"]["available_stories"][0]["group_slot"] == 1
+
+
+def test_prepare_sprint_input_context_returns_selection_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify sprint input returns structured selection errors."""
+    blocking_story_id = 66
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": blocking_story_id,
+                    "story_title": "Budget",
+                    "priority": 101,
+                    "story_points": 5,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Low",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=3,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_CAPACITY_BLOCKED"
+    assert prepared["selection_details"]["blocking_story_id"] == blocking_story_id
+
+
+def test_load_sprint_candidates_preserves_readiness_from_fetcher() -> None:
+    """Verify candidate normalization keeps readiness diagnostics."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Unsized story",
+                    "priority": 999,
+                    "story_points": None,
+                }
+            ],
+            "readiness": {
+                "status": "blocked",
+                "unsized_count": 1,
+                "default_priority_count": 1,
+                "blocking_codes": [
+                    "SPRINT_CANDIDATES_UNSIZED",
+                    "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+                ],
+                "blocking_story_ids": [11],
+            },
+        }
+
+    result = sprint_input.load_sprint_candidates(
+        7,
+        fetch_candidates=fake_fetch_sprint_candidates,
+    )
+
+    assert result["success"] is True
+    assert result["readiness"] == {
+        "status": "blocked",
+        "unsized_count": 1,
+        "default_priority_count": 1,
+        "blocking_codes": [
+            "SPRINT_CANDIDATES_UNSIZED",
+            "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+        ],
+        "blocking_story_ids": [11],
+    }
 
 
 @pytest.mark.asyncio
@@ -191,7 +370,10 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
 
     assert runtime_result["success"] is True
     assert runtime_result["output_artifact"]["is_complete"] is True
-    assert runtime_capture["payload"] == adapter_capture["args"]
+    adapter_args = adapter_capture["args"]
+    assert adapter_args["available_stories"][0]["parent_group"] is None
+    assert adapter_args["available_stories"][0]["group_slot"] is None
+    assert runtime_capture["payload"] == adapter_args
     assert runtime_capture["payload"] == {
         "available_stories": [
             {
@@ -205,6 +387,8 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
                 "story_points": 3,
                 "evaluated_invariant_ids": ["INV-12"],
                 "story_compliance_boundary_summaries": [],
+                "parent_group": None,
+                "group_slot": None,
             }
         ],
         "team_velocity_assumption": "High",
@@ -213,6 +397,402 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
         "max_story_points": 13,
         "include_task_decomposition": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_output_that_changes_locked_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects output that changes locked selected story ids."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 3,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 99,
+                    "story_title": "Out of Scope Story",
+                    "priority": 3,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12, 99])
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert result["validation_errors"] == [
+        "selected stories do not match locked Sprint selection: "
+        "expected [12, 13], actual [12, 99]"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_output_that_drops_locked_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects output that drops locked selected story ids."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12])
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert result["validation_errors"] == [
+        "selected stories do not match locked Sprint selection: "
+        "expected [12, 13], actual [12]"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_locked_selection_selected_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects locked sprint selected count mismatches."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12, 13], selected_count=3)
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert "capacity analysis does not match locked Sprint selection" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_locked_selection_story_points_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects locked sprint story point mismatches."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12, 13], story_points_used=5)
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert "capacity analysis does not match locked Sprint selection" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_locked_selection_max_story_points_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects locked sprint max story point mismatches."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12, 13], max_story_points=10)
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=13,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert "capacity analysis does not match locked Sprint selection" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_locked_selection_deselected_stories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime rejects deselected stories for locked sprint selection."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids(
+            [12, 13],
+            deselected_stories=[
+                {
+                    "story_id": 99,
+                    "reason": "Not included by the model.",
+                }
+            ],
+        )
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert (
+        "deselected stories are not allowed for locked Sprint selection"
+        in result["error"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_output_that_matches_locked_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify runtime accepts output with exact locked selection capacity."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 1,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Event Delta Replay",
+                    "priority": 2,
+                    "story_points": 2,
+                    "evaluated_invariant_ids": [],
+                },
+            ],
+        }
+
+    async def fake_invoke(_payload: object) -> object:
+        return _sprint_output_for_story_ids([12, 13])
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=[12, 13],
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert [
+        story["story_id"] for story in result["output_artifact"]["selected_stories"]
+    ] == [12, 13]
 
 
 @pytest.mark.asyncio
@@ -238,7 +818,7 @@ async def test_runtime_rejects_out_of_scope_task_invariant_bindings(
         }
 
     async def fake_invoke(_payload: object) -> object:
-        return _valid_sprint_output()
+        return _valid_sprint_output(max_story_points=None)
 
     monkeypatch.setattr(
         sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
@@ -288,7 +868,7 @@ async def test_runtime_passes_story_acceptance_criteria_into_decomposition_valid
         }
 
     async def fake_invoke(_payload: object) -> object:
-        return _valid_sprint_output()
+        return _valid_sprint_output(max_story_points=None)
 
     def fake_validate_task_decomposition_quality(
         _output: object,
@@ -385,7 +965,7 @@ async def test_runtime_rejects_poor_task_decomposition_quality(
                     "capacity_band": "6-7 stories",
                     "selected_count": 1,
                     "story_points_used": 3,
-                    "max_story_points": 13,
+                    "max_story_points": None,
                     "commitment_note": "Valid note",
                     "reasoning": "Valid reasoning",
                 },
@@ -615,9 +1195,7 @@ async def test_adk_runner_preserves_structured_validation_details(
                     return structured_errors
 
             msg = "ADK validation failed"
-            raise RuntimeError(
-                msg
-            ) from FakeStructuredValidationError()
+            raise RuntimeError(msg) from FakeStructuredValidationError()
             yield None
 
     class FakePart:

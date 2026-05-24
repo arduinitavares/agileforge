@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -586,6 +586,54 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
     assert isinstance(output_artifact, dict)
     output_artifact = cast("dict[str, object]", output_artifact)
     assert output_artifact["error"] == "SPRINT_GENERATION_FAILED"
+
+
+def test_sprint_generate_blocks_unready_candidates_before_runtime(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_setup_project(repo, workflow)
+
+    session.add(Product(product_id=project_id, name="Sprint Project"))
+    session.add(
+        UserStory(
+            product_id=project_id,
+            title="Unsized story",
+            story_description="As a planner, I want sizing before sprint planning.",
+            acceptance_criteria="- Story has a deterministic estimate.",
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+            story_points=None,
+            rank=None,
+        )
+    )
+    session.commit()
+
+    async def fake_run_sprint_agent_from_state(
+        *_args: object, **_kwargs: object
+    ) -> Never:
+        msg = "runtime should not run for unready candidates"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        api_module, "run_sprint_agent_from_state", fake_run_sprint_agent_from_state
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/generate",
+        json={
+            "team_velocity_assumption": "Medium",
+            "sprint_duration_days": 14,
+            "include_task_decomposition": True,
+        },
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert "SPRINT_CANDIDATES_UNSIZED" in response.json()["detail"]
+    assert "SPRINT_CANDIDATES_DEFAULT_PRIORITY" in response.json()["detail"]
+    assert workflow.states[str(project_id)] == {"fsm_state": "SPRINT_SETUP"}
 
 
 def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypatch):  # noqa: ANN001, ANN201, D103

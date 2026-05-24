@@ -17,7 +17,9 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     SaveSprintPlanInput,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
+from services.agent_workbench.fingerprints import canonical_hash
 from services.phases import workflow_state
+from services.sprint_input import load_sprint_candidates
 from services.sprint_runtime import PUBLIC_TASK_KIND_VALUES
 
 VALID_SPRINT_GENERATION_STATES = {
@@ -26,6 +28,7 @@ VALID_SPRINT_GENERATION_STATES = {
     OrchestratorState.SPRINT_DRAFT.value,
     OrchestratorState.SPRINT_PERSISTENCE.value,
 }
+VALID_FSM_STATES = {state.value for state in OrchestratorState}
 
 
 class SprintPhaseError(Exception):
@@ -240,6 +243,7 @@ async def generate_sprint_plan(
     include_task_decomposition: bool,
     selected_story_ids: list[int] | None,
     user_input: str | None,
+    load_candidates: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
     reset_stale_saved_sprint_planner_working_set(
@@ -252,8 +256,28 @@ async def generate_sprint_plan(
             f"Invalid phase for sprint generation (state: {state.get('fsm_state')})"
         )
 
+    candidates_payload = (
+        load_candidates()
+        if load_candidates is not None
+        else load_sprint_candidates(project_id)
+    )
+    readiness = candidates_payload.get("readiness")
+    if isinstance(readiness, dict) and readiness.get("status") == "blocked":
+        codes = ", ".join(str(code) for code in readiness.get("blocking_codes", []))
+        raise SprintPhaseError(
+            f"Sprint candidates are not planning-ready: {codes}",
+            status_code=409,
+        )
+
     attempts = ensure_sprint_attempts(state)
     has_attempts = len(attempts) > 0
+    previous_assessment = state.get("sprint_plan_assessment")
+    previous_complete_assessment = (
+        dict(previous_assessment)
+        if _is_complete_sprint_assessment(previous_assessment)
+        else None
+    )
+    previous_input_context = state.get("sprint_last_input_context")
 
     sprint_result = await run_sprint_agent(
         state,
@@ -268,6 +292,7 @@ async def generate_sprint_plan(
     normalized_output_artifact = normalize_sprint_output_artifact(
         cast("dict[str, Any] | None", sprint_result.get("output_artifact"))
     )
+    artifact_fingerprint = _sprint_artifact_fingerprint(normalized_output_artifact)
     failure_meta = dict(
         failure_meta_builder(
             cast("dict[str, object]", sprint_result),
@@ -287,12 +312,30 @@ async def generate_sprint_plan(
         failure_meta=failure_meta,
         created_at=now_iso(),
     )
-
-    next_state = set_sprint_fsm_state(
+    attempt_id = f"sprint-attempt-{attempt_count}"
+    _attach_attempt_guards(
         state,
-        is_complete=is_complete,
-        now_iso=now_iso,
+        attempt_id=attempt_id,
+        artifact_fingerprint=artifact_fingerprint,
     )
+
+    preserve_reviewed_draft = (
+        has_attempts
+        and not bool(sprint_result.get("success"))
+        and previous_complete_assessment is not None
+    )
+    if preserve_reviewed_draft:
+        state["sprint_plan_assessment"] = previous_complete_assessment
+        if isinstance(previous_input_context, dict):
+            state["sprint_last_input_context"] = dict(previous_input_context)
+        state["fsm_state"] = OrchestratorState.SPRINT_DRAFT.value
+        next_state = OrchestratorState.SPRINT_DRAFT.value
+    else:
+        next_state = set_sprint_fsm_state(
+            state,
+            is_complete=is_complete,
+            now_iso=now_iso,
+        )
     save_state(state)
 
     return {
@@ -303,6 +346,8 @@ async def generate_sprint_plan(
         "input_context": sprint_result.get("input_context"),
         "output_artifact": normalized_output_artifact,
         "attempt_count": attempt_count,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": artifact_fingerprint,
         **failure_meta,
         "fsm_state": next_state,
     }
@@ -327,7 +372,8 @@ async def get_sprint_history(
         for attempt in attempts
         if isinstance(attempt, dict)
     ]
-    if normalized_attempts != attempts:
+    restored_draft = _restore_latest_complete_sprint_draft(state, normalized_attempts)
+    if normalized_attempts != attempts or restored_draft:
         state["sprint_attempts"] = normalized_attempts
         save_state(state)
 
@@ -479,7 +525,7 @@ def close_sprint(
     }
 
 
-async def save_sprint_plan(
+async def save_sprint_plan(  # noqa: C901
     *,
     project_id: int,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
@@ -491,6 +537,10 @@ async def save_sprint_plan(
     save_plan_tool: Callable[[SaveSprintPlanInput, Any], dict[str, Any]],
     team_name: str,
     sprint_start_date: str,
+    attempt_id: str | None = None,
+    expected_artifact_fingerprint: str | None = None,
+    expected_state: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
     if reset_stale_saved_sprint_planner_working_set(
@@ -499,9 +549,27 @@ async def save_sprint_plan(
     ):
         save_state(state)
 
+    replay = _sprint_save_replay(state, idempotency_key)
+    if replay is not None:
+        return replay
+
     assessment = state.get("sprint_plan_assessment")
     if not isinstance(assessment, dict):
         raise SprintPhaseError("No sprint draft available to save")
+
+    if _guarded_save_requested(
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        expected_state=expected_state,
+        idempotency_key=idempotency_key,
+    ):
+        _assert_save_expected_state(state, expected_state)
+        _assert_save_guards(
+            state=state,
+            assessment=assessment,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+        )
 
     if not bool(assessment.get("is_complete", False)):
         raise SprintPhaseError("Sprint cannot be saved until is_complete is true")
@@ -515,6 +583,8 @@ async def save_sprint_plan(
 
     assessment_payload = dict(assessment)
     assessment_payload.pop("is_complete", None)
+    assessment_payload.pop("attempt_id", None)
+    assessment_payload.pop("artifact_fingerprint", None)
 
     try:
         sprint_data = SprintPlannerOutput.model_validate(assessment_payload)
@@ -552,12 +622,175 @@ async def save_sprint_plan(
     state["fsm_state_entered_at"] = now_iso()
     state["sprint_saved_at"] = now_iso()
     state["sprint_planner_owner_sprint_id"] = result.get("sprint_id")
-    save_state(state)
 
-    return {
+    payload = {
         "fsm_state": OrchestratorState.SPRINT_PERSISTENCE.value,
         "save_result": result,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": expected_artifact_fingerprint,
+        "idempotency_key": idempotency_key,
     }
+    if idempotency_key is not None:
+        _record_sprint_save_replay(state, idempotency_key, payload)
+    save_state(state)
+    return payload
+
+
+def _sprint_artifact_fingerprint(output_artifact: dict[str, Any]) -> str:
+    return canonical_hash({"phase": "sprint", "output_artifact": output_artifact})
+
+
+def _is_complete_sprint_assessment(value: object) -> bool:
+    return isinstance(value, dict) and value.get("is_complete") is True
+
+
+def _restore_latest_complete_sprint_draft(
+    state: dict[str, Any],
+    attempts: Sequence[dict[str, Any]],
+) -> bool:
+    if state.get("fsm_state") != OrchestratorState.SPRINT_SETUP.value:
+        return False
+    if _is_complete_sprint_assessment(state.get("sprint_plan_assessment")):
+        return False
+
+    for attempt in reversed(attempts):
+        if attempt.get("is_complete") is not True:
+            continue
+        output_artifact = attempt.get("output_artifact")
+        if not isinstance(output_artifact, dict):
+            continue
+        restored = dict(output_artifact)
+        attempt_id = attempt.get("attempt_id")
+        artifact_fingerprint = attempt.get("artifact_fingerprint")
+        if isinstance(attempt_id, str) and attempt_id:
+            restored["attempt_id"] = attempt_id
+        if isinstance(artifact_fingerprint, str) and artifact_fingerprint:
+            restored["artifact_fingerprint"] = artifact_fingerprint
+        restored["is_complete"] = True
+        state["sprint_plan_assessment"] = restored
+        input_context = attempt.get("input_context")
+        if isinstance(input_context, dict):
+            state["sprint_last_input_context"] = dict(input_context)
+        state["fsm_state"] = OrchestratorState.SPRINT_DRAFT.value
+        return True
+    return False
+
+
+def _attach_attempt_guards(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+    artifact_fingerprint: str,
+) -> None:
+    attempts = ensure_sprint_attempts(state)
+    if attempts:
+        attempts[-1]["attempt_id"] = attempt_id
+        attempts[-1]["artifact_fingerprint"] = artifact_fingerprint
+        output_artifact = attempts[-1].get("output_artifact")
+        if isinstance(output_artifact, dict):
+            output_artifact["attempt_id"] = attempt_id
+            output_artifact["artifact_fingerprint"] = artifact_fingerprint
+
+    assessment = state.get("sprint_plan_assessment")
+    if isinstance(assessment, dict):
+        assessment["attempt_id"] = attempt_id
+        assessment["artifact_fingerprint"] = artifact_fingerprint
+
+
+def _sprint_save_replay(
+    state: dict[str, Any],
+    idempotency_key: str | None,
+) -> dict[str, Any] | None:
+    if idempotency_key is None:
+        return None
+    saves = state.get("sprint_save_idempotency_keys")
+    if not isinstance(saves, dict):
+        return None
+    payload = saves.get(idempotency_key)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _guarded_save_requested(
+    *,
+    attempt_id: str | None,
+    expected_artifact_fingerprint: str | None,
+    expected_state: str | None,
+    idempotency_key: str | None,
+) -> bool:
+    return (
+        attempt_id is not None
+        or expected_artifact_fingerprint is not None
+        or expected_state is not None
+        or idempotency_key is not None
+    )
+
+
+def _record_sprint_save_replay(
+    state: dict[str, Any],
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> None:
+    saves = state.get("sprint_save_idempotency_keys")
+    if not isinstance(saves, dict):
+        saves = {}
+    saves[idempotency_key] = dict(payload)
+    state["sprint_save_idempotency_keys"] = saves
+
+
+def _normalize_fsm_state(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        if normalized in VALID_FSM_STATES:
+            return normalized
+    return OrchestratorState.SETUP_REQUIRED.value
+
+
+def _assert_save_expected_state(
+    state: dict[str, Any],
+    expected_state: str | None,
+) -> None:
+    if expected_state != OrchestratorState.SPRINT_DRAFT.value:
+        raise SprintPhaseError("Sprint save expected_state must be SPRINT_DRAFT")
+    fsm_state = _normalize_fsm_state(state.get("fsm_state"))
+    if fsm_state != expected_state:
+        raise SprintPhaseError(
+            f"Sprint save stale state: expected {expected_state}, got {fsm_state}",
+        )
+
+
+def _assert_save_guards(
+    *,
+    state: dict[str, Any],
+    assessment: dict[str, Any],
+    attempt_id: str | None,
+    expected_artifact_fingerprint: str | None,
+) -> None:
+    selected_attempt = _find_sprint_attempt(state, attempt_id)
+    if (
+        not attempt_id
+        or not expected_artifact_fingerprint
+        or assessment.get("attempt_id") != attempt_id
+        or assessment.get("artifact_fingerprint") != expected_artifact_fingerprint
+        or selected_attempt is None
+        or selected_attempt.get("artifact_fingerprint") != expected_artifact_fingerprint
+    ):
+        raise SprintPhaseError(
+            "Sprint save guard mismatch: draft attempt or artifact fingerprint "
+            "does not match the reviewed Sprint draft.",
+        )
+
+
+def _find_sprint_attempt(
+    state: dict[str, Any],
+    attempt_id: str | None,
+) -> dict[str, Any] | None:
+    if not attempt_id:
+        return None
+    attempts = ensure_sprint_attempts(state)
+    for attempt in attempts:
+        if attempt.get("attempt_id") == attempt_id:
+            return attempt
+    return None
 
 
 def start_saved_sprint(

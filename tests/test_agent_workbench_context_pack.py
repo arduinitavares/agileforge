@@ -247,11 +247,10 @@ def test_sprint_planning_pack_filters_unimplemented_next_commands() -> None:
     assert data["fsm_state"] == "SPRINT_SETUP"
     assert data["next_valid_commands"] == [
         "agileforge sprint candidates --project-id 7",
+        "agileforge sprint generate --project-id 7",
     ]
     assert data["blocked_commands"] == []
-    assert data["blocked_future_commands"] == [
-        "agileforge sprint generate --project-id 7 --selected-story-ids 1,2,3",
-    ]
+    assert data["blocked_future_commands"] == []
     assert data["included_sections"] == [
         "workflow",
         "authority",

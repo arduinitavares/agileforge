@@ -66,6 +66,10 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story save",
     "agileforge story complete",
     "agileforge story reopen",
+    "agileforge story repair-readiness",
+    "agileforge sprint generate",
+    "agileforge sprint history",
+    "agileforge sprint save",
 }
 
 EXPECTED_PHASE_2E_COMMAND_NAMES = {
@@ -493,6 +497,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "agileforge story save",
         "agileforge story complete",
         "agileforge story reopen",
+        "agileforge story repair-readiness",
     }
 
     assert story_command_names.issubset(names)
@@ -508,6 +513,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
     save = command_schema_payload("agileforge story save")
     complete = command_schema_payload("agileforge story complete")
     reopen = command_schema_payload("agileforge story reopen")
+    repair_readiness = command_schema_payload("agileforge story repair-readiness")
 
     assert pending["mutates"] is False
     assert pending["input"]["required"] == ["project_id"]
@@ -543,12 +549,72 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "idempotency_key",
     ]
     assert reopen["idempotency_required"] is True
-    for schema in (generate, retry, save, complete, reopen):
+    assert repair_readiness["mutates"] is True
+    assert repair_readiness["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert repair_readiness["idempotency_required"] is True
+    for schema in (generate, retry, save, complete, reopen, repair_readiness):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in schema["errors"]
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
         assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
+
+
+def test_sprint_phase_commands_are_registered_and_available() -> None:
+    """Expose Sprint phase generation commands as installed CLI capabilities."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+    sprint_command_names = {
+        "agileforge sprint generate",
+        "agileforge sprint history",
+        "agileforge sprint save",
+    }
+
+    assert sprint_command_names.issubset(names)
+    for command_name in sprint_command_names:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    generate = command_schema_payload("agileforge sprint generate")
+    history = command_schema_payload("agileforge sprint history")
+    save = command_schema_payload("agileforge sprint save")
+
+    assert generate["mutates"] is True
+    assert generate["input"]["required"] == ["project_id"]
+    assert generate["input"]["optional"] == [
+        "input",
+        "selected_story_ids",
+        "team_velocity_assumption",
+        "sprint_duration_days",
+        "max_story_points",
+        "include_task_decomposition",
+    ]
+    assert history["mutates"] is False
+    assert history["input"]["required"] == ["project_id"]
+    assert save["mutates"] is True
+    assert save["input"]["required"] == [
+        "project_id",
+        "team_name",
+        "sprint_start_date",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save["idempotency_required"] is True
+    for schema in (generate, history, save):
+        assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
+        assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
+        assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
+    assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
+    assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
+    assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in save["errors"]
+    assert ErrorCode.MUTATION_FAILED.value in save["errors"]
 
 
 def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:

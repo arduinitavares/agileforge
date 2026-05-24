@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
-from services.agent_workbench.story_phase import StoryPhaseRunner
+if TYPE_CHECKING:
+    from sqlmodel import Session
+
+from models.core import Product, Sprint, SprintStory, Team, UserStory
+from models.enums import SprintStatus
+from services.agent_workbench.story_phase import (
+    StoryPhaseRunner,
+    _repair_story_readiness_rows,
+)
+from services.phases.story_service import StoryPhaseError
 
 PROJECT_ID = 2
 EXPECTED_REQUIREMENT_COUNT = 2
@@ -427,6 +436,218 @@ def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> N
     assert result["data"]["fsm_state"] == "STORY_INTERVIEW"
     assert captured["expected_state"] == "SPRINT_SETUP"
     assert captured["idempotency_key"] == "reopen-story-review-match"
+
+
+def test_story_repair_readiness_runner_passes_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story readiness repair passes expected state and idempotency guards."""
+    captured: dict[str, Any] = {}
+
+    async def fake_repair_story_readiness(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "project_id": kwargs["project_id"],
+            "fsm_state": "SPRINT_SETUP",
+            "idempotency_key": kwargs["idempotency_key"],
+            "repair_result": {"repaired_count": 1, "story_ids": [66]},
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.repair_story_readiness",
+        fake_repair_story_readiness,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.repair_readiness(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="repair-story-readiness-2",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["repair_result"] == {
+        "repaired_count": 1,
+        "story_ids": [66],
+    }
+    assert captured["expected_state"] == "SPRINT_SETUP"
+    assert captured["idempotency_key"] == "repair-story-readiness-2"
+
+
+def test_repair_story_readiness_rows_block_missing_refined_row(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story readiness repair must not silently skip missing DB rows."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    session.add(product)
+    team = Team(name="Cartola Team")
+    session.add(team)
+    session.commit()
+
+    request = {
+        "project_id": PROJECT_ID,
+        "items": [
+            {
+                "parent_requirement": "Choose weekly squad",
+                "slot": 1,
+                "story_points": 5,
+                "rank": "101",
+            }
+        ],
+    }
+
+    with pytest.raises(StoryPhaseError) as excinfo:
+        _repair_story_readiness_rows(request)
+
+    assert excinfo.value.status_code == 409  # noqa: PLR2004
+    assert "could not find active refined story" in excinfo.value.detail
+
+
+def test_repair_story_readiness_rows_rechecks_open_sprint_links(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story readiness repair must recheck sprint safety in the write session."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    session.add(product)
+    team = Team(name="Cartola Team")
+    session.add(team)
+    story = UserStory(
+        product_id=PROJECT_ID,
+        title="Choose weekly squad",
+        story_description="As a manager, I want a squad.",
+        acceptance_criteria="- Verify squad choice.",
+        source_requirement="choose_weekly_squad",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=None,
+        rank=None,
+    )
+    session.add(story)
+    session.flush()
+    assert team.team_id is not None
+    sprint = Sprint(
+        goal="Plan live MVP",
+        start_date=date(2026, 5, 25),
+        end_date=date(2026, 6, 8),
+        status=SprintStatus.PLANNED,
+        started_at=datetime(2026, 5, 25, 9, 0, tzinfo=UTC),
+        product_id=PROJECT_ID,
+        team_id=team.team_id,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    assert story.story_id is not None
+    session.add(
+        SprintStory(
+            sprint_id=sprint.sprint_id,
+            story_id=story.story_id,
+        )
+    )
+    session.commit()
+
+    request = {
+        "project_id": PROJECT_ID,
+        "items": [
+            {
+                "parent_requirement": "Choose weekly squad",
+                "slot": 1,
+                "story_points": 5,
+                "rank": "101",
+            }
+        ],
+    }
+
+    with pytest.raises(StoryPhaseError) as excinfo:
+        _repair_story_readiness_rows(request)
+
+    assert excinfo.value.status_code == 409  # noqa: PLR2004
+    assert "unsafe after Sprint work exists" in excinfo.value.detail
+
+
+def test_repair_story_readiness_rows_rechecks_completed_sprint_links(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story readiness repair must block any existing sprint linkage."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    session.add(product)
+    team = Team(name="Cartola Team")
+    session.add(team)
+    story = UserStory(
+        product_id=PROJECT_ID,
+        title="Choose weekly squad",
+        story_description="As a manager, I want a squad.",
+        acceptance_criteria="- Verify squad choice.",
+        source_requirement="choose_weekly_squad",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=None,
+        rank=None,
+    )
+    session.add(story)
+    session.flush()
+    assert team.team_id is not None
+    sprint = Sprint(
+        goal="Completed live MVP",
+        start_date=date(2026, 5, 25),
+        end_date=date(2026, 6, 8),
+        status=SprintStatus.COMPLETED,
+        started_at=datetime(2026, 5, 25, 9, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 6, 8, 18, 0, tzinfo=UTC),
+        product_id=PROJECT_ID,
+        team_id=team.team_id,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    assert story.story_id is not None
+    session.add(
+        SprintStory(
+            sprint_id=sprint.sprint_id,
+            story_id=story.story_id,
+        )
+    )
+    session.commit()
+
+    request = {
+        "project_id": PROJECT_ID,
+        "items": [
+            {
+                "parent_requirement": "Choose weekly squad",
+                "slot": 1,
+                "story_points": 5,
+                "rank": "101",
+            }
+        ],
+    }
+
+    with pytest.raises(StoryPhaseError) as excinfo:
+        _repair_story_readiness_rows(request)
+
+    assert excinfo.value.status_code == 409  # noqa: PLR2004
+    assert "unsafe after Sprint work exists" in excinfo.value.detail
 
 
 def test_story_complete_hydrates_roadmap_from_product_json_before_coverage(

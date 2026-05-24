@@ -48,6 +48,20 @@ class SprintPlannerStory(BaseModel):
             description="Optional story points estimate (>= 1 when provided).",
         ),
     ]
+    parent_group: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="Optional readiness group derived from sprint input.",
+        ),
+    ]
+    group_slot: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="Optional position within the readiness group derived from sprint input.",
+        ),
+    ]
     story_description: Annotated[
         str,
         Field(description="Detailed user story description."),

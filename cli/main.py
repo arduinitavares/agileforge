@@ -66,6 +66,10 @@ Examples:
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
     """--idempotency-key save-roadmap-001
   agileforge sprint candidates --project-id 1
+  agileforge sprint generate --project-id 1
+  agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date """
+    """2026-05-25 --attempt-id <attempt_id> --expected-artifact-fingerprint """
+    """<fingerprint> --expected-state SPRINT_DRAFT --idempotency-key save-sprint-001
   agileforge context pack --project-id 1 --phase sprint-planning
 """
 )
@@ -350,8 +354,50 @@ class _Application(Protocol):
         """Reopen one saved Story requirement before Sprint work exists."""
         ...
 
+    def story_repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Backfill Story planning metadata before Sprint work starts."""
+        ...
+
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return sprint candidate projection."""
+        ...
+
+    def sprint_generate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+        selected_story_ids: list[int] | None = None,
+        team_velocity_assumption: str = "Medium",
+        sprint_duration_days: int = 14,
+        max_story_points: int | None = None,
+        include_task_decomposition: bool = True,
+    ) -> JsonObject:
+        """Generate or refine a Sprint draft."""
+        ...
+
+    def sprint_history(self, *, project_id: int) -> JsonObject:
+        """Return Sprint attempt history."""
+        ...
+
+    def sprint_save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        team_name: str,
+        sprint_start_date: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Persist the current Sprint draft."""
         ...
 
     def context_pack(
@@ -947,6 +993,14 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_reopen.add_argument("--expected-state", required=True)
     story_reopen.add_argument("--idempotency-key", required=True)
     story_reopen.set_defaults(command_handler=_story_reopen)
+    story_repair = story_sub.add_parser(
+        "repair-readiness",
+        help="Backfill Story planning metadata before Sprint work starts.",
+    )
+    story_repair.add_argument("--project-id", type=int, required=True)
+    story_repair.add_argument("--expected-state", required=True)
+    story_repair.add_argument("--idempotency-key", required=True)
+    story_repair.set_defaults(command_handler=_story_repair_readiness)
 
     sprint = subparsers.add_parser("sprint", help="Inspect sprint planning inputs.")
     sprint_sub = sprint.add_subparsers(
@@ -960,6 +1014,50 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     sprint_candidates.add_argument("--project-id", type=int, required=True)
     sprint_candidates.set_defaults(command_handler=_sprint_candidates)
+    sprint_generate = sprint_sub.add_parser(
+        "generate",
+        help="Generate or refine a Sprint draft.",
+    )
+    sprint_generate.add_argument("--project-id", type=int, required=True)
+    sprint_generate.add_argument("--input", dest="user_input")
+    sprint_generate.add_argument(
+        "--selected-story-ids",
+        type=_parse_selected_story_ids,
+    )
+    sprint_generate.add_argument(
+        "--team-velocity-assumption",
+        choices=("Low", "Medium", "High"),
+        default="Medium",
+    )
+    sprint_generate.add_argument("--sprint-duration-days", type=int, default=14)
+    sprint_generate.add_argument("--max-story-points", type=int)
+    sprint_generate.add_argument(
+        "--no-task-decomposition",
+        action="store_false",
+        dest="include_task_decomposition",
+    )
+    sprint_generate.set_defaults(
+        command_handler=_sprint_generate,
+        include_task_decomposition=True,
+    )
+    sprint_history = sprint_sub.add_parser(
+        "history",
+        help="Show Sprint attempt history.",
+    )
+    sprint_history.add_argument("--project-id", type=int, required=True)
+    sprint_history.set_defaults(command_handler=_sprint_history)
+    sprint_save = sprint_sub.add_parser(
+        "save",
+        help="Persist a reviewed Sprint draft.",
+    )
+    sprint_save.add_argument("--project-id", type=int, required=True)
+    sprint_save.add_argument("--team-name", required=True)
+    sprint_save.add_argument("--sprint-start-date", required=True)
+    sprint_save.add_argument("--attempt-id", required=True)
+    sprint_save.add_argument("--expected-artifact-fingerprint", required=True)
+    sprint_save.add_argument("--expected-state", required=True)
+    sprint_save.add_argument("--idempotency-key", required=True)
+    sprint_save.set_defaults(command_handler=_sprint_save)
 
     context = subparsers.add_parser("context", help="Build bounded agent context.")
     context_sub = context.add_subparsers(
@@ -1615,6 +1713,31 @@ def _non_empty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _parse_selected_story_ids(value: str) -> list[int]:
+    """Parse comma-separated story IDs for Sprint generation."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            story_id = int(part)
+        except ValueError as exc:
+            message = "--selected-story-ids must be a comma-separated list of integers."
+            raise argparse.ArgumentTypeError(message) from exc
+        if story_id <= 0:
+            message = "--selected-story-ids values must be positive integers."
+            raise argparse.ArgumentTypeError(message)
+        if story_id not in seen:
+            seen.add(story_id)
+            ids.append(story_id)
+    if not ids:
+        message = "--selected-story-ids must include at least one story ID."
+        raise argparse.ArgumentTypeError(message)
+    return ids
+
+
 def _review_data(result: JsonObject) -> Mapping[object, object] | None:
     """Return the data mapping from a review result."""
     return _as_mapping(result.get("data"))
@@ -1965,6 +2088,18 @@ def _story_reopen(
     )
 
 
+def _story_repair_readiness(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story readiness repair to the application facade."""
+    return "agileforge story repair-readiness", application.story_repair_readiness(
+        project_id=args.project_id,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
 def _sprint_candidates(
     args: argparse.Namespace,
     application: _Application,
@@ -1972,6 +2107,48 @@ def _sprint_candidates(
     """Route sprint candidates to the application facade."""
     return "agileforge sprint candidates", application.sprint_candidates(
         project_id=args.project_id
+    )
+
+
+def _sprint_generate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint generation to the application facade."""
+    return "agileforge sprint generate", application.sprint_generate(
+        project_id=args.project_id,
+        user_input=args.user_input,
+        selected_story_ids=args.selected_story_ids,
+        team_velocity_assumption=args.team_velocity_assumption,
+        sprint_duration_days=args.sprint_duration_days,
+        max_story_points=args.max_story_points,
+        include_task_decomposition=args.include_task_decomposition,
+    )
+
+
+def _sprint_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint history to the application facade."""
+    return "agileforge sprint history", application.sprint_history(
+        project_id=args.project_id,
+    )
+
+
+def _sprint_save(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint save to the application facade."""
+    return "agileforge sprint save", application.sprint_save(
+        project_id=args.project_id,
+        team_name=args.team_name,
+        sprint_start_date=args.sprint_start_date,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
     )
 
 

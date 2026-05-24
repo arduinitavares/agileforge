@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import anyio
 from sqlmodel import Session, select
 
-from models.core import SprintStory, UserStory
+from models.core import Sprint, SprintStory, UserStory
 from models.db import get_engine
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
@@ -33,6 +33,7 @@ from services.phases.story_service import (
     get_story_history,
     get_story_pending,
     reopen_story_requirement,
+    repair_story_readiness,
     retry_story_draft,
     save_story_draft,
 )
@@ -135,6 +136,21 @@ class StoryPhaseRunner:
             self._reopen,
             project_id,
             parent_requirement,
+            expected_state,
+            idempotency_key,
+        )
+
+    def repair_readiness(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Backfill Story planning metadata before Sprint work starts."""
+        return anyio.run(
+            self._repair_readiness,
+            project_id,
             expected_state,
             idempotency_key,
         )
@@ -362,6 +378,38 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
+    async def _repair_readiness(
+        self,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            data = await repair_story_readiness(
+                project_id=project_id,
+                expected_state=expected_state,
+                idempotency_key=idempotency_key,
+                load_state=lambda: self._load_story_state(
+                    str(project_id), project_id, product
+                ),
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                repair_rows=_repair_story_readiness_rows,
+                assert_repair_safe=lambda repair_project_id: (
+                    _assert_repair_readiness_safe(project_id=repair_project_id)
+                ),
+            )
+        except StoryPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
@@ -445,6 +493,83 @@ def _assert_reopen_safe(*, project_id: int, normalized_requirement: str) -> None
                 message,
                 status_code=409,
             )
+
+
+def _repair_story_readiness_rows(request: dict[str, Any]) -> dict[str, Any]:
+    """Backfill only Story planning metadata for active refined rows."""
+    project_id = int(request["project_id"])
+    items = list(request.get("items") or [])
+    repaired_ids: list[int] = []
+    with Session(get_engine()) as session:
+        _assert_repair_readiness_safe_in_session(session, project_id=project_id)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            story = session.exec(
+                select(UserStory).where(
+                    UserStory.product_id == project_id,
+                    UserStory.source_requirement
+                    == normalize_requirement_key(item["parent_requirement"]),
+                    UserStory.refinement_slot == int(item["slot"]),
+                    UserStory.is_refined == True,  # noqa: E712
+                    UserStory.is_superseded == False,  # noqa: E712
+                )
+            ).first()
+            if story is None:
+                message = (
+                    "Story readiness repair could not find active refined story "
+                    f"for {item.get('parent_requirement')!r} slot {item.get('slot')!r}."
+                )
+                raise StoryPhaseError(message, status_code=409)
+            story.story_points = int(item["story_points"])
+            story.rank = str(item["rank"])
+            session.add(story)
+            if story.story_id is not None:
+                repaired_ids.append(story.story_id)
+        session.commit()
+    return {"repaired_count": len(repaired_ids), "story_ids": repaired_ids}
+
+
+def _assert_repair_readiness_safe(*, project_id: int) -> None:
+    """Block Story readiness repair if refined rows already feed any Sprint."""
+    with Session(get_engine()) as session:
+        _assert_repair_readiness_safe_in_session(session, project_id=project_id)
+
+
+def _assert_repair_readiness_safe_in_session(
+    session: Session,
+    *,
+    project_id: int,
+) -> None:
+    """Block Story readiness repair if refined rows already feed any Sprint."""
+    active_story_ids = [
+        story_id
+        for story_id in session.exec(
+            select(UserStory.story_id).where(
+                UserStory.product_id == project_id,
+                UserStory.is_refined == True,  # noqa: E712
+                UserStory.is_superseded == False,  # noqa: E712
+            )
+        ).all()
+        if story_id is not None
+    ]
+    if not active_story_ids:
+        return
+
+    sprint_link = session.exec(
+        select(SprintStory.story_id)
+        .join(Sprint, cast("Any", Sprint.sprint_id) == SprintStory.sprint_id)
+        .where(
+            Sprint.product_id == project_id,
+            cast("Any", SprintStory.story_id).in_(active_story_ids),
+        )
+    ).first()
+    if sprint_link is not None:
+        message = "Story readiness repair is unsafe after Sprint work exists."
+        raise StoryPhaseError(
+            message,
+            status_code=409,
+        )
 
 
 def _build_tool_context(context: object) -> ToolContext:
