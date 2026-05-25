@@ -843,18 +843,20 @@ def _assert_sprint_source_current(
     state: dict[str, Any],
     load_candidates: Callable[[], dict[str, Any]] | None,
 ) -> None:
+    draft_source = assessment.get("source_fingerprint") or state.get(
+        "sprint_candidate_source_fingerprint"
+    )
+    if not isinstance(draft_source, str):
+        return
+
     candidates_payload = (
         load_candidates()
         if load_candidates is not None
         else load_sprint_candidates(project_id)
     )
     current_source = candidates_payload.get("source_fingerprint")
-    draft_source = assessment.get("source_fingerprint") or state.get(
-        "sprint_candidate_source_fingerprint"
-    )
     if (
         isinstance(current_source, str)
-        and isinstance(draft_source, str)
         and current_source != draft_source
     ):
         raise SprintPhaseError(

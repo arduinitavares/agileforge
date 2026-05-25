@@ -811,7 +811,16 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
     """Verify save sprint plan sanitizes assessment and updates state."""
     state: JsonDict = {
         "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+            },
+        ],
         "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-1",
+            "artifact_fingerprint": "sha256:reviewed",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
             "duration_days": 14,
@@ -1133,7 +1142,16 @@ async def test_save_sprint_plan_maps_open_sprint_conflict_to_phase_error() -> No
     """Verify save sprint plan maps open sprint conflict to phase error."""
     state: JsonDict = {
         "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+            },
+        ],
         "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-1",
+            "artifact_fingerprint": "sha256:reviewed",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
             "duration_days": 14,
