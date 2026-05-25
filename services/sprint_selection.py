@@ -67,6 +67,7 @@ class _DependencyCohort:
 class _ResultDependencyMetadata:
     edges: list[dict[str, int]] = field(default_factory=list)
     promoted_story_ids: list[int] = field(default_factory=list)
+    warnings: list[dict[str, Any]] = field(default_factory=list)
 
 
 def derive_parent_group(priority: int | None) -> int | None:
@@ -122,6 +123,7 @@ def _select_manual(
     policy: _SelectionPolicy,
 ) -> SprintSelectionResult:
     by_id = _rows_by_story_id(rows)
+    edges = _candidate_dependency_edges(rows)
     invalid_selected_ids = [
         story_id for story_id in selected_story_ids if story_id not in by_id
     ]
@@ -132,12 +134,63 @@ def _select_manual(
             details={"invalid_selected_ids": invalid_selected_ids},
         )
 
-    selected_rows = [by_id[story_id] for story_id in selected_story_ids]
+    seen_ids: set[int] = set()
+    duplicate_ids = []
+    for story_id in selected_story_ids:
+        if story_id in seen_ids and story_id not in duplicate_ids:
+            duplicate_ids.append(story_id)
+        seen_ids.add(story_id)
+    if duplicate_ids:
+        raise SprintSelectionError(
+            code="SPRINT_SELECTION_DUPLICATE",
+            message="Manual Sprint selection contains duplicate story IDs.",
+            details={"duplicate_selected_ids": duplicate_ids},
+        )
+
+    selected_id_set = set(selected_story_ids)
+    priority_index = {
+        story_id: (index, index) for index, story_id in enumerate(selected_story_ids)
+    }
+    for dependent_id in selected_story_ids:
+        missing_prerequisites = sorted(edges.get(dependent_id, set()) - selected_id_set)
+        if missing_prerequisites:
+            raise SprintSelectionError(
+                code="SPRINT_SELECTION_DEPENDENCY_MISSING",
+                message="Manual Sprint selection omits required prerequisite stories.",
+                details={
+                    "dependent_story_id": dependent_id,
+                    "missing_prerequisite_story_ids": missing_prerequisites,
+                },
+            )
+
+    reordered_ids = _topological_story_order(
+        selected_id_set,
+        edges=edges,
+        priority_index=priority_index,
+    )
+    warnings = []
+    if reordered_ids != selected_story_ids:
+        warnings.append(
+            {
+                "code": "SPRINT_SELECTION_MANUAL_REORDERED",
+                "message": (
+                    "Manual Sprint selection was reordered to satisfy dependencies."
+                ),
+                "requested_story_ids": selected_story_ids,
+                "selected_story_ids": reordered_ids,
+            }
+        )
+
+    selected_rows = [by_id[story_id] for story_id in reordered_ids]
     return _result(
         mode="manual",
         selected_rows=selected_rows,
         all_rows=rows,
         policy=policy,
+        dependency_metadata=_ResultDependencyMetadata(
+            edges=_edge_payloads(edges, reordered_ids),
+            warnings=warnings,
+        ),
     )
 
 
@@ -469,6 +522,7 @@ def _result(
         max_story_points=policy.max_story_points,
         team_velocity_assumption=policy.team_velocity_assumption,
         story_limit=policy.story_limit,
+        warnings=dependency_metadata.warnings,
         dependency_edges=dependency_metadata.edges,
         dependency_promoted_story_ids=dependency_metadata.promoted_story_ids,
     )

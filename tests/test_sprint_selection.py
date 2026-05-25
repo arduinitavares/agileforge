@@ -16,6 +16,7 @@ EXPECTED_GROUP_SLOT = 2
 EXPECTED_CAPACITY_POINTS_USED = 4
 EXPECTED_MANUAL_POINTS_USED = 3
 EXPECTED_DEPENDENCY_POINTS_USED = 4
+DEPENDENT_STORY_ID = 85
 RANK_PRIORITY_BASE = 100
 STORY_COUNT_WITH_EXCESS = 9
 
@@ -145,6 +146,22 @@ def test_manual_selection_raises_structured_error_for_missing_story_id() -> None
     assert exc_info.value.details["invalid_selected_ids"] == [9]
 
 
+def test_manual_selection_raises_structured_error_for_duplicate_story_id() -> None:
+    """Verify manual mode reports duplicate selected_story_ids with details."""
+    rows = [_row(1, 101, 2), _row(2, 102, 3)]
+
+    with pytest.raises(SprintSelectionError) as exc_info:
+        select_sprint_story_rows(
+            rows,
+            team_velocity_assumption="Medium",
+            max_story_points=5,
+            selected_story_ids=[1, 1],
+        )
+
+    assert exc_info.value.code == "SPRINT_SELECTION_DUPLICATE"
+    assert exc_info.value.details["duplicate_selected_ids"] == [1]
+
+
 def _dep_row(
     story_id: int,
     priority: int,
@@ -219,3 +236,49 @@ def test_auto_selection_ignores_unparseable_candidate_prerequisite_ids() -> None
 
     assert result.selected_story_ids == [66, 85]
     assert result.dependency_promoted_story_ids == [66]
+
+
+def test_manual_selection_blocks_missing_prerequisite() -> None:
+    """Verify manual mode blocks selected dependents with omitted prerequisites."""
+    rows = [
+        _dep_row(85, 101, 3, blocked_by=[66]),
+        _dep_row(66, 201, 1),
+    ]
+
+    with pytest.raises(SprintSelectionError) as exc_info:
+        select_sprint_story_rows(
+            rows,
+            team_velocity_assumption="Medium",
+            max_story_points=4,
+            selected_story_ids=[85],
+        )
+
+    assert exc_info.value.code == "SPRINT_SELECTION_DEPENDENCY_MISSING"
+    assert exc_info.value.details["missing_prerequisite_story_ids"] == [66]
+    assert exc_info.value.details["dependent_story_id"] == DEPENDENT_STORY_ID
+
+
+def test_manual_selection_reorders_to_dependency_safe_order() -> None:
+    """Verify manual mode reorders selected stories into dependency-safe order."""
+    rows = [
+        _dep_row(85, 101, 3, blocked_by=[66]),
+        _dep_row(66, 201, 1),
+    ]
+
+    result = select_sprint_story_rows(
+        rows,
+        team_velocity_assumption="Medium",
+        max_story_points=4,
+        selected_story_ids=[85, 66],
+    )
+
+    assert result.mode == "manual"
+    assert result.selected_story_ids == [66, 85]
+    assert result.warnings == [
+        {
+            "code": "SPRINT_SELECTION_MANUAL_REORDERED",
+            "message": "Manual Sprint selection was reordered to satisfy dependencies.",
+            "requested_story_ids": [85, 66],
+            "selected_story_ids": [66, 85],
+        }
+    ]
