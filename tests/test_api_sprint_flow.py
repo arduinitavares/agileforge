@@ -199,8 +199,14 @@ def _seed_sprint_setup_project(
     return product.product_id
 
 
-def _build_sprint_assessment(*, is_complete: bool = True) -> dict[str, Any]:
-    return {
+def _build_sprint_assessment(
+    *,
+    is_complete: bool = True,
+    attempt_id: str = "sprint-attempt-1",
+    artifact_fingerprint: str = "sha256:reviewed",
+    source_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    assessment = {
         "sprint_goal": "Persist event deltas safely",
         "sprint_number": 1,
         "duration_days": 14,
@@ -217,6 +223,12 @@ def _build_sprint_assessment(*, is_complete: bool = True) -> dict[str, Any]:
         },
         "is_complete": is_complete,
     }
+    if is_complete:
+        assessment["attempt_id"] = attempt_id
+        assessment["artifact_fingerprint"] = artifact_fingerprint
+        if source_fingerprint is not None:
+            assessment["source_fingerprint"] = source_fingerprint
+    return assessment
 
 
 def _seed_sprint_draft_project(
@@ -230,6 +242,13 @@ def _seed_sprint_draft_project(
     product.compiled_authority_json = '{"ok": true}'
     workflow.states[str(product.product_id)] = {
         "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-1",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": is_complete,
+            }
+        ],
         "sprint_plan_assessment": _build_sprint_assessment(is_complete=is_complete),
     }
     return product.product_id
@@ -1119,6 +1138,37 @@ def test_sprint_save_sanitizes_assessment_and_uses_tool_contract(monkeypatch):  
     assert captured["tool_context"].state["preserved"] is True
     assert captured["tool_context"].state["sprint_plan"]["duration_days"] == 14  # noqa: PLR2004
     assert "is_complete" not in captured["tool_context"].state["sprint_plan"]
+
+
+def test_sprint_save_api_blocks_older_complete_after_latest_failed_attempt(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_draft_project(repo, workflow)
+    workflow.states[str(project_id)]["sprint_attempts"].append(
+        {
+            "attempt_id": "sprint-attempt-2",
+            "artifact_fingerprint": "sha256:failed",
+            "source_fingerprint": "sha256:source",
+            "is_complete": False,
+            "failure_stage": "invocation_exception",
+        }
+    )
+
+    def fail_if_called(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for stale API sprint save"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, "save_sprint_plan_tool", fail_if_called)
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json={
+            "team_name": "Team Alpha",
+            "sprint_start_date": "2026-03-15",
+        },
+    )
+
+    assert response.status_code == 409  # noqa: PLR2004
+    assert "latest complete Sprint attempt" in response.json()["detail"]
 
 
 def test_sprint_save_requires_team_name(monkeypatch):  # noqa: ANN001, ANN201, D103

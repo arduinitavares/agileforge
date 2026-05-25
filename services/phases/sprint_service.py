@@ -575,19 +575,20 @@ async def save_sprint_plan(  # noqa: C901
             attempt_id=attempt_id,
             expected_artifact_fingerprint=expected_artifact_fingerprint,
         )
-        _assert_latest_complete_sprint_attempt(
-            state=state,
-            attempt_id=attempt_id,
-        )
-        _assert_sprint_source_current(
-            project_id=project_id,
-            assessment=assessment,
-            state=state,
-            load_candidates=load_candidates,
-        )
-
     if not bool(assessment.get("is_complete", False)):
         raise SprintPhaseError("Sprint cannot be saved until is_complete is true")
+
+    _assert_latest_complete_sprint_attempt(
+        state=state,
+        attempt_id=attempt_id,
+        assessment=assessment,
+    )
+    _assert_sprint_source_current(
+        project_id=project_id,
+        assessment=assessment,
+        state=state,
+        load_candidates=load_candidates,
+    )
 
     normalized_team_name = team_name.strip()
     normalized_start_date = sprint_start_date.strip()
@@ -818,12 +819,16 @@ def _assert_latest_complete_sprint_attempt(
     *,
     state: dict[str, Any],
     attempt_id: str | None,
+    assessment: dict[str, Any],
 ) -> None:
     attempts = ensure_sprint_attempts(state)
     latest_attempt: object = attempts[-1] if attempts else None
+    expected_attempt_id = attempt_id or assessment.get("attempt_id")
     if (
         not isinstance(latest_attempt, dict)
-        or latest_attempt.get("attempt_id") != attempt_id
+        or latest_attempt.get("attempt_id") != expected_attempt_id
+        or latest_attempt.get("artifact_fingerprint")
+        != assessment.get("artifact_fingerprint")
         or latest_attempt.get("is_complete") is not True
     ):
         raise SprintPhaseError(
