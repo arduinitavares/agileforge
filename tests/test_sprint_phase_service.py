@@ -816,11 +816,14 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
                 "attempt_id": "sprint-attempt-1",
                 "artifact_fingerprint": "sha256:reviewed",
                 "is_complete": True,
+                "source_fingerprint": "sha256:source",
             },
         ],
+        "sprint_candidate_source_fingerprint": "sha256:source",
         "sprint_plan_assessment": {
             "attempt_id": "sprint-attempt-1",
             "artifact_fingerprint": "sha256:reviewed",
+            "source_fingerprint": "sha256:source",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
             "duration_days": 14,
@@ -878,6 +881,7 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
         save_plan_tool=save_plan_tool,
         team_name="Team Alpha",
         sprint_start_date="2026-03-15",
+        load_candidates=lambda: {"source_fingerprint": "sha256:source"},
     )
 
     assert payload["fsm_state"] == "SPRINT_PERSISTENCE"
@@ -889,6 +893,7 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
     assert captured["input_data"].sprint_start_date == "2026-03-15"
     assert captured["tool_context"].state["sprint_plan"]["duration_days"] == 14  # noqa: PLR2004
     assert "is_complete" not in captured["tool_context"].state["sprint_plan"]
+    assert "source_fingerprint" not in captured["tool_context"].state["sprint_plan"]
 
 
 @pytest.mark.asyncio
@@ -1088,6 +1093,77 @@ async def test_save_sprint_plan_blocks_when_candidate_source_changed() -> None:
         )
 
     assert "Story/dependency source changed" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_sprint_plan_blocks_when_candidate_source_unverifiable() -> None:
+    """Verify guarded sprint save rejects missing current source fingerprint."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_candidate_source_fingerprint": "sha256:old_source",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-4",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+                "source_fingerprint": "sha256:old_source",
+            }
+        ],
+        "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-4",
+            "artifact_fingerprint": "sha256:reviewed",
+            "source_fingerprint": "sha256:old_source",
+            "sprint_goal": "Persist safely",
+            "sprint_number": 1,
+            "duration_days": 14,
+            "selected_stories": [],
+            "deselected_stories": [],
+            "capacity_analysis": {
+                "velocity_assumption": "Medium",
+                "capacity_band": "4-5 stories",
+                "selected_count": 0,
+                "story_points_used": 0,
+                "max_story_points": 13,
+                "commitment_note": "Fits",
+                "reasoning": "Fits",
+            },
+            "is_complete": True,
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    def save_plan_tool(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for unverifiable sprint source"
+        raise AssertionError(msg)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await save_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            current_planned_sprint_id=None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_plan_tool=save_plan_tool,
+            team_name="Team Alpha",
+            sprint_start_date="2026-03-15",
+            attempt_id="sprint-attempt-4",
+            expected_artifact_fingerprint="sha256:reviewed",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key="save-sprint-7-004",
+            load_candidates=lambda: {
+                "success": False,
+                "error_code": "SPRINT_CANDIDATE_FETCH_FAILED",
+            },
+        )
+
+    assert "source could not be verified" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

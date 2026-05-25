@@ -601,6 +601,7 @@ async def save_sprint_plan(  # noqa: C901
     assessment_payload.pop("is_complete", None)
     assessment_payload.pop("attempt_id", None)
     assessment_payload.pop("artifact_fingerprint", None)
+    assessment_payload.pop("source_fingerprint", None)
 
     try:
         sprint_data = SprintPlannerOutput.model_validate(assessment_payload)
@@ -855,10 +856,12 @@ def _assert_sprint_source_current(
         else load_sprint_candidates(project_id)
     )
     current_source = candidates_payload.get("source_fingerprint")
-    if (
-        isinstance(current_source, str)
-        and current_source != draft_source
-    ):
+    if not isinstance(current_source, str):
+        raise SprintPhaseError(
+            "Story/dependency source could not be verified; regenerate the "
+            "Sprint draft before saving.",
+        )
+    if current_source != draft_source:
         raise SprintPhaseError(
             "Story/dependency source changed; regenerate the Sprint draft before "
             "saving.",
