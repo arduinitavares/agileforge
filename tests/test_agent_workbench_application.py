@@ -174,6 +174,18 @@ class _SprintDraftReadProjection(_FakeReadProjection):
         result["data"]["state"] = {
             "fsm_state": "SPRINT_DRAFT",
             "setup_status": "passed",
+            "sprint_attempts": [
+                {
+                    "attempt_id": "sprint-attempt-4",
+                    "artifact_fingerprint": "sha256:reviewed",
+                    "is_complete": True,
+                }
+            ],
+            "sprint_plan_assessment": {
+                "attempt_id": "sprint-attempt-4",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+            },
         }
         return result
 
@@ -1828,6 +1840,62 @@ def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_hides_sprint_save_after_latest_failed_attempt() -> None:
+    """Workflow next must not advertise saving an older complete draft."""
+
+    class _LatestFailedSprintDraftReadProjection(_FakeReadProjection):
+        """Fake read projection for a stale reviewed Sprint draft state."""
+
+        def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+            """Return Sprint draft workflow state with a newer failed attempt."""
+            result = super().workflow_state(project_id=project_id)
+            result["data"]["state"] = {
+                "fsm_state": "SPRINT_DRAFT",
+                "setup_status": "passed",
+                "sprint_attempts": [
+                    {
+                        "attempt_id": "sprint-attempt-4",
+                        "artifact_fingerprint": "sha256:reviewed",
+                        "is_complete": True,
+                    },
+                    {
+                        "attempt_id": "sprint-attempt-5",
+                        "artifact_fingerprint": "sha256:failed",
+                        "is_complete": False,
+                        "failure_stage": "invocation_exception",
+                    },
+                ],
+                "sprint_plan_assessment": {
+                    "attempt_id": "sprint-attempt-4",
+                    "artifact_fingerprint": "sha256:reviewed",
+                    "is_complete": True,
+                },
+            }
+            return result
+
+    app = AgentWorkbenchApplication(
+        read_projection=_LatestFailedSprintDraftReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    commands = result["data"]["next_valid_commands"]
+    assert any(command.startswith("agileforge sprint generate") for command in commands)
+    assert not any(command.startswith("agileforge sprint save") for command in commands)
+    assert result["data"]["blocked_commands"] == [
+        {
+            "command": "agileforge sprint save",
+            "reason_code": "SPRINT_DRAFT_NOT_LATEST_COMPLETE",
+            "details": {
+                "latest_attempt_id": "sprint-attempt-5",
+                "draft_attempt_id": "sprint-attempt-4",
+            },
+        }
+    ]
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

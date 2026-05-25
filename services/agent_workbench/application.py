@@ -1805,11 +1805,23 @@ def _sprint_workflow_next(
         return None
 
     next_valid_commands: list[str] = []
+    blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
+    save_blocker = (
+        _sprint_save_blocker(workflow) if fsm_state == "SPRINT_DRAFT" else None
+    )
     for command_name, command_text in _sprint_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
     ):
+        if command_name == "agileforge sprint save" and save_blocker is not None:
+            blocked_commands.append(
+                {
+                    "command": command_name,
+                    **save_blocker,
+                }
+            )
+            continue
         if command_is_available(command_name):
             next_valid_commands.append(command_text)
         else:
@@ -1818,7 +1830,7 @@ def _sprint_workflow_next(
     data: dict[str, Any] = {
         "project_id": project_id,
         "next_valid_commands": next_valid_commands,
-        "blocked_commands": [],
+        "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
         "status": "next_phase_available" if next_valid_commands else None,
     }
@@ -1844,6 +1856,41 @@ def _sprint_workflow_next(
         ),
         "errors": [],
     }
+
+
+def _sprint_save_blocker(workflow: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a blocker when the current Sprint draft is not save-ready."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    assessment = state_data.get("sprint_plan_assessment")
+    attempts = state_data.get("sprint_attempts")
+    if not isinstance(assessment, dict) or assessment.get("is_complete") is not True:
+        return {"reason_code": "SPRINT_DRAFT_INCOMPLETE", "details": {}}
+    if not isinstance(attempts, list) or not attempts:
+        return {"reason_code": "SPRINT_DRAFT_NO_ATTEMPT", "details": {}}
+
+    latest = attempts[-1]
+    if not isinstance(latest, dict):
+        return {
+            "reason_code": "SPRINT_DRAFT_NOT_LATEST_COMPLETE",
+            "details": {
+                "latest_attempt_id": None,
+                "draft_attempt_id": assessment.get("attempt_id"),
+            },
+        }
+    if (
+        latest.get("is_complete") is not True
+        or latest.get("attempt_id") != assessment.get("attempt_id")
+        or latest.get("artifact_fingerprint") != assessment.get("artifact_fingerprint")
+    ):
+        return {
+            "reason_code": "SPRINT_DRAFT_NOT_LATEST_COMPLETE",
+            "details": {
+                "latest_attempt_id": latest.get("attempt_id"),
+                "draft_attempt_id": assessment.get("attempt_id"),
+            },
+        }
+    return None
 
 
 def _sprint_command_candidates(
