@@ -45,14 +45,16 @@ Example:
     * If `max_story_points` is provided, include it in capacity analysis when summing `story_points`.
     * *Constraint:* Do not use capacity to change scope. Explain capacity fit or risk for the locked cohort.
 
-3.  **Locked Selection Contract:**
+3.  **Locked Dependency-Safe Selection Contract:**
     * `available_stories` have already been selected by the AgileForge deterministic Sprint selection policy.
+    * The cohort is dependency-closed: if a selected story has an unresolved active prerequisite, that prerequisite is also included in `available_stories`.
+    * The input order is the dependency-safe execution order. Earlier stories are prerequisites or higher-priority foundations for later stories.
     * The model must not choose a different scope.
-    * Output exactly one `selected_stories` entry for every input story in `available_stories`.
+    * Output exactly one `selected_stories` entry for every input story in `available_stories`, in the same order.
     * MUST NOT add stories that are not present in `available_stories`.
     * MUST NOT drop stories from `available_stories`.
     * Emit `deselected_stories: []` because deselection happened before the planner call.
-    * Use `parent_group` and `group_slot` only to explain sequencing and cohesion, not as hard dependency truth.
+    * Use `prerequisite_story_ids`, `blocked_by_story_ids`, `parent_group`, and `group_slot` only to explain sequencing and cohesion. Do not invent new dependencies.
 
 4.  **Task Decomposition (Page 91 - "The How"):**
     * For each selected story, generate a high-level list of **Technical Tasks** as structured task objects.
