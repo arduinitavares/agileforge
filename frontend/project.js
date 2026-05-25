@@ -3989,7 +3989,46 @@ function clearSprintSelection() {
 }
 
 function getSelectedSprintCandidates() {
-    return sprintCandidates.filter(candidate => selectedSprintStoryIds.has(candidate.story_id));
+    const selectedIds = new Set(Array.from(selectedSprintStoryIds).map(Number));
+    return sprintCandidates.filter(candidate => selectedIds.has(Number(candidate.story_id)));
+}
+
+function sprintCandidateById(storyId) {
+    return sprintCandidates.find(candidate => Number(candidate.story_id) === Number(storyId)) || null;
+}
+
+function storyDisplayPrerequisiteIds(story) {
+    const prerequisiteIds = Array.isArray(story.prerequisite_story_ids) ? story.prerequisite_story_ids : [];
+    return Array.from(new Set(prerequisiteIds.map(Number)));
+}
+
+function storySelectionPrerequisiteIds(story) {
+    const blockedByIds = Array.isArray(story.blocked_by_story_ids) ? story.blocked_by_story_ids : [];
+    const prerequisiteIds = storyDisplayPrerequisiteIds(story);
+    return Array.from(new Set([...blockedByIds, ...prerequisiteIds].map(Number)));
+}
+
+function addSprintStoryWithPrerequisites(storyId, visitedStoryIds = new Set()) {
+    const normalizedStoryId = Number(storyId);
+    if (visitedStoryIds.has(normalizedStoryId)) return;
+    visitedStoryIds.add(normalizedStoryId);
+    const story = sprintCandidateById(storyId);
+    if (!story) return;
+    const prerequisiteIds = storySelectionPrerequisiteIds(story);
+    prerequisiteIds.forEach(prerequisiteId => addSprintStoryWithPrerequisites(prerequisiteId, visitedStoryIds));
+    selectedSprintStoryIds.add(normalizedStoryId);
+}
+
+function removeSprintStoryAndDependents(storyId, visitedStoryIds = new Set()) {
+    const normalizedStoryId = Number(storyId);
+    if (visitedStoryIds.has(normalizedStoryId)) return;
+    visitedStoryIds.add(normalizedStoryId);
+    selectedSprintStoryIds.delete(normalizedStoryId);
+    sprintCandidates.forEach(candidate => {
+        if (storySelectionPrerequisiteIds(candidate).includes(normalizedStoryId)) {
+            removeSprintStoryAndDependents(candidate.story_id, visitedStoryIds);
+        }
+    });
 }
 
 function updateSprintSelectionSummary() {
@@ -4030,10 +4069,18 @@ function renderSprintCandidates() {
     }
 
     sprintCandidates.forEach((story) => {
-        const checked = selectedSprintStoryIds.has(story.story_id);
+        const checked = selectedSprintStoryIds.has(Number(story.story_id));
         const points = Number.isFinite(story.story_points) ? `${story.story_points} pts` : 'Unestimated';
         const persona = story.persona ? `Persona: ${story.persona}` : 'Persona not set';
         const origin = story.story_origin ? `Origin: ${story.story_origin}` : 'Origin unknown';
+        const prerequisiteIds = storyDisplayPrerequisiteIds(story);
+        const blockedByIds = Array.isArray(story.blocked_by_story_ids) ? story.blocked_by_story_ids : [];
+        const dependencyLabel = prerequisiteIds.length > 0
+            ? `Requires: ${prerequisiteIds.map(id => `#${id}`).join(', ')}`
+            : 'No active prerequisites';
+        const dependencyBadgeClasses = blockedByIds.length > 0
+            ? 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-800'
+            : 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800';
 
         const row = document.createElement('label');
         row.className = 'flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 transition-colors hover:border-teal-300 dark:border-slate-700 dark:bg-slate-800/60 dark:hover:border-teal-700';
@@ -4048,6 +4095,7 @@ function renderSprintCandidates() {
                     <span>${points}</span>
                     <span>${persona}</span>
                     <span>${origin}</span>
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold ${dependencyBadgeClasses}">${dependencyLabel}</span>
                 </div>
             </div>
         `;
@@ -4055,10 +4103,11 @@ function renderSprintCandidates() {
         const checkbox = row.querySelector('input[type="checkbox"]');
         checkbox?.addEventListener('change', (event) => {
             if (event.target.checked) {
-                selectedSprintStoryIds.add(story.story_id);
+                addSprintStoryWithPrerequisites(story.story_id);
             } else {
-                selectedSprintStoryIds.delete(story.story_id);
+                removeSprintStoryAndDependents(story.story_id);
             }
+            renderSprintCandidates();
             updateSprintSelectionSummary();
             updateSprintCapacityWarning();
         });
@@ -4117,9 +4166,9 @@ async function loadSprintCandidates() {
         if (data.status !== 'success') throw new Error('Failed to load sprint candidates');
 
         const items = Array.isArray(data.data?.items) ? data.data.items : [];
-        const validIds = new Set(items.map(item => item.story_id));
+        const validIds = new Set(items.map(item => Number(item.story_id)));
         selectedSprintStoryIds = new Set(
-            Array.from(selectedSprintStoryIds).filter(storyId => validIds.has(storyId))
+            Array.from(selectedSprintStoryIds).map(Number).filter(storyId => validIds.has(storyId))
         );
         sprintCandidates = items;
         renderSprintCandidates();
