@@ -211,6 +211,68 @@ async def test_generate_sprint_plan_updates_state_and_returns_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_sprint_plan_stamps_attempt_with_source_fingerprint() -> None:
+    """Verify generated sprint attempts keep the candidate source fingerprint."""
+    state: JsonDict = {"fsm_state": "SPRINT_SETUP"}
+    source_fingerprint = "sha256:" + "b" * 64
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        return {
+            "success": True,
+            "source_fingerprint": source_fingerprint,
+            "input_context": {"available_stories": [{"story_id": 66}]},
+            "output_artifact": {
+                "sprint_goal": "Ship budget guard",
+                "sprint_number": 1,
+                "duration_days": 14,
+                "selected_stories": [],
+                "deselected_stories": [],
+                "capacity_analysis": {
+                    "velocity_assumption": "Medium",
+                    "capacity_band": "1 story",
+                    "selected_count": 0,
+                    "story_points_used": 0,
+                    "max_story_points": 4,
+                    "commitment_note": "Fits.",
+                    "reasoning": "Small locked scope.",
+                },
+                "is_complete": True,
+            },
+            "is_complete": True,
+            "error": None,
+        }
+
+    await generate_sprint_plan(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda _state: None,
+        current_planned_sprint_id=None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_sprint_agent=fake_run_sprint_agent,
+        failure_meta_builder=_failure_meta_builder,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=[66],
+        user_input=None,
+        load_candidates=lambda: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 66}],
+            "readiness": {"status": "ready"},
+        },
+    )
+
+    assert state["sprint_candidate_source_fingerprint"] == source_fingerprint
+    assert state["sprint_attempts"][0]["source_fingerprint"] == source_fingerprint
+    assert state["sprint_plan_assessment"]["source_fingerprint"] == source_fingerprint
+
+
+@pytest.mark.asyncio
 async def test_generate_sprint_plan_uses_shared_fsm_transition_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -75,6 +75,7 @@ class _FailureDetails:
     validation_errors: ValidationErrors | None = None
     public_validation_errors: list[str] | None = None
     exception: BaseException | None = None
+    source_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class _PreparedSprintPayload:
     input_context: SprintInputContext
     payload: SprintPlannerInput
     selection_policy: dict[str, Any]
+    source_fingerprint: str | None
 
 
 async def _invoke_sprint_agent(payload: SprintPlannerInput) -> str:
@@ -108,6 +110,13 @@ def _as_object_dict(value: object) -> dict[str, object] | None:
 def _normalize_input_context(value: object) -> SprintInputContext:
     normalized = _as_object_dict(value)
     return normalized or {}
+
+
+def _normalize_source_fingerprint(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
 
 
 def _normalize_validation_errors(errors: object) -> ValidationErrors:
@@ -334,11 +343,14 @@ def _failure(
     selection_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     message = details.message
+    source_fingerprint = details.source_fingerprint
     artifact_context: dict[str, Any] = {
         "input_context": input_context,
     }
     if selection_policy is not None:
         artifact_context["selection_policy"] = selection_policy
+    if source_fingerprint is not None:
+        artifact_context["source_fingerprint"] = source_fingerprint
 
     artifact_result: FailureArtifactResult = write_failure_artifact(
         phase="sprint",
@@ -377,6 +389,7 @@ def _failure(
         "message": message,
         "validation_errors": list(details.public_validation_errors or []),
         "is_complete": False,
+        "source_fingerprint": source_fingerprint,
         "failure_artifact_id": metadata["failure_artifact_id"],
         "failure_stage": metadata["failure_stage"],
         "failure_summary": metadata["failure_summary"],
@@ -388,6 +401,7 @@ def _failure(
         "success": False,
         "input_context": input_context,
         "selection_policy": selection_policy,
+        "source_fingerprint": source_fingerprint,
         "output_artifact": artifact,
         "is_complete": None,
         "error": message,
@@ -415,6 +429,9 @@ def _prepare_sprint_payload(
         selected_story_ids=options.get("selected_story_ids"),
     )
     input_context = _normalize_input_context(prepared.get("input_context"))
+    source_fingerprint = _normalize_source_fingerprint(
+        prepared.get("source_fingerprint")
+    )
 
     if not prepared.get("success"):
         return _failure(
@@ -424,7 +441,8 @@ def _prepare_sprint_payload(
             details=_FailureDetails(
                 message=str(
                     prepared.get("message") or "Sprint input preparation failed."
-                )
+                ),
+                source_fingerprint=source_fingerprint,
             ),
         )
 
@@ -445,6 +463,7 @@ def _prepare_sprint_payload(
                 validation_errors=_normalize_validation_errors(exc.errors()),
                 public_validation_errors=public_validation_errors,
                 exception=exc,
+                source_fingerprint=source_fingerprint,
             ),
             selection_policy=selection_policy,
         )
@@ -452,6 +471,7 @@ def _prepare_sprint_payload(
         input_context=input_context,
         payload=payload,
         selection_policy=selection_policy,
+        source_fingerprint=source_fingerprint,
     )
 
 
@@ -478,6 +498,7 @@ async def _invoke_prepared_sprint_payload(
                 validation_errors=_normalize_validation_errors(exc.validation_errors),
                 public_validation_errors=public_validation_errors,
                 exception=exc,
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -489,6 +510,7 @@ async def _invoke_prepared_sprint_payload(
             details=_FailureDetails(
                 message=f"Sprint runtime failed: {exc}",
                 exception=exc,
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -526,6 +548,7 @@ def _locked_selection_output_failure(
                 public_validation_errors=_compact_public_validation_errors(
                     structured_errors
                 ),
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -549,6 +572,7 @@ def _locked_selection_output_failure(
                 public_validation_errors=_compact_public_validation_errors(
                     capacity_errors
                 ),
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -569,6 +593,7 @@ def _locked_selection_output_failure(
                 public_validation_errors=_compact_public_validation_errors(
                     deselected_errors
                 ),
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -592,6 +617,7 @@ def _validate_sprint_output(
             details=_FailureDetails(
                 message="Sprint response is not valid JSON",
                 raw_text=raw_text,
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -613,6 +639,7 @@ def _validate_sprint_output(
                 validation_errors=_normalize_validation_errors(exc.errors()),
                 public_validation_errors=public_validation_errors,
                 exception=exc,
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -655,6 +682,7 @@ def _validate_sprint_output(
                 public_validation_errors=_compact_public_validation_errors(
                     decomp_errors
                 ),
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -682,6 +710,7 @@ def _validate_sprint_output(
                 public_validation_errors=_compact_public_validation_errors(
                     binding_errors
                 ),
+                source_fingerprint=prepared.source_fingerprint,
             ),
             selection_policy=prepared.selection_policy,
         )
@@ -692,6 +721,7 @@ def _validate_sprint_output(
         "success": True,
         "input_context": input_context,
         "selection_policy": prepared.selection_policy,
+        "source_fingerprint": prepared.source_fingerprint,
         "output_artifact": output_artifact,
         "is_complete": True,
         "error": None,

@@ -318,6 +318,10 @@ async def generate_sprint_plan(
         attempt_id=attempt_id,
         artifact_fingerprint=artifact_fingerprint,
     )
+    _attach_attempt_source_fingerprint(
+        state,
+        source_fingerprint=sprint_result.get("source_fingerprint"),
+    )
 
     preserve_reviewed_draft = (
         has_attempts
@@ -695,6 +699,25 @@ def _attach_attempt_guards(
     if isinstance(assessment, dict):
         assessment["attempt_id"] = attempt_id
         assessment["artifact_fingerprint"] = artifact_fingerprint
+
+
+def _attach_attempt_source_fingerprint(
+    state: dict[str, Any],
+    *,
+    source_fingerprint: object,
+) -> None:
+    if not isinstance(source_fingerprint, str) or not source_fingerprint.strip():
+        return
+    normalized_source_fingerprint = source_fingerprint.strip()
+    state["sprint_candidate_source_fingerprint"] = normalized_source_fingerprint
+
+    attempts = ensure_sprint_attempts(state)
+    if attempts:
+        attempts[-1]["source_fingerprint"] = normalized_source_fingerprint
+
+    assessment = state.get("sprint_plan_assessment")
+    if isinstance(assessment, dict):
+        assessment["source_fingerprint"] = normalized_source_fingerprint
 
 
 def _sprint_save_replay(

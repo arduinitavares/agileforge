@@ -360,6 +360,73 @@ def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text
     assert first["source_fingerprint"] != changed["source_fingerprint"]
 
 
+def test_prepare_sprint_payload_preserves_source_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared Sprint payload preserves candidate source fingerprint."""
+    source_fingerprint = "sha256:" + "a" * 64
+
+    def fake_prepare_sprint_input_context(
+        *,
+        product_id: int,
+        **options: object,
+    ) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        assert options["team_velocity_assumption"] == "Medium"
+        return {
+            "success": True,
+            "source_fingerprint": source_fingerprint,
+            "selection_policy": {
+                "mode": "auto",
+                "source_fingerprint": source_fingerprint,
+            },
+            "input_context": {
+                "available_stories": [
+                    {
+                        "story_id": 66,
+                        "story_title": "Budget",
+                        "story_description": "Validate the sprint budget.",
+                        "priority": 101,
+                        "story_points": 1,
+                        "acceptance_criteria_items": [],
+                        "evaluated_invariant_ids": [],
+                        "story_compliance_boundary_summaries": [],
+                        "prerequisite_story_ids": [],
+                        "blocked_by_story_ids": [],
+                        "dependency_status": "ready",
+                    }
+                ],
+                "team_velocity_assumption": "Medium",
+                "sprint_duration_days": 14,
+                "max_story_points": 4,
+                "include_task_decomposition": True,
+                "selected_story_ids": [66],
+            },
+        }
+
+    monkeypatch.setattr(
+        sprint_runtime,
+        "prepare_sprint_input_context",
+        fake_prepare_sprint_input_context,
+    )
+
+    prepared = sprint_runtime._prepare_sprint_payload(
+        project_id=7,
+        options={
+            "team_velocity_assumption": "Medium",
+            "sprint_duration_days": 14,
+            "include_task_decomposition": True,
+            "max_story_points": 4,
+            "selected_story_ids": None,
+            "user_input": None,
+        },
+    )
+
+    assert isinstance(prepared, sprint_runtime._PreparedSprintPayload)
+    assert prepared.source_fingerprint == source_fingerprint
+    assert prepared.selection_policy["source_fingerprint"] == source_fingerprint
+
+
 def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
