@@ -20,6 +20,7 @@ from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_k
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,
 )
+from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
@@ -31,6 +32,7 @@ from services.interview_runtime import (
     reset_subject_working_set,
     set_request_projection,
 )
+from services.phases.sprint_service import reset_sprint_planner_working_set
 from services.phases.story_service import (
     StoryPhaseError,
     complete_story_phase,
@@ -342,6 +344,16 @@ class StoryPhaseRunner:
         if isinstance(product, dict):
             return product
 
+        initial_fsm_state: str | None = None
+
+        async def load_state() -> dict[str, Any]:
+            nonlocal initial_fsm_state
+            state = await self._load_story_state(str(project_id), project_id, product)
+            initial_fsm_state = (
+                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
+            )
+            return state
+
         try:
             data = await save_story_draft(
                 project_id=project_id,
@@ -350,11 +362,12 @@ class StoryPhaseRunner:
                 expected_artifact_fingerprint=expected_artifact_fingerprint,
                 expected_state=expected_state,
                 idempotency_key=idempotency_key,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
+                load_state=load_state,
+                save_state=lambda state: self._save_story_mutation_state(
+                    str(project_id),
+                    state,
+                    reason="story_saved",
+                    initial_fsm_state=initial_fsm_state,
                 ),
                 hydrate_context=lambda session_id, hydrated_project_id: (
                     self._hydrate_context(session_id, hydrated_project_id, product)
@@ -407,16 +420,27 @@ class StoryPhaseRunner:
         if isinstance(product, dict):
             return product
 
+        initial_fsm_state: str | None = None
+
+        async def load_state() -> dict[str, Any]:
+            nonlocal initial_fsm_state
+            state = await self._load_story_state(str(project_id), project_id, product)
+            initial_fsm_state = (
+                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
+            )
+            return state
+
         try:
             data = await reopen_story_requirement(
                 parent_requirement=parent_requirement,
                 expected_state=expected_state,
                 idempotency_key=idempotency_key,
-                load_state=lambda: self._load_story_state(
-                    str(project_id), project_id, product
-                ),
-                save_state=lambda state: self._save_session_state(
-                    str(project_id), state
+                load_state=load_state,
+                save_state=lambda state: self._save_story_mutation_state(
+                    str(project_id),
+                    state,
+                    reason="story_reopened",
+                    initial_fsm_state=initial_fsm_state,
                 ),
                 now_iso=_now_iso,
                 assert_reopen_safe=lambda normalized_requirement: _assert_reopen_safe(
@@ -623,6 +647,11 @@ class StoryPhaseRunner:
             idempotency_key=idempotency_key,
             payload=payload,
         )
+        _invalidate_unsaved_sprint_working_set(
+            state,
+            reason="story_dependencies_applied",
+            now_iso=_now_iso(),
+        )
         self._save_session_state(str(project_id), state)
         return _data_envelope(payload)
 
@@ -671,6 +700,59 @@ class StoryPhaseRunner:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
+
+    def _save_story_mutation_state(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        *,
+        reason: str,
+        initial_fsm_state: str | None,
+    ) -> None:
+        current_fsm_state = state.get("fsm_state")
+        current_fsm_state_entered_at = state.get("fsm_state_entered_at")
+        if current_fsm_state not in {
+            OrchestratorState.SPRINT_SETUP.value,
+            OrchestratorState.SPRINT_DRAFT.value,
+        }:
+            state["fsm_state"] = initial_fsm_state
+        _invalidate_unsaved_sprint_working_set(
+            state,
+            reason=reason,
+            now_iso=_now_iso(),
+        )
+        if current_fsm_state not in {
+            OrchestratorState.SPRINT_SETUP.value,
+            OrchestratorState.SPRINT_DRAFT.value,
+        }:
+            state["fsm_state"] = current_fsm_state
+            if current_fsm_state_entered_at is None:
+                state.pop("fsm_state_entered_at", None)
+            else:
+                state["fsm_state_entered_at"] = current_fsm_state_entered_at
+        self._save_session_state(session_id, state)
+
+
+def _invalidate_unsaved_sprint_working_set(
+    state: dict[str, Any],
+    *,
+    reason: str,
+    now_iso: str,
+) -> None:
+    """Clear unsaved Sprint planner state after upstream Story data changes."""
+    if state.get("sprint_planner_owner_sprint_id") is not None:
+        return
+    if state.get("fsm_state") not in {
+        OrchestratorState.SPRINT_SETUP.value,
+        OrchestratorState.SPRINT_DRAFT.value,
+    }:
+        return
+
+    reset_sprint_planner_working_set(state)
+    state["fsm_state"] = OrchestratorState.SPRINT_SETUP.value
+    state["fsm_state_entered_at"] = now_iso
+    state["sprint_invalidated_reason"] = reason
+    state["sprint_invalidated_at"] = now_iso
 
 
 def _dependency_guard_error(

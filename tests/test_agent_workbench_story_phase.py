@@ -25,6 +25,7 @@ from models.enums import SprintStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.story_phase import (
     StoryPhaseRunner,
+    _invalidate_unsaved_sprint_working_set,
     _repair_story_readiness_rows,
 )
 from services.phases.story_service import StoryPhaseError
@@ -32,6 +33,61 @@ from services.phases.story_service import StoryPhaseError
 PROJECT_ID = 2
 EXPECTED_REQUIREMENT_COUNT = 2
 EXPECTED_FAILURE_ATTEMPT_COUNT = 2
+OWNED_SPRINT_ID = 42
+
+
+def test_invalidate_unsaved_sprint_working_set_clears_draft_state() -> None:
+    """Unsaved Sprint draft state is cleared after upstream Story changes."""
+    state: dict[str, Any] = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [{"attempt_id": "sprint-attempt-1"}],
+        "sprint_last_input_context": {"available_stories": []},
+        "sprint_plan_assessment": {"attempt_id": "sprint-attempt-1"},
+        "sprint_saved_at": "2026-05-24T10:00:00Z",
+        "sprint_planner_owner_sprint_id": None,
+    }
+
+    _invalidate_unsaved_sprint_working_set(
+        state,
+        reason="story_dependencies_applied",
+        now_iso="2026-05-25T12:00:00Z",
+    )
+
+    assert state["fsm_state"] == "SPRINT_SETUP"
+    assert state["sprint_attempts"] == []
+    assert state["sprint_last_input_context"] is None
+    assert state["sprint_plan_assessment"] is None
+    assert state["sprint_saved_at"] is None
+    assert state["sprint_planner_owner_sprint_id"] is None
+    assert state["sprint_invalidated_reason"] == "story_dependencies_applied"
+    assert state["sprint_invalidated_at"] == "2026-05-25T12:00:00Z"
+
+
+def test_invalidate_unsaved_sprint_working_set_preserves_owned_state() -> None:
+    """Persisted Sprint ownership keeps planner state intact."""
+    state: dict[str, Any] = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [{"attempt_id": "sprint-attempt-1"}],
+        "sprint_last_input_context": {"available_stories": []},
+        "sprint_plan_assessment": {"attempt_id": "sprint-attempt-1"},
+        "sprint_saved_at": "2026-05-24T10:00:00Z",
+        "sprint_planner_owner_sprint_id": OWNED_SPRINT_ID,
+    }
+
+    _invalidate_unsaved_sprint_working_set(
+        state,
+        reason="story_dependencies_applied",
+        now_iso="2026-05-25T12:00:00Z",
+    )
+
+    assert state["fsm_state"] == "SPRINT_DRAFT"
+    assert state["sprint_attempts"] == [{"attempt_id": "sprint-attempt-1"}]
+    assert state["sprint_last_input_context"] == {"available_stories": []}
+    assert state["sprint_plan_assessment"] == {"attempt_id": "sprint-attempt-1"}
+    assert state["sprint_saved_at"] == "2026-05-24T10:00:00Z"
+    assert state["sprint_planner_owner_sprint_id"] == OWNED_SPRINT_ID
+    assert "sprint_invalidated_reason" not in state
+    assert "sprint_invalidated_at" not in state
 
 
 class _FakeProductRepo:
@@ -467,11 +523,11 @@ def test_story_dependency_propose_creates_guarded_attempt(
     )
 
 
-def test_story_dependency_apply_promotes_reviewed_attempt(
+def test_story_dependency_apply_promotes_reviewed_attempt_and_invalidates_sprint(
     monkeypatch: pytest.MonkeyPatch,
     session: Session,
 ) -> None:
-    """Story dependency apply promotes exact reviewed attempt edges to active."""
+    """Story dependency apply promotes edges and clears unsaved Sprint draft state."""
     dependent_story_id, prerequisite_story_id = _seed_dependency_rows(session)
     engine = session.get_bind()
     monkeypatch.setattr(
@@ -489,16 +545,37 @@ def test_story_dependency_apply_promotes_reviewed_attempt(
         expected_state="SPRINT_SETUP",
         idempotency_key="dep-propose-apply-001",
     )["data"]
+    workflow_service.state.update(
+        {
+            "fsm_state": "SPRINT_DRAFT",
+            "sprint_attempts": [{"attempt_id": "sprint-attempt-4"}],
+            "sprint_last_input_context": {"available_stories": []},
+            "sprint_plan_assessment": {"attempt_id": "sprint-attempt-4"},
+            "sprint_saved_at": None,
+            "sprint_planner_owner_sprint_id": None,
+        }
+    )
 
     result = runner.dependency_apply(
         project_id=PROJECT_ID,
         attempt_id=proposal["attempt_id"],
         expected_artifact_fingerprint=proposal["artifact_fingerprint"],
-        expected_state="SPRINT_SETUP",
+        expected_state="SPRINT_DRAFT",
         idempotency_key="dep-apply-2-001",
     )
 
     assert result["ok"] is True
+    assert workflow_service.state["fsm_state"] == "SPRINT_SETUP"
+    assert workflow_service.state["sprint_attempts"] == []
+    assert workflow_service.state["sprint_last_input_context"] is None
+    assert workflow_service.state["sprint_plan_assessment"] is None
+    assert workflow_service.state["sprint_saved_at"] is None
+    assert workflow_service.state["sprint_planner_owner_sprint_id"] is None
+    assert (
+        workflow_service.state["sprint_invalidated_reason"]
+        == "story_dependencies_applied"
+    )
+    assert isinstance(workflow_service.state["sprint_invalidated_at"], str)
     session.expire_all()
     edge = session.exec(
         select(UserStoryDependency).where(
@@ -555,6 +632,10 @@ def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def fake_reopen_story_requirement(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
+        state = await kwargs["load_state"]()
+        state["fsm_state"] = "STORY_INTERVIEW"
+        state["fsm_state_entered_at"] = "2026-05-25T13:00:00Z"
+        kwargs["save_state"](state)
         return {
             "parent_requirement": kwargs["parent_requirement"],
             "fsm_state": "STORY_INTERVIEW",
@@ -565,10 +646,30 @@ def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> N
         "services.agent_workbench.story_phase.reopen_story_requirement",
         fake_reopen_story_requirement,
     )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "fsm_state": "SPRINT_SETUP",
+            "sprint_attempts": [{"attempt_id": "sprint-attempt-5"}],
+            "sprint_last_input_context": {"available_stories": []},
+            "sprint_plan_assessment": {"attempt_id": "sprint-attempt-5"},
+            "sprint_saved_at": None,
+            "sprint_planner_owner_sprint_id": None,
+        }
+    )
     runner = StoryPhaseRunner(
         product_repo=_FakeProductRepo(),
-        workflow_service=_FakeWorkflowService(),
+        workflow_service=workflow_service,
     )
+
+    async def fake_load_story_state(
+        _session_id: str,
+        _project_id: int,
+        _product: Product,
+    ) -> dict[str, Any]:
+        return dict(workflow_service.state)
+
+    monkeypatch.setattr(runner, "_load_story_state", fake_load_story_state)
 
     result = runner.reopen(
         project_id=PROJECT_ID,
@@ -581,6 +682,12 @@ def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> N
     assert result["data"]["fsm_state"] == "STORY_INTERVIEW"
     assert captured["expected_state"] == "SPRINT_SETUP"
     assert captured["idempotency_key"] == "reopen-story-review-match"
+    assert workflow_service.state["fsm_state"] == "STORY_INTERVIEW"
+    assert workflow_service.state["fsm_state_entered_at"] == "2026-05-25T13:00:00Z"
+    assert workflow_service.state["sprint_attempts"] == []
+    assert workflow_service.state["sprint_last_input_context"] is None
+    assert workflow_service.state["sprint_plan_assessment"] is None
+    assert workflow_service.state["sprint_invalidated_reason"] == "story_reopened"
 
 
 def test_story_repair_readiness_runner_passes_guards(
