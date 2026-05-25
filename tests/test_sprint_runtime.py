@@ -155,6 +155,40 @@ def test_prepare_sprint_input_context_rejects_invalid_selected_story_ids(
     assert prepared["invalid_selected_ids"] == [999]
 
 
+def test_prepare_sprint_input_context_rejects_duplicate_selected_story_ids() -> None:
+    """Verify duplicate manual selections reach selector validation."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 66,
+                    "story_title": "Budget parameter",
+                    "priority": 101,
+                    "story_points": 1,
+                }
+            ],
+        }
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=[66, 66],
+        fetch_candidates=fake_fetch_sprint_candidates,
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_DUPLICATE"
+    assert prepared["selection_details"]["duplicate_selected_ids"] == [66]
+
+
 def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

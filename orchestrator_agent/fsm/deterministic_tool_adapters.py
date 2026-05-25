@@ -230,6 +230,48 @@ def _selection_error(invalid_ids: Sequence[int]) -> dict[str, Any]:
             "Deterministic adapter blocked sprint planning because selection "
             "contains non-eligible stories."
         ),
+        "selection_details": {"invalid_selected_ids": invalid},
+    }
+
+
+def _sprint_selection_error(
+    *,
+    prepared: dict[str, Any],
+    selected_story_ids: object,
+) -> dict[str, Any]:
+    """Build deterministic error payloads for structured sprint selection errors."""
+    error_code = str(prepared.get("error_code") or "SPRINT_SELECTION_INVALID")
+    if error_code == "SPRINT_SELECTION_INVALID":
+        return _selection_error(prepared.get("invalid_selected_ids") or [])
+
+    details = prepared.get("selection_details")
+    selection_details = dict(details) if isinstance(details, dict) else {}
+    normalized_selected_ids = _normalize_selected_story_ids(selected_story_ids)
+    if normalized_selected_ids:
+        selection_details.setdefault("selected_story_ids", normalized_selected_ids)
+
+    guidance = (
+        "Include prerequisite story IDs in selected_story_ids or change "
+        "selected_story_ids to remove blocked dependent stories."
+        if error_code == "SPRINT_SELECTION_DEPENDENCY_MISSING"
+        else "Change selected_story_ids to a valid sprint selection and retry."
+    )
+    return {
+        "is_complete": False,
+        "error": error_code,
+        "missing_context": [error_code.lower()],
+        "clarifying_questions": [
+            (
+                f"Manual sprint selection failed with {error_code}. "
+                f"{guidance}"
+            )
+        ],
+        "guidance": guidance,
+        "message": (
+            "Deterministic adapter blocked sprint planning because manual "
+            "selected_story_ids failed selection validation."
+        ),
+        "selection_details": selection_details,
     }
 
 
@@ -411,8 +453,11 @@ async def sprint_planner_tool(
 
     if not prepared.get("success"):
         error_code = prepared.get("error_code")
-        if error_code == "SPRINT_SELECTION_INVALID":
-            return _selection_error(prepared.get("invalid_selected_ids") or [])
+        if isinstance(error_code, str) and error_code.startswith("SPRINT_SELECTION_"):
+            return _sprint_selection_error(
+                prepared=prepared,
+                selected_story_ids=selected_story_ids,
+            )
         return _missing_context_error(
             code=str(error_code or "SPRINT_CONTEXT_MISSING"),
             missing_context=[

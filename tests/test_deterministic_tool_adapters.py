@@ -365,6 +365,73 @@ async def test_sprint_adapter_rejects_non_eligible_selected_story_ids(
     assert result["error"] == "SPRINT_SELECTION_INVALID"
 
 
+@pytest.mark.asyncio
+async def test_sprint_adapter_preserves_dependency_missing_selection_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify sprint adapter reports dependency-specific selection failures."""
+    dependent_story_id = 85
+    prerequisite_story_id = 66
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": dependent_story_id,
+                    "story_title": "Live workflow",
+                    "priority": 101,
+                    "story_points": 3,
+                    "blocked_by_story_ids": [prerequisite_story_id],
+                    "prerequisite_story_ids": [prerequisite_story_id],
+                    "dependency_status": "blocked",
+                },
+                {
+                    "story_id": prerequisite_story_id,
+                    "story_title": "Budget parameter",
+                    "priority": 201,
+                    "story_points": 1,
+                    "blocked_by_story_ids": [],
+                    "prerequisite_story_ids": [],
+                    "dependency_status": "ready",
+                },
+            ],
+        }
+
+    async def fail_if_called(*, args: object, tool_context: object) -> None:
+        del args, tool_context
+        pytest.fail("Sub-agent should not run when selection dependency is missing")
+
+    monkeypatch.setattr(
+        adapters, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(adapters._SPRINT_PLANNER_TOOL, "run_async", fail_if_called)
+
+    context = make_tool_context({"active_project": {"product_id": 7}})
+    result = await adapters.sprint_planner_tool(
+        selected_story_ids=[dependent_story_id],
+        tool_context=context,
+    )
+
+    assert result["is_complete"] is False
+    assert result["error"] == "SPRINT_SELECTION_DEPENDENCY_MISSING"
+    assert result["selection_details"]["selected_story_ids"] == [dependent_story_id]
+    assert result["selection_details"]["missing_prerequisite_story_ids"] == [
+        prerequisite_story_id
+    ]
+    remediation_text = " ".join(
+        [
+            *result.get("clarifying_questions", []),
+            str(result.get("guidance", "")),
+            str(result.get("message", "")),
+        ]
+    ).lower()
+    assert "prerequisite" in remediation_text
+    assert "selected_story_ids" in remediation_text
+
+
 def test_state_registry_keeps_public_generation_tool_names() -> None:
     """Verify state registry keeps public generation tool names."""
     routing_def = STATE_REGISTRY[OrchestratorState.SETUP_REQUIRED]

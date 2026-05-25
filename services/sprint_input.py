@@ -109,16 +109,14 @@ def _sprint_candidate_readiness(candidates: list[dict[str, Any]]) -> dict[str, A
 
 
 def normalize_selected_story_ids(value: object) -> list[int]:
-    """Normalize selected story IDs while preserving order and uniqueness."""
+    """Normalize selected story IDs while preserving positive manual repeats."""
     if not isinstance(value, list):
         return []
-    seen = set()
     normalized: list[int] = []
     for item in value:
         parsed = normalize_positive_int(item)
-        if parsed is None or parsed in seen:
+        if parsed is None:
             continue
-        seen.add(parsed)
         normalized.append(parsed)
     return normalized
 
