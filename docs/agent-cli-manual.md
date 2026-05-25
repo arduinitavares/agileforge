@@ -668,18 +668,37 @@ candidates. Use `--input` for real refinement feedback only.
 scope. AgileForge first locks a deterministic story cohort from planning-ready
 candidates:
 
-- Default mode selects the priority/rank prefix, bounded by
-  `--max-story-points` when provided and the velocity story-count band.
-- Manual mode uses the exact `--selected-story-ids` list and preserves caller
-  order.
+- Default mode selects a dependency-closed cohort, bounded by
+  `--max-story-points` when provided and the velocity story-count band. If a
+  selected candidate has an active prerequisite that is also a candidate,
+  AgileForge includes that prerequisite first.
+- Manual mode requires a dependency-closed `--selected-story-ids` list. If a
+  selected story requires another active candidate story and that prerequisite
+  is omitted, Sprint generation fails with
+  `SPRINT_SELECTION_DEPENDENCY_MISSING`. If all required stories are present
+  but out of order, AgileForge reorders them into dependency-safe order and
+  reports `SPRINT_SELECTION_MANUAL_REORDERED`.
+
+### Dependency-Aware Sprint Selection
+
+Default generation:
+
+```sh
+agileforge sprint generate --project-id "$PROJECT_ID"
+```
+
+Manual override:
+
+```sh
+agileforge sprint generate \
+  --project-id "$PROJECT_ID" \
+  --selected-story-ids <prerequisite_id>,<dependent_id>
+```
 
 The Sprint Planner receives only the locked cohort. Its job is to write the
 Sprint Goal, explain cohesion, and decompose the selected stories into tasks. If
 the model adds, drops, or changes selected story IDs, AgileForge fails the run
 with `MUTATION_FAILED`.
-
-The current selector uses rank/group order as a temporary planning policy. Rank
-is not dependency truth. Explicit story dependency graphs are planned next.
 
 If generation returns `ok: false`, stop and report the first error code, message,
 and details. Sprint runtime failures are hard CLI failures and should not be
