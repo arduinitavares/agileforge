@@ -67,6 +67,9 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story complete",
     "agileforge story reopen",
     "agileforge story repair-readiness",
+    "agileforge story dependencies inspect",
+    "agileforge story dependencies propose",
+    "agileforge story dependencies apply",
     "agileforge sprint generate",
     "agileforge sprint history",
     "agileforge sprint save",
@@ -483,6 +486,43 @@ def test_roadmap_commands_are_registered_and_available() -> None:
     ]
     assert save["idempotency_required"] is True
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
+
+
+def test_story_dependency_commands_are_registered_and_available() -> None:
+    """Expose Story dependency review commands as installed CLI capabilities."""
+    names = installed_command_names()
+    dependency_command_names = {
+        "agileforge story dependencies inspect",
+        "agileforge story dependencies propose",
+        "agileforge story dependencies apply",
+    }
+
+    assert dependency_command_names.issubset(names)
+    for command_name in dependency_command_names:
+        assert command_is_available(command_name) is True
+
+    inspect_payload = command_schema_payload("agileforge story dependencies inspect")
+    propose_payload = command_schema_payload("agileforge story dependencies propose")
+    apply_payload = command_schema_payload("agileforge story dependencies apply")
+
+    assert inspect_payload["mutates"] is False
+    assert inspect_payload["input"]["required"] == ["project_id"]
+    assert propose_payload["mutates"] is True
+    assert propose_payload["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert propose_payload["idempotency_required"] is True
+    assert apply_payload["mutates"] is True
+    assert apply_payload["input"]["required"] == [
+        "project_id",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert apply_payload["idempotency_required"] is True
 
 
 def test_story_phase_commands_are_registered_and_available() -> None:

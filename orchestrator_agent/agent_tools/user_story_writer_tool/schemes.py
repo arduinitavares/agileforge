@@ -73,6 +73,13 @@ class UserStoryItem(BaseModel):
             "Omit (null) for 'High' or 'Medium'."
         ),
     )
+    dependency_candidates: list["StoryDependencyCandidate"] = Field(
+        default_factory=list,
+        description=(
+            "Proposed prerequisite story references. These are advisory until "
+            "reviewed and applied as active story dependencies."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -143,6 +150,36 @@ class UserStoryItem(BaseModel):
                 "decomposition_warning is required when invest_score is 'Low'."
             )
         return self
+
+
+class StoryDependencyCandidate(BaseModel):
+    """Candidate prerequisite edge proposed by story generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prerequisite_ref: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Story id, exact title, or source_requirement#slot reference.",
+        ),
+    ]
+    reason: Annotated[
+        str,
+        Field(
+            min_length=3,
+            description="Why the prerequisite must precede this story.",
+        ),
+    ]
+    confidence: Annotated[
+        Literal["explicit", "inferred"],
+        Field(
+            description=(
+                "Whether the source explicitly states the dependency or the model "
+                "inferred it."
+            ),
+        ),
+    ]
 
 
 class UserStoryWriterInput(BaseModel):

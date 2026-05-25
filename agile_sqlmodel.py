@@ -37,6 +37,7 @@ from models.core import (
     TeamMembership,
     Theme,
     UserStory,
+    UserStoryDependency,
 )
 from models.enums import (
     SpecAuthorityStatus,
@@ -87,6 +88,7 @@ __all__ = [
     "Theme",
     "TimeFrame",
     "UserStory",
+    "UserStoryDependency",
     "WorkflowEvent",
     "WorkflowEventType",
 ]

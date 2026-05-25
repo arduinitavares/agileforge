@@ -8,12 +8,21 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from sqlmodel import select
 
 if TYPE_CHECKING:
     from sqlmodel import Session
 
-from models.core import Product, Sprint, SprintStory, Team, UserStory
-from models.enums import SprintStatus
+from models.core import (
+    Product,
+    Sprint,
+    SprintStory,
+    Team,
+    UserStory,
+    UserStoryDependency,
+)
+from models.enums import SprintStatus, WorkflowEventType
+from models.events import WorkflowEvent
 from services.agent_workbench.story_phase import (
     StoryPhaseRunner,
     _repair_story_readiness_rows,
@@ -82,6 +91,57 @@ class _FakeWorkflowService:
         """Persist state updates."""
         del session_id
         self.state.update(partial_update)
+
+
+def _seed_dependency_rows(session: Session) -> tuple[int, int]:
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    first = UserStory(
+        product_id=PROJECT_ID,
+        title="Capture market data",
+        story_description="As a manager, I want captured market data.",
+        acceptance_criteria="- Verify capture.",
+        source_requirement="live recommendation",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=2,
+        rank="101",
+    )
+    second = UserStory(
+        product_id=PROJECT_ID,
+        title="Generate recommendation",
+        story_description="As a manager, I want a recommendation.",
+        acceptance_criteria="- Verify recommendation.",
+        source_requirement="live recommendation",
+        refinement_slot=2,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=3,
+        rank="102",
+    )
+    session.add(product)
+    session.add(first)
+    session.add(second)
+    session.commit()
+    session.refresh(first)
+    session.refresh(second)
+    assert first.story_id is not None
+    assert second.story_id is not None
+    session.add(
+        UserStoryDependency(
+            product_id=PROJECT_ID,
+            dependent_story_id=second.story_id,
+            prerequisite_story_id=first.story_id,
+            status="proposed",
+            source="story_writer",
+            confidence="explicit",
+            reason="Recommendation needs market data first.",
+        )
+    )
+    session.commit()
+    return second.story_id, first.story_id
 
 
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -370,6 +430,91 @@ def test_story_save_passes_guard_fields(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["data"]["artifact_fingerprint"] == "sha256:abc"
     assert result["data"]["fsm_state"] == "STORY_PERSISTENCE"
     assert "data" not in result["data"]
+
+
+def test_story_dependency_propose_creates_guarded_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Story dependency propose creates a fingerprinted review attempt."""
+    _seed_dependency_rows(session)
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["fsm_state"] = "SPRINT_SETUP"
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.dependency_propose(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="dep-propose-2-001",
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["attempt_id"].startswith("story-dependencies-")
+    assert data["artifact_fingerprint"].startswith("sha256:")
+    assert data["proposed_edge_count"] >= 1
+    assert (
+        workflow_service.state["story_dependency_attempts"][0]["attempt_id"]
+        == (data["attempt_id"])
+    )
+
+
+def test_story_dependency_apply_promotes_reviewed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Story dependency apply promotes exact reviewed attempt edges to active."""
+    dependent_story_id, prerequisite_story_id = _seed_dependency_rows(session)
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["fsm_state"] = "SPRINT_SETUP"
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+    proposal = runner.dependency_propose(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="dep-propose-apply-001",
+    )["data"]
+
+    result = runner.dependency_apply(
+        project_id=PROJECT_ID,
+        attempt_id=proposal["attempt_id"],
+        expected_artifact_fingerprint=proposal["artifact_fingerprint"],
+        expected_state="SPRINT_SETUP",
+        idempotency_key="dep-apply-2-001",
+    )
+
+    assert result["ok"] is True
+    session.expire_all()
+    edge = session.exec(
+        select(UserStoryDependency).where(
+            UserStoryDependency.dependent_story_id == dependent_story_id,
+            UserStoryDependency.prerequisite_story_id == prerequisite_story_id,
+        )
+    ).one()
+    assert edge.status == "active"
+    assert edge.source == "manual_review"
+    assert edge.confidence == "reviewed"
+    events = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == WorkflowEventType.STORY_DEPENDENCIES_APPLIED
+        )
+    ).all()
+    assert len(events) == 1
 
 
 def test_story_complete_passes_guard_fields(monkeypatch: pytest.MonkeyPatch) -> None:

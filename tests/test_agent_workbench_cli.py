@@ -556,6 +556,74 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
+        """Return a story dependency inspect payload."""
+        self.calls.append(("story_dependencies_inspect", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "active_edge_count": 0},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_dependencies_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story dependency propose payload."""
+        self.calls.append(
+            (
+                "story_dependencies_propose",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "attempt_id": "story-dependencies-test",
+                "artifact_fingerprint": "sha256:" + "a" * 64,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_dependencies_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story dependency apply payload."""
+        self.calls.append(
+            (
+                "story_dependencies_apply",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "activated_edge_count": 1},
+            "warnings": [],
+            "errors": [],
+        }
+
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return a sprint candidates payload."""
         self.calls.append(("sprint_candidates", {"project_id": project_id}))
@@ -1722,6 +1790,67 @@ def test_cli_routes_roadmap_commands(
                 },
             ),
             "agileforge story repair-readiness",
+        ),
+        (
+            [
+                "story",
+                "dependencies",
+                "inspect",
+                "--project-id",
+                str(PROJECT_ID),
+            ],
+            ("story_dependencies_inspect", {"project_id": PROJECT_ID}),
+            "agileforge story dependencies inspect",
+        ),
+        (
+            [
+                "story",
+                "dependencies",
+                "propose",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "SPRINT_SETUP",
+                "--idempotency-key",
+                "dep-propose-1",
+            ],
+            (
+                "story_dependencies_propose",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "SPRINT_SETUP",
+                    "idempotency_key": "dep-propose-1",
+                },
+            ),
+            "agileforge story dependencies propose",
+        ),
+        (
+            [
+                "story",
+                "dependencies",
+                "apply",
+                "--project-id",
+                str(PROJECT_ID),
+                "--attempt-id",
+                "story-dependencies-test",
+                "--expected-artifact-fingerprint",
+                "sha256:" + "a" * 64,
+                "--expected-state",
+                "SPRINT_SETUP",
+                "--idempotency-key",
+                "dep-apply-1",
+            ],
+            (
+                "story_dependencies_apply",
+                {
+                    "project_id": PROJECT_ID,
+                    "attempt_id": "story-dependencies-test",
+                    "expected_artifact_fingerprint": "sha256:" + "a" * 64,
+                    "expected_state": "SPRINT_SETUP",
+                    "idempotency_key": "dep-apply-1",
+                },
+            ),
+            "agileforge story dependencies apply",
         ),
     ],
 )

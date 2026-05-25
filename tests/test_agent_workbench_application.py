@@ -414,12 +414,12 @@ class _ChangedProjectReadProjection(_FakeReadProjection):
         return result
 
 
-class _ChangedCandidateReadProjection(_SprintReadyReadProjection):
-    """Fake read projection with a changed candidate fingerprint."""
+class _ChangedSprintWorkflowReadProjection(_SprintReadyReadProjection):
+    """Fake read projection with changed Sprint workflow fingerprint input."""
 
-    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
-        """Return candidate payload with changed fingerprint inputs."""
-        result = super().sprint_candidates(project_id=project_id)
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Sprint setup workflow state with changed fingerprint input."""
+        result = super().workflow_state(project_id=project_id)
         result["data"]["source_fingerprint"] = "sha256:" + "9" * 64
         return result
 
@@ -1726,6 +1726,19 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == [
         "agileforge story pending --project-id 7",
+        "agileforge story dependencies inspect --project-id 7",
+        (
+            "agileforge story dependencies propose --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story dependencies apply --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
         (
             "agileforge story complete --project-id 7 "
             "--expected-state STORY_PERSISTENCE "
@@ -1750,11 +1763,25 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
         "data": {
             "project_id": PROJECT_ID,
             "next_valid_commands": [
+                "agileforge story dependencies inspect --project-id 7",
+                (
+                    "agileforge story dependencies propose --project-id 7 "
+                    "--expected-state SPRINT_SETUP "
+                    "--idempotency-key <idempotency_key>"
+                ),
+                (
+                    "agileforge story dependencies apply --project-id 7 "
+                    "--attempt-id <attempt_id> "
+                    "--expected-artifact-fingerprint <artifact_fingerprint> "
+                    "--expected-state SPRINT_SETUP "
+                    "--idempotency-key <idempotency_key>"
+                ),
                 "agileforge sprint candidates --project-id 7",
                 "agileforge sprint generate --project-id 7",
             ],
             "blocked_commands": [],
             "blocked_future_commands": [],
+            "status": "next_phase_available",
             "source_fingerprint": result["data"]["source_fingerprint"],
         },
         "warnings": [],
@@ -1775,6 +1802,19 @@ def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == [
         "agileforge sprint history --project-id 7",
+        "agileforge story dependencies inspect --project-id 7",
+        (
+            "agileforge story dependencies propose --project-id 7 "
+            "--expected-state SPRINT_DRAFT "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story dependencies apply --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state SPRINT_DRAFT "
+            "--idempotency-key <idempotency_key>"
+        ),
         (
             "agileforge sprint save --project-id 7 "
             "--team-name <team_name> "
@@ -2048,14 +2088,14 @@ def test_workflow_next_failed_setup_does_not_require_authority_status(
     ]
 
 
-def test_application_workflow_next_fingerprint_changes_with_pack_inputs() -> None:
-    """Verify workflow next fingerprint includes context pack inputs."""
+def test_application_workflow_next_fingerprint_changes_with_workflow_inputs() -> None:
+    """Verify workflow next fingerprint includes Sprint workflow inputs."""
     first = AgentWorkbenchApplication(
         read_projection=_SprintReadyReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
     ).workflow_next(project_id=PROJECT_ID)
     changed = AgentWorkbenchApplication(
-        read_projection=_ChangedCandidateReadProjection(),
+        read_projection=_ChangedSprintWorkflowReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
     ).workflow_next(project_id=PROJECT_ID)
 

@@ -284,6 +284,32 @@ class _StoryPhaseRunner(Protocol):
         """Backfill Story planning metadata before Sprint work starts."""
         ...
 
+    def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
+        """Inspect Story dependency graph."""
+        ...
+
+    def dependency_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Create a Story dependency proposal artifact."""
+        ...
+
+    def dependency_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Apply a reviewed Story dependency artifact."""
+        ...
+
 
 class _SprintPhaseRunner(Protocol):
     """Sprint phase commands exposed through the facade."""
@@ -893,6 +919,42 @@ class AgentWorkbenchApplication:
         """Backfill Story planning metadata before Sprint work starts."""
         return self._get_story_runner().repair_readiness(
             project_id=project_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def story_dependencies_inspect(self, *, project_id: int) -> dict[str, Any]:
+        """Inspect Story dependency graph."""
+        return self._get_story_runner().dependency_inspect(project_id=project_id)
+
+    def story_dependencies_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Create a Story dependency proposal artifact."""
+        return self._get_story_runner().dependency_propose(
+            project_id=project_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def story_dependencies_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Apply a reviewed Story dependency proposal artifact."""
+        return self._get_story_runner().dependency_apply(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
         )
@@ -1632,6 +1694,10 @@ def _story_command_candidates(
             return [pending_command, generate_command]
         return [
             pending_command,
+            *_story_dependency_command_candidates(
+                project_id=project_id,
+                expected_state="STORY_PERSISTENCE",
+            ),
             (
                 "agileforge story complete",
                 (
@@ -1735,7 +1801,7 @@ def _sprint_workflow_next(
 ) -> dict[str, Any] | None:
     """Return Sprint phase commands for Sprint workflow states."""
     fsm_state = _fsm_state_from_envelope(workflow)
-    if fsm_state not in {"SPRINT_DRAFT", "SPRINT_PERSISTENCE"}:
+    if fsm_state not in {"SPRINT_SETUP", "SPRINT_DRAFT", "SPRINT_PERSISTENCE"}:
         return None
 
     next_valid_commands: list[str] = []
@@ -1788,6 +1854,10 @@ def _sprint_command_candidates(
     """Return Sprint command candidates for the current Sprint state."""
     if fsm_state == "SPRINT_SETUP":
         return [
+            *_story_dependency_command_candidates(
+                project_id=project_id,
+                expected_state="SPRINT_SETUP",
+            ),
             (
                 "agileforge sprint candidates",
                 f"agileforge sprint candidates --project-id {project_id}",
@@ -1802,6 +1872,10 @@ def _sprint_command_candidates(
             (
                 "agileforge sprint history",
                 f"agileforge sprint history --project-id {project_id}",
+            ),
+            *_story_dependency_command_candidates(
+                project_id=project_id,
+                expected_state="SPRINT_DRAFT",
             ),
             (
                 "agileforge sprint save",
@@ -1828,6 +1902,38 @@ def _sprint_command_candidates(
             "agileforge sprint history",
             f"agileforge sprint history --project-id {project_id}",
         )
+    ]
+
+
+def _story_dependency_command_candidates(
+    *,
+    project_id: int,
+    expected_state: str,
+) -> list[tuple[str, str]]:
+    """Return Story dependency review command candidates for current state."""
+    return [
+        (
+            "agileforge story dependencies inspect",
+            f"agileforge story dependencies inspect --project-id {project_id}",
+        ),
+        (
+            "agileforge story dependencies propose",
+            (
+                f"agileforge story dependencies propose --project-id {project_id} "
+                f"--expected-state {expected_state} "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge story dependencies apply",
+            (
+                f"agileforge story dependencies apply --project-id {project_id} "
+                "--attempt-id <attempt_id> "
+                "--expected-artifact-fingerprint <artifact_fingerprint> "
+                f"--expected-state {expected_state} "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
     ]
 
 

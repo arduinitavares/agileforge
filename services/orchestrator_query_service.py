@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from models.core import Product, Sprint, SprintStory, UserStory
 from models.db import get_engine
 from models.enums import SprintStatus, StoryStatus
+from services.story_dependencies import load_story_dependency_graph
 from utils.spec_schemas import ValidationEvidence
 
 CACHE_TTL_MINUTES: int = 5
@@ -110,6 +111,29 @@ def _sprint_candidate_readiness(
         "blocking_codes": blocking_codes,
         "blocking_story_ids": sorted(set(unsized_ids + default_priority_ids)),
     }
+
+
+def _augment_readiness_with_dependency_issues(
+    readiness: dict[str, Any],
+    *,
+    dependency_issues: list[Any],
+    cycle_paths: list[list[int]],
+) -> dict[str, Any]:
+    """Add active dependency graph blockers to sprint readiness."""
+    blocking_codes = list(readiness.get("blocking_codes") or [])
+    blocking_story_ids = set(readiness.get("blocking_story_ids") or [])
+    for issue in dependency_issues:
+        code = str(getattr(issue, "code", "STORY_DEPENDENCY_INVALID"))
+        if code not in blocking_codes:
+            blocking_codes.append(code)
+        blocking_story_ids.update(int(story_id) for story_id in issue.story_ids)
+    readiness["blocking_codes"] = blocking_codes
+    readiness["blocking_story_ids"] = sorted(blocking_story_ids)
+    readiness["dependency_issue_count"] = len(dependency_issues)
+    readiness["dependency_cycle_paths"] = cycle_paths
+    if blocking_codes:
+        readiness["status"] = "blocked"
+    return readiness
 
 
 def _build_projects_payload(
@@ -246,6 +270,15 @@ def fetch_sprint_candidates_from_session(
         refined.append(story)
 
     refined.sort(key=_story_order_key)
+    dependency_graph = load_story_dependency_graph(session, project_id=product_id)
+    active_dependency_issues = [
+        issue
+        for issue in dependency_graph.issues
+        if issue.edge_status == "active" or issue.code == "STORY_DEPENDENCY_CYCLE"
+    ]
+    refined_story_ids = {
+        int(story.story_id) for story in refined if story.story_id is not None
+    }
 
     candidate_list: list[dict[str, Any]] = [
         {
@@ -261,6 +294,28 @@ def fetch_sprint_candidates_from_session(
             "evaluated_invariant_ids": _story_evaluated_invariant_ids(story),
             "story_compliance_boundary_summaries": (
                 _story_compliance_boundary_summaries(story)
+            ),
+            "prerequisite_story_ids": sorted(
+                dependency_graph.active_edges.get(int(story.story_id or 0), set())
+            ),
+            "blocked_by_story_ids": sorted(
+                prerequisite_id
+                for prerequisite_id in dependency_graph.active_edges.get(
+                    int(story.story_id or 0),
+                    set(),
+                )
+                if prerequisite_id in refined_story_ids
+            ),
+            "dependency_status": (
+                "blocked"
+                if any(
+                    prerequisite_id in refined_story_ids
+                    for prerequisite_id in dependency_graph.active_edges.get(
+                        int(story.story_id or 0),
+                        set(),
+                    )
+                )
+                else "ready"
             ),
         }
         for story in refined
@@ -281,7 +336,11 @@ def fetch_sprint_candidates_from_session(
         "success": True,
         "count": len(candidate_list),
         "stories": candidate_list,
-        "readiness": _sprint_candidate_readiness(candidate_list),
+        "readiness": _augment_readiness_with_dependency_issues(
+            _sprint_candidate_readiness(candidate_list),
+            dependency_issues=active_dependency_issues,
+            cycle_paths=dependency_graph.cycle_paths,
+        ),
         "excluded_counts": {
             "non_refined": excluded_non_refined,
             "superseded": excluded_superseded,

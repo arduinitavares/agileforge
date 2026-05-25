@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func
-from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy.schema import CheckConstraint, UniqueConstraint
 from sqlalchemy.types import Date, Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -372,6 +372,58 @@ class UserStory(SQLModel, table=True):
     tasks: list["Task"] = Relationship(
         back_populates="story",
         sa_relationship_kwargs={"cascade": "all, delete"},
+    )
+
+
+class UserStoryDependency(SQLModel, table=True):
+    """Reviewable dependency edge between two active user stories."""
+
+    __tablename__ = "user_story_dependencies"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "dependent_story_id",
+            "prerequisite_story_id",
+            name="unique_user_story_dependency_edge",
+        ),
+        CheckConstraint(
+            "dependent_story_id <> prerequisite_story_id",
+            name="ck_user_story_dependencies_not_self",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'active', 'rejected')",
+            name="ck_user_story_dependencies_status",
+        ),
+        CheckConstraint(
+            "source IN ('story_writer', 'dependency_repair', 'manual_review')",
+            name="ck_user_story_dependencies_source",
+        ),
+        CheckConstraint(
+            "confidence IN ('explicit', 'inferred', 'reviewed')",
+            name="ck_user_story_dependencies_confidence",
+        ),
+    )
+
+    dependency_id: int | None = Field(default=None, primary_key=True)
+    product_id: int = Field(foreign_key="products.product_id", index=True)
+    dependent_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
+    prerequisite_story_id: int = Field(foreign_key="user_stories.story_id", index=True)
+    status: str = Field(default="proposed", index=True, nullable=False)
+    source: str = Field(default="story_writer", index=True, nullable=False)
+    confidence: str = Field(default="inferred", index=True, nullable=False)
+    reason: str | None = Field(default=None, sa_type=Text)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column_kwargs={"server_default": func.now()},
+        nullable=False,
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column_kwargs={
+            "server_default": func.now(),
+            "onupdate": func.now(),
+        },
+        nullable=False,
     )
 
 

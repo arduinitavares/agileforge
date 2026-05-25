@@ -22,6 +22,7 @@ from agile_sqlmodel import (
     WorkflowEvent,
     WorkflowEventType,
 )
+from models.core import UserStoryDependency
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool import tools as story_tools
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
@@ -160,6 +161,155 @@ class TestSaveStoriesTool:
         assert result["success"], result.get("error")
         assert result["saved_count"] == 1
         assert len(result["story_ids"]) == 1
+
+    def test_save_persists_resolved_dependency_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Persist resolved story dependency candidates as proposed edges."""
+        _seed_product(session)
+        dependent = {
+            **_alternate_valid_story(),
+            "dependency_candidates": [
+                {
+                    "prerequisite_ref": "Enforce attestation gate",
+                    "reason": "Audit story depends on the gate existing first.",
+                    "confidence": "explicit",
+                }
+            ],
+        }
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-dependency-candidate",
+            parent_rank=2,
+            stories=[_valid_story(), dependent],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        assert result["dependency_proposed_count"] == 1
+        edges = session.exec(select(UserStoryDependency)).all()
+        assert len(edges) == 1
+        edge = edges[0]
+        assert edge.status == "proposed"
+        assert edge.source == "story_writer"
+        assert edge.confidence == "explicit"
+        dependent_story = session.get(UserStory, edge.dependent_story_id)
+        prerequisite_story = session.get(UserStory, edge.prerequisite_story_id)
+        assert dependent_story is not None
+        assert prerequisite_story is not None
+        assert dependent_story.title == "Audit attestation attempts"
+        assert prerequisite_story.title == "Enforce attestation gate"
+
+    def test_save_purges_stale_proposed_dependency_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Rewrite removes stale proposed dependency rows for saved stories."""
+        _seed_product(session)
+        first_payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-stale-dependency-first",
+            parent_rank=2,
+            stories=[
+                _valid_story(),
+                {
+                    **_alternate_valid_story(),
+                    "dependency_candidates": [
+                        {
+                            "prerequisite_ref": "Enforce attestation gate",
+                            "reason": "Audit story depends on the gate first.",
+                            "confidence": "explicit",
+                        }
+                    ],
+                },
+            ],
+        )
+        second_payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-stale-dependency-second",
+            parent_rank=2,
+            stories=[_valid_story(), _alternate_valid_story()],
+        )
+
+        first = save_stories_tool(input_data=first_payload, tool_context=None)
+        second = save_stories_tool(input_data=second_payload, tool_context=None)
+
+        assert first["success"], first.get("error")
+        assert second["success"], second.get("error")
+        edges = session.exec(select(UserStoryDependency)).all()
+        assert edges == []
+
+    def test_save_blocks_explicit_unresolved_dependency_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Explicit unresolved candidate blocks the story save."""
+        _seed_product(session)
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-explicit-unresolved-dependency",
+            parent_rank=2,
+            stories=[
+                {
+                    **_valid_story(),
+                    "dependency_candidates": [
+                        {
+                            "prerequisite_ref": "Missing prerequisite",
+                            "reason": "This dependency was explicit in the source.",
+                            "confidence": "explicit",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"] is False
+        assert result["error_code"] == "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
+        rows = session.exec(select(UserStory)).all()
+        assert rows == []
+
+    def test_save_warns_for_inferred_unresolved_dependency_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Inferred unresolved candidate is skipped with a warning."""
+        _seed_product(session)
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-inferred-unresolved-dependency",
+            parent_rank=2,
+            stories=[
+                {
+                    **_valid_story(),
+                    "dependency_candidates": [
+                        {
+                            "prerequisite_ref": "Missing prerequisite",
+                            "reason": "This dependency was inferred by the model.",
+                            "confidence": "inferred",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        assert result["dependency_proposed_count"] == 0
+        assert result["dependency_warnings"][0]["code"] == (
+            "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
+        )
+        edges = session.exec(select(UserStoryDependency)).all()
+        assert edges == []
 
     def test_valid_stories_persist_story_points_from_estimated_effort(
         self,
@@ -456,9 +606,7 @@ class TestSaveStoriesTool:
         assert result["success"], result.get("error")
         assert result["updated_story_ids"] == [seed.story_id]
 
-    def test_save_stories_tool_replays_idempotency_key(
-        self, session: Session
-    ) -> None:
+    def test_save_stories_tool_replays_idempotency_key(self, session: Session) -> None:
         """Replay same idempotency key from event metadata without touching rows."""
         _seed_product(session)
 

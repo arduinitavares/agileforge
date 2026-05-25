@@ -78,6 +78,27 @@ class SprintPlannerStory(BaseModel):
         str | None,
         Field(default=None, description="Original source requirement or reference."),
     ]
+    prerequisite_story_ids: Annotated[
+        list[int],
+        Field(
+            default_factory=list,
+            description="Active prerequisite story IDs that must precede this story.",
+        ),
+    ]
+    blocked_by_story_ids: Annotated[
+        list[int],
+        Field(
+            default_factory=list,
+            description="Prerequisite story IDs that are still unresolved candidates.",
+        ),
+    ]
+    dependency_status: Annotated[
+        Literal["ready", "blocked"],
+        Field(
+            default="ready",
+            description="Dependency readiness for this story in sprint planning.",
+        ),
+    ]
     evaluated_invariant_ids: Annotated[
         list[str],
         Field(

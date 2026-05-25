@@ -186,6 +186,20 @@ def load_sprint_candidates(
                 for item in (row.get("story_compliance_boundary_summaries") or [])
                 if str(item).strip()
             ],
+            "prerequisite_story_ids": [
+                int(story_id)
+                for story_id in (row.get("prerequisite_story_ids") or [])
+                if normalize_positive_int(story_id) is not None
+            ],
+            "blocked_by_story_ids": [
+                int(story_id)
+                for story_id in (row.get("blocked_by_story_ids") or [])
+                if normalize_positive_int(story_id) is not None
+            ],
+            "dependency_status": as_text(
+                row.get("dependency_status") or "ready"
+            ).strip()
+            or "ready",
         }
 
         persona = as_text(row.get("persona")).strip() or None
@@ -312,6 +326,9 @@ def prepare_sprint_input_context(
                 "story_compliance_boundary_summaries": list(
                     row.get("story_compliance_boundary_summaries") or []
                 ),
+                "prerequisite_story_ids": list(row.get("prerequisite_story_ids") or []),
+                "blocked_by_story_ids": list(row.get("blocked_by_story_ids") or []),
+                "dependency_status": row.get("dependency_status", "ready"),
             }
             for row in selection.selected_rows
             if isinstance(row, dict)

@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from itertools import pairwise
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 import anyio
 from sqlmodel import Session, select
 
-from models.core import Sprint, SprintStory, UserStory
+from models.core import Sprint, SprintStory, UserStory, UserStoryDependency
 from models.db import get_engine
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,
 )
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import (
     append_attempt,
     append_feedback_entry,
@@ -37,6 +42,10 @@ from services.phases.story_service import (
     retry_story_draft,
     save_story_draft,
 )
+from services.story_dependencies import (
+    dependency_inspect_payload,
+    load_story_dependency_graph,
+)
 from services.story_runtime import (
     run_story_agent_from_state,
     run_story_agent_request,
@@ -50,6 +59,12 @@ if TYPE_CHECKING:
     from models.core import Product
 else:
     ToolContext = Any
+
+_DEPENDENCY_REVIEW_STATES = {"STORY_PERSISTENCE", "SPRINT_SETUP", "SPRINT_DRAFT"}
+_DEPENDENCY_ATTEMPTS_KEY = "story_dependency_attempts"
+_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY = "story_dependency_propose_idempotency_keys"
+_DEPENDENCY_APPLY_IDEMPOTENCY_KEY = "story_dependency_apply_idempotency_keys"
+_MAX_DEPENDENCY_ATTEMPTS = 20
 
 
 class StoryPhaseRunner:
@@ -151,6 +166,44 @@ class StoryPhaseRunner:
         return anyio.run(
             self._repair_readiness,
             project_id,
+            expected_state,
+            idempotency_key,
+        )
+
+    def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
+        """Inspect active/proposed Story dependency edges."""
+        return anyio.run(self._dependency_inspect, project_id)
+
+    def dependency_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Create a reviewed dependency proposal attempt."""
+        return anyio.run(
+            self._dependency_propose,
+            project_id,
+            expected_state,
+            idempotency_key,
+        )
+
+    def dependency_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Apply an exact reviewed dependency proposal attempt."""
+        return anyio.run(
+            self._dependency_apply,
+            project_id,
+            attempt_id,
+            expected_artifact_fingerprint,
             expected_state,
             idempotency_key,
         )
@@ -410,6 +463,169 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
+    async def _dependency_inspect(self, project_id: int) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                return _data_envelope(
+                    dependency_inspect_payload(session, project_id=project_id)
+                )
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+
+    async def _dependency_propose(
+        self,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        state = await self._ensure_session(str(project_id))
+        replay = _dependency_replay(
+            state,
+            registry_key=_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY,
+            idempotency_key=idempotency_key,
+        )
+        if replay is not None:
+            return _data_envelope(replay)
+        guard_error = _dependency_guard_error(
+            state=state,
+            expected_state=expected_state,
+        )
+        if guard_error is not None:
+            return guard_error
+
+        try:
+            with Session(get_engine()) as session:
+                artifact = _build_dependency_proposal_artifact(
+                    session,
+                    project_id=project_id,
+                )
+                session.add(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.STORY_DEPENDENCIES_PROPOSED,
+                        product_id=project_id,
+                        session_id=str(project_id),
+                        event_metadata=json.dumps(
+                            _dependency_propose_event_metadata(
+                                artifact=artifact,
+                                idempotency_key=idempotency_key,
+                                project_id=project_id,
+                            )
+                        ),
+                    )
+                )
+                session.commit()
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+
+        _record_dependency_attempt(state, artifact)
+        _record_dependency_replay(
+            state,
+            registry_key=_DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY,
+            idempotency_key=idempotency_key,
+            payload=artifact,
+        )
+        self._save_session_state(str(project_id), state)
+        return _data_envelope(artifact)
+
+    async def _dependency_apply(  # noqa: PLR0911
+        self,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        state = await self._ensure_session(str(project_id))
+        replay = _dependency_replay(
+            state,
+            registry_key=_DEPENDENCY_APPLY_IDEMPOTENCY_KEY,
+            idempotency_key=idempotency_key,
+        )
+        if replay is not None:
+            return _data_envelope(replay)
+        guard_error = _dependency_guard_error(
+            state=state,
+            expected_state=expected_state,
+        )
+        if guard_error is not None:
+            return guard_error
+
+        attempt = _find_dependency_attempt(
+            state,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+        )
+        if attempt is None:
+            return _error_envelope(
+                ErrorCode.INVALID_COMMAND,
+                "Dependency apply requires an exact known attempt and fingerprint.",
+                details={
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                },
+            )
+
+        try:
+            with Session(get_engine()) as session:
+                before_graph = load_story_dependency_graph(
+                    session,
+                    project_id=project_id,
+                )
+                payload = _apply_dependency_attempt(
+                    session,
+                    project_id=project_id,
+                    attempt=attempt,
+                    attempt_id=attempt_id,
+                    artifact_fingerprint=expected_artifact_fingerprint,
+                    idempotency_key=idempotency_key,
+                    before_cycle_count=len(before_graph.cycle_paths),
+                )
+                if payload.get("success") is False:
+                    session.rollback()
+                    return _error_envelope(
+                        ErrorCode.MUTATION_FAILED,
+                        str(payload["error"]),
+                        details=payload,
+                    )
+                session.add(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.STORY_DEPENDENCIES_APPLIED,
+                        product_id=project_id,
+                        session_id=str(project_id),
+                        event_metadata=json.dumps(
+                            _dependency_apply_event_metadata(
+                                payload=payload,
+                                idempotency_key=idempotency_key,
+                                project_id=project_id,
+                            )
+                        ),
+                    )
+                )
+                session.commit()
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+
+        _record_dependency_replay(
+            state,
+            registry_key=_DEPENDENCY_APPLY_IDEMPOTENCY_KEY,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
+        self._save_session_state(str(project_id), state)
+        return _data_envelope(payload)
+
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
@@ -455,6 +671,371 @@ class StoryPhaseRunner:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
+
+
+def _dependency_guard_error(
+    *,
+    state: dict[str, Any],
+    expected_state: str,
+) -> dict[str, Any] | None:
+    current_state = state.get("fsm_state")
+    if expected_state not in _DEPENDENCY_REVIEW_STATES:
+        return _error_envelope(
+            ErrorCode.INVALID_COMMAND,
+            "Story dependency review is only allowed in Story/Sprint review states.",
+            details={
+                "expected_state": expected_state,
+                "allowed_states": sorted(_DEPENDENCY_REVIEW_STATES),
+            },
+        )
+    if current_state != expected_state:
+        return _error_envelope(
+            ErrorCode.INVALID_COMMAND,
+            "Expected workflow state does not match current state.",
+            details={"expected_state": expected_state, "current_state": current_state},
+        )
+    return None
+
+
+def _dependency_replay(
+    state: dict[str, Any],
+    *,
+    registry_key: str,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    registry = state.get(registry_key)
+    if not isinstance(registry, dict):
+        return None
+    payload = registry.get(idempotency_key)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _record_dependency_replay(
+    state: dict[str, Any],
+    *,
+    registry_key: str,
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> None:
+    registry = state.get(registry_key)
+    if not isinstance(registry, dict):
+        registry = {}
+    registry[idempotency_key] = dict(payload)
+    state[registry_key] = registry
+
+
+def _record_dependency_attempt(
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+) -> None:
+    attempts = state.get(_DEPENDENCY_ATTEMPTS_KEY)
+    if not isinstance(attempts, list):
+        attempts = []
+    attempts.append(dict(artifact))
+    state[_DEPENDENCY_ATTEMPTS_KEY] = attempts[-_MAX_DEPENDENCY_ATTEMPTS:]
+
+
+def _find_dependency_attempt(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+) -> dict[str, Any] | None:
+    attempts = state.get(_DEPENDENCY_ATTEMPTS_KEY)
+    if not isinstance(attempts, list):
+        return None
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        if (
+            attempt.get("attempt_id") == attempt_id
+            and attempt.get("artifact_fingerprint") == expected_artifact_fingerprint
+        ):
+            return dict(attempt)
+    return None
+
+
+def _build_dependency_proposal_artifact(
+    session: Session,
+    *,
+    project_id: int,
+) -> dict[str, Any]:
+    attempt_id = f"story-dependencies-{uuid4()}"
+    inspect_payload = dependency_inspect_payload(session, project_id=project_id)
+    active_edges = [
+        {**edge, "selected": True} for edge in inspect_payload["active_edges"]
+    ]
+    proposed_edges = [
+        {**edge, "selected": True} for edge in inspect_payload["proposed_edges"]
+    ]
+    edge_keys = {
+        (edge["dependent_story_id"], edge["prerequisite_story_id"])
+        for edge in [*active_edges, *proposed_edges]
+    }
+    deterministic_edges = _deterministic_dependency_edges(
+        session,
+        project_id=project_id,
+        existing_edge_keys=edge_keys,
+    )
+    edges = [*active_edges, *proposed_edges, *deterministic_edges]
+    artifact: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "is_complete": True,
+        "active_edge_count": len(active_edges),
+        "proposed_edge_count": len(proposed_edges) + len(deterministic_edges),
+        "cycle_count": inspect_payload["cycle_count"],
+        "cycle_paths": inspect_payload["cycle_paths"],
+        "edges": edges,
+    }
+    artifact["artifact_fingerprint"] = canonical_hash(
+        {"phase": "story_dependencies", "artifact": artifact}
+    )
+    return artifact
+
+
+def _deterministic_dependency_edges(
+    session: Session,
+    *,
+    project_id: int,
+    existing_edge_keys: set[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    stories = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == project_id)
+        .where(UserStory.is_refined == True)  # noqa: E712
+        .where(UserStory.is_superseded == False)  # noqa: E712
+        .order_by(UserStory.source_requirement, UserStory.refinement_slot)
+    ).all()
+    by_requirement: dict[str, list[UserStory]] = {}
+    for story in stories:
+        if (
+            story.story_id is None
+            or not story.source_requirement
+            or story.refinement_slot is None
+        ):
+            continue
+        by_requirement.setdefault(story.source_requirement, []).append(story)
+
+    edges: list[dict[str, Any]] = []
+    for requirement_stories in by_requirement.values():
+        ordered = sorted(
+            requirement_stories,
+            key=lambda story: (story.refinement_slot or 0, story.story_id or 0),
+        )
+        for prerequisite, dependent in pairwise(ordered):
+            if prerequisite.story_id is None or dependent.story_id is None:
+                continue
+            key = (dependent.story_id, prerequisite.story_id)
+            if key in existing_edge_keys:
+                continue
+            existing_edge_keys.add(key)
+            edges.append(
+                {
+                    "dependency_id": None,
+                    "dependent_story_id": dependent.story_id,
+                    "dependent_story_title": dependent.title,
+                    "prerequisite_story_id": prerequisite.story_id,
+                    "prerequisite_story_title": prerequisite.title,
+                    "status": "proposed",
+                    "source": "dependency_repair",
+                    "confidence": "inferred",
+                    "reason": (
+                        "Deterministic refinement order: later slot depends on "
+                        "the immediately previous slot in the same requirement."
+                    ),
+                    "selected": True,
+                }
+            )
+    return edges
+
+
+def _apply_dependency_attempt(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    attempt: dict[str, Any],
+    attempt_id: str,
+    artifact_fingerprint: str,
+    idempotency_key: str,
+    before_cycle_count: int,
+) -> dict[str, Any]:
+    edges = attempt.get("edges")
+    if not isinstance(edges, list):
+        return {
+            "success": False,
+            "error": "Dependency attempt has malformed edges.",
+            "attempt_id": attempt_id,
+        }
+
+    artifact_edge_keys: set[tuple[int, int]] = set()
+    activated_edges: list[dict[str, Any]] = []
+    rejected_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        pair = _edge_pair(edge)
+        if pair is None:
+            continue
+        artifact_edge_keys.add(pair)
+        if edge.get("status") == "rejected" or edge.get("selected") is False:
+            rejected_edges.append(
+                _set_dependency_edge_status(
+                    session,
+                    project_id=project_id,
+                    pair=pair,
+                    status="rejected",
+                    reason=str(edge.get("reason") or "Rejected by dependency review."),
+                )
+            )
+            continue
+        if edge.get("selected") is True:
+            activated_edges.append(
+                _set_dependency_edge_status(
+                    session,
+                    project_id=project_id,
+                    pair=pair,
+                    status="active",
+                    reason=str(edge.get("reason") or "Accepted by dependency review."),
+                )
+            )
+
+    for proposed_edge in session.exec(
+        select(UserStoryDependency)
+        .where(UserStoryDependency.product_id == project_id)
+        .where(UserStoryDependency.status == "proposed")
+    ).all():
+        pair = (proposed_edge.dependent_story_id, proposed_edge.prerequisite_story_id)
+        if pair in artifact_edge_keys:
+            continue
+        proposed_edge.status = "rejected"
+        proposed_edge.source = "manual_review"
+        proposed_edge.confidence = "reviewed"
+        proposed_edge.updated_at = datetime.now(UTC)
+        session.add(proposed_edge)
+        rejected_edges.append(_dependency_edge_summary(proposed_edge))
+
+    session.flush()
+    after_graph = load_story_dependency_graph(session, project_id=project_id)
+    after_cycle_count = len(after_graph.cycle_paths)
+    if after_cycle_count and after_cycle_count >= before_cycle_count:
+        return {
+            "success": False,
+            "error": "Dependency apply would leave an active cycle unresolved.",
+            "attempt_id": attempt_id,
+            "cycle_count_before_apply": before_cycle_count,
+            "cycle_count_after_apply": after_cycle_count,
+            "cycle_paths": after_graph.cycle_paths,
+        }
+
+    return {
+        "success": True,
+        "project_id": project_id,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": artifact_fingerprint,
+        "idempotency_key": idempotency_key,
+        "activated_edge_count": len(activated_edges),
+        "activated_edges": activated_edges,
+        "rejected_edge_count": len(rejected_edges),
+        "rejected_edges": rejected_edges,
+        "active_edge_count": sum(
+            len(items) for items in after_graph.active_edges.values()
+        ),
+        "cycle_count_after_apply": after_cycle_count,
+    }
+
+
+def _edge_pair(edge: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        dependent_story_id = int(edge["dependent_story_id"])
+        prerequisite_story_id = int(edge["prerequisite_story_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return dependent_story_id, prerequisite_story_id
+
+
+def _set_dependency_edge_status(
+    session: Session,
+    *,
+    project_id: int,
+    pair: tuple[int, int],
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    dependent_story_id, prerequisite_story_id = pair
+    edge = session.exec(
+        select(UserStoryDependency)
+        .where(UserStoryDependency.product_id == project_id)
+        .where(UserStoryDependency.dependent_story_id == dependent_story_id)
+        .where(UserStoryDependency.prerequisite_story_id == prerequisite_story_id)
+    ).first()
+    if edge is None:
+        edge = UserStoryDependency(
+            product_id=project_id,
+            dependent_story_id=dependent_story_id,
+            prerequisite_story_id=prerequisite_story_id,
+        )
+    edge.status = status
+    edge.source = "manual_review"
+    edge.confidence = "reviewed"
+    edge.reason = reason
+    edge.updated_at = datetime.now(UTC)
+    session.add(edge)
+    session.flush()
+    return _dependency_edge_summary(edge)
+
+
+def _dependency_edge_summary(edge: UserStoryDependency) -> dict[str, Any]:
+    return {
+        "dependent_story_id": edge.dependent_story_id,
+        "prerequisite_story_id": edge.prerequisite_story_id,
+        "reason": edge.reason,
+        "source": edge.source,
+        "confidence": edge.confidence,
+    }
+
+
+def _dependency_propose_event_metadata(
+    *,
+    artifact: dict[str, Any],
+    idempotency_key: str,
+    project_id: int,
+) -> dict[str, Any]:
+    edge_ids = [
+        edge["dependency_id"]
+        for edge in artifact.get("edges", [])
+        if isinstance(edge, dict) and edge.get("dependency_id") is not None
+    ]
+    return {
+        "action": "story_dependencies_proposed",
+        "idempotency_key": idempotency_key,
+        "attempt_id": artifact["attempt_id"],
+        "artifact_fingerprint": artifact["artifact_fingerprint"],
+        "project_id": project_id,
+        "proposed_edge_count": artifact["proposed_edge_count"],
+        "active_edge_count": artifact["active_edge_count"],
+        "cycle_count": artifact["cycle_count"],
+        "edge_ids": edge_ids,
+    }
+
+
+def _dependency_apply_event_metadata(
+    *,
+    payload: dict[str, Any],
+    idempotency_key: str,
+    project_id: int,
+) -> dict[str, Any]:
+    return {
+        "action": "story_dependencies_applied",
+        "idempotency_key": idempotency_key,
+        "attempt_id": payload["attempt_id"],
+        "artifact_fingerprint": payload["artifact_fingerprint"],
+        "project_id": project_id,
+        "activated_edges": payload["activated_edges"],
+        "rejected_edges": payload["rejected_edges"],
+        "active_edge_count": payload["active_edge_count"],
+        "rejected_edge_count": payload["rejected_edge_count"],
+        "cycle_count_after_apply": payload["cycle_count_after_apply"],
+    }
 
 
 def _now_iso() -> str:

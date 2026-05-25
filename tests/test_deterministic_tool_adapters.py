@@ -298,6 +298,9 @@ async def test_sprint_adapter_injects_refined_candidates_from_state(
             "story_points": 3,
             "evaluated_invariant_ids": [],
             "story_compliance_boundary_summaries": [],
+            "prerequisite_story_ids": [],
+            "blocked_by_story_ids": [],
+            "dependency_status": "ready",
         }
     ]
 

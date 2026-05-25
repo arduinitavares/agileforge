@@ -364,6 +364,32 @@ class _Application(Protocol):
         """Backfill Story planning metadata before Sprint work starts."""
         ...
 
+    def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
+        """Inspect Story dependency graph."""
+        ...
+
+    def story_dependencies_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Create a Story dependency proposal artifact."""
+        ...
+
+    def story_dependencies_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Apply a reviewed Story dependency proposal artifact."""
+        ...
+
     def sprint_candidates(self, *, project_id: int) -> JsonObject:
         """Return sprint candidate projection."""
         ...
@@ -1001,6 +1027,42 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_repair.add_argument("--expected-state", required=True)
     story_repair.add_argument("--idempotency-key", required=True)
     story_repair.set_defaults(command_handler=_story_repair_readiness)
+    story_dependencies = story_sub.add_parser(
+        "dependencies",
+        help="Inspect and review Story dependency edges.",
+    )
+    story_dependencies_sub = story_dependencies.add_subparsers(
+        dest="dependency_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    story_dependencies_inspect = story_dependencies_sub.add_parser(
+        "inspect",
+        help="Inspect active and proposed Story dependency edges.",
+    )
+    story_dependencies_inspect.add_argument("--project-id", type=int, required=True)
+    story_dependencies_inspect.set_defaults(command_handler=_story_dependencies_inspect)
+    story_dependencies_propose = story_dependencies_sub.add_parser(
+        "propose",
+        help="Create a reviewed Story dependency proposal artifact.",
+    )
+    story_dependencies_propose.add_argument("--project-id", type=int, required=True)
+    story_dependencies_propose.add_argument("--expected-state", required=True)
+    story_dependencies_propose.add_argument("--idempotency-key", required=True)
+    story_dependencies_propose.set_defaults(command_handler=_story_dependencies_propose)
+    story_dependencies_apply = story_dependencies_sub.add_parser(
+        "apply",
+        help="Apply a reviewed Story dependency proposal artifact.",
+    )
+    story_dependencies_apply.add_argument("--project-id", type=int, required=True)
+    story_dependencies_apply.add_argument("--attempt-id", required=True)
+    story_dependencies_apply.add_argument(
+        "--expected-artifact-fingerprint",
+        required=True,
+    )
+    story_dependencies_apply.add_argument("--expected-state", required=True)
+    story_dependencies_apply.add_argument("--idempotency-key", required=True)
+    story_dependencies_apply.set_defaults(command_handler=_story_dependencies_apply)
 
     sprint = subparsers.add_parser("sprint", help="Inspect sprint planning inputs.")
     sprint_sub = sprint.add_subparsers(
@@ -2097,6 +2159,49 @@ def _story_repair_readiness(
         project_id=args.project_id,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_dependencies_inspect(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story dependency inspect to the application facade."""
+    return (
+        "agileforge story dependencies inspect",
+        application.story_dependencies_inspect(project_id=args.project_id),
+    )
+
+
+def _story_dependencies_propose(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story dependency propose to the application facade."""
+    return (
+        "agileforge story dependencies propose",
+        application.story_dependencies_propose(
+            project_id=args.project_id,
+            expected_state=args.expected_state,
+            idempotency_key=args.idempotency_key,
+        ),
+    )
+
+
+def _story_dependencies_apply(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story dependency apply to the application facade."""
+    return (
+        "agileforge story dependencies apply",
+        application.story_dependencies_apply(
+            project_id=args.project_id,
+            attempt_id=args.attempt_id,
+            expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+            expected_state=args.expected_state,
+            idempotency_key=args.idempotency_key,
+        ),
     )
 
 

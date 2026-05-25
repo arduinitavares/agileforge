@@ -356,6 +356,24 @@ def test_phase1_cli_drives_real_application_facade(
             lambda data: (
                 data["next_valid_commands"]
                 == [
+                    (
+                        "agileforge story dependencies inspect "
+                        f"--project-id {project_id}"
+                    ),
+                    (
+                        "agileforge story dependencies propose "
+                        f"--project-id {project_id} "
+                        "--expected-state SPRINT_SETUP "
+                        "--idempotency-key <idempotency_key>"
+                    ),
+                    (
+                        "agileforge story dependencies apply "
+                        f"--project-id {project_id} "
+                        "--attempt-id <attempt_id> "
+                        "--expected-artifact-fingerprint <artifact_fingerprint> "
+                        "--expected-state SPRINT_SETUP "
+                        "--idempotency-key <idempotency_key>"
+                    ),
                     f"agileforge sprint candidates --project-id {project_id}",
                     f"agileforge sprint generate --project-id {project_id}",
                 ]

@@ -6,7 +6,7 @@ Tests the query tools used by the orchestrator agent.
 
 from sqlmodel import Session
 
-from agile_sqlmodel import Product, StoryStatus, UserStory
+from agile_sqlmodel import Product, StoryStatus, UserStory, UserStoryDependency
 from tests.typing_helpers import make_tool_context
 from tools.orchestrator_tools import (
     count_projects,
@@ -301,6 +301,122 @@ def test_fetch_sprint_candidates_only_refined_todo(session: Session) -> None:
     assert result["stories"][0]["story_title"] == "Refined Story"
     assert result["stories"][0]["priority"] == 2  # noqa: PLR2004
     assert result["stories"][0]["persona"] == "Document Reviewer"
+
+
+def test_fetch_sprint_candidates_includes_dependency_metadata(
+    session: Session,
+) -> None:
+    """Sprint candidates expose active story dependency metadata."""
+    session.add(Product(product_id=22, name="Sprint Dependency Project"))
+    prerequisite = UserStory(
+        product_id=22,
+        title="Capture market data",
+        status=StoryStatus.TO_DO,
+        rank="101",
+        story_points=2,
+        is_refined=True,
+        is_superseded=False,
+        story_origin="refined",
+    )
+    dependent = UserStory(
+        product_id=22,
+        title="Generate recommendation",
+        status=StoryStatus.TO_DO,
+        rank="102",
+        story_points=3,
+        is_refined=True,
+        is_superseded=False,
+        story_origin="refined",
+    )
+    session.add(prerequisite)
+    session.add(dependent)
+    session.commit()
+    session.refresh(prerequisite)
+    session.refresh(dependent)
+    assert prerequisite.story_id is not None
+    assert dependent.story_id is not None
+    session.add(
+        UserStoryDependency(
+            product_id=22,
+            dependent_story_id=dependent.story_id,
+            prerequisite_story_id=prerequisite.story_id,
+            status="active",
+        )
+    )
+    session.commit()
+
+    result = fetch_sprint_candidates(22)
+
+    assert result["success"] is True
+    by_title = {story["story_title"]: story for story in result["stories"]}
+    assert by_title["Generate recommendation"]["prerequisite_story_ids"] == [
+        prerequisite.story_id
+    ]
+    assert by_title["Generate recommendation"]["blocked_by_story_ids"] == [
+        prerequisite.story_id
+    ]
+    assert by_title["Generate recommendation"]["dependency_status"] == "blocked"
+    assert by_title["Capture market data"]["dependency_status"] == "ready"
+
+
+def test_fetch_sprint_candidates_blocks_active_dependency_cycle(
+    session: Session,
+) -> None:
+    """Sprint candidates fail readiness when active dependency graph cycles."""
+    session.add(Product(product_id=23, name="Sprint Cycle Project"))
+    first = UserStory(
+        product_id=23,
+        title="First",
+        status=StoryStatus.TO_DO,
+        rank="101",
+        story_points=2,
+        is_refined=True,
+        is_superseded=False,
+        story_origin="refined",
+    )
+    second = UserStory(
+        product_id=23,
+        title="Second",
+        status=StoryStatus.TO_DO,
+        rank="102",
+        story_points=3,
+        is_refined=True,
+        is_superseded=False,
+        story_origin="refined",
+    )
+    session.add(first)
+    session.add(second)
+    session.commit()
+    session.refresh(first)
+    session.refresh(second)
+    assert first.story_id is not None
+    assert second.story_id is not None
+    session.add(
+        UserStoryDependency(
+            product_id=23,
+            dependent_story_id=first.story_id,
+            prerequisite_story_id=second.story_id,
+            status="active",
+        )
+    )
+    session.add(
+        UserStoryDependency(
+            product_id=23,
+            dependent_story_id=second.story_id,
+            prerequisite_story_id=first.story_id,
+            status="active",
+        )
+    )
+    session.commit()
+
+    result = fetch_sprint_candidates(23)
+
+    assert result["success"] is True
+    assert result["readiness"]["status"] == "blocked"
+    assert "STORY_DEPENDENCY_CYCLE" in result["readiness"]["blocking_codes"]
+    assert result["readiness"]["dependency_cycle_paths"] == [
+        [first.story_id, second.story_id, first.story_id]
+    ]
 
 
 def test_fetch_product_backlog_exposes_refinement_flags(session: Session) -> None:

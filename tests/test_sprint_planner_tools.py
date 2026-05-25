@@ -180,10 +180,7 @@ def test_save_sprint_plan_creates_records(session: Session) -> None:
 
     tasks = session.exec(select(Task)).all()
     assert len(tasks) == 2  # noqa: PLR2004
-    metadata_by_description = {
-        task.description: _task_metadata(task)
-        for task in tasks
-    }
+    metadata_by_description = {task.description: _task_metadata(task) for task in tasks}
     assert metadata_by_description["Create auth table"].task_kind == "implementation"
     assert metadata_by_description["Create auth table"].artifact_targets == [
         "auth schema"
@@ -785,6 +782,8 @@ def test_fetch_sprint_candidates_reports_blocked_readiness_for_unsized_rows(
             "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
         ],
         "blocking_story_ids": [unsized.story_id],
+        "dependency_issue_count": 0,
+        "dependency_cycle_paths": [],
     }
 
 

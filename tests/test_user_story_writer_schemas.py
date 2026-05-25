@@ -42,6 +42,52 @@ class TestUserStoryItem:
         assert item.invest_score == "High"
         assert item.decomposition_warning is None
 
+    def test_accepts_dependency_candidate(self) -> None:
+        """Verify user story items can propose dependency candidates."""
+        item = UserStoryItem(
+            story_title="Generate recommendation",
+            statement=(
+                "As a manager, I want a generated recommendation, "
+                "so that I can choose a squad before lock."
+            ),
+            acceptance_criteria=["Verify recommendation uses captured market data."],
+            invest_score="High",
+            estimated_effort="M",
+            dependency_candidates=[
+                {
+                    "prerequisite_ref": "Capture market data",
+                    "reason": "Recommendation needs market data before generation.",
+                    "confidence": "explicit",
+                }
+            ],
+        )
+
+        assert item.dependency_candidates[0].prerequisite_ref == "Capture market data"
+        assert item.dependency_candidates[0].confidence == "explicit"
+
+    def test_rejects_invalid_dependency_candidate_confidence(self) -> None:
+        """Verify dependency candidate confidence is closed-set."""
+        with pytest.raises(ValidationError):
+            UserStoryItem(
+                story_title="Generate recommendation",
+                statement=(
+                    "As a manager, I want a generated recommendation, "
+                    "so that I can choose a squad before lock."
+                ),
+                acceptance_criteria=[
+                    "Verify recommendation uses captured market data."
+                ],
+                invest_score="High",
+                estimated_effort="M",
+                dependency_candidates=[
+                    {
+                        "prerequisite_ref": "Capture market data",
+                        "reason": "Recommendation needs market data first.",
+                        "confidence": "maybe",
+                    }
+                ],
+            )
+
     def test_valid_medium_score_item(self) -> None:
         """Verify valid medium score item."""
         item = UserStoryItem(

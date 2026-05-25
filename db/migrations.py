@@ -26,7 +26,7 @@ from utils.task_metadata import canonical_task_metadata_json
 logger = logging.getLogger(__name__)
 
 AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "3"
-REVIEW_KEY_COLUMN = "review_" "token"
+REVIEW_KEY_COLUMN = "review_token"
 
 
 def _get_existing_tables(engine: Engine) -> set[str]:
@@ -962,6 +962,78 @@ def migrate_user_story_refinement_linkage(engine: Engine) -> list[str]:
 
 
 # =============================================================================
+# USER STORY DEPENDENCIES MIGRATION
+# =============================================================================
+
+USER_STORY_DEPENDENCIES_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS user_story_dependencies (
+    dependency_id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(product_id) ON DELETE CASCADE,
+    dependent_story_id INTEGER NOT NULL
+        REFERENCES user_stories(story_id) ON DELETE CASCADE,
+    prerequisite_story_id INTEGER NOT NULL
+        REFERENCES user_stories(story_id) ON DELETE CASCADE,
+    status VARCHAR NOT NULL DEFAULT 'proposed',
+    source VARCHAR NOT NULL DEFAULT 'story_writer',
+    confidence VARCHAR NOT NULL DEFAULT 'inferred',
+    reason TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_user_story_dependency_edge
+        UNIQUE (product_id, dependent_story_id, prerequisite_story_id),
+    CONSTRAINT ck_user_story_dependencies_not_self
+        CHECK (dependent_story_id <> prerequisite_story_id),
+    CONSTRAINT ck_user_story_dependencies_status
+        CHECK (status IN ('proposed', 'active', 'rejected')),
+    CONSTRAINT ck_user_story_dependencies_source
+        CHECK (source IN ('story_writer', 'dependency_repair', 'manual_review')),
+    CONSTRAINT ck_user_story_dependencies_confidence
+        CHECK (confidence IN ('explicit', 'inferred', 'reviewed'))
+)
+"""
+
+
+def migrate_user_story_dependencies(engine: Engine) -> list[str]:
+    """Ensure story dependency edge storage exists."""
+    actions: list[str] = []
+
+    if _ensure_table_exists(
+        engine,
+        "user_story_dependencies",
+        USER_STORY_DEPENDENCIES_CREATE_SQL,
+    ):
+        actions.append("created table: user_story_dependencies")
+
+    if _ensure_index_exists(
+        engine,
+        "user_story_dependencies",
+        "ix_user_story_dependencies_product_status",
+        ["product_id", "status"],
+    ):
+        actions.append("created index: ix_user_story_dependencies_product_status")
+
+    if _ensure_index_exists(
+        engine,
+        "user_story_dependencies",
+        "ix_user_story_dependencies_dependent_story_id",
+        ["dependent_story_id"],
+    ):
+        actions.append("created index: ix_user_story_dependencies_dependent_story_id")
+
+    if _ensure_index_exists(
+        engine,
+        "user_story_dependencies",
+        "ix_user_story_dependencies_prerequisite_story_id",
+        ["prerequisite_story_id"],
+    ):
+        actions.append(
+            "created index: ix_user_story_dependencies_prerequisite_story_id"
+        )
+
+    return actions
+
+
+# =============================================================================
 # SPRINT LIFECYCLE MIGRATION
 # =============================================================================
 
@@ -1215,6 +1287,7 @@ def ensure_schema_current(engine: Engine) -> None:
         actions = migrate_spec_authority_tables(engine)
         actions.extend(migrate_product_spec_cache(engine))
         actions.extend(migrate_user_story_refinement_linkage(engine))
+        actions.extend(migrate_user_story_dependencies(engine))
         actions.extend(migrate_sprint_lifecycle(engine))
         actions.extend(migrate_task_metadata(engine))
         actions.extend(migrate_task_execution_logs(engine))

@@ -104,6 +104,9 @@ def test_input_schema_accepts_optional_fields() -> None:
                 "story_points": 3,
                 "parent_group": 1,
                 "group_slot": 1,
+                "prerequisite_story_ids": [],
+                "blocked_by_story_ids": [],
+                "dependency_status": "ready",
                 "evaluated_invariant_ids": ["INV-123"],
                 "story_compliance_boundary_summaries": ["Must log in"],
             }
@@ -119,6 +122,7 @@ def test_input_schema_accepts_optional_fields() -> None:
     assert model.include_task_decomposition is False
     assert model.available_stories[0].parent_group == 1
     assert model.available_stories[0].group_slot == 1
+    assert model.available_stories[0].dependency_status == "ready"
 
 
 def test_input_schema_requires_duration_days() -> None:

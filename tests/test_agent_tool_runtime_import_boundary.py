@@ -129,7 +129,7 @@ def test_user_story_writer_tool_imports_runtime_surfaces_from_models_packages() 
         {"Product", "UserStory", "get_engine", "WorkflowEvent", "WorkflowEventType"},
     )
 
-    assert core_imports == {"Product", "UserStory"}
+    assert core_imports == {"Product", "UserStory", "UserStoryDependency"}
     assert "get_engine" in db_imports
     assert "WorkflowEvent" in event_imports
     assert "WorkflowEventType" in enum_imports

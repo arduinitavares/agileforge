@@ -578,6 +578,48 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge story dependencies inspect",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge story dependencies propose",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=("project_id", "expected_state", "idempotency_key"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge story dependencies apply",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=(
+            "project_id",
+            "attempt_id",
+            "expected_artifact_fingerprint",
+            "expected_state",
+            "idempotency_key",
+        ),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge sprint generate",
         mutates=True,
         phase="phase_2d",

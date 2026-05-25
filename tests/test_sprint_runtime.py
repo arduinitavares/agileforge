@@ -297,6 +297,61 @@ def test_load_sprint_candidates_preserves_readiness_from_fetcher() -> None:
     }
 
 
+def test_prepare_sprint_input_preserves_dependency_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint planner input keeps dependency metadata from candidates."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Capture market data",
+                    "priority": 101,
+                    "story_points": 2,
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                    "dependency_status": "ready",
+                },
+                {
+                    "story_id": 12,
+                    "story_title": "Generate recommendation",
+                    "priority": 102,
+                    "story_points": 3,
+                    "prerequisite_story_ids": [11],
+                    "blocked_by_story_ids": [11],
+                    "dependency_status": "blocked",
+                },
+            ],
+            "readiness": {"status": "ready", "blocking_codes": []},
+        }
+
+    monkeypatch.setattr(
+        sprint_input,
+        "fetch_sprint_candidates",
+        fake_fetch_sprint_candidates,
+    )
+
+    result = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=None,
+        include_task_decomposition=True,
+    )
+
+    assert result["success"] is True
+    stories = result["input_context"]["available_stories"]
+    assert stories[1]["prerequisite_story_ids"] == [11]
+    assert stories[1]["blocked_by_story_ids"] == [11]
+    assert stories[1]["dependency_status"] == "blocked"
+
+
 @pytest.mark.asyncio
 async def test_runtime_and_adapter_build_matching_sprint_input(
     monkeypatch: pytest.MonkeyPatch,
@@ -389,6 +444,9 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
                 "story_compliance_boundary_summaries": [],
                 "parent_group": None,
                 "group_slot": None,
+                "prerequisite_story_ids": [],
+                "blocked_by_story_ids": [],
+                "dependency_status": "ready",
             }
         ],
         "team_velocity_assumption": "High",

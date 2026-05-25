@@ -541,6 +541,56 @@ Story save persists Sprint planning metadata:
 Refined child story rank is derived from Roadmap parent order plus child slot.
 For example, the first child of the second Roadmap item receives rank `201`.
 
+### Reviewing Story Dependencies
+
+Story generation can propose prerequisite edges, but they are not active truth
+until reviewed and applied. Inspect first:
+
+```sh
+agileforge story dependencies inspect \
+  --project-id "$PROJECT_ID" \
+  > story-dependencies-inspect.json
+```
+
+Create a guarded dependency review artifact from proposed edges plus
+deterministic same-requirement slot hints:
+
+```sh
+agileforge story dependencies propose \
+  --project-id "$PROJECT_ID" \
+  --expected-state SPRINT_SETUP \
+  --idempotency-key "dep-propose-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > story-dependencies-propose.json
+```
+
+Review `data.edges`, `data.cycle_count`, and `data.artifact_fingerprint`. Apply
+only the exact reviewed attempt:
+
+```sh
+ATTEMPT_ID="$(python - <<'PY'
+import json
+print(json.load(open("story-dependencies-propose.json"))["data"]["attempt_id"])
+PY
+)"
+ARTIFACT_FINGERPRINT="$(python - <<'PY'
+import json
+print(json.load(open("story-dependencies-propose.json"))["data"]["artifact_fingerprint"])
+PY
+)"
+
+agileforge story dependencies apply \
+  --project-id "$PROJECT_ID" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state SPRINT_SETUP \
+  --idempotency-key "dep-apply-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > story-dependencies-apply.json
+```
+
+`inspect`, `propose`, and `apply` are allowed in `STORY_PERSISTENCE`,
+`SPRINT_SETUP`, and `SPRINT_DRAFT` so a bad graph cannot deadlock Sprint
+planning. Active cycles still block Sprint candidate readiness until resolved.
+
 ### Repairing Story Readiness Before Sprint
 
 Use this when refined stories were saved before AgileForge persisted
@@ -594,7 +644,8 @@ agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
 
 Do not generate a Sprint while `data.readiness.status` is `blocked`. Resolve the
 reported blockers first; Sprint generation fails closed when candidates are
-unsized or still carry default priority.
+unsized, still carry default priority, or contain active dependency graph
+errors such as `STORY_DEPENDENCY_CYCLE`.
 
 Generate a Sprint draft from the reviewed candidate set:
 
@@ -911,13 +962,17 @@ agileforge story save --project-id 1 --parent-requirement "Roadmap requirement" 
 agileforge story complete --project-id 1 --expected-state STORY_PERSISTENCE --idempotency-key complete-story-001
 agileforge story reopen --project-id 1 --parent-requirement "Roadmap requirement" --expected-state SPRINT_SETUP --idempotency-key reopen-story-001
 agileforge story repair-readiness --project-id 1 --expected-state SPRINT_SETUP --idempotency-key repair-story-readiness-001
+agileforge story dependencies inspect --project-id 1
+agileforge story dependencies propose --project-id 1 --expected-state SPRINT_SETUP --idempotency-key dep-propose-001
+agileforge story dependencies apply --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state SPRINT_SETUP --idempotency-key dep-apply-001
 ```
 
-`story show`, `story pending`, and `story history` are read-only. `story
-generate`, `story retry`, `story save`, `story complete`, `story reopen`, and
-`story repair-readiness` mutate workflow state. Save, complete, reopen, and
-repair-readiness are guarded and require
-explicit idempotency keys.
+`story show`, `story pending`, `story history`, and `story dependencies inspect`
+are read-only. `story generate`, `story retry`, `story save`, `story complete`,
+`story reopen`, `story repair-readiness`, `story dependencies propose`, and
+`story dependencies apply` mutate workflow state. Save, complete, reopen,
+repair-readiness, dependency propose, and dependency apply are guarded and
+require explicit idempotency keys.
 
 ### Sprint Commands
 

@@ -12,7 +12,7 @@ from google.adk.tools import ToolContext
 from pydantic import BaseModel, Field, ValidationError
 from sqlmodel import Session, select
 
-from models.core import Product, UserStory
+from models.core import Product, UserStory, UserStoryDependency
 from models.db import get_engine
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
@@ -21,7 +21,7 @@ from orchestrator_agent.agent_tools.story_linkage import (
     title_changed_significantly,
 )
 
-from .schemes import UserStoryItem
+from .schemes import StoryDependencyCandidate, UserStoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,9 @@ class SaveStoriesInput(BaseModel):
 
     idempotency_key: Annotated[
         str,
-        Field(description="Stable key used to safely replay the same persistence call."),
+        Field(
+            description="Stable key used to safely replay the same persistence call."
+        ),
     ]
     product_id: Annotated[
         int,
@@ -89,6 +91,7 @@ _EFFORT_TO_STORY_POINTS: dict[str, int] = {
     "XL": 8,
 }
 _RANK_CHILD_SCALE = 100
+_SLOT_REF_PATTERN = re.compile(r"^(?P<requirement>.+)#(?:slot[-_ ]*)?(?P<slot>\d+)$")
 
 
 def _story_points_from_effort(estimated_effort: str) -> int:
@@ -220,7 +223,10 @@ def _story_replacement_blockers(stories: list[UserStory]) -> list[dict[str, Any]
         if len(story.sprints or []) > 0:
             reasons.append("linked_sprint")
         status_value = getattr(story.status, "value", story.status)
-        if story.status != StoryStatus.TO_DO and status_value != StoryStatus.TO_DO.value:
+        if (
+            story.status != StoryStatus.TO_DO
+            and status_value != StoryStatus.TO_DO.value
+        ):
             reasons.append("status_progressed")
         if reasons:
             blockers.append(
@@ -271,6 +277,19 @@ def _active_stories_for_requirement(
     ).all()
 
 
+def _active_stories_for_product(
+    session: Session,
+    *,
+    product_id: int,
+) -> list[UserStory]:
+    return session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == product_id)
+        .where(UserStory.is_superseded == False)  # noqa: E712
+        .order_by(UserStory.source_requirement, UserStory.refinement_slot)
+    ).all()
+
+
 def _replay_response(
     *,
     input_data: SaveStoriesInput,
@@ -291,6 +310,8 @@ def _replay_response(
         "created_story_ids": metadata.get("created_story_ids", []),
         "superseded_story_ids": metadata.get("superseded_story_ids", []),
         "story_ids": metadata.get("story_ids", []),
+        "dependency_proposed_count": metadata.get("dependency_proposed_count", 0),
+        "dependency_warnings": metadata.get("dependency_warnings", []),
         "message": f"Replayed previous save for '{input_data.parent_requirement}'.",
     }
 
@@ -378,13 +399,14 @@ def _upsert_refined_story(  # noqa: PLR0913
     return story_id, "created"
 
 
-def _story_save_metadata(
+def _story_save_metadata(  # noqa: PLR0913
     *,
     input_data: SaveStoriesInput,
     request_identity: dict[str, str],
     updated_ids: list[int],
     created_ids: list[int],
     superseded_ids: list[int],
+    story_ids_by_slot: list[dict[str, int]],
 ) -> dict[str, Any]:
     return {
         "parent_requirement": input_data.parent_requirement,
@@ -397,6 +419,7 @@ def _story_save_metadata(
         "updated_story_ids": updated_ids,
         "created_story_ids": created_ids,
         "story_ids": sorted(updated_ids + created_ids),
+        "story_ids_by_slot": story_ids_by_slot,
         "superseded_story_ids": superseded_ids,
     }
 
@@ -420,6 +443,8 @@ def _success_response(
         "created_story_ids": metadata["created_story_ids"],
         "superseded_story_ids": metadata["superseded_story_ids"],
         "story_ids": metadata["story_ids"],
+        "dependency_proposed_count": metadata.get("dependency_proposed_count", 0),
+        "dependency_warnings": metadata.get("dependency_warnings", []),
         "message": (
             f"{metadata['saved_count']} user stories saved for "
             f"'{input_data.parent_requirement}'."
@@ -438,6 +463,7 @@ def _persist_validated_stories(
     created_ids: list[int] = []
     updated_ids: list[int] = []
     superseded_ids: list[int] = []
+    story_ids_by_slot: list[dict[str, int]] = []
     existing_by_slot = {
         story.refinement_slot: story
         for story in existing_active
@@ -460,6 +486,7 @@ def _persist_validated_stories(
         )
         target = created_ids if action == "created" else updated_ids
         target.append(story_id)
+        story_ids_by_slot.append({"slot": idx, "story_id": story_id})
 
     active_slots = set(range(1, len(validated) + 1))
     for story in existing_active:
@@ -490,6 +517,305 @@ def _persist_validated_stories(
         updated_ids=updated_ids,
         created_ids=created_ids,
         superseded_ids=superseded_ids,
+        story_ids_by_slot=story_ids_by_slot,
+    )
+
+
+def _dependency_candidate_failure_response(
+    *,
+    input_data: SaveStoriesInput,
+    code: str,
+    story_id: int,
+    candidate: StoryDependencyCandidate,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "error_code": code,
+        "error": message,
+        "story_id": story_id,
+        "prerequisite_ref": candidate.prerequisite_ref,
+        "confidence": candidate.confidence,
+    }
+
+
+def _dependency_candidate_warning(
+    *,
+    code: str,
+    story_id: int,
+    candidate: StoryDependencyCandidate,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "message": message,
+        "story_id": story_id,
+        "prerequisite_ref": candidate.prerequisite_ref,
+        "confidence": candidate.confidence,
+    }
+
+
+def _resolve_dependency_candidate(
+    *,
+    candidate: StoryDependencyCandidate,
+    active_stories: list[UserStory],
+    normalized_req: str,
+    dependent_slot: int | None,
+) -> list[UserStory]:
+    ref = candidate.prerequisite_ref.strip()
+    if ref.isdigit():
+        story_id = int(ref)
+        return [story for story in active_stories if story.story_id == story_id]
+
+    normalized_ref = normalize_requirement_key(ref)
+    title_matches = [
+        story
+        for story in active_stories
+        if normalize_requirement_key(story.title) == normalized_ref
+    ]
+    if title_matches:
+        return title_matches
+
+    slot_match = _SLOT_REF_PATTERN.match(ref)
+    if slot_match:
+        requirement_key = normalize_requirement_key(slot_match.group("requirement"))
+        slot = int(slot_match.group("slot"))
+        slot_matches = [
+            story
+            for story in active_stories
+            if story.source_requirement == requirement_key
+            and story.refinement_slot == slot
+        ]
+        if slot_matches:
+            return slot_matches
+
+    if normalized_ref == normalized_req and dependent_slot is not None:
+        return [
+            story
+            for story in active_stories
+            if story.source_requirement == normalized_req
+            and story.refinement_slot is not None
+            and story.refinement_slot < dependent_slot
+        ]
+
+    return []
+
+
+def _purge_stale_story_writer_proposals(
+    session: Session,
+    *,
+    product_id: int,
+    story_ids: list[int],
+) -> int:
+    if not story_ids:
+        return 0
+    stale_edges = session.exec(
+        select(UserStoryDependency)
+        .where(UserStoryDependency.product_id == product_id)
+        .where(UserStoryDependency.dependent_story_id.in_(story_ids))
+        .where(UserStoryDependency.status == "proposed")
+        .where(UserStoryDependency.source == "story_writer")
+    ).all()
+    for edge in stale_edges:
+        session.delete(edge)
+    session.flush()
+    return len(stale_edges)
+
+
+def _dependency_edges_by_pair(
+    session: Session,
+    *,
+    product_id: int,
+) -> dict[tuple[int, int], UserStoryDependency]:
+    rows = session.exec(
+        select(UserStoryDependency).where(UserStoryDependency.product_id == product_id)
+    ).all()
+    return {
+        (edge.dependent_story_id, edge.prerequisite_story_id): edge for edge in rows
+    }
+
+
+def _persist_dependency_candidates(  # noqa: PLR0912, PLR0915
+    session: Session,
+    *,
+    input_data: SaveStoriesInput,
+    normalized_req: str,
+    validated: list[UserStoryItem],
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    slot_to_story_id = {
+        item["slot"]: item["story_id"] for item in metadata.get("story_ids_by_slot", [])
+    }
+    current_story_ids = list(slot_to_story_id.values())
+    purged_count = _purge_stale_story_writer_proposals(
+        session,
+        product_id=input_data.product_id,
+        story_ids=current_story_ids,
+    )
+    active_stories = _active_stories_for_product(
+        session,
+        product_id=input_data.product_id,
+    )
+    existing_edges = _dependency_edges_by_pair(
+        session,
+        product_id=input_data.product_id,
+    )
+    warnings: list[dict[str, Any]] = []
+    proposed_count = 0
+
+    for slot, item in enumerate(validated, start=1):
+        story_id = slot_to_story_id.get(slot)
+        if story_id is None:
+            continue
+        for candidate in item.dependency_candidates:
+            try:
+                matches = _resolve_dependency_candidate(
+                    candidate=candidate,
+                    active_stories=active_stories,
+                    normalized_req=normalized_req,
+                    dependent_slot=slot,
+                )
+            except (AttributeError, ValueError) as exc:
+                message = f"Could not resolve dependency candidate: {exc}"
+                if candidate.confidence == "explicit":
+                    return (
+                        _dependency_candidate_failure_response(
+                            input_data=input_data,
+                            code="STORY_DEPENDENCY_CANDIDATE_RESOLUTION_FAILED",
+                            story_id=story_id,
+                            candidate=candidate,
+                            message=message,
+                        ),
+                        {},
+                    )
+                warnings.append(
+                    _dependency_candidate_warning(
+                        code="STORY_DEPENDENCY_CANDIDATE_RESOLUTION_FAILED",
+                        story_id=story_id,
+                        candidate=candidate,
+                        message=message,
+                    )
+                )
+                continue
+
+            if not matches:
+                message = "Dependency candidate did not resolve to an active story."
+                if candidate.confidence == "explicit":
+                    return (
+                        _dependency_candidate_failure_response(
+                            input_data=input_data,
+                            code="STORY_DEPENDENCY_CANDIDATE_UNRESOLVED",
+                            story_id=story_id,
+                            candidate=candidate,
+                            message=message,
+                        ),
+                        {},
+                    )
+                warnings.append(
+                    _dependency_candidate_warning(
+                        code="STORY_DEPENDENCY_CANDIDATE_UNRESOLVED",
+                        story_id=story_id,
+                        candidate=candidate,
+                        message=message,
+                    )
+                )
+                continue
+
+            if len(matches) > 1:
+                message = "Dependency candidate resolved to multiple active stories."
+                if candidate.confidence == "explicit":
+                    return (
+                        _dependency_candidate_failure_response(
+                            input_data=input_data,
+                            code="STORY_DEPENDENCY_CANDIDATE_AMBIGUOUS",
+                            story_id=story_id,
+                            candidate=candidate,
+                            message=message,
+                        ),
+                        {},
+                    )
+                warnings.append(
+                    _dependency_candidate_warning(
+                        code="STORY_DEPENDENCY_CANDIDATE_AMBIGUOUS",
+                        story_id=story_id,
+                        candidate=candidate,
+                        message=message,
+                    )
+                )
+                continue
+
+            prerequisite_story_id = matches[0].story_id
+            if prerequisite_story_id is None:
+                continue
+            if prerequisite_story_id == story_id:
+                message = "Dependency candidate resolves to the same story."
+                if candidate.confidence == "explicit":
+                    return (
+                        _dependency_candidate_failure_response(
+                            input_data=input_data,
+                            code="STORY_DEPENDENCY_CANDIDATE_SELF_EDGE",
+                            story_id=story_id,
+                            candidate=candidate,
+                            message=message,
+                        ),
+                        {},
+                    )
+                warnings.append(
+                    _dependency_candidate_warning(
+                        code="STORY_DEPENDENCY_CANDIDATE_SELF_EDGE",
+                        story_id=story_id,
+                        candidate=candidate,
+                        message=message,
+                    )
+                )
+                continue
+
+            pair = (story_id, prerequisite_story_id)
+            existing_edge = existing_edges.get(pair)
+            if existing_edge is not None and existing_edge.status == "active":
+                warnings.append(
+                    _dependency_candidate_warning(
+                        code="STORY_DEPENDENCY_CANDIDATE_ALREADY_ACTIVE",
+                        story_id=story_id,
+                        candidate=candidate,
+                        message="Dependency candidate is already active.",
+                    )
+                )
+                continue
+            if existing_edge is not None:
+                existing_edge.status = "proposed"
+                existing_edge.source = "story_writer"
+                existing_edge.confidence = candidate.confidence
+                existing_edge.reason = candidate.reason
+                existing_edge.updated_at = datetime.now(UTC)
+                session.add(existing_edge)
+                proposed_count += 1
+                continue
+
+            edge = UserStoryDependency(
+                product_id=input_data.product_id,
+                dependent_story_id=story_id,
+                prerequisite_story_id=prerequisite_story_id,
+                status="proposed",
+                source="story_writer",
+                confidence=candidate.confidence,
+                reason=candidate.reason,
+            )
+            session.add(edge)
+            existing_edges[pair] = edge
+            proposed_count += 1
+
+    session.flush()
+    return (
+        None,
+        {
+            "dependency_proposed_count": proposed_count,
+            "dependency_purged_stale_count": purged_count,
+            "dependency_warnings": warnings,
+        },
     )
 
 
@@ -523,7 +849,7 @@ def _store_story_context(
     }
 
 
-def save_stories_tool(
+def save_stories_tool(  # noqa: PLR0911
     input_data: SaveStoriesInput,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
@@ -604,6 +930,16 @@ def save_stories_tool(
             validated=validated,
             existing_active=existing_active,
         )
+        dependency_failure, dependency_metadata = _persist_dependency_candidates(
+            session,
+            input_data=input_data,
+            normalized_req=normalized_req,
+            validated=validated,
+            metadata=metadata,
+        )
+        if dependency_failure is not None:
+            return dependency_failure
+        metadata.update(dependency_metadata)
         duration_seconds = _story_refinement_duration(
             tool_context=tool_context,
             start_ts=start_ts,
