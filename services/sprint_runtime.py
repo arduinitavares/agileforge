@@ -83,6 +83,7 @@ class _PreparedSprintPayload:
 
     input_context: SprintInputContext
     payload: SprintPlannerInput
+    selection_policy: dict[str, Any]
 
 
 async def _invoke_sprint_agent(payload: SprintPlannerInput) -> str:
@@ -330,17 +331,22 @@ def _failure(
     input_context: SprintInputContext,
     failure_stage: str,
     details: _FailureDetails,
+    selection_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     message = details.message
+    artifact_context: dict[str, Any] = {
+        "input_context": input_context,
+    }
+    if selection_policy is not None:
+        artifact_context["selection_policy"] = selection_policy
+
     artifact_result: FailureArtifactResult = write_failure_artifact(
         phase="sprint",
         project_id=project_id,
         failure_stage=failure_stage,
         failure_summary=message,
         raw_output=details.raw_text,
-        context={
-            "input_context": input_context,
-        },
+        context=artifact_context,
         model_info={
             **get_agent_model_info(sprint_agent),
             "app_name": SPRINT_RUNNER_IDENTITY.app_name,
@@ -381,6 +387,7 @@ def _failure(
     return {
         "success": False,
         "input_context": input_context,
+        "selection_policy": selection_policy,
         "output_artifact": artifact,
         "is_complete": None,
         "error": message,
@@ -421,6 +428,10 @@ def _prepare_sprint_payload(
             ),
         )
 
+    selection_policy = prepared.get("selection_policy")
+    if not isinstance(selection_policy, dict):
+        selection_policy = {}
+
     try:
         payload = SprintPlannerInput.model_validate(input_context)
     except ValidationError as exc:
@@ -435,8 +446,13 @@ def _prepare_sprint_payload(
                 public_validation_errors=public_validation_errors,
                 exception=exc,
             ),
+            selection_policy=selection_policy,
         )
-    return _PreparedSprintPayload(input_context=input_context, payload=payload)
+    return _PreparedSprintPayload(
+        input_context=input_context,
+        payload=payload,
+        selection_policy=selection_policy,
+    )
 
 
 async def _invoke_prepared_sprint_payload(
@@ -463,6 +479,7 @@ async def _invoke_prepared_sprint_payload(
                 public_validation_errors=public_validation_errors,
                 exception=exc,
             ),
+            selection_policy=prepared.selection_policy,
         )
     except ValueError as exc:
         return _failure(
@@ -473,6 +490,7 @@ async def _invoke_prepared_sprint_payload(
                 message=f"Sprint runtime failed: {exc}",
                 exception=exc,
             ),
+            selection_policy=prepared.selection_policy,
         )
     return raw_text
 
@@ -509,6 +527,7 @@ def _locked_selection_output_failure(
                     structured_errors
                 ),
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     capacity_errors = _locked_capacity_validation_errors(
@@ -531,6 +550,7 @@ def _locked_selection_output_failure(
                     capacity_errors
                 ),
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     deselected_errors = _locked_deselected_stories_validation_errors(output_model)
@@ -550,6 +570,7 @@ def _locked_selection_output_failure(
                     deselected_errors
                 ),
             ),
+            selection_policy=prepared.selection_policy,
         )
     return None
 
@@ -572,6 +593,7 @@ def _validate_sprint_output(
                 message="Sprint response is not valid JSON",
                 raw_text=raw_text,
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     try:
@@ -592,6 +614,7 @@ def _validate_sprint_output(
                 public_validation_errors=public_validation_errors,
                 exception=exc,
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     locked_selection_failure = _locked_selection_output_failure(
@@ -633,6 +656,7 @@ def _validate_sprint_output(
                     decomp_errors
                 ),
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     allowed_invariant_ids_by_story = {
@@ -659,6 +683,7 @@ def _validate_sprint_output(
                     binding_errors
                 ),
             ),
+            selection_policy=prepared.selection_policy,
         )
 
     output_artifact = output_model.model_dump(exclude_none=True)
@@ -666,6 +691,7 @@ def _validate_sprint_output(
     return {
         "success": True,
         "input_context": input_context,
+        "selection_policy": prepared.selection_policy,
         "output_artifact": output_artifact,
         "is_complete": True,
         "error": None,

@@ -358,6 +358,9 @@ def prepare_sprint_input_context(
             "max_story_points": selection.max_story_points,
             "team_velocity_assumption": selection.team_velocity_assumption,
             "story_limit": selection.story_limit,
+            "dependency_closed": selection.dependency_closed,
+            "dependency_edges": selection.dependency_edges,
+            "dependency_promoted_story_ids": selection.dependency_promoted_story_ids,
             "warnings": selection.warnings,
         },
     }

@@ -211,6 +211,123 @@ def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     assert prepared["input_context"]["available_stories"][0]["group_slot"] == 1
 
 
+def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:
+    """Verify sprint input reports dependency-aware selection diagnostics."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 85,
+                    "story_title": "Live workflow",
+                    "priority": 101,
+                    "story_points": 3,
+                    "blocked_by_story_ids": [66],
+                    "prerequisite_story_ids": [66],
+                    "dependency_status": "blocked",
+                },
+                {
+                    "story_id": 66,
+                    "story_title": "Budget parameter",
+                    "priority": 201,
+                    "story_points": 1,
+                    "blocked_by_story_ids": [],
+                    "prerequisite_story_ids": [],
+                    "dependency_status": "ready",
+                },
+            ],
+        }
+
+    result = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=fake_fetch_sprint_candidates,
+    )
+
+    assert result["selected_story_ids"] == [66, 85]
+    assert result["selection_policy"]["dependency_closed"] is True
+    assert result["selection_policy"]["dependency_promoted_story_ids"] == [66]
+    assert result["selection_policy"]["dependency_edges"] == [
+        {"dependent_story_id": 85, "prerequisite_story_id": 66}
+    ]
+
+
+def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify invalid runtime input still reports selection diagnostics."""
+    selection_policy = {
+        "mode": "auto",
+        "selected_story_ids": [66, 85],
+        "dependency_closed": True,
+        "dependency_edges": [{"dependent_story_id": 85, "prerequisite_story_id": 66}],
+        "dependency_promoted_story_ids": [66],
+    }
+    artifact_context: dict[str, object] = {}
+
+    def fake_prepare_sprint_input_context(
+        *,
+        product_id: int,
+        **options: object,
+    ) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        assert options["team_velocity_assumption"] == "Medium"
+        return {
+            "success": True,
+            "input_context": {},
+            "selection_policy": selection_policy,
+        }
+
+    def fake_write_failure_artifact(**kwargs: object) -> dict[str, object]:
+        artifact_context.update(cast("dict[str, object]", kwargs["context"]))
+        return {
+            "metadata": {
+                "failure_artifact_id": "sprint-failure-1",
+                "failure_stage": "input_validation",
+                "failure_summary": "Sprint input validation failed",
+                "raw_output_preview": None,
+                "has_full_artifact": False,
+            }
+        }
+
+    monkeypatch.setattr(
+        sprint_runtime,
+        "prepare_sprint_input_context",
+        fake_prepare_sprint_input_context,
+    )
+    monkeypatch.setattr(
+        sprint_runtime,
+        "write_failure_artifact",
+        fake_write_failure_artifact,
+    )
+
+    result = sprint_runtime._prepare_sprint_payload(
+        project_id=7,
+        options={
+            "team_velocity_assumption": "Medium",
+            "sprint_duration_days": 14,
+            "include_task_decomposition": True,
+            "max_story_points": 4,
+            "selected_story_ids": None,
+            "user_input": None,
+        },
+    )
+
+    assert isinstance(result, dict)
+    assert result["success"] is False
+    assert result["failure_stage"] == "input_validation"
+    assert result["selection_policy"] == selection_policy
+    assert artifact_context["selection_policy"] == selection_policy
+
+
 def test_prepare_sprint_input_context_returns_selection_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
