@@ -704,6 +704,23 @@ If generation returns `ok: false`, stop and report the first error code, message
 and details. Sprint runtime failures are hard CLI failures and should not be
 hidden.
 
+### Sprint Draft Freshness
+
+Sprint drafts are saveable only when they are the latest complete Sprint attempt
+and were generated from the current Story/dependency candidate source. If a
+Story is saved/reopened or dependency edges are applied, AgileForge clears the
+unsaved Sprint draft and returns to Sprint setup. If Sprint regeneration fails,
+older complete attempts remain visible in history for audit but cannot be saved.
+
+Use `agileforge workflow next --project-id "$PROJECT_ID"` before saving. If it
+does not advertise `agileforge sprint save`, regenerate Sprint first:
+
+```sh
+agileforge sprint generate \
+  --project-id "$PROJECT_ID" \
+  --input "Regenerate after current Story/dependency changes. Use locked deterministic cohort."
+```
+
 When generation returns a complete reviewed draft, save that exact attempt:
 
 ```sh
