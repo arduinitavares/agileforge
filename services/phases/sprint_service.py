@@ -545,6 +545,7 @@ async def save_sprint_plan(  # noqa: C901
     expected_artifact_fingerprint: str | None = None,
     expected_state: str | None = None,
     idempotency_key: str | None = None,
+    load_candidates: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
     if reset_stale_saved_sprint_planner_working_set(
@@ -573,6 +574,16 @@ async def save_sprint_plan(  # noqa: C901
             assessment=assessment,
             attempt_id=attempt_id,
             expected_artifact_fingerprint=expected_artifact_fingerprint,
+        )
+        _assert_latest_complete_sprint_attempt(
+            state=state,
+            attempt_id=attempt_id,
+        )
+        _assert_sprint_source_current(
+            project_id=project_id,
+            assessment=assessment,
+            state=state,
+            load_candidates=load_candidates,
         )
 
     if not bool(assessment.get("is_complete", False)):
@@ -800,6 +811,50 @@ def _assert_save_guards(
         raise SprintPhaseError(
             "Sprint save guard mismatch: draft attempt or artifact fingerprint "
             "does not match the reviewed Sprint draft.",
+        )
+
+
+def _assert_latest_complete_sprint_attempt(
+    *,
+    state: dict[str, Any],
+    attempt_id: str | None,
+) -> None:
+    attempts = ensure_sprint_attempts(state)
+    latest_attempt: object = attempts[-1] if attempts else None
+    if (
+        not isinstance(latest_attempt, dict)
+        or latest_attempt.get("attempt_id") != attempt_id
+        or latest_attempt.get("is_complete") is not True
+    ):
+        raise SprintPhaseError(
+            "Sprint save requires the latest complete Sprint attempt.",
+        )
+
+
+def _assert_sprint_source_current(
+    *,
+    project_id: int,
+    assessment: dict[str, Any],
+    state: dict[str, Any],
+    load_candidates: Callable[[], dict[str, Any]] | None,
+) -> None:
+    candidates_payload = (
+        load_candidates()
+        if load_candidates is not None
+        else load_sprint_candidates(project_id)
+    )
+    current_source = candidates_payload.get("source_fingerprint")
+    draft_source = assessment.get("source_fingerprint") or state.get(
+        "sprint_candidate_source_fingerprint"
+    )
+    if (
+        isinstance(current_source, str)
+        and isinstance(draft_source, str)
+        and current_source != draft_source
+    ):
+        raise SprintPhaseError(
+            "Story/dependency source changed; regenerate the Sprint draft before "
+            "saving.",
         )
 
 

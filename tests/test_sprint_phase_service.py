@@ -945,6 +945,143 @@ async def test_save_sprint_plan_enforces_reviewed_attempt_guards() -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_sprint_plan_blocks_when_latest_attempt_failed() -> None:
+    """Verify guarded sprint save requires latest attempt to be complete."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-4",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+            },
+            {
+                "attempt_id": "sprint-attempt-5",
+                "artifact_fingerprint": "sha256:failed",
+                "is_complete": False,
+            },
+        ],
+        "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-4",
+            "artifact_fingerprint": "sha256:reviewed",
+            "sprint_goal": "Persist safely",
+            "sprint_number": 1,
+            "duration_days": 14,
+            "selected_stories": [],
+            "deselected_stories": [],
+            "capacity_analysis": {
+                "velocity_assumption": "Medium",
+                "capacity_band": "4-5 stories",
+                "selected_count": 0,
+                "story_points_used": 0,
+                "max_story_points": 13,
+                "commitment_note": "Fits",
+                "reasoning": "Fits",
+            },
+            "is_complete": True,
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    def save_plan_tool(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for stale sprint attempt"
+        raise AssertionError(msg)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await save_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            current_planned_sprint_id=None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_plan_tool=save_plan_tool,
+            team_name="Team Alpha",
+            sprint_start_date="2026-03-15",
+            attempt_id="sprint-attempt-4",
+            expected_artifact_fingerprint="sha256:reviewed",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key="save-sprint-7-004",
+        )
+
+    assert "latest complete Sprint attempt" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_sprint_plan_blocks_when_candidate_source_changed() -> None:
+    """Verify guarded sprint save rejects stale story/dependency source."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_candidate_source_fingerprint": "sha256:old_source",
+        "sprint_attempts": [
+            {
+                "attempt_id": "sprint-attempt-4",
+                "artifact_fingerprint": "sha256:reviewed",
+                "is_complete": True,
+                "source_fingerprint": "sha256:old_source",
+            }
+        ],
+        "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-4",
+            "artifact_fingerprint": "sha256:reviewed",
+            "source_fingerprint": "sha256:old_source",
+            "sprint_goal": "Persist safely",
+            "sprint_number": 1,
+            "duration_days": 14,
+            "selected_stories": [],
+            "deselected_stories": [],
+            "capacity_analysis": {
+                "velocity_assumption": "Medium",
+                "capacity_band": "4-5 stories",
+                "selected_count": 0,
+                "story_points_used": 0,
+                "max_story_points": 13,
+                "commitment_note": "Fits",
+                "reasoning": "Fits",
+            },
+            "is_complete": True,
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    def save_plan_tool(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for changed sprint source"
+        raise AssertionError(msg)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await save_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            current_planned_sprint_id=None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_plan_tool=save_plan_tool,
+            team_name="Team Alpha",
+            sprint_start_date="2026-03-15",
+            attempt_id="sprint-attempt-4",
+            expected_artifact_fingerprint="sha256:reviewed",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key="save-sprint-7-004",
+            load_candidates=lambda: {"source_fingerprint": "sha256:current_source"},
+        )
+
+    assert "Story/dependency source changed" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_save_sprint_plan_replays_matching_idempotency_key() -> None:
     """Verify repeat guarded save returns the recorded payload without mutation."""
     replay_payload: JsonDict = {
