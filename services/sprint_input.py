@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from typing import Any, NotRequired, Protocol, TypedDict, Unpack
 
+from services.agent_workbench.fingerprints import canonical_hash
 from services.orchestrator_query_service import fetch_sprint_candidates
 from services.sprint_selection import (
     SprintSelectionError,
@@ -210,16 +211,32 @@ def load_sprint_candidates(
 
         stories.append(normalized_story)
 
+    readiness = (
+        raw_result.get("readiness")
+        if isinstance(raw_result.get("readiness"), dict)
+        else _sprint_candidate_readiness(stories)
+    )
+    excluded_counts = raw_result.get("excluded_counts") or {}
+    message = raw_result.get("message") or f"Found {len(stories)} sprint candidates."
+    source_fingerprint = canonical_hash(
+        {
+            "command": "agileforge sprint candidates",
+            "product_id": product_id,
+            "stories": stories,
+            "readiness": readiness,
+            "excluded_counts": excluded_counts,
+            "message": message,
+        }
+    )
+
     return {
         "success": True,
         "count": len(stories),
         "stories": stories,
-        "readiness": raw_result.get("readiness")
-        if isinstance(raw_result.get("readiness"), dict)
-        else _sprint_candidate_readiness(stories),
-        "excluded_counts": raw_result.get("excluded_counts") or {},
-        "message": raw_result.get("message")
-        or f"Found {len(stories)} sprint candidates.",
+        "readiness": readiness,
+        "excluded_counts": excluded_counts,
+        "message": message,
+        "source_fingerprint": source_fingerprint,
     }
 
 
@@ -347,9 +364,11 @@ def prepare_sprint_input_context(
         "success": True,
         "input_context": input_context,
         "candidate_result": candidate_result,
+        "source_fingerprint": candidate_result.get("source_fingerprint"),
         "selected_story_ids": selection.selected_story_ids,
         "selection_policy": {
             "mode": selection.mode,
+            "source_fingerprint": candidate_result.get("source_fingerprint"),
             "selected_story_ids": selection.selected_story_ids,
             "excluded_story_ids": selection.excluded_story_ids,
             "story_points_used": selection.story_points_used,

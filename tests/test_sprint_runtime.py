@@ -13,6 +13,8 @@ from services import sprint_input, sprint_runtime
 from utils import adk_runner
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from google.adk.tools import ToolContext
 
 
@@ -292,6 +294,70 @@ def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:
     assert result["selection_policy"]["dependency_edges"] == [
         {"dependent_story_id": 85, "prerequisite_story_id": 66}
     ]
+
+
+def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text(
+) -> None:
+    """Sprint source fingerprint changes when candidate content changes."""
+
+    def fetch_with_title(
+        title: str,
+    ) -> Callable[..., dict[str, object]]:
+        def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+            assert product_id == 7  # noqa: PLR2004
+            return {
+                "success": True,
+                "count": 1,
+                "stories": [
+                    {
+                        "story_id": 71,
+                        "story_title": title,
+                        "priority": 302,
+                        "story_points": 2,
+                        "acceptance_criteria": "- Verify explicit --budget only.",
+                        "blocked_by_story_ids": [],
+                        "prerequisite_story_ids": [],
+                    }
+                ],
+                "readiness": {"status": "ready", "blocking_codes": []},
+                "excluded_counts": {
+                    "non_refined": 0,
+                    "superseded": 0,
+                    "open_sprint": 0,
+                },
+                "message": "Found 1 sprint candidate.",
+            }
+
+        return fake_fetch_sprint_candidates
+
+    first = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=None,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=fetch_with_title("Validate Squad Budget Compliance"),
+    )
+    changed = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=None,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=fetch_with_title(
+            "Require Explicit Budget and Validate Squad Compliance"
+        ),
+    )
+
+    assert first["success"] is True
+    assert changed["success"] is True
+    assert first["source_fingerprint"].startswith("sha256:")
+    assert changed["source_fingerprint"].startswith("sha256:")
+    assert first["source_fingerprint"] != changed["source_fingerprint"]
 
 
 def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
