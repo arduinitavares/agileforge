@@ -15,6 +15,7 @@ EXPECTED_PARENT_GROUP = 10
 EXPECTED_GROUP_SLOT = 2
 EXPECTED_CAPACITY_POINTS_USED = 4
 EXPECTED_MANUAL_POINTS_USED = 3
+EXPECTED_DEPENDENCY_POINTS_USED = 4
 RANK_PRIORITY_BASE = 100
 STORY_COUNT_WITH_EXCESS = 9
 
@@ -142,3 +143,79 @@ def test_manual_selection_raises_structured_error_for_missing_story_id() -> None
 
     assert exc_info.value.code == "SPRINT_SELECTION_INVALID"
     assert exc_info.value.details["invalid_selected_ids"] == [9]
+
+
+def _dep_row(
+    story_id: int,
+    priority: int,
+    points: int,
+    *,
+    blocked_by: list[object] | None = None,
+) -> dict[str, object]:
+    return {
+        "story_id": story_id,
+        "story_title": f"Story {story_id}",
+        "priority": priority,
+        "story_points": points,
+        "blocked_by_story_ids": blocked_by or [],
+        "prerequisite_story_ids": blocked_by or [],
+        "dependency_status": "blocked" if blocked_by else "ready",
+    }
+
+
+def test_auto_selection_promotes_prerequisite_before_dependent() -> None:
+    """Verify auto mode promotes candidate prerequisites ahead of dependents."""
+    rows = [
+        _dep_row(85, 101, 3, blocked_by=[66]),
+        _dep_row(66, 201, 1),
+        _dep_row(79, 301, 2),
+    ]
+
+    result = select_sprint_story_rows(
+        rows,
+        team_velocity_assumption="Medium",
+        max_story_points=4,
+        selected_story_ids=[],
+    )
+
+    assert result.selected_story_ids == [66, 85]
+    assert result.story_points_used == EXPECTED_DEPENDENCY_POINTS_USED
+    assert result.dependency_promoted_story_ids == [66]
+    assert result.dependency_closed is True
+
+
+def test_auto_selection_promotes_transitive_prerequisites() -> None:
+    """Verify auto mode promotes the full transitive prerequisite chain."""
+    rows = [
+        _dep_row(30, 101, 2, blocked_by=[20]),
+        _dep_row(20, 201, 2, blocked_by=[10]),
+        _dep_row(10, 301, 1),
+    ]
+
+    result = select_sprint_story_rows(
+        rows,
+        team_velocity_assumption="Medium",
+        max_story_points=5,
+        selected_story_ids=[],
+    )
+
+    assert result.selected_story_ids == [10, 20, 30]
+    assert result.dependency_promoted_story_ids == [10, 20]
+
+
+def test_auto_selection_ignores_unparseable_candidate_prerequisite_ids() -> None:
+    """Verify malformed prerequisite IDs are ignored instead of crashing."""
+    rows = [
+        _dep_row(85, 101, 3, blocked_by=["not-an-id", None, 66]),
+        _dep_row(66, 201, 1),
+    ]
+
+    result = select_sprint_story_rows(
+        rows,
+        team_velocity_assumption="Medium",
+        max_story_points=4,
+        selected_story_ids=[],
+    )
+
+    assert result.selected_story_ids == [66, 85]
+    assert result.dependency_promoted_story_ids == [66]
