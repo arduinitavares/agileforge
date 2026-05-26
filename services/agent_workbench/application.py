@@ -424,6 +424,33 @@ class _SprintPhaseRunner(Protocol):
         """Log Sprint task execution progress."""
         ...
 
+    def story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return close readiness for one Sprint story."""
+        ...
+
+    def story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Close one Sprint story."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -1196,6 +1223,48 @@ class AgentWorkbenchApplication:
             checklist_result=checklist_result,
             validation_summary=validation_summary,
             notes=notes,
+            changed_by=changed_by,
+        )
+
+    def sprint_story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return close readiness for one Sprint story."""
+        return self._get_sprint_runner().story_readiness(
+            project_id=project_id,
+            story_id=story_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Close one Sprint story."""
+        return self._get_sprint_runner().story_close(
+            project_id=project_id,
+            story_id=story_id,
+            expected_status=expected_status,
+            expected_story_fingerprint=expected_story_fingerprint,
+            idempotency_key=idempotency_key,
+            resolution=resolution,
+            completion_notes=completion_notes,
+            evidence_links=evidence_links,
+            sprint_id=sprint_id,
             changed_by=changed_by,
         )
 
@@ -2185,6 +2254,23 @@ def _sprint_command_candidates(
                     "--expected-status <expected_status> "
                     "--expected-task-fingerprint <task_fingerprint> "
                     "--idempotency-key <idempotency_key>"
+                ),
+            ),
+            (
+                "agileforge sprint story readiness",
+                (
+                    f"agileforge sprint story readiness --project-id {project_id} "
+                    "--story-id <story_id>"
+                ),
+            ),
+            (
+                "agileforge sprint story close",
+                (
+                    f"agileforge sprint story close --project-id {project_id} "
+                    "--story-id <story_id> --expected-status <expected_status> "
+                    "--expected-story-fingerprint <story_fingerprint> "
+                    "--idempotency-key <idempotency_key> "
+                    "--resolution Completed --completion-notes <notes>"
                 ),
             ),
             (

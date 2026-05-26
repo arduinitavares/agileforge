@@ -17,12 +17,13 @@ from models.core import Sprint, SprintStory, Task, UserStory
 from models.db import get_engine
 from models.enums import (
     SprintStatus,
+    StoryResolution,
     StoryStatus,
     TaskAcceptanceResult,
     TaskStatus,
     WorkflowEventType,
 )
-from models.events import TaskExecutionLog, WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
@@ -42,6 +43,15 @@ from services.phases.sprint_service import (
     start_sprint_execution,
 )
 from services.sprint_runtime import run_sprint_agent_from_state
+from services.story_close_service import (
+    StoryCloseServiceError,
+)
+from services.story_close_service import (
+    close_story as close_story_service,
+)
+from services.story_close_service import (
+    get_story_close_readiness as get_story_close_readiness_service,
+)
 from services.story_dependencies import load_story_dependency_graph
 from services.task_execution_service import (
     TaskExecutionServiceError,
@@ -50,10 +60,12 @@ from services.task_execution_service import (
 )
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
-from utils.api_schemas import TaskExecutionWriteRequest
+from utils.api_schemas import StoryCloseWriteRequest, TaskExecutionWriteRequest
 from utils.task_metadata import parse_task_metadata
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from google.adk.tools import ToolContext
     from sqlmodel.sql._expression_select_cls import SelectOfScalar
 
@@ -64,6 +76,8 @@ else:
 _DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
 _SPRINT_TASK_UPDATE_COMMAND = "agileforge sprint task update"
 _SPRINT_TASK_UPDATE_LEASE_OWNER = "agileforge-cli:sprint-task-update"
+_SPRINT_STORY_CLOSE_COMMAND = "agileforge sprint story close"
+_SPRINT_STORY_CLOSE_LEASE_OWNER = "agileforge-cli:sprint-story-close"
 
 
 @dataclass(frozen=True)
@@ -79,6 +93,20 @@ class _StoryDependencyMetadataContext:
 
 class _SprintTaskUpdateError(SprintPhaseError):
     """Sprint task update guard failure with structured details."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        details: dict[str, Any],
+        status_code: int = 409,
+    ) -> None:
+        super().__init__(detail, status_code=status_code)
+        self.details = details
+
+
+class _SprintStoryCloseError(SprintPhaseError):
+    """Sprint story close guard failure with structured details."""
 
     def __init__(
         self,
@@ -518,6 +546,148 @@ class SprintPhaseRunner:
         )
         return response
 
+    def story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return close readiness for one Sprint story."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                resolved_sprint_id = self._resolve_execution_sprint_id(
+                    project_id,
+                    sprint_id=sprint_id,
+                    session=session,
+                )
+                data = _story_close_readiness_payload(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id,
+                    story_id=story_id,
+                )
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data)
+
+    def story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Close one Sprint story through a guarded mutation."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        engine = get_engine()
+        ledger = MutationLedgerRepository(engine=engine)
+        expected = _normalize_story_status(expected_status)
+        write_request = StoryCloseWriteRequest(
+            resolution=_normalize_story_resolution(resolution),
+            completion_notes=completion_notes,
+            evidence_links=evidence_links,
+            changed_by=changed_by,
+        )
+        request_payload = {
+            "project_id": project_id,
+            "sprint_id": sprint_id,
+            "story_id": story_id,
+            "expected_status": expected.value,
+            "expected_story_fingerprint": expected_story_fingerprint,
+            "resolution": write_request.resolution.value,
+            "completion_notes": write_request.completion_notes,
+            "evidence_links": write_request.evidence_links or [],
+            "changed_by": changed_by,
+        }
+        request_hash = canonical_hash(request_payload)
+        now = datetime.now(UTC)
+        ledger_result = ledger.create_or_load(
+            command=_SPRINT_STORY_CLOSE_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=f"sprint-story-close:{uuid4()}",
+            changed_by=changed_by,
+            lease_owner=_SPRINT_STORY_CLOSE_LEASE_OWNER,
+            now=now,
+        )
+        if ledger_result.error_code is not None:
+            return _ledger_error(ledger_result)
+        if ledger_result.replayed:
+            replay = ledger_result.response or {}
+            if isinstance(replay.get("data"), dict):
+                replay["data"].setdefault("idempotency", {})["replayed"] = True
+            return replay
+
+        try:
+            with Session(engine) as session:
+                resolved_sprint_id = self._resolve_execution_sprint_id(
+                    project_id,
+                    sprint_id=sprint_id,
+                    session=session,
+                )
+                current_payload = _story_close_readiness_payload(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id,
+                    story_id=story_id,
+                )
+                _assert_story_close_guards(
+                    current_status=str(current_payload["current_status"]),
+                    expected_status=expected,
+                    current_story_fingerprint=str(
+                        current_payload["story_fingerprint"]
+                    ),
+                    expected_story_fingerprint=expected_story_fingerprint,
+                    story_id=story_id,
+                )
+                closed = _close_story(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id,
+                    story_id=story_id,
+                    request=write_request,
+                )
+                closed["story_fingerprint"] = _story_fingerprint_for_ids(
+                    session=session,
+                    sprint_id=resolved_sprint_id,
+                    story_id=story_id,
+                )
+                closed["idempotency"] = {"replayed": False}
+                response = _data_envelope(closed)
+        except (SprintPhaseError, ValueError) as exc:
+            response = _story_close_error(exc)
+
+        raw_response_data = response.get("data")
+        response_data = (
+            cast("dict[str, Any]", raw_response_data)
+            if isinstance(raw_response_data, dict)
+            else {}
+        )
+        ledger.finalize_success(
+            mutation_event_id=cast("int", ledger_result.ledger.mutation_event_id),
+            lease_owner=_SPRINT_STORY_CLOSE_LEASE_OWNER,
+            after=response_data,
+            response=response,
+            now=datetime.now(UTC),
+        )
+        return response
+
     async def _generate(  # noqa: PLR0913
         self,
         project_id: int,
@@ -816,6 +986,11 @@ def _raise_no_execution_sprint_found() -> NoReturn:
 
 def _raise_task_not_found() -> NoReturn:
     message = "Task not found in this Sprint."
+    raise SprintPhaseError(message, status_code=404)
+
+
+def _raise_story_not_found() -> NoReturn:
+    message = "Story not found"
     raise SprintPhaseError(message, status_code=404)
 
 
@@ -1511,6 +1686,236 @@ def _task_execution_history(
     return cast("dict[str, Any]", _json_ready(payload))
 
 
+def _story_close_readiness_payload(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+    story_id: int,
+) -> dict[str, Any]:
+    """Return story close readiness plus the guard fingerprint."""
+    try:
+        payload = get_story_close_readiness_service(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            load_story=lambda: session.get(UserStory, story_id),
+            load_sprint=lambda: session.get(Sprint, sprint_id),
+            load_sprint_story=lambda story: _load_sprint_story_for_story(
+                session=session,
+                sprint_id=sprint_id,
+                story=story,
+            ),
+            load_tasks=lambda: _load_story_tasks(session=session, story_id=story_id),
+            task_progress=_story_task_progress,
+        )
+    except StoryCloseServiceError as exc:
+        raise SprintPhaseError(exc.detail, status_code=exc.status_code) from exc
+    data = cast("dict[str, Any]", _json_ready(payload))
+    data["story_fingerprint"] = _story_fingerprint_for_ids(
+        session=session,
+        sprint_id=sprint_id,
+        story_id=story_id,
+    )
+    return data
+
+
+def _close_story(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+    story_id: int,
+    request: StoryCloseWriteRequest,
+) -> dict[str, Any]:
+    """Persist story close using the domain service and serialize response."""
+
+    def persist_story_close(**kwargs: object) -> None:
+        story = cast("UserStory", kwargs["story"])
+        session.add(story)
+        session.add(
+            StoryCompletionLog(
+                story_id=story_id,
+                old_status=cast("StoryStatus", kwargs["old_status"]),
+                new_status=StoryStatus.DONE,
+                resolution=story.resolution,
+                delivered=story.completion_notes,
+                evidence=cast("str | None", kwargs["evidence_json"]),
+                known_gaps=cast("str | None", kwargs["known_gaps"]),
+                follow_ups_created=cast("str | None", kwargs["follow_up_notes"]),
+                changed_by=cast("str", kwargs["changed_by"]),
+                changed_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    try:
+        payload = close_story_service(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            story_id=story_id,
+            resolution=request.resolution,
+            completion_notes=request.completion_notes,
+            evidence_links=request.evidence_links,
+            known_gaps=request.known_gaps,
+            follow_up_notes=request.follow_up_notes,
+            changed_by=request.changed_by,
+            now=lambda: datetime.now(UTC),
+            load_story=lambda: session.get(UserStory, story_id),
+            load_sprint=lambda: session.get(Sprint, sprint_id),
+            load_sprint_story=lambda story: _load_sprint_story_for_story(
+                session=session,
+                sprint_id=sprint_id,
+                story=story,
+            ),
+            load_tasks=lambda: _load_story_tasks(session=session, story_id=story_id),
+            task_progress=_story_task_progress,
+            persist_story_close=persist_story_close,
+        )
+    except StoryCloseServiceError as exc:
+        raise SprintPhaseError(exc.detail, status_code=exc.status_code) from exc
+    return cast("dict[str, Any]", _json_ready(payload))
+
+
+def _load_sprint_story_for_story(
+    *,
+    session: Session,
+    sprint_id: int,
+    story: object,
+) -> SprintStory | None:
+    """Return the SprintStory join row for a story-like object."""
+    story_obj = cast("UserStory", story)
+    return session.exec(
+        select(SprintStory).where(
+            SprintStory.sprint_id == sprint_id,
+            SprintStory.story_id == story_obj.story_id,
+        )
+    ).first()
+
+
+def _load_story_tasks(*, session: Session, story_id: int) -> list[Task]:
+    """Return tasks for one story in deterministic order."""
+    return list(
+        session.exec(
+            select(Task)
+            .where(Task.story_id == story_id)
+            .order_by(cast("Any", Task.task_id).asc())
+        ).all()
+    )
+
+
+def _story_task_progress(tasks: Sequence[object]) -> tuple[int, int, int, bool]:
+    """Return actionable task progress using the API's checklist policy."""
+    task_models = cast("Sequence[Task]", tasks)
+    actionable_tasks = [
+        task
+        for task in task_models
+        if bool(parse_task_metadata(task.metadata_json).checklist_items)
+    ]
+    total_tasks = len(actionable_tasks)
+    done_tasks = sum(1 for task in actionable_tasks if task.status == TaskStatus.DONE)
+    cancelled_tasks = sum(
+        1 for task in actionable_tasks if task.status == TaskStatus.CANCELLED
+    )
+    all_actionable_done = (
+        total_tasks > 0 and (done_tasks + cancelled_tasks) == total_tasks
+    )
+    return total_tasks, done_tasks, cancelled_tasks, all_actionable_done
+
+
+def _story_fingerprint_for_ids(
+    *,
+    session: Session,
+    sprint_id: int,
+    story_id: int,
+) -> str:
+    """Return the guard fingerprint for one story in one Sprint."""
+    story = session.get(UserStory, story_id)
+    if story is None:
+        _raise_story_not_found()
+    tasks = _load_story_tasks(session=session, story_id=story_id)
+    return _story_fingerprint(story=story, sprint_id=sprint_id, tasks=tasks)
+
+
+def _story_fingerprint(
+    *,
+    story: UserStory,
+    sprint_id: int,
+    tasks: list[Task],
+) -> str:
+    """Return a deterministic close guard fingerprint for a story."""
+    return canonical_hash(
+        {
+            "story_id": story.story_id,
+            "sprint_id": sprint_id,
+            "status": _enum_value(story.status),
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "status": _enum_value(task.status),
+                }
+                for task in sorted(tasks, key=lambda item: item.task_id or 0)
+            ],
+        }
+    )
+
+
+def _normalize_story_status(value: str) -> StoryStatus:
+    """Parse a CLI story status value."""
+    normalized = value.strip().replace("_", " ").replace("-", " ").lower()
+    for status in StoryStatus:
+        if status.value.lower() == normalized:
+            return status
+    message = f"Unsupported story status: {value}"
+    raise ValueError(message)
+
+
+def _normalize_story_resolution(value: str) -> StoryResolution:
+    """Parse a CLI story close resolution value."""
+    normalized = value.strip().lower()
+    for resolution in StoryResolution:
+        if resolution.value.lower() == normalized:
+            return resolution
+    message = f"Unsupported story resolution: {value}"
+    raise ValueError(message)
+
+
+def _assert_story_close_guards(
+    *,
+    current_status: str,
+    expected_status: StoryStatus,
+    current_story_fingerprint: str,
+    expected_story_fingerprint: str,
+    story_id: int,
+) -> None:
+    """Fail closed when a story close request is stale."""
+    if current_status != expected_status.value:
+        message = (
+            f"Story {story_id} has status {current_status!r}, "
+            f"expected {expected_status.value!r}."
+        )
+        raise _SprintStoryCloseError(
+            message,
+            details={
+                "reason_code": "SPRINT_STORY_STATUS_STALE",
+                "story_id": story_id,
+                "current_status": current_status,
+                "expected_status": expected_status.value,
+            },
+        )
+    if current_story_fingerprint != expected_story_fingerprint:
+        message = "SPRINT_STORY_FINGERPRINT_STALE: story fingerprint is stale."
+        raise _SprintStoryCloseError(
+            message,
+            details={
+                "reason_code": "SPRINT_STORY_FINGERPRINT_STALE",
+                "story_id": story_id,
+                "current_story_fingerprint": current_story_fingerprint,
+                "expected_story_fingerprint": expected_story_fingerprint,
+            },
+        )
+
+
 def _topologically_sorted_sprint_stories(
     sprint: Sprint,
     *,
@@ -1772,6 +2177,23 @@ def _task_update_error(exc: Exception) -> dict[str, Any]:
                 "--task-id <task_id>."
             ),
             "Refresh the task ticket and retry with current guard values.",
+        ],
+    )
+
+
+def _story_close_error(exc: Exception) -> dict[str, Any]:
+    """Map story close validation failures onto mutation failure envelopes."""
+    details = getattr(exc, "details", None)
+    return _error_envelope(
+        ErrorCode.MUTATION_FAILED,
+        str(exc),
+        details=details if isinstance(details, dict) else {},
+        remediation=[
+            (
+                "Run agileforge sprint story readiness --project-id <project_id> "
+                "--story-id <story_id>."
+            ),
+            "Refresh the story close guard values and retry.",
         ],
     )
 

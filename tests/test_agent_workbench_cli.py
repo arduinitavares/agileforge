@@ -883,6 +883,70 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def sprint_story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint story readiness payload."""
+        self.calls.append(
+            (
+                "sprint_story_readiness",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "sprint_id": sprint_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a sprint story close payload."""
+        self.calls.append(
+            (
+                "sprint_story_close",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "expected_status": expected_status,
+                    "expected_story_fingerprint": expected_story_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "resolution": resolution,
+                    "completion_notes": completion_notes,
+                    "evidence_links": evidence_links,
+                    "sprint_id": sprint_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
     def context_pack(
         self,
         *,
@@ -2395,6 +2459,76 @@ def test_sprint_task_cli_routes_ticket_commands(
                 "checklist_result": "fully_met",
                 "validation_summary": "uv run pytest tests/test_live_budget.py -q",
                 "notes": "No known gaps.",
+                "changed_by": "cli-agent",
+            },
+        ),
+    ]
+
+
+def test_sprint_story_cli_routes_readiness_and_close(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint story CLI exposes readiness reads and guarded close mutation."""
+    app = _FakeApplication()
+
+    readiness_exit = main(
+        ["sprint", "story", "readiness", "--project-id", "7", "--story-id", "66"],
+        application=app,
+    )
+    close_exit = main(
+        [
+            "sprint",
+            "story",
+            "close",
+            "--project-id",
+            "7",
+            "--story-id",
+            "66",
+            "--expected-status",
+            "To Do",
+            "--expected-story-fingerprint",
+            "sha256:story",
+            "--idempotency-key",
+            "close-story-66-001",
+            "--resolution",
+            "Completed",
+            "--completion-notes",
+            "All tasks completed.",
+            "--evidence-link",
+            "scripts/run_live_round.py",
+            "--evidence-link",
+            "tests/test_live_budget.py",
+        ],
+        application=app,
+    )
+
+    outputs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert [readiness_exit, close_exit] == [0, 0]
+    assert [payload["ok"] for payload in outputs] == [True, True]
+    assert app.calls[-2:] == [
+        (
+            "sprint_story_readiness",
+            {"project_id": 7, "story_id": 66, "sprint_id": None},
+        ),
+        (
+            "sprint_story_close",
+            {
+                "project_id": 7,
+                "story_id": 66,
+                "expected_status": "To Do",
+                "expected_story_fingerprint": "sha256:story",
+                "idempotency_key": "close-story-66-001",
+                "resolution": "Completed",
+                "completion_notes": "All tasks completed.",
+                "evidence_links": [
+                    "scripts/run_live_round.py",
+                    "tests/test_live_budget.py",
+                ],
+                "sprint_id": None,
                 "changed_by": "cli-agent",
             },
         ),

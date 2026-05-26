@@ -614,6 +614,8 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
         "agileforge sprint save",
         "agileforge sprint start",
         "agileforge sprint status",
+        "agileforge sprint story close",
+        "agileforge sprint story readiness",
         "agileforge sprint task history",
         "agileforge sprint task next",
         "agileforge sprint task show",
@@ -633,6 +635,8 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     start = command_schema_payload("agileforge sprint start")
     status = command_schema_payload("agileforge sprint status")
     tasks = command_schema_payload("agileforge sprint tasks")
+    story_readiness = command_schema_payload("agileforge sprint story readiness")
+    story_close = command_schema_payload("agileforge sprint story close")
     task_next = command_schema_payload("agileforge sprint task next")
     task_show = command_schema_payload("agileforge sprint task show")
     task_history = command_schema_payload("agileforge sprint task history")
@@ -675,6 +679,25 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     assert tasks["mutates"] is False
     assert tasks["input"]["required"] == ["project_id"]
     assert tasks["input"]["optional"] == ["sprint_id"]
+    assert story_readiness["mutates"] is False
+    assert story_readiness["input"]["required"] == ["project_id", "story_id"]
+    assert story_readiness["input"]["optional"] == ["sprint_id"]
+    assert story_close["mutates"] is True
+    assert story_close["idempotency_required"] is True
+    assert story_close["input"]["required"] == [
+        "project_id",
+        "story_id",
+        "expected_status",
+        "expected_story_fingerprint",
+        "idempotency_key",
+        "resolution",
+        "completion_notes",
+    ]
+    assert story_close["input"]["optional"] == [
+        "sprint_id",
+        "evidence_link",
+        "changed_by",
+    ]
     assert task_next["mutates"] is False
     assert task_next["input"]["required"] == ["project_id"]
     assert task_next["input"]["optional"] == ["sprint_id"]
@@ -710,6 +733,8 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
         start,
         status,
         tasks,
+        story_readiness,
+        story_close,
         task_next,
         task_show,
         task_history,
@@ -717,13 +742,14 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     ):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
-    for schema in (generate, history, save, start, task_update):
+    for schema in (generate, history, save, start, story_close, task_update):
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in start["errors"]
+    assert ErrorCode.MUTATION_FAILED.value in story_close["errors"]
 
 
 def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:

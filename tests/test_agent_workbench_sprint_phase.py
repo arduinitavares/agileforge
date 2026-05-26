@@ -19,12 +19,13 @@ from models.core import (
 )
 from models.enums import (
     SprintStatus,
+    StoryResolution,
     StoryStatus,
     TaskAcceptanceResult,
     TaskStatus,
     WorkflowEventType,
 )
-from models.events import TaskExecutionLog, WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from services.agent_workbench import sprint_phase as sprint_phase_module
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.phases import sprint_service
@@ -793,3 +794,235 @@ def test_sprint_task_update_rejects_blocked_task_start(
     persisted_task = session.get(Task, blocked_task.task_id)
     assert persisted_task is not None
     assert persisted_task.status == TaskStatus.TO_DO
+
+
+def test_sprint_story_close_marks_story_done_and_unblocks_next_task(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story close should mark Done and refresh dependency-aware task selection."""
+    product = Product(name="Story Close Product")
+    team = Team(name="Story Close Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_story = UserStory(
+        product_id=product.product_id,
+        title="Enforce budget",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    dependent_story = UserStory(
+        product_id=product.product_id,
+        title="Run live workflow",
+        story_points=3,
+        rank="102",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([completed_story, dependent_story])
+    session.flush()
+    assert completed_story.story_id is not None
+    assert dependent_story.story_id is not None
+
+    session.add(
+        UserStoryDependency(
+            product_id=product.product_id,
+            dependent_story_id=dependent_story.story_id,
+            prerequisite_story_id=completed_story.story_id,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+        )
+    )
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Close story explicitly",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=completed_story.story_id),
+            SprintStory(sprint_id=sprint.sprint_id, story_id=dependent_story.story_id),
+            Task(
+                story_id=completed_story.story_id,
+                description="Implement required budget",
+                status=TaskStatus.DONE,
+                metadata_json=serialize_task_metadata(
+                    TaskMetadata(checklist_items=["Budget is required"])
+                ),
+            ),
+            Task(
+                story_id=completed_story.story_id,
+                description="Test required budget",
+                status=TaskStatus.DONE,
+                metadata_json=serialize_task_metadata(
+                    TaskMetadata(checklist_items=["Missing budget fails"])
+                ),
+            ),
+            Task(
+                story_id=dependent_story.story_id,
+                description="Implement live workflow",
+                status=TaskStatus.TO_DO,
+                metadata_json=serialize_task_metadata(
+                    TaskMetadata(checklist_items=["Workflow uses budget gate"])
+                ),
+            ),
+        ]
+    )
+    session.commit()
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    before_next = runner.task_next(project_id=product.product_id)
+    readiness = runner.story_readiness(
+        project_id=product.product_id,
+        story_id=completed_story.story_id,
+    )
+    close = runner.story_close(
+        project_id=product.product_id,
+        story_id=completed_story.story_id,
+        expected_status="To Do",
+        expected_story_fingerprint=readiness["data"]["story_fingerprint"],
+        idempotency_key="close-story-budget-001",
+        resolution="Completed",
+        completion_notes="All budget tasks completed and validated.",
+        evidence_links=["scripts/run_live_round.py"],
+        changed_by="cli-agent",
+    )
+    replay = runner.story_close(
+        project_id=product.product_id,
+        story_id=completed_story.story_id,
+        expected_status="To Do",
+        expected_story_fingerprint=readiness["data"]["story_fingerprint"],
+        idempotency_key="close-story-budget-001",
+        resolution="Completed",
+        completion_notes="All budget tasks completed and validated.",
+        evidence_links=["scripts/run_live_round.py"],
+        changed_by="cli-agent",
+    )
+    after_next = runner.task_next(project_id=product.product_id)
+
+    assert before_next["data"]["task_ticket"] is None
+    assert before_next["data"]["reason"] == "no_available_task"
+    assert readiness["ok"] is True
+    assert readiness["data"]["close_eligible"] is True
+    assert readiness["data"]["current_status"] == "To Do"
+    assert str(readiness["data"]["story_fingerprint"]).startswith(
+        TASK_FINGERPRINT_PREFIX
+    )
+    assert close["ok"] is True
+    assert close["data"]["idempotency"]["replayed"] is False
+    assert close["data"]["current_status"] == "Done"
+    assert close["data"]["resolution"] == StoryResolution.COMPLETED.value
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+    assert after_next["data"]["task_ticket"]["story"]["story_id"] == (
+        dependent_story.story_id
+    )
+
+    session.expire_all()
+    persisted_story = session.get(UserStory, completed_story.story_id)
+    assert persisted_story is not None
+    assert persisted_story.status == StoryStatus.DONE
+    completion_log = session.exec(select(StoryCompletionLog)).first()
+    assert completion_log is not None
+    assert completion_log.changed_by == "cli-agent"
+
+
+def test_sprint_story_close_rejects_stale_story_fingerprint(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story close should fail when task state changes after readiness."""
+    product = Product(name="Stale Story Close Product")
+    team = Team(name="Stale Story Close Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Close stale story",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Reject stale close",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+    task = Task(
+        story_id=story.story_id,
+        description="Finish implementation",
+        status=TaskStatus.DONE,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(checklist_items=["Implementation completed"])
+        ),
+    )
+    session.add(task)
+    session.commit()
+    assert task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+    readiness = runner.story_readiness(
+        project_id=product.product_id,
+        story_id=story.story_id,
+    )
+    stale_fingerprint = str(readiness["data"]["story_fingerprint"])
+
+    task.status = TaskStatus.IN_PROGRESS
+    session.add(task)
+    session.commit()
+
+    result = runner.story_close(
+        project_id=product.product_id,
+        story_id=story.story_id,
+        expected_status="To Do",
+        expected_story_fingerprint=stale_fingerprint,
+        idempotency_key="close-stale-story-001",
+        resolution="Completed",
+        completion_notes="This should not close.",
+        evidence_links=["stale.py"],
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["reason_code"] == (
+        "SPRINT_STORY_FINGERPRINT_STALE"
+    )
+    persisted_story = session.get(UserStory, story.story_id)
+    assert persisted_story is not None
+    assert persisted_story.status == StoryStatus.TO_DO

@@ -22,16 +22,15 @@ The installed CLI supports:
 - Backlog generate, history, and save.
 - Roadmap generate, history, and save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
-- Sprint candidates, generate, history, save, start, status, tasks, and task
-  tickets.
+- Sprint candidates, generate, history, save, start, status, tasks, task
+  tickets, and explicit story close.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
 
 The installed CLI does not yet support:
 
-- Story close, Sprint close, deleting, or resetting workflow artifacts from the
-  CLI.
+- Sprint close, deleting, or resetting workflow artifacts from the CLI.
 - Task claim/lease, per-checklist-item tracking, or automatic validation run
   capture.
 
@@ -814,8 +813,8 @@ contain a cycle after the sprint has started, `sprint tasks` still returns
 uses rank fallback order so execution views remain recoverable.
 
 `workflow next` in `SPRINT_VIEW` should advertise `sprint task next`,
-`sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`, and
-`sprint history`.
+`sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`,
+`sprint story readiness`, `sprint story close`, and `sprint history`.
 
 ### Sprint Task Tickets
 
@@ -918,6 +917,76 @@ Task update safety rules:
 - Updating a blocked task to `In Progress` or `Done` fails closed.
 - Stale status or stale fingerprint fails closed. Refresh the ticket and retry.
 - `Done` and `Cancelled` are terminal for this phase.
+
+### Sprint Story Close
+
+Completing every task does not automatically close the parent story. Agents must
+explicitly close the story so dependency unblocking and sprint progress are
+recorded with story-level evidence.
+
+Check close readiness after the story's tasks are Done or Cancelled:
+
+```sh
+agileforge sprint story readiness \
+  --project-id "$PROJECT_ID" \
+  --story-id "$STORY_ID" > story-readiness.json
+```
+
+Read these fields before closing:
+
+- `data.close_eligible`
+- `data.current_status`
+- `data.story_fingerprint`
+- `data.readiness.total_tasks`
+- `data.readiness.done_tasks`
+- `data.readiness.cancelled_tasks`
+
+Close only when `close_eligible` is `true`:
+
+```sh
+STORY_STATUS="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("story-readiness.json").read_text())
+print(payload["data"]["current_status"])
+PY
+)"
+
+STORY_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("story-readiness.json").read_text())
+print(payload["data"]["story_fingerprint"])
+PY
+)"
+
+agileforge sprint story close \
+  --project-id "$PROJECT_ID" \
+  --story-id "$STORY_ID" \
+  --expected-status "$STORY_STATUS" \
+  --expected-story-fingerprint "$STORY_FINGERPRINT" \
+  --idempotency-key "close-story-$STORY_ID-$(date +%Y%m%d%H%M%S)" \
+  --resolution Completed \
+  --completion-notes "All story tasks completed and validated." \
+  --evidence-link path/to/changed_file.py
+```
+
+Valid `--resolution` values are `Completed`, `Completed with AC changes`,
+`Partial`, and `Won't Do`.
+
+Story close safety rules:
+
+- `--idempotency-key`, `--expected-status`, and
+  `--expected-story-fingerprint` are required.
+- The story fingerprint includes story id, sprint id, story status, and sorted
+  task ids/statuses. Any task status change after readiness invalidates the
+  close attempt.
+- Close fails if any actionable task is not `Done` or `Cancelled`.
+- Close fails if the story is already `Done` or `Accepted`.
+- After close, downstream task blockers recalculate from the persisted story
+  status. Run `agileforge sprint task next --project-id "$PROJECT_ID"` again.
 
 ## JSON Envelope Contract
 
@@ -1184,11 +1253,14 @@ agileforge sprint task next --project-id 1
 agileforge sprint task show --project-id 1 --task-id 42
 agileforge sprint task history --project-id 1 --task-id 42
 agileforge sprint task update --project-id 1 --task-id 42 --status "In Progress" --expected-status "To Do" --expected-task-fingerprint <fingerprint> --idempotency-key task-42-start-001 --notes "Starting work."
+agileforge sprint story readiness --project-id 1 --story-id 42
+agileforge sprint story close --project-id 1 --story-id 42 --expected-status "To Do" --expected-story-fingerprint <fingerprint> --idempotency-key close-story-42-001 --resolution Completed --completion-notes "All tasks completed." --evidence-link scripts/run_live_round.py
 ```
 
-`candidates`, `history`, `status`, `tasks`, `task next`, `task show`, and
-`task history` are read-only. `generate`, `save`, `start`, and `task update`
-mutate state. `save`, `start`, and `task update` require idempotency keys.
+`candidates`, `history`, `status`, `tasks`, `task next`, `task show`, `task
+history`, and `story readiness` are read-only. `generate`, `save`, `start`,
+`task update`, and `story close` mutate state. `save`, `start`, `task update`,
+and `story close` require idempotency keys.
 
 ### Context Commands
 
@@ -1236,6 +1308,14 @@ Installed domain mutations:
 - `agileforge roadmap save`
 - `agileforge story save`
 - `agileforge story complete`
+- `agileforge story reopen`
+- `agileforge story repair-readiness`
+- `agileforge story dependencies propose`
+- `agileforge story dependencies apply`
+- `agileforge sprint save`
+- `agileforge sprint start`
+- `agileforge sprint task update`
+- `agileforge sprint story close`
 
 For `project create` and `project setup retry`, the parser enforces:
 

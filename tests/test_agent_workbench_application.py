@@ -1261,6 +1261,70 @@ class _FakeSprintRunner:
             "errors": [],
         }
 
+    def story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint story readiness."""
+        self.calls.append(
+            (
+                "story_readiness",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "sprint_id": sprint_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record Sprint story close."""
+        self.calls.append(
+            (
+                "story_close",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "expected_status": expected_status,
+                    "expected_story_fingerprint": expected_story_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "resolution": resolution,
+                    "completion_notes": completion_notes,
+                    "evidence_links": evidence_links,
+                    "sprint_id": sprint_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
@@ -1685,6 +1749,20 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
         )["data"]["task_id"]
         == TASK_ID
     )
+    assert app.sprint_story_readiness(
+        project_id=PROJECT_ID,
+        story_id=STORY_ID,
+    )["data"]["story_id"] == STORY_ID
+    assert app.sprint_story_close(
+        project_id=PROJECT_ID,
+        story_id=STORY_ID,
+        expected_status="To Do",
+        expected_story_fingerprint="sha256:story",
+        idempotency_key="close-story-12-001",
+        resolution="Completed",
+        completion_notes="Story complete.",
+        evidence_links=["scripts/run_live_round.py"],
+    )["data"]["story_id"] == STORY_ID
     assert runner.calls == [
         (
             "start",
@@ -1721,6 +1799,25 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
                 "checklist_result": None,
                 "validation_summary": None,
                 "notes": "Starting work.",
+                "changed_by": "cli-agent",
+            },
+        ),
+        (
+            "story_readiness",
+            {"project_id": PROJECT_ID, "story_id": STORY_ID, "sprint_id": None},
+        ),
+        (
+            "story_close",
+            {
+                "project_id": PROJECT_ID,
+                "story_id": STORY_ID,
+                "expected_status": "To Do",
+                "expected_story_fingerprint": "sha256:story",
+                "idempotency_key": "close-story-12-001",
+                "resolution": "Completed",
+                "completion_notes": "Story complete.",
+                "evidence_links": ["scripts/run_live_round.py"],
+                "sprint_id": None,
                 "changed_by": "cli-agent",
             },
         ),
@@ -2303,6 +2400,17 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
             "--expected-status <expected_status> "
             "--expected-task-fingerprint <task_fingerprint> "
             "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge sprint story readiness --project-id 7 "
+            "--story-id <story_id>"
+        ),
+        (
+            "agileforge sprint story close --project-id 7 "
+            "--story-id <story_id> --expected-status <expected_status> "
+            "--expected-story-fingerprint <story_fingerprint> "
+            "--idempotency-key <idempotency_key> "
+            "--resolution Completed --completion-notes <notes>"
         ),
         "agileforge sprint history --project-id 7",
     ]

@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from models.enums import StoryResolution
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
@@ -512,6 +513,33 @@ class _Application(Protocol):
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Log Sprint task execution progress."""
+        ...
+
+    def sprint_story_readiness(
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return close readiness for one Sprint story."""
+        ...
+
+    def sprint_story_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        expected_status: str,
+        expected_story_fingerprint: str,
+        idempotency_key: str,
+        resolution: str,
+        completion_notes: str,
+        evidence_links: list[str] | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Close one Sprint story."""
         ...
 
     def context_pack(
@@ -1289,6 +1317,47 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_task_update.add_argument("--notes")
     sprint_task_update.add_argument("--changed-by", default="cli-agent")
     sprint_task_update.set_defaults(command_handler=_sprint_task_update)
+    sprint_story = sprint_sub.add_parser(
+        "story",
+        help="Inspect and close active Sprint stories.",
+    )
+    sprint_story_sub = sprint_story.add_subparsers(
+        dest="story_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    sprint_story_readiness = sprint_story_sub.add_parser(
+        "readiness",
+        help="Return close readiness for one Sprint story.",
+    )
+    sprint_story_readiness.add_argument("--project-id", type=int, required=True)
+    sprint_story_readiness.add_argument("--story-id", type=int, required=True)
+    sprint_story_readiness.add_argument("--sprint-id", type=int)
+    sprint_story_readiness.set_defaults(command_handler=_sprint_story_readiness)
+    sprint_story_close = sprint_story_sub.add_parser(
+        "close",
+        help="Close one Sprint story after its tasks are complete.",
+    )
+    sprint_story_close.add_argument("--project-id", type=int, required=True)
+    sprint_story_close.add_argument("--story-id", type=int, required=True)
+    sprint_story_close.add_argument("--expected-status", required=True)
+    sprint_story_close.add_argument("--expected-story-fingerprint", required=True)
+    sprint_story_close.add_argument("--idempotency-key", required=True)
+    sprint_story_close.add_argument(
+        "--resolution",
+        choices=tuple(resolution.value for resolution in StoryResolution),
+        required=True,
+    )
+    sprint_story_close.add_argument("--completion-notes", required=True)
+    sprint_story_close.add_argument(
+        "--evidence-link",
+        action="append",
+        default=[],
+        dest="evidence_links",
+    )
+    sprint_story_close.add_argument("--sprint-id", type=int)
+    sprint_story_close.add_argument("--changed-by", default="cli-agent")
+    sprint_story_close.set_defaults(command_handler=_sprint_story_close)
 
     context = subparsers.add_parser("context", help="Build bounded agent context.")
     context_sub = context.add_subparsers(
@@ -2514,6 +2583,37 @@ def _sprint_task_update(
         checklist_result=args.checklist_result,
         validation_summary=args.validation_summary,
         notes=args.notes,
+        changed_by=args.changed_by,
+    )
+
+
+def _sprint_story_readiness(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint story readiness to the application facade."""
+    return "agileforge sprint story readiness", application.sprint_story_readiness(
+        project_id=args.project_id,
+        story_id=args.story_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_story_close(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint story close to the application facade."""
+    return "agileforge sprint story close", application.sprint_story_close(
+        project_id=args.project_id,
+        story_id=args.story_id,
+        expected_status=args.expected_status,
+        expected_story_fingerprint=args.expected_story_fingerprint,
+        idempotency_key=args.idempotency_key,
+        resolution=args.resolution,
+        completion_notes=args.completion_notes,
+        evidence_links=args.evidence_links,
+        sprint_id=args.sprint_id,
         changed_by=args.changed_by,
     )
 
