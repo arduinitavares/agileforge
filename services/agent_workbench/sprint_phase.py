@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -74,10 +75,42 @@ else:
     ToolContext = Any
 
 _DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
+_DEPENDENCY_RISK_MIN_MATCHED_TERMS = 2
+_DEPENDENCY_RISK_MIN_TERM_LENGTH = 5
 _SPRINT_TASK_UPDATE_COMMAND = "agileforge sprint task update"
 _SPRINT_TASK_UPDATE_LEASE_OWNER = "agileforge-cli:sprint-task-update"
 _SPRINT_STORY_CLOSE_COMMAND = "agileforge sprint story close"
 _SPRINT_STORY_CLOSE_LEASE_OWNER = "agileforge-cli:sprint-story-close"
+_DEPENDENCY_RISK_INTEGRATION_MARKERS = (
+    "execute",
+    "artifact set",
+    "end-to-end",
+    "orchestrat",
+    "workflow",
+)
+_DEPENDENCY_RISK_CUE_MARKERS = (
+    "before",
+    "exist",
+    "guard",
+    "reject",
+    "require",
+    "using",
+    "valid",
+    "without",
+)
+_DEPENDENCY_RISK_STOPWORDS = frozenset(
+    {
+        "cartola",
+        "command",
+        "containing",
+        "data",
+        "recommendation",
+        "recommendations",
+        "story",
+        "validate",
+        "validation",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1230,6 +1263,20 @@ def _build_sprint_task_view(
             dependency_order_source=dependency_order_source,
         ),
     )
+    risk_metadata = _story_dependency_risk_metadata(
+        ordered_stories,
+        active_edges=graph.active_edges,
+        story_statuses=story_statuses,
+    )
+    for story_id, metadata in risk_metadata.items():
+        story_metadata.setdefault(story_id, {}).update(metadata)
+    dependency_review_required_story_count = sum(
+        1
+        for metadata in risk_metadata.values()
+        if metadata["dependency_review_required"]
+    )
+    if dependency_review_required_story_count:
+        warnings.append(_dependency_review_required_warning(risk_metadata))
     tasks = _serialize_sprint_tasks(
         ordered_stories,
         story_dependency_metadata=story_metadata,
@@ -1244,6 +1291,9 @@ def _build_sprint_task_view(
                 1
                 for metadata in story_metadata.values()
                 if metadata["is_blocked"]
+            ),
+            "dependency_review_required_story_count": (
+                dependency_review_required_story_count
             ),
             "ordering": ordering,
         },
@@ -1267,6 +1317,7 @@ def _next_task_ticket(
         for task in tasks
         if task.get("status") == TaskStatus.TO_DO.value
         and task.get("is_blocked") is not True
+        and task.get("dependency_review_required") is not True
     ]
     if not candidates:
         return None, "no_available_task"
@@ -1340,6 +1391,15 @@ def _build_task_ticket(
             "unblocks_story_ids": list(task_row.get("unblocks_story_ids") or []),
             "dependency_summary": dependency_summary,
             "dependency_order_source": task_row.get("dependency_order_source"),
+            "dependency_review_required": (
+                task_row.get("dependency_review_required") is True
+            ),
+            "missing_dependency_story_ids": list(
+                task_row.get("missing_dependency_story_ids") or []
+            ),
+            "dependency_review_candidates": list(
+                task_row.get("dependency_review_candidates") or []
+            ),
         },
         "work_contract": {
             "checklist_items": list(task_row.get("checklist_items") or []),
@@ -1536,6 +1596,27 @@ def _assert_task_update_guards(  # noqa: PLR0913
                 "reason_code": "SPRINT_TASK_ARTIFACT_REFS_REQUIRED",
                 "task_id": task_row.get("task_id"),
                 "artifact_targets": list(task_row.get("artifact_targets") or []),
+            },
+        )
+    if (
+        new_status in {TaskStatus.IN_PROGRESS, TaskStatus.DONE}
+        and task_row.get("dependency_review_required") is True
+    ):
+        missing_ids = list(task_row.get("missing_dependency_story_ids") or [])
+        message = (
+            "SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED: task needs dependency review."
+        )
+        raise _SprintTaskUpdateError(
+            message,
+            status_code=409,
+            details={
+                "reason_code": "SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED",
+                "task_id": task_row.get("task_id"),
+                "story_id": task_row.get("story_id"),
+                "missing_dependency_story_ids": missing_ids,
+                "dependency_review_candidates": list(
+                    task_row.get("dependency_review_candidates") or []
+                ),
             },
         )
     if (
@@ -2039,6 +2120,166 @@ def _story_dependency_metadata(
             "dependency_order_source": context.dependency_order_source,
         }
     return metadata_by_story_id
+
+
+def _story_dependency_risk_metadata(
+    stories: list[UserStory],
+    *,
+    active_edges: dict[int, set[int]],
+    story_statuses: dict[int, StoryStatus],
+) -> dict[int, dict[str, Any]]:
+    """Return high-confidence missing dependency review hints."""
+    metadata_by_story_id: dict[int, dict[str, Any]] = {}
+    for dependent in stories:
+        dependent_id = dependent.story_id
+        if dependent_id is None or story_statuses.get(dependent_id) == StoryStatus.DONE:
+            continue
+        dependent_title = _normalize_dependency_text(str(dependent.title or ""))
+        dependent_text = _dependency_risk_story_text(dependent)
+        if not _looks_like_dependency_consumer(
+            title=dependent_title,
+            text=dependent_text,
+        ):
+            continue
+        covered_prerequisite_ids = _dependency_closure(dependent_id, active_edges)
+        candidates: list[dict[str, Any]] = []
+        for prerequisite in stories:
+            prerequisite_id = prerequisite.story_id
+            if (
+                prerequisite_id is None
+                or prerequisite_id == dependent_id
+                or prerequisite_id in covered_prerequisite_ids
+                or story_statuses.get(prerequisite_id) == StoryStatus.DONE
+                or not _candidate_can_be_missing_prerequisite(dependent, prerequisite)
+            ):
+                continue
+            matched_terms = _matched_dependency_terms(
+                dependent_text=dependent_text,
+                prerequisite=prerequisite,
+            )
+            if len(matched_terms) < _DEPENDENCY_RISK_MIN_MATCHED_TERMS:
+                continue
+            candidates.append(
+                {
+                    "story_id": prerequisite_id,
+                    "title": prerequisite.title,
+                    "matched_terms": matched_terms,
+                }
+            )
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (str(item["title"]), int(item["story_id"])))
+        metadata_by_story_id[dependent_id] = {
+            "dependency_review_required": True,
+            "dependency_review_reason_code": "MISSING_SEMANTIC_DEPENDENCY_EDGE",
+            "missing_dependency_story_ids": [
+                int(candidate["story_id"]) for candidate in candidates
+            ],
+            "dependency_review_candidates": candidates,
+        }
+    return metadata_by_story_id
+
+
+def _dependency_review_required_warning(
+    risk_metadata: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a structured warning for missing semantic dependency edges."""
+    story_ids = sorted(risk_metadata)
+    pairs: list[dict[str, Any]] = []
+    for dependent_story_id in story_ids:
+        metadata = risk_metadata[dependent_story_id]
+        pairs.extend(
+            [
+                {
+                    "dependent_story_id": dependent_story_id,
+                    "prerequisite_story_id": candidate["story_id"],
+                    "matched_terms": candidate["matched_terms"],
+                }
+                for candidate in metadata.get("dependency_review_candidates", [])
+            ]
+        )
+    return {
+        "code": "SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED",
+        "message": (
+            "Some Sprint stories reference unfinished peer stories without active "
+            "dependency edges."
+        ),
+        "details": {
+            "story_ids": story_ids,
+            "missing_dependency_pairs": pairs,
+        },
+    }
+
+
+def _dependency_risk_story_text(story: UserStory) -> str:
+    """Return normalized text used for dependency-risk matching."""
+    return _normalize_dependency_text(
+        " ".join(
+            str(value or "")
+            for value in (
+                story.title,
+                story.story_description,
+                story.acceptance_criteria,
+            )
+        )
+    )
+
+
+def _normalize_dependency_text(value: str) -> str:
+    """Normalize story text for conservative dependency-risk matching."""
+    lowered = value.lower().replace("\u2011", "-").replace("\u2010", "-")
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def _looks_like_dependency_consumer(*, title: str, text: str) -> bool:
+    """Return true when a story appears to consume prerequisite work."""
+    return any(
+        marker in title for marker in _DEPENDENCY_RISK_INTEGRATION_MARKERS
+    ) and any(marker in text for marker in _DEPENDENCY_RISK_CUE_MARKERS)
+
+
+def _candidate_can_be_missing_prerequisite(
+    dependent: UserStory,
+    prerequisite: UserStory,
+) -> bool:
+    """Return true when rank order can support a missing semantic prerequisite."""
+    dependent_rank = _story_rank_number(dependent)
+    prerequisite_rank = _story_rank_number(prerequisite)
+    if dependent_rank is None or prerequisite_rank is None:
+        return True
+    return prerequisite_rank > dependent_rank
+
+
+def _story_rank_number(story: UserStory) -> int | None:
+    """Return the numeric story rank when available."""
+    match = re.search(r"\d+", str(story.rank or ""))
+    if match is None:
+        return None
+    return int(match.group(0))
+
+
+def _matched_dependency_terms(
+    *,
+    dependent_text: str,
+    prerequisite: UserStory,
+) -> list[str]:
+    """Return prerequisite title terms present in dependent story text."""
+    terms = _dependency_title_terms(str(prerequisite.title or ""))
+    return sorted(term for term in terms if term in dependent_text)
+
+
+def _dependency_title_terms(title: str) -> set[str]:
+    """Return significant title terms for dependency-risk matching."""
+    normalized = _normalize_dependency_text(title)
+    raw_terms = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", normalized)
+    return {
+        term
+        for term in raw_terms
+        if (
+            len(term) >= _DEPENDENCY_RISK_MIN_TERM_LENGTH
+            and term not in _DEPENDENCY_RISK_STOPWORDS
+        )
+    }
 
 
 def _dependency_closure(

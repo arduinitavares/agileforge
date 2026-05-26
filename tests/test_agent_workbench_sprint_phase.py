@@ -209,6 +209,7 @@ def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(
         "active_edge_count": 0,
         "cycle_count": 0,
         "blocked_story_count": 0,
+        "dependency_review_required_story_count": 0,
         "ordering": "topological",
     }
 
@@ -345,6 +346,7 @@ def test_sprint_runner_tasks_include_dependency_safe_execution_metadata(
         "active_edge_count": 3,
         "cycle_count": 0,
         "blocked_story_count": 2,
+        "dependency_review_required_story_count": 0,
         "ordering": "topological",
     }
     assert [task["story_id"] for task in data["tasks"]] == [
@@ -488,12 +490,126 @@ def test_sprint_runner_tasks_warn_and_fallback_on_dependency_cycle(
         "active_edge_count": 2,
         "cycle_count": 1,
         "blocked_story_count": 2,
+        "dependency_review_required_story_count": 0,
         "ordering": "rank_fallback",
     }
     assert [task["story_id"] for task in result["data"]["tasks"]] == [
         first.story_id,
         second.story_id,
     ]
+
+
+def test_sprint_task_next_skips_story_with_missing_semantic_dependency(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task next should not recommend integration work with missing prereq edges."""
+    product = Product(name="Risk Product")
+    team = Team(name="Risk Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    live_workflow = UserStory(
+        product_id=product.product_id,
+        title="Execute Live Pre-Lock Recommendation Workflow",
+        story_description=(
+            "Run the live recommendation workflow using a valid pre-lock market "
+            "capture and reject finalized target-round data leaks."
+        ),
+        acceptance_criteria=(
+            "- Verify the command uses a valid pre-lock market capture.\n"
+            "- Verify no finalized target-round data is present."
+        ),
+        story_points=3,
+        rank="102",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    capture = UserStory(
+        product_id=product.product_id,
+        title="Capture Pre-Lock Cartola Market Data",
+        story_description="Capture the pre-lock market data before recommendations.",
+        acceptance_criteria="- Verify capture metadata is written.",
+        story_points=3,
+        rank="201",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([live_workflow, capture])
+    session.flush()
+    assert live_workflow.story_id is not None
+    assert capture.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Live recommendation",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=live_workflow.story_id),
+            SprintStory(sprint_id=sprint.sprint_id, story_id=capture.story_id),
+            Task(story_id=live_workflow.story_id, description="Design live workflow"),
+            Task(story_id=capture.story_id, description="Design capture contract"),
+        ]
+    )
+    session.commit()
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    tasks = runner.tasks(project_id=product.product_id)
+    next_ticket = runner.task_next(project_id=product.product_id)
+
+    by_story_id = {task["story_id"]: task for task in tasks["data"]["tasks"]}
+    assert by_story_id[live_workflow.story_id]["dependency_review_required"] is True
+    assert by_story_id[live_workflow.story_id]["missing_dependency_story_ids"] == [
+        capture.story_id
+    ]
+    assert (
+        by_story_id[live_workflow.story_id]["dependency_review_candidates"][0][
+            "story_id"
+        ]
+        == capture.story_id
+    )
+    assert tasks["warnings"] == [
+        {
+            "code": "SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED",
+            "message": (
+                "Some Sprint stories reference unfinished peer stories without "
+                "active dependency edges."
+            ),
+            "details": {
+                "story_ids": [live_workflow.story_id],
+                "missing_dependency_pairs": [
+                    {
+                        "dependent_story_id": live_workflow.story_id,
+                        "prerequisite_story_id": capture.story_id,
+                        "matched_terms": ["capture", "market", "pre-lock"],
+                    }
+                ],
+            },
+        }
+    ]
+    assert tasks["data"]["dependency_summary"] == {
+        "active_edge_count": 0,
+        "cycle_count": 0,
+        "blocked_story_count": 0,
+        "dependency_review_required_story_count": 1,
+        "ordering": "topological",
+    }
+    assert next_ticket["data"]["task_ticket"]["story"]["story_id"] == capture.story_id
 
 
 def test_sprint_task_next_returns_in_progress_ticket_before_new_todo(
@@ -792,6 +908,106 @@ def test_sprint_task_update_rejects_blocked_task_start(
         prerequisite.story_id
     ]
     persisted_task = session.get(Task, blocked_task.task_id)
+    assert persisted_task is not None
+    assert persisted_task.status == TaskStatus.TO_DO
+
+
+def test_sprint_task_update_rejects_dependency_review_required_task_start(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agents cannot start risky integration tasks before dependency review."""
+    product = Product(name="Risk Update Product")
+    team = Team(name="Risk Update Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    live_workflow = UserStory(
+        product_id=product.product_id,
+        title="Execute Live Pre-Lock Recommendation Workflow",
+        story_description=(
+            "Run the live recommendation workflow using a valid pre-lock market "
+            "capture."
+        ),
+        acceptance_criteria="- Verify the command uses pre-lock market capture.",
+        story_points=3,
+        rank="102",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    capture = UserStory(
+        product_id=product.product_id,
+        title="Capture Pre-Lock Cartola Market Data",
+        story_points=3,
+        rank="201",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([live_workflow, capture])
+    session.flush()
+    assert live_workflow.story_id is not None
+    assert capture.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Reject risky start",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    risky_task = Task(
+        story_id=live_workflow.story_id,
+        description="Design live workflow",
+        status=TaskStatus.TO_DO,
+    )
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=live_workflow.story_id),
+            SprintStory(sprint_id=sprint.sprint_id, story_id=capture.story_id),
+            risky_task,
+            Task(story_id=capture.story_id, description="Design capture contract"),
+        ]
+    )
+    session.commit()
+    assert risky_task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+    show = runner.task_show(
+        project_id=product.product_id,
+        task_id=risky_task.task_id,
+    )
+    fingerprint = show["data"]["task_ticket"]["guards"]["expected_task_fingerprint"]
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=risky_task.task_id,
+        status="In Progress",
+        expected_status="To Do",
+        expected_task_fingerprint=str(fingerprint),
+        idempotency_key="start-risky-task-001",
+        notes="Trying to start risky workflow work.",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["reason_code"] == (
+        "SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED"
+    )
+    assert result["errors"][0]["details"]["missing_dependency_story_ids"] == [
+        capture.story_id
+    ]
+    persisted_task = session.get(Task, risky_task.task_id)
     assert persisted_task is not None
     assert persisted_task.status == TaskStatus.TO_DO
 

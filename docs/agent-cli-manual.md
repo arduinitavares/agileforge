@@ -814,23 +814,31 @@ and add read-only execution metadata:
 - `blocked_by_story_ids`
 - `unblocks_story_ids`
 - `is_blocked`
+- `dependency_review_required`
+- `missing_dependency_story_ids`
+- `dependency_review_candidates`
 - `dependency_order_source`
 
 Use the row order and `story_execution_order` as the implementation order.
-Do not start a task whose `is_blocked` is `true`. `blocked_by_story_ids` is
-transitive and is cleared only when every prerequisite story is `Done`,
-including prerequisites completed in earlier sprints.
+Do not start a task whose `is_blocked` or `dependency_review_required` is
+`true`. `blocked_by_story_ids` is transitive and is cleared only when every
+prerequisite story is `Done`, including prerequisites completed in earlier
+sprints.
 
-These fields reflect the active `story dependencies` graph. They do not infer
-hidden prerequisites from prose. If the task order contradicts the reviewed
-Sprint intent, inspect and repair story dependencies before directing an
+These fields primarily reflect the active `story dependencies` graph.
+AgileForge also runs a conservative dependency-risk detector for unstarted
+integration/workflow stories. If a story text clearly references an unfinished
+peer story and no active edge covers it, `sprint tasks` marks
+`dependency_review_required: true` and emits
+`SPRINT_TASK_DEPENDENCY_REVIEW_REQUIRED`. Repair the graph before directing an
 implementation agent.
 
 The response also includes `dependency_summary` with `active_edge_count`,
-`cycle_count`, `blocked_story_count`, and `ordering`. If active dependencies
-contain a cycle after the sprint has started, `sprint tasks` still returns
-`ok: true`, emits `SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK` in `warnings`, and
-uses rank fallback order so execution views remain recoverable.
+`cycle_count`, `blocked_story_count`,
+`dependency_review_required_story_count`, and `ordering`. If active
+dependencies contain a cycle after the sprint has started, `sprint tasks` still
+returns `ok: true`, emits `SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK` in warnings,
+and uses rank fallback order so execution views remain recoverable.
 
 `workflow next` in `SPRINT_VIEW` should advertise `sprint task next`,
 `sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`,
@@ -851,8 +859,8 @@ agileforge sprint task next --project-id "$PROJECT_ID" > task-next.json
 
 If a task is already `In Progress`, `task next` returns that task before
 offering new `To Do` work. Otherwise it returns the first unblocked `To Do` task
-by dependency-aware execution order. If no work is available, `data.task_ticket`
-is `null` and `data.reason` explains why.
+that does not require dependency review. If no work is available,
+`data.task_ticket` is `null` and `data.reason` explains why.
 
 Show a specific ticket or history:
 
