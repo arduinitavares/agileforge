@@ -710,6 +710,75 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def sprint_start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a sprint start payload."""
+        self.calls.append(
+            (
+                "sprint_start",
+                {
+                    "project_id": project_id,
+                    "sprint_id": sprint_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "sprint_id": sprint_id or 11,
+                "fsm_state": "SPRINT_VIEW",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint status payload."""
+        self.calls.append(
+            ("sprint_status", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint tasks payload."""
+        self.calls.append(
+            ("sprint_tasks", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "sprint_id": sprint_id or 11,
+                "tasks": [],
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def context_pack(
         self,
         *,
@@ -2078,6 +2147,65 @@ def test_sprint_save_cli_requires_review_guards(
             "idempotency_key": "save-sprint-7-001",
         },
     )
+
+
+def test_sprint_start_cli_requires_expected_state_and_idempotency(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint start CLI routes guarded activation fields."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "sprint",
+            "start",
+            "--project-id",
+            "7",
+            "--expected-state",
+            "SPRINT_PERSISTENCE",
+            "--idempotency-key",
+            "start-sprint-7-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["fsm_state"] == "SPRINT_VIEW"
+    assert app.calls[-1] == (
+        "sprint_start",
+        {
+            "project_id": 7,
+            "sprint_id": None,
+            "expected_state": "SPRINT_PERSISTENCE",
+            "idempotency_key": "start-sprint-7-001",
+        },
+    )
+
+
+def test_sprint_status_and_tasks_cli_route_optional_sprint_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint status/tasks CLI allow the runner to resolve the active sprint."""
+    resolved_sprint_id = 11
+    app = _FakeApplication()
+
+    status_exit = main(["sprint", "status", "--project-id", "7"], application=app)
+    tasks_exit = main(["sprint", "tasks", "--project-id", "7"], application=app)
+
+    assert status_exit == 0
+    assert tasks_exit == 0
+    outputs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert outputs[0]["data"]["sprint_id"] == resolved_sprint_id
+    assert outputs[1]["data"]["tasks"] == []
+    assert app.calls[-2:] == [
+        ("sprint_status", {"project_id": 7, "sprint_id": None}),
+        ("sprint_tasks", {"project_id": 7, "sprint_id": None}),
+    ]
 
 
 def test_story_save_cli_flattens_save_result(

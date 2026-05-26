@@ -70,6 +70,10 @@ Examples:
   agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date """
     """2026-05-25 --attempt-id <attempt_id> --expected-artifact-fingerprint """
     """<fingerprint> --expected-state SPRINT_DRAFT --idempotency-key save-sprint-001
+  agileforge sprint start --project-id 1 --expected-state SPRINT_PERSISTENCE """
+    """--idempotency-key start-sprint-001
+  agileforge sprint status --project-id 1
+  agileforge sprint tasks --project-id 1
   agileforge context pack --project-id 1 --phase sprint-planning
 """
 )
@@ -424,6 +428,35 @@ class _Application(Protocol):
         idempotency_key: str,
     ) -> JsonObject:
         """Persist the current Sprint draft."""
+        ...
+
+    def sprint_start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Start a saved Sprint."""
+        ...
+
+    def sprint_status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return Sprint execution status."""
+        ...
+
+    def sprint_tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return Sprint execution tasks."""
         ...
 
     def context_pack(
@@ -1064,7 +1097,7 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_dependencies_apply.add_argument("--idempotency-key", required=True)
     story_dependencies_apply.set_defaults(command_handler=_story_dependencies_apply)
 
-    sprint = subparsers.add_parser("sprint", help="Inspect sprint planning inputs.")
+    sprint = subparsers.add_parser("sprint", help="Run Sprint phase commands.")
     sprint_sub = sprint.add_subparsers(
         dest="action",
         required=True,
@@ -1120,6 +1153,29 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_save.add_argument("--expected-state", required=True)
     sprint_save.add_argument("--idempotency-key", required=True)
     sprint_save.set_defaults(command_handler=_sprint_save)
+    sprint_start = sprint_sub.add_parser(
+        "start",
+        help="Start a saved Sprint for execution.",
+    )
+    sprint_start.add_argument("--project-id", type=int, required=True)
+    sprint_start.add_argument("--sprint-id", type=int)
+    sprint_start.add_argument("--expected-state", required=True)
+    sprint_start.add_argument("--idempotency-key", required=True)
+    sprint_start.set_defaults(command_handler=_sprint_start)
+    sprint_status = sprint_sub.add_parser(
+        "status",
+        help="Show Sprint execution status.",
+    )
+    sprint_status.add_argument("--project-id", type=int, required=True)
+    sprint_status.add_argument("--sprint-id", type=int)
+    sprint_status.set_defaults(command_handler=_sprint_status)
+    sprint_tasks = sprint_sub.add_parser(
+        "tasks",
+        help="List Sprint execution tasks.",
+    )
+    sprint_tasks.add_argument("--project-id", type=int, required=True)
+    sprint_tasks.add_argument("--sprint-id", type=int)
+    sprint_tasks.set_defaults(command_handler=_sprint_tasks)
 
     context = subparsers.add_parser("context", help="Build bounded agent context.")
     context_sub = context.add_subparsers(
@@ -2254,6 +2310,41 @@ def _sprint_save(
         expected_artifact_fingerprint=args.expected_artifact_fingerprint,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _sprint_start(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint start to the application facade."""
+    return "agileforge sprint start", application.sprint_start(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _sprint_status(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint status to the application facade."""
+    return "agileforge sprint status", application.sprint_status(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_tasks(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint tasks to the application facade."""
+    return "agileforge sprint tasks", application.sprint_tasks(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
     )
 
 

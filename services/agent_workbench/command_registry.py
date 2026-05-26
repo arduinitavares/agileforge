@@ -673,6 +673,42 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.MUTATION_FAILED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge sprint start",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=("project_id", "expected_state", "idempotency_key"),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint status",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint tasks",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
 )
 
 

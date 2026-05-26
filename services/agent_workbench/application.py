@@ -346,6 +346,35 @@ class _SprintPhaseRunner(Protocol):
         """Persist the current Sprint draft."""
         ...
 
+    def start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Start a saved Sprint."""
+        ...
+
+    def status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return Sprint execution status."""
+        ...
+
+    def tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return Sprint execution tasks."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -1005,6 +1034,46 @@ class AgentWorkbenchApplication:
             expected_artifact_fingerprint=expected_artifact_fingerprint,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
+        )
+
+    def sprint_start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Start a saved Sprint."""
+        return self._get_sprint_runner().start(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def sprint_status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return Sprint execution status."""
+        return self._get_sprint_runner().status(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return Sprint execution tasks."""
+        return self._get_sprint_runner().tasks(
+            project_id=project_id,
+            sprint_id=sprint_id,
         )
 
     def _get_read_projection(self) -> _ReadProjection:
@@ -1801,7 +1870,12 @@ def _sprint_workflow_next(
 ) -> dict[str, Any] | None:
     """Return Sprint phase commands for Sprint workflow states."""
     fsm_state = _fsm_state_from_envelope(workflow)
-    if fsm_state not in {"SPRINT_SETUP", "SPRINT_DRAFT", "SPRINT_PERSISTENCE"}:
+    if fsm_state not in {
+        "SPRINT_SETUP",
+        "SPRINT_DRAFT",
+        "SPRINT_PERSISTENCE",
+        "SPRINT_VIEW",
+    }:
         return None
 
     next_valid_commands: list[str] = []
@@ -1942,6 +2016,36 @@ def _sprint_command_candidates(
                     f"agileforge sprint generate --project-id {project_id} "
                     "--input <feedback>"
                 ),
+            ),
+        ]
+    if fsm_state == "SPRINT_PERSISTENCE":
+        return [
+            (
+                "agileforge sprint start",
+                (
+                    f"agileforge sprint start --project-id {project_id} "
+                    "--expected-state SPRINT_PERSISTENCE "
+                    "--idempotency-key <idempotency_key>"
+                ),
+            ),
+            (
+                "agileforge sprint history",
+                f"agileforge sprint history --project-id {project_id}",
+            ),
+        ]
+    if fsm_state == "SPRINT_VIEW":
+        return [
+            (
+                "agileforge sprint status",
+                f"agileforge sprint status --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint tasks",
+                f"agileforge sprint tasks --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint history",
+                f"agileforge sprint history --project-id {project_id}",
             ),
         ]
     return [

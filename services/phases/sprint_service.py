@@ -773,12 +773,50 @@ def _record_sprint_save_replay(
     state["sprint_save_idempotency_keys"] = saves
 
 
+def _sprint_start_replay(
+    state: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    starts = state.get("sprint_start_idempotency_keys")
+    if not isinstance(starts, dict):
+        return None
+    payload = starts.get(idempotency_key)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _record_sprint_start_replay(
+    state: dict[str, Any],
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> None:
+    starts = state.get("sprint_start_idempotency_keys")
+    if not isinstance(starts, dict):
+        starts = {}
+    starts[idempotency_key] = dict(payload)
+    state["sprint_start_idempotency_keys"] = starts
+
+
 def _normalize_fsm_state(value: object) -> str:
     if isinstance(value, str):
         normalized = value.strip().upper()
         if normalized in VALID_FSM_STATES:
             return normalized
     return OrchestratorState.SETUP_REQUIRED.value
+
+
+def _assert_sprint_start_expected_state(
+    state: dict[str, Any],
+    expected_state: str,
+) -> None:
+    if expected_state != OrchestratorState.SPRINT_PERSISTENCE.value:
+        raise SprintPhaseError(
+            "Sprint start expected_state must be SPRINT_PERSISTENCE"
+        )
+    fsm_state = _normalize_fsm_state(state.get("fsm_state"))
+    if fsm_state != expected_state:
+        raise SprintPhaseError(
+            f"Sprint start stale state: expected {expected_state}, got {fsm_state}",
+        )
 
 
 def _assert_save_expected_state(
@@ -925,3 +963,70 @@ def start_saved_sprint(
             runtime_summary,
         )
     }
+
+
+def start_sprint_execution(
+    *,
+    project_id: int,
+    sprint_id: int | None,
+    expected_state: str,
+    idempotency_key: str,
+    load_state: Callable[[], dict[str, Any]],
+    save_state: Callable[[dict[str, Any]], None],
+    now_iso: Callable[[], str],
+    resolve_sprint_id: Callable[[], int | None],
+    load_sprint: Callable[[int], Any | None],
+    load_other_active: Callable[[int], Any | None],
+    persist_started_sprint: Callable[[int], Any | None],
+    build_runtime_summary: Callable[[], dict[str, Any]],
+    serialize_sprint: Callable[[Any, dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Start the reviewed Sprint and synchronize workbench FSM state."""
+    normalized_key = idempotency_key.strip()
+    if not normalized_key:
+        raise SprintPhaseError("Sprint start idempotency_key is required")
+
+    state = load_state()
+    replay = _sprint_start_replay(state, normalized_key)
+    if replay is not None:
+        return replay
+
+    _assert_sprint_start_expected_state(state, expected_state)
+
+    resolved_sprint_id = sprint_id or resolve_sprint_id()
+    if resolved_sprint_id is None:
+        raise SprintPhaseError("No planned Sprint is available to start.")
+
+    data = start_saved_sprint(
+        project_id=project_id,
+        sprint_id=resolved_sprint_id,
+        load_sprint=lambda: load_sprint(resolved_sprint_id),
+        load_other_active=lambda: load_other_active(resolved_sprint_id),
+        persist_started_sprint=lambda: persist_started_sprint(resolved_sprint_id),
+        build_runtime_summary=build_runtime_summary,
+        serialize_sprint=serialize_sprint,
+    )
+    sprint_payload = data.get("sprint")
+    payload_sprint_id = (
+        sprint_payload.get("id")
+        if isinstance(sprint_payload, dict)
+        and isinstance(sprint_payload.get("id"), int)
+        else resolved_sprint_id
+    )
+
+    started_at = now_iso()
+    state["fsm_state"] = OrchestratorState.SPRINT_VIEW.value
+    state["fsm_state_entered_at"] = started_at
+    state["active_sprint_id"] = payload_sprint_id
+    state["sprint_started_at"] = started_at
+
+    payload = {
+        "project_id": project_id,
+        "sprint_id": payload_sprint_id,
+        "fsm_state": OrchestratorState.SPRINT_VIEW.value,
+        "idempotency_key": normalized_key,
+        **data,
+    }
+    _record_sprint_start_replay(state, normalized_key, payload)
+    save_state(state)
+    return payload

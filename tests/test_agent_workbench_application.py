@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     )
 
 PROJECT_ID = 7
+SPRINT_ID = 11
 SPEC_VERSION_ID = 3
 STORY_ID = 12
 RECOVERY_MUTATION_EVENT_ID = 42
@@ -186,6 +187,33 @@ class _SprintDraftReadProjection(_FakeReadProjection):
                 "artifact_fingerprint": "sha256:reviewed",
                 "is_complete": True,
             },
+        }
+        return result
+
+
+class _SprintPersistenceReadProjection(_FakeReadProjection):
+    """Fake read projection for a saved planned Sprint state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return sprint persistence workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_PERSISTENCE",
+            "setup_status": "passed",
+        }
+        return result
+
+
+class _SprintViewReadProjection(_FakeReadProjection):
+    """Fake read projection for an active Sprint state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return sprint view workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_VIEW",
+            "setup_status": "passed",
+            "active_sprint_id": 11,
         }
         return result
 
@@ -979,6 +1007,152 @@ class _FakeStoryRunner:
         }
 
 
+class _FakeSprintRunner:
+    """Fake Sprint runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def generate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+        selected_story_ids: list[int] | None = None,
+        team_velocity_assumption: str = "Medium",
+        sprint_duration_days: int = 14,
+        max_story_points: int | None = None,
+        include_task_decomposition: bool = True,
+    ) -> dict[str, Any]:
+        """Record Sprint generate."""
+        self.calls.append(
+            (
+                "generate",
+                {
+                    "project_id": project_id,
+                    "user_input": user_input,
+                    "selected_story_ids": selected_story_ids,
+                    "team_velocity_assumption": team_velocity_assumption,
+                    "sprint_duration_days": sprint_duration_days,
+                    "max_story_points": max_story_points,
+                    "include_task_decomposition": include_task_decomposition,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_DRAFT"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def history(self, *, project_id: int) -> dict[str, Any]:
+        """Record Sprint history."""
+        self.calls.append(("history", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        team_name: str,
+        sprint_start_date: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Sprint save."""
+        self.calls.append(
+            (
+                "save",
+                {
+                    "project_id": project_id,
+                    "team_name": team_name,
+                    "sprint_start_date": sprint_start_date,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "SPRINT_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Sprint start."""
+        self.calls.append(
+            (
+                "start",
+                {
+                    "project_id": project_id,
+                    "sprint_id": sprint_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint status."""
+        self.calls.append(
+            ("status", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint tasks."""
+        self.calls.append(("tasks", {"project_id": project_id, "sprint_id": sprint_id}))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "sprint_id": sprint_id or SPRINT_ID,
+                "tasks": [],
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
     app = AgentWorkbenchApplication(
@@ -1361,6 +1535,37 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "idempotency_key": "repair-story-readiness-7",
             },
         ),
+    ]
+
+
+def test_application_routes_sprint_execution_commands_to_runner() -> None:
+    """Verify Sprint execution facade methods delegate to the configured runner."""
+    runner = _FakeSprintRunner()
+    app = AgentWorkbenchApplication(sprint_runner=runner)
+
+    assert (
+        app.sprint_start(
+            project_id=PROJECT_ID,
+            sprint_id=None,
+            expected_state="SPRINT_PERSISTENCE",
+            idempotency_key="start-sprint-7-001",
+        )["data"]["sprint_id"]
+        == SPRINT_ID
+    )
+    assert app.sprint_status(project_id=PROJECT_ID)["data"]["sprint_id"] == SPRINT_ID
+    assert app.sprint_tasks(project_id=PROJECT_ID)["data"]["tasks"] == []
+    assert runner.calls == [
+        (
+            "start",
+            {
+                "project_id": PROJECT_ID,
+                "sprint_id": None,
+                "expected_state": "SPRINT_PERSISTENCE",
+                "idempotency_key": "start-sprint-7-001",
+            },
+        ),
+        ("status", {"project_id": PROJECT_ID, "sprint_id": None}),
+        ("tasks", {"project_id": PROJECT_ID, "sprint_id": None}),
     ]
 
 
@@ -1896,6 +2101,45 @@ def test_workflow_next_hides_sprint_save_after_latest_failed_attempt() -> None:
             },
         }
     ]
+
+
+def test_workflow_next_routes_sprint_persistence_to_guarded_start() -> None:
+    """Expose guarded Sprint start after a Sprint has been saved."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintPersistenceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge sprint start --project-id 7 "
+            "--expected-state SPRINT_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "agileforge sprint history --project-id 7",
+    ]
+    assert result["data"]["blocked_commands"] == []
+
+
+def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
+    """Expose execution commands once Sprint start syncs to SPRINT_VIEW."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintViewReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge sprint status --project-id 7",
+        "agileforge sprint tasks --project-id 7",
+        "agileforge sprint history --project-id 7",
+    ]
+    assert result["data"]["blocked_commands"] == []
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

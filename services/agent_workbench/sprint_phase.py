@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import anyio
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
-from models.core import Sprint
+from models.core import Sprint, UserStory
 from models.db import get_engine
-from models.enums import SprintStatus
+from models.enums import SprintStatus, WorkflowEventType
+from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
@@ -23,13 +26,16 @@ from services.phases.sprint_service import (
     generate_sprint_plan,
     get_sprint_history,
     save_sprint_plan,
+    start_sprint_execution,
 )
 from services.sprint_runtime import run_sprint_agent_from_state
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
+from utils.task_metadata import parse_task_metadata
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
+    from sqlmodel.sql._expression_select_cls import SelectOfScalar
 
     from models.core import Product
 else:
@@ -98,6 +104,92 @@ class SprintPhaseRunner:
             expected_state,
             idempotency_key,
         )
+
+    def start(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Start a saved Sprint and move the workflow into execution."""
+        return anyio.run(
+            self._start,
+            project_id,
+            sprint_id,
+            expected_state,
+            idempotency_key,
+        )
+
+    def status(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return active/planned Sprint execution status."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                resolved_sprint_id = self._resolve_execution_sprint_id(
+                    project_id,
+                    sprint_id=sprint_id,
+                    session=session,
+                )
+                sprint = _get_saved_sprint(session, project_id, resolved_sprint_id)
+                if sprint is None:
+                    _raise_sprint_not_found()
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": resolved_sprint_id,
+                    "sprint": _serialize_sprint_detail(
+                        sprint,
+                        runtime_summary=_build_sprint_runtime_summary(
+                            session=session,
+                            project_id=project_id,
+                        ),
+                    ),
+                    "task_summary": _task_summary(sprint),
+                }
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data)
+
+    def tasks(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return task rows for the active/planned Sprint."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                resolved_sprint_id = self._resolve_execution_sprint_id(
+                    project_id,
+                    sprint_id=sprint_id,
+                    session=session,
+                )
+                sprint = _get_saved_sprint(session, project_id, resolved_sprint_id)
+                if sprint is None:
+                    _raise_sprint_not_found()
+                tasks = _serialize_sprint_tasks(sprint)
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": resolved_sprint_id,
+                    "task_count": len(tasks),
+                    "tasks": tasks,
+                }
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data)
 
     async def _generate(  # noqa: PLR0913
         self,
@@ -202,6 +294,89 @@ class SprintPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
+    async def _start(
+        self,
+        project_id: int,
+        sprint_id: int | None,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        state = await self._ensure_session(str(project_id))
+        with Session(get_engine()) as session:
+
+            def _persist_started_sprint(resolved_sprint_id: int) -> Sprint | None:
+                sprint = _get_saved_sprint(session, project_id, resolved_sprint_id)
+                if sprint is None:
+                    return None
+                if sprint.started_at is None:
+                    sprint.started_at = datetime.now(UTC)
+                    sprint.status = SprintStatus.ACTIVE
+                    session.add(sprint)
+                    session.add(
+                        WorkflowEvent(
+                            event_type=WorkflowEventType.SPRINT_STARTED,
+                            product_id=project_id,
+                            sprint_id=resolved_sprint_id,
+                            session_id=str(project_id),
+                            event_metadata=json.dumps(
+                                {
+                                    "team_id": sprint.team_id,
+                                    "planned_start_date": str(sprint.start_date),
+                                    "planned_end_date": str(sprint.end_date),
+                                }
+                            ),
+                        )
+                    )
+                    session.commit()
+                    session.refresh(sprint)
+                return _get_saved_sprint(session, project_id, resolved_sprint_id)
+
+            try:
+                data = start_sprint_execution(
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    expected_state=expected_state,
+                    idempotency_key=idempotency_key,
+                    load_state=lambda: state,
+                    save_state=lambda state: self._save_session_state(
+                        str(project_id), state
+                    ),
+                    now_iso=_now_iso,
+                    resolve_sprint_id=lambda: self._current_planned_sprint_id(
+                        project_id
+                    ),
+                    load_sprint=lambda resolved_id: _get_saved_sprint(
+                        session, project_id, resolved_id
+                    ),
+                    load_other_active=lambda resolved_id: session.exec(
+                        select(Sprint).where(
+                            Sprint.product_id == project_id,
+                            Sprint.status == SprintStatus.ACTIVE,
+                            Sprint.sprint_id != resolved_id,
+                        )
+                    ).first(),
+                    persist_started_sprint=_persist_started_sprint,
+                    build_runtime_summary=lambda: _build_sprint_runtime_summary(
+                        session=session,
+                        project_id=project_id,
+                    ),
+                    serialize_sprint=lambda sprint, runtime_summary: (
+                        _serialize_sprint_detail(
+                            sprint,
+                            runtime_summary=runtime_summary,
+                        )
+                    ),
+                )
+            except SprintPhaseError as exc:
+                return _phase_error(exc)
+            except RuntimeError as exc:
+                return _workflow_error(exc)
+        return _data_envelope(data)
+
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
@@ -249,6 +424,217 @@ class SprintPhaseRunner:
                 )
             ).first()
             return sprint.sprint_id if sprint else None
+
+    def _current_active_sprint_id(self, project_id: int) -> int | None:
+        with Session(get_engine()) as session:
+            sprint = session.exec(
+                select(Sprint)
+                .where(
+                    Sprint.product_id == project_id,
+                    Sprint.status == SprintStatus.ACTIVE,
+                )
+                .order_by(
+                    cast("Any", Sprint.started_at).desc(),
+                    cast("Any", Sprint.sprint_id).desc(),
+                )
+            ).first()
+            return sprint.sprint_id if sprint else None
+
+    def _resolve_execution_sprint_id(
+        self,
+        project_id: int,
+        *,
+        sprint_id: int | None,
+        session: Session,
+    ) -> int:
+        if sprint_id is not None:
+            return sprint_id
+        sprint = session.exec(
+            select(Sprint)
+            .where(
+                Sprint.product_id == project_id,
+                Sprint.status == SprintStatus.ACTIVE,
+            )
+            .order_by(
+                cast("Any", Sprint.started_at).desc(),
+                cast("Any", Sprint.sprint_id).desc(),
+            )
+        ).first()
+        if sprint is None:
+            sprint = session.exec(
+                select(Sprint)
+                .where(
+                    Sprint.product_id == project_id,
+                    Sprint.status == SprintStatus.PLANNED,
+                )
+                .order_by(
+                    cast("Any", Sprint.updated_at).desc(),
+                    cast("Any", Sprint.sprint_id).desc(),
+                )
+            ).first()
+        if sprint is None or sprint.sprint_id is None:
+            _raise_no_execution_sprint_found()
+        return sprint.sprint_id
+
+
+def _raise_sprint_not_found() -> NoReturn:
+    message = "Sprint not found"
+    raise SprintPhaseError(message, status_code=404)
+
+
+def _raise_no_execution_sprint_found() -> NoReturn:
+    message = "No active or planned Sprint found."
+    raise SprintPhaseError(message, status_code=404)
+
+
+def _saved_sprint_query() -> SelectOfScalar[Sprint]:
+    """Return saved Sprint query with execution relationships loaded."""
+    return select(Sprint).options(
+        selectinload(cast("Any", Sprint.team)),
+        selectinload(cast("Any", Sprint.stories)).selectinload(
+            cast("Any", UserStory.tasks)
+        ),
+    )
+
+
+def _get_saved_sprint(
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+) -> Sprint | None:
+    """Return a saved Sprint constrained to one project."""
+    return session.exec(
+        _saved_sprint_query().where(
+            Sprint.product_id == project_id,
+            Sprint.sprint_id == sprint_id,
+        )
+    ).first()
+
+
+def _enum_value(value: object) -> str | None:
+    """Return enum value text for JSON payloads."""
+    enum_value = getattr(value, "value", value)
+    return str(enum_value) if enum_value is not None else None
+
+
+def _serialize_temporal(value: object) -> str | None:
+    """Serialize date/datetime-like values for CLI JSON."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return value.isoformat()
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    return str(value)
+
+
+def _sorted_sprint_stories(sprint: Sprint) -> list[UserStory]:
+    """Return Sprint stories in stable planning order."""
+    return sorted(
+        sprint.stories,
+        key=lambda story: (
+            story.rank or "",
+            story.story_id or 0,
+        ),
+    )
+
+
+def _serialize_sprint_story(story: UserStory) -> dict[str, Any]:
+    """Return compact story detail for Sprint execution commands."""
+    return {
+        "story_id": story.story_id,
+        "title": story.title,
+        "rank": story.rank,
+        "status": _enum_value(story.status),
+        "story_points": story.story_points,
+        "task_count": len(story.tasks),
+    }
+
+
+def _serialize_sprint_detail(
+    sprint: Sprint,
+    *,
+    runtime_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Return Sprint detail payload for CLI execution commands."""
+    stories = _sorted_sprint_stories(sprint)
+    return {
+        "id": sprint.sprint_id,
+        "goal": sprint.goal,
+        "status": _enum_value(sprint.status),
+        "started_at": _serialize_temporal(sprint.started_at),
+        "completed_at": _serialize_temporal(sprint.completed_at),
+        "start_date": _serialize_temporal(sprint.start_date),
+        "end_date": _serialize_temporal(sprint.end_date),
+        "team_id": sprint.team_id,
+        "team_name": sprint.team.name if sprint.team else None,
+        "story_count": len(stories),
+        "selected_stories": [_serialize_sprint_story(story) for story in stories],
+        "runtime_summary": runtime_summary,
+    }
+
+
+def _build_sprint_runtime_summary(
+    *,
+    session: Session,
+    project_id: int,
+) -> dict[str, Any]:
+    """Return active/planned Sprint summary for guard messaging."""
+    active = session.exec(
+        select(Sprint).where(
+            Sprint.product_id == project_id,
+            Sprint.status == SprintStatus.ACTIVE,
+        )
+    ).first()
+    planned = session.exec(
+        select(Sprint).where(
+            Sprint.product_id == project_id,
+            Sprint.status == SprintStatus.PLANNED,
+        )
+    ).first()
+    return {
+        "active_sprint_id": active.sprint_id if active else None,
+        "planned_sprint_id": planned.sprint_id if planned else None,
+    }
+
+
+def _serialize_sprint_tasks(sprint: Sprint) -> list[dict[str, Any]]:
+    """Return Sprint task rows grouped by story order."""
+    rows: list[dict[str, Any]] = []
+    for story in _sorted_sprint_stories(sprint):
+        tasks = sorted(story.tasks, key=lambda task: task.task_id or 0)
+        for task in tasks:
+            metadata = parse_task_metadata(
+                task.metadata_json,
+                task_id=task.task_id,
+            )
+            rows.append(
+                {
+                    "task_id": task.task_id,
+                    "story_id": story.story_id,
+                    "story_title": story.title,
+                    "description": task.description,
+                    "status": _enum_value(task.status),
+                    "task_kind": metadata.task_kind,
+                    "artifact_targets": list(metadata.artifact_targets),
+                    "workstream_tags": list(metadata.workstream_tags),
+                    "relevant_invariant_ids": list(metadata.relevant_invariant_ids),
+                    "checklist_items": list(metadata.checklist_items),
+                }
+            )
+    return rows
+
+
+def _task_summary(sprint: Sprint) -> dict[str, Any]:
+    """Return status counts for Sprint tasks."""
+    counts: dict[str, int] = {}
+    tasks = _serialize_sprint_tasks(sprint)
+    for task in tasks:
+        status = str(task.get("status") or "Unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return {"task_count": len(tasks), "status_counts": counts}
 
 
 def _now_iso() -> str:

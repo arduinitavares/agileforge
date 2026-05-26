@@ -3284,10 +3284,23 @@ async def start_project_sprint(project_id: int, sprint_id: int) -> dict[str, Any
                 detail=exc.detail,
             ) from exc
 
+        _sync_started_sprint_workflow_state(project_id=project_id, sprint_id=sprint_id)
         return {
             "status": "success",
             "data": data,
         }
+
+
+def _sync_started_sprint_workflow_state(*, project_id: int, sprint_id: int) -> None:
+    """Move the workbench session into Sprint execution after API start."""
+    session_id = str(project_id)
+    state = workflow_service.get_session_status(session_id) or {}
+    now = _now_iso()
+    state["fsm_state"] = OrchestratorState.SPRINT_VIEW.value
+    state["fsm_state_entered_at"] = now
+    state["active_sprint_id"] = sprint_id
+    state["sprint_started_at"] = now
+    workflow_service.update_session_status(session_id, state)
 
 
 register_sprint_routes(

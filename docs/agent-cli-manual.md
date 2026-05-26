@@ -22,7 +22,7 @@ The installed CLI supports:
 - Backlog generate, history, and save.
 - Roadmap generate, history, and save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
-- Sprint candidates, generate, history, and save.
+- Sprint candidates, generate, history, save, start, status, and tasks.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
@@ -759,6 +759,33 @@ If the saved draft came from a refinement file, read `attempt_id` and
 `artifact_fingerprint` from that latest reviewed file instead. Never save an
 older attempt after a newer refinement.
 
+### Sprint Execution Start
+
+After save, start the reviewed Sprint through a guarded mutation:
+
+```sh
+agileforge sprint start \
+  --project-id "$PROJECT_ID" \
+  --expected-state SPRINT_PERSISTENCE \
+  --idempotency-key "start-sprint-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > sprint-start.json
+```
+
+`--sprint-id` is optional. If omitted, AgileForge resolves the current planned
+Sprint for the project. On success the persisted Sprint becomes `Active`, the
+workbench FSM moves to `SPRINT_VIEW`, and repeated calls with the same
+idempotency key replay the same payload.
+
+Inspect execution status and task rows:
+
+```sh
+agileforge sprint status --project-id "$PROJECT_ID" | python -m json.tool
+agileforge sprint tasks --project-id "$PROJECT_ID" | python -m json.tool
+```
+
+`workflow next` in `SPRINT_VIEW` should advertise `sprint status`, `sprint
+tasks`, and `sprint history`.
+
 ## JSON Envelope Contract
 
 Every command returns one JSON envelope on stdout.
@@ -1014,9 +1041,16 @@ require explicit idempotency keys.
 
 ```sh
 agileforge sprint candidates --project-id 1
+agileforge sprint generate --project-id 1
+agileforge sprint history --project-id 1
+agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date 2026-05-25 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state SPRINT_DRAFT --idempotency-key save-sprint-001
+agileforge sprint start --project-id 1 --expected-state SPRINT_PERSISTENCE --idempotency-key start-sprint-001
+agileforge sprint status --project-id 1
+agileforge sprint tasks --project-id 1
 ```
 
-Read-only.
+`candidates`, `history`, `status`, and `tasks` are read-only. `generate`,
+`save`, and `start` mutate state. `save` and `start` require idempotency keys.
 
 ### Context Commands
 

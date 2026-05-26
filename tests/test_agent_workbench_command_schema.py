@@ -612,6 +612,9 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
         "agileforge sprint generate",
         "agileforge sprint history",
         "agileforge sprint save",
+        "agileforge sprint start",
+        "agileforge sprint status",
+        "agileforge sprint tasks",
     }
 
     assert sprint_command_names.issubset(names)
@@ -623,6 +626,9 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
     generate = command_schema_payload("agileforge sprint generate")
     history = command_schema_payload("agileforge sprint history")
     save = command_schema_payload("agileforge sprint save")
+    start = command_schema_payload("agileforge sprint start")
+    status = command_schema_payload("agileforge sprint status")
+    tasks = command_schema_payload("agileforge sprint tasks")
 
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id"]
@@ -647,14 +653,30 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
         "idempotency_key",
     ]
     assert save["idempotency_required"] is True
-    for schema in (generate, history, save):
+    assert start["mutates"] is True
+    assert start["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert start["input"]["optional"] == ["sprint_id"]
+    assert start["idempotency_required"] is True
+    assert status["mutates"] is False
+    assert status["input"]["required"] == ["project_id"]
+    assert status["input"]["optional"] == ["sprint_id"]
+    assert tasks["mutates"] is False
+    assert tasks["input"]["required"] == ["project_id"]
+    assert tasks["input"]["optional"] == ["sprint_id"]
+    for schema in (generate, history, save, start, status, tasks):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
+    for schema in (generate, history, save, start):
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
+    assert ErrorCode.MUTATION_FAILED.value in start["errors"]
 
 
 def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:

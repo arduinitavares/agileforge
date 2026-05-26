@@ -1356,13 +1356,14 @@ def test_list_sprints_returns_saved_sprints_newest_first(session, monkeypatch): 
 
 
 def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):  # noqa: ANN001, ANN201, D103
-    client, repo, _workflow = _build_client(monkeypatch)
+    client, repo, workflow = _build_client(monkeypatch)
     project_id, sprint_id = _seed_saved_sprint(
         session,
         repo,
         started=False,
         created_title="Planned Sprint",
     )
+    workflow.states[str(project_id)] = {"fsm_state": "SPRINT_PERSISTENCE"}
 
     story = session.exec(
         select(UserStory).where(UserStory.product_id == project_id)
@@ -1407,6 +1408,8 @@ def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):
     assert second_response.status_code == 200  # noqa: PLR2004
     second_payload = second_response.json()
     assert second_payload["data"]["sprint"]["started_at"] == started_at
+    assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_VIEW"
+    assert workflow.states[str(project_id)]["active_sprint_id"] == sprint_id
 
     events = session.exec(
         select(WorkflowEvent).where(

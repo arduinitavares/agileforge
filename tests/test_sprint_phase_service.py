@@ -23,6 +23,7 @@ from services.phases.sprint_service import (
     reset_stale_saved_sprint_planner_working_set,
     save_sprint_plan,
     start_saved_sprint,
+    start_sprint_execution,
 )
 
 JsonDict = dict[str, Any]
@@ -1360,3 +1361,103 @@ def test_start_saved_sprint_persists_planned_sprint_and_returns_detail() -> None
 
     assert payload["sprint"]["status"] == "ACTIVE"
     assert payload["sprint"]["summary"] == {"active_sprint_id": 3}
+
+
+def test_start_sprint_execution_updates_fsm_and_records_idempotency() -> None:
+    """Verify guarded Sprint start syncs the workbench FSM."""
+    resolved_sprint_id = 11
+    state: JsonDict = {"fsm_state": "SPRINT_PERSISTENCE"}
+    saved_states: list[JsonDict] = []
+    sprint = SimpleNamespace(status="PLANNED", started_at=None)
+    started = SimpleNamespace(status="ACTIVE", started_at="2026-05-26T09:00:00Z")
+
+    payload = start_sprint_execution(
+        project_id=7,
+        sprint_id=None,
+        expected_state="SPRINT_PERSISTENCE",
+        idempotency_key="start-sprint-7-001",
+        load_state=lambda: state,
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-05-26T09:00:00Z",
+        resolve_sprint_id=lambda: resolved_sprint_id,
+        load_sprint=lambda resolved_id: sprint
+        if resolved_id == resolved_sprint_id
+        else None,
+        load_other_active=lambda _resolved_id: None,
+        persist_started_sprint=lambda resolved_id: started
+        if resolved_id == resolved_sprint_id
+        else None,
+        build_runtime_summary=lambda: {"active_sprint_id": resolved_sprint_id},
+        serialize_sprint=lambda _sprint, summary: {
+            "id": resolved_sprint_id,
+            "status": "Active",
+            "summary": summary,
+        },
+    )
+
+    assert payload["fsm_state"] == "SPRINT_VIEW"
+    assert payload["sprint_id"] == resolved_sprint_id
+    assert payload["sprint"]["status"] == "Active"
+    assert state["fsm_state"] == "SPRINT_VIEW"
+    assert state["active_sprint_id"] == resolved_sprint_id
+    assert state["sprint_started_at"] == "2026-05-26T09:00:00Z"
+    assert state["sprint_start_idempotency_keys"]["start-sprint-7-001"] == payload
+    assert saved_states[-1]["fsm_state"] == "SPRINT_VIEW"
+
+
+def test_start_sprint_execution_replays_idempotency_after_fsm_moves() -> None:
+    """Verify retried Sprint start returns the recorded payload."""
+    replay_payload: JsonDict = {
+        "fsm_state": "SPRINT_VIEW",
+        "sprint_id": 11,
+        "sprint": {"id": 11},
+        "idempotency_key": "start-sprint-7-001",
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_VIEW",
+        "sprint_start_idempotency_keys": {
+            "start-sprint-7-001": replay_payload,
+        },
+    }
+
+    payload = start_sprint_execution(
+        project_id=7,
+        sprint_id=None,
+        expected_state="SPRINT_PERSISTENCE",
+        idempotency_key="start-sprint-7-001",
+        load_state=lambda: state,
+        save_state=lambda _updated: pytest.fail("replay should not persist state"),
+        now_iso=lambda: "2026-05-26T09:00:00Z",
+        resolve_sprint_id=lambda: pytest.fail("replay should not resolve sprint"),
+        load_sprint=lambda _resolved_id: pytest.fail("replay should not load sprint"),
+        load_other_active=lambda _resolved_id: None,
+        persist_started_sprint=lambda _resolved_id: None,
+        build_runtime_summary=dict,
+        serialize_sprint=lambda _sprint, _summary: {},
+    )
+
+    assert payload == replay_payload
+
+
+def test_start_sprint_execution_rejects_stale_expected_state() -> None:
+    """Verify Sprint start must run from SPRINT_PERSISTENCE."""
+    state: JsonDict = {"fsm_state": "SPRINT_VIEW"}
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        start_sprint_execution(
+            project_id=7,
+            sprint_id=11,
+            expected_state="SPRINT_PERSISTENCE",
+            idempotency_key="start-sprint-7-002",
+            load_state=lambda: state,
+            save_state=lambda _updated: None,
+            now_iso=lambda: "2026-05-26T09:00:00Z",
+            resolve_sprint_id=lambda: 11,
+            load_sprint=lambda _resolved_id: None,
+            load_other_active=lambda _resolved_id: None,
+            persist_started_sprint=lambda _resolved_id: None,
+            build_runtime_summary=dict,
+            serialize_sprint=lambda _sprint, _summary: {},
+        )
+
+    assert "expected SPRINT_PERSISTENCE, got SPRINT_VIEW" in exc_info.value.detail
