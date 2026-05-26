@@ -783,6 +783,33 @@ agileforge sprint status --project-id "$PROJECT_ID" | python -m json.tool
 agileforge sprint tasks --project-id "$PROJECT_ID" | python -m json.tool
 ```
 
+`sprint tasks` is dependency-aware. The task rows preserve the existing fields
+and add read-only execution metadata:
+
+- `task_execution_order`
+- `story_execution_order`
+- `direct_blocked_by_story_ids`
+- `blocked_by_story_ids`
+- `unblocks_story_ids`
+- `is_blocked`
+- `dependency_order_source`
+
+Use the row order and `story_execution_order` as the implementation order.
+Do not start a task whose `is_blocked` is `true`. `blocked_by_story_ids` is
+transitive and is cleared only when every prerequisite story is `Done`,
+including prerequisites completed in earlier sprints.
+
+These fields reflect the active `story dependencies` graph. They do not infer
+hidden prerequisites from prose. If the task order contradicts the reviewed
+Sprint intent, inspect and repair story dependencies before directing an
+implementation agent.
+
+The response also includes `dependency_summary` with `active_edge_count`,
+`cycle_count`, `blocked_story_count`, and `ordering`. If active dependencies
+contain a cycle after the sprint has started, `sprint tasks` still returns
+`ok: true`, emits `SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK` in `warnings`, and
+uses rank fallback order so execution views remain recoverable.
+
 `workflow next` in `SPRINT_VIEW` should advertise `sprint status`, `sprint
 tasks`, and `sprint history`.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
@@ -13,7 +14,7 @@ from sqlmodel import Session, select
 
 from models.core import Sprint, UserStory
 from models.db import get_engine
-from models.enums import SprintStatus, WorkflowEventType
+from models.enums import SprintStatus, StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
@@ -29,6 +30,7 @@ from services.phases.sprint_service import (
     start_sprint_execution,
 )
 from services.sprint_runtime import run_sprint_agent_from_state
+from services.story_dependencies import load_story_dependency_graph
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
 from utils.task_metadata import parse_task_metadata
@@ -40,6 +42,19 @@ if TYPE_CHECKING:
     from models.core import Product
 else:
     ToolContext = Any
+
+_DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
+
+
+@dataclass(frozen=True)
+class _StoryDependencyMetadataContext:
+    """Inputs needed to build per-story execution dependency metadata."""
+
+    active_edges: dict[int, set[int]]
+    downstream_edges: dict[int, set[int]]
+    story_statuses: dict[int, StoryStatus]
+    execution_index_by_story_id: dict[int, int]
+    dependency_order_source: str
 
 
 class SprintPhaseRunner:
@@ -180,16 +195,21 @@ class SprintPhaseRunner:
                 sprint = _get_saved_sprint(session, project_id, resolved_sprint_id)
                 if sprint is None:
                     _raise_sprint_not_found()
-                tasks = _serialize_sprint_tasks(sprint)
+                task_view = _build_sprint_task_view(
+                    session=session,
+                    project_id=project_id,
+                    sprint=sprint,
+                )
                 data = {
                     "project_id": project_id,
                     "sprint_id": resolved_sprint_id,
-                    "task_count": len(tasks),
-                    "tasks": tasks,
+                    "task_count": len(task_view["tasks"]),
+                    "tasks": task_view["tasks"],
+                    "dependency_summary": task_view["dependency_summary"],
                 }
         except SprintPhaseError as exc:
             return _phase_error(exc)
-        return _data_envelope(data)
+        return _data_envelope(data, warnings=task_view["warnings"])
 
     async def _generate(  # noqa: PLR0913
         self,
@@ -525,8 +545,9 @@ def _serialize_temporal(value: object) -> str | None:
         if value.tzinfo is not None:
             return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
         return value.isoformat()
-    if hasattr(value, "isoformat"):
-        return str(value.isoformat())
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
     return str(value)
 
 
@@ -600,41 +621,283 @@ def _build_sprint_runtime_summary(
     }
 
 
-def _serialize_sprint_tasks(sprint: Sprint) -> list[dict[str, Any]]:
-    """Return Sprint task rows grouped by story order."""
+def _build_sprint_task_view(
+    *,
+    session: Session,
+    project_id: int,
+    sprint: Sprint,
+) -> dict[str, Any]:
+    """Return dependency-aware task rows and read-side diagnostics."""
+    graph = load_story_dependency_graph(session, project_id=project_id)
+    active_edge_count = sum(
+        len(prerequisites) for prerequisites in graph.active_edges.values()
+    )
+    warnings: list[dict[str, Any]] = []
+    ordering = "topological"
+
+    if graph.cycle_paths:
+        ordering = "rank_fallback"
+        ordered_stories = _sorted_sprint_stories(sprint)
+        warnings.append(
+            {
+                "code": "SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK",
+                "message": (
+                    "Active story dependencies contain a cycle; Sprint tasks are "
+                    "returned using rank fallback order."
+                ),
+                "details": {"cycle_paths": graph.cycle_paths},
+            }
+        )
+    else:
+        ordered_stories = _topologically_sorted_sprint_stories(
+            sprint,
+            active_edges=graph.active_edges,
+        )
+
+    story_statuses = _story_statuses(
+        session,
+        sprint=sprint,
+        active_edges=graph.active_edges,
+    )
+    current_story_ids = {
+        story.story_id for story in sprint.stories if story.story_id is not None
+    }
+    execution_index_by_story_id = {
+        story.story_id: index
+        for index, story in enumerate(ordered_stories, start=1)
+        if story.story_id is not None
+    }
+    downstream_edges = _downstream_edges(
+        active_edges=graph.active_edges,
+        current_story_ids=current_story_ids,
+    )
+    dependency_order_source = (
+        "rank_fallback"
+        if ordering == "rank_fallback"
+        else "active_story_dependencies"
+    )
+    story_metadata = _story_dependency_metadata(
+        ordered_stories,
+        context=_StoryDependencyMetadataContext(
+            active_edges=graph.active_edges,
+            downstream_edges=downstream_edges,
+            story_statuses=story_statuses,
+            execution_index_by_story_id=execution_index_by_story_id,
+            dependency_order_source=dependency_order_source,
+        ),
+    )
+    tasks = _serialize_sprint_tasks(
+        ordered_stories,
+        story_dependency_metadata=story_metadata,
+    )
+    return {
+        "tasks": tasks,
+        "warnings": warnings,
+        "dependency_summary": {
+            "active_edge_count": active_edge_count,
+            "cycle_count": len(graph.cycle_paths),
+            "blocked_story_count": sum(
+                1
+                for metadata in story_metadata.values()
+                if metadata["is_blocked"]
+            ),
+            "ordering": ordering,
+        },
+    }
+
+
+def _serialize_sprint_tasks(
+    stories: list[UserStory],
+    *,
+    story_dependency_metadata: dict[int, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return Sprint task rows grouped by dependency-aware story order."""
+    dependency_metadata = story_dependency_metadata or {}
     rows: list[dict[str, Any]] = []
-    for story in _sorted_sprint_stories(sprint):
+    task_execution_order = 1
+    for story in stories:
         tasks = sorted(story.tasks, key=lambda task: task.task_id or 0)
         for task in tasks:
             metadata = parse_task_metadata(
                 task.metadata_json,
                 task_id=task.task_id,
             )
-            rows.append(
-                {
-                    "task_id": task.task_id,
-                    "story_id": story.story_id,
-                    "story_title": story.title,
-                    "description": task.description,
-                    "status": _enum_value(task.status),
-                    "task_kind": metadata.task_kind,
-                    "artifact_targets": list(metadata.artifact_targets),
-                    "workstream_tags": list(metadata.workstream_tags),
-                    "relevant_invariant_ids": list(metadata.relevant_invariant_ids),
-                    "checklist_items": list(metadata.checklist_items),
-                }
-            )
+            row = {
+                "task_id": task.task_id,
+                "story_id": story.story_id,
+                "story_title": story.title,
+                "description": task.description,
+                "status": _enum_value(task.status),
+                "task_kind": metadata.task_kind,
+                "artifact_targets": list(metadata.artifact_targets),
+                "workstream_tags": list(metadata.workstream_tags),
+                "relevant_invariant_ids": list(metadata.relevant_invariant_ids),
+                "checklist_items": list(metadata.checklist_items),
+                "task_execution_order": task_execution_order,
+            }
+            if story.story_id is not None:
+                row.update(dependency_metadata.get(story.story_id, {}))
+            rows.append(row)
+            task_execution_order += 1
     return rows
 
 
 def _task_summary(sprint: Sprint) -> dict[str, Any]:
     """Return status counts for Sprint tasks."""
     counts: dict[str, int] = {}
-    tasks = _serialize_sprint_tasks(sprint)
+    tasks = _serialize_sprint_tasks(_sorted_sprint_stories(sprint))
     for task in tasks:
         status = str(task.get("status") or "Unknown")
         counts[status] = counts.get(status, 0) + 1
     return {"task_count": len(tasks), "status_counts": counts}
+
+
+def _topologically_sorted_sprint_stories(
+    sprint: Sprint,
+    *,
+    active_edges: dict[int, set[int]],
+) -> list[UserStory]:
+    """Return Sprint stories ordered with in-sprint prerequisites first."""
+    fallback_order = _sorted_sprint_stories(sprint)
+    stories_by_id = {
+        story.story_id: story for story in fallback_order if story.story_id is not None
+    }
+    story_ids = set(stories_by_id)
+    fallback_index = {
+        story_id: index for index, story_id in enumerate(stories_by_id, start=1)
+    }
+    indegree = dict.fromkeys(story_ids, 0)
+    dependents_by_prerequisite: dict[int, set[int]] = {}
+    for dependent_id in sorted(story_ids):
+        for prerequisite_id in sorted(active_edges.get(dependent_id, set())):
+            if prerequisite_id not in story_ids:
+                continue
+            indegree[dependent_id] += 1
+            dependents_by_prerequisite.setdefault(prerequisite_id, set()).add(
+                dependent_id
+            )
+
+    ready = sorted(
+        [story_id for story_id, count in indegree.items() if count == 0],
+        key=lambda story_id: fallback_index[story_id],
+    )
+    ordered_ids: list[int] = []
+    while ready:
+        story_id = ready.pop(0)
+        ordered_ids.append(story_id)
+        for dependent_id in sorted(
+            dependents_by_prerequisite.get(story_id, set()),
+            key=lambda item: fallback_index[item],
+        ):
+            indegree[dependent_id] -= 1
+            if indegree[dependent_id] == 0:
+                ready.append(dependent_id)
+                ready.sort(key=lambda item: fallback_index[item])
+
+    if len(ordered_ids) != len(story_ids):
+        return fallback_order
+    return [stories_by_id[story_id] for story_id in ordered_ids]
+
+
+def _story_statuses(
+    session: Session,
+    *,
+    sprint: Sprint,
+    active_edges: dict[int, set[int]],
+) -> dict[int, StoryStatus]:
+    """Return statuses for current and dependency graph stories."""
+    story_ids = {
+        story.story_id for story in sprint.stories if story.story_id is not None
+    }
+    for dependent_id, prerequisite_ids in active_edges.items():
+        story_ids.add(dependent_id)
+        story_ids.update(prerequisite_ids)
+    if not story_ids:
+        return {}
+
+    rows = session.exec(
+        select(UserStory).where(cast("Any", UserStory.story_id).in_(story_ids))
+    ).all()
+    return {
+        story.story_id: story.status for story in rows if story.story_id is not None
+    }
+
+
+def _downstream_edges(
+    *,
+    active_edges: dict[int, set[int]],
+    current_story_ids: set[int],
+) -> dict[int, set[int]]:
+    """Return current-sprint dependents keyed by prerequisite story id."""
+    downstream: dict[int, set[int]] = {}
+    for dependent_id, prerequisite_ids in active_edges.items():
+        if dependent_id not in current_story_ids:
+            continue
+        for prerequisite_id in prerequisite_ids:
+            downstream.setdefault(prerequisite_id, set()).add(dependent_id)
+    return downstream
+
+
+def _story_dependency_metadata(
+    stories: list[UserStory],
+    *,
+    context: _StoryDependencyMetadataContext,
+) -> dict[int, dict[str, Any]]:
+    """Return dependency metadata safe to attach to every task row."""
+    metadata_by_story_id: dict[int, dict[str, Any]] = {}
+    for story in stories:
+        story_id = story.story_id
+        if story_id is None:
+            continue
+        direct_blocked_by = sorted(context.active_edges.get(story_id, set()))
+        closure = _dependency_closure(story_id, context.active_edges)
+        blocked_by = sorted(
+            prerequisite_id
+            for prerequisite_id in closure
+            if context.story_statuses.get(prerequisite_id) != StoryStatus.DONE
+        )
+        unblocks = sorted(
+            context.downstream_edges.get(story_id, set()),
+            key=lambda dependent_id: (
+                context.execution_index_by_story_id.get(
+                    dependent_id,
+                    _DEPENDENCY_ORDER_FALLBACK_INDEX,
+                ),
+                dependent_id,
+            ),
+        )
+        metadata_by_story_id[story_id] = {
+            "story_execution_order": context.execution_index_by_story_id.get(story_id),
+            "direct_blocked_by_story_ids": direct_blocked_by,
+            "blocked_by_story_ids": blocked_by,
+            "unblocks_story_ids": unblocks,
+            "is_blocked": bool(blocked_by),
+            "dependency_order_source": context.dependency_order_source,
+        }
+    return metadata_by_story_id
+
+
+def _dependency_closure(
+    story_id: int,
+    active_edges: dict[int, set[int]],
+) -> set[int]:
+    """Return all transitive prerequisites for one story, cycle-safe."""
+    closure: set[int] = set()
+    visiting: set[int] = set()
+
+    def visit(current_id: int) -> None:
+        visiting.add(current_id)
+        for prerequisite_id in sorted(active_edges.get(current_id, set())):
+            if prerequisite_id not in closure:
+                closure.add(prerequisite_id)
+            if prerequisite_id in visiting:
+                continue
+            visit(prerequisite_id)
+        visiting.remove(current_id)
+
+    visit(story_id)
+    closure.discard(story_id)
+    return closure
 
 
 def _now_iso() -> str:
@@ -658,12 +921,16 @@ def _flatten_phase_payload(data: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
+def _data_envelope(
+    data: dict[str, Any],
+    *,
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Return application facade success envelope."""
     return {
         "ok": True,
         "data": _flatten_phase_payload(data),
-        "warnings": [],
+        "warnings": warnings or [],
         "errors": [],
     }
 
