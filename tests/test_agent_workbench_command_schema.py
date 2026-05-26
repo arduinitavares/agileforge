@@ -604,7 +604,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
 
 
-def test_sprint_phase_commands_are_registered_and_available() -> None:
+def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Sprint phase generation commands as installed CLI capabilities."""
     names = installed_command_names()
     capabilities = _capability_by_name()
@@ -614,6 +614,10 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
         "agileforge sprint save",
         "agileforge sprint start",
         "agileforge sprint status",
+        "agileforge sprint task history",
+        "agileforge sprint task next",
+        "agileforge sprint task show",
+        "agileforge sprint task update",
         "agileforge sprint tasks",
     }
 
@@ -629,6 +633,10 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
     start = command_schema_payload("agileforge sprint start")
     status = command_schema_payload("agileforge sprint status")
     tasks = command_schema_payload("agileforge sprint tasks")
+    task_next = command_schema_payload("agileforge sprint task next")
+    task_show = command_schema_payload("agileforge sprint task show")
+    task_history = command_schema_payload("agileforge sprint task history")
+    task_update = command_schema_payload("agileforge sprint task update")
 
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id"]
@@ -667,10 +675,49 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:
     assert tasks["mutates"] is False
     assert tasks["input"]["required"] == ["project_id"]
     assert tasks["input"]["optional"] == ["sprint_id"]
-    for schema in (generate, history, save, start, status, tasks):
+    assert task_next["mutates"] is False
+    assert task_next["input"]["required"] == ["project_id"]
+    assert task_next["input"]["optional"] == ["sprint_id"]
+    assert task_show["mutates"] is False
+    assert task_show["input"]["required"] == ["project_id", "task_id"]
+    assert task_show["input"]["optional"] == ["sprint_id"]
+    assert task_history["mutates"] is False
+    assert task_history["input"]["required"] == ["project_id", "task_id"]
+    assert task_history["input"]["optional"] == ["sprint_id"]
+    assert task_update["mutates"] is True
+    assert task_update["idempotency_required"] is True
+    assert task_update["input"]["required"] == [
+        "project_id",
+        "task_id",
+        "status",
+        "expected_status",
+        "expected_task_fingerprint",
+        "idempotency_key",
+    ]
+    assert task_update["input"]["optional"] == [
+        "sprint_id",
+        "outcome_summary",
+        "artifact_ref",
+        "checklist_result",
+        "validation_summary",
+        "notes",
+        "changed_by",
+    ]
+    for schema in (
+        generate,
+        history,
+        save,
+        start,
+        status,
+        tasks,
+        task_next,
+        task_show,
+        task_history,
+        task_update,
+    ):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
-    for schema in (generate, history, save, start):
+    for schema in (generate, history, save, start, task_update):
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]

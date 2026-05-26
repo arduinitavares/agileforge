@@ -6,21 +6,33 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from uuid import uuid4
 
 import anyio
 from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 
-from models.core import Sprint, UserStory
+from models.core import Sprint, SprintStory, Task, UserStory
 from models.db import get_engine
-from models.enums import SprintStatus, StoryStatus, WorkflowEventType
-from models.events import WorkflowEvent
+from models.enums import (
+    SprintStatus,
+    StoryStatus,
+    TaskAcceptanceResult,
+    TaskStatus,
+    WorkflowEventType,
+)
+from models.events import TaskExecutionLog, WorkflowEvent
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.fingerprints import canonical_hash
+from services.agent_workbench.mutation_ledger import (
+    LedgerLoadResult,
+    MutationLedgerRepository,
+)
 from services.phases import workflow_state
 from services.phases.sprint_service import (
     SprintPhaseError,
@@ -31,8 +43,14 @@ from services.phases.sprint_service import (
 )
 from services.sprint_runtime import run_sprint_agent_from_state
 from services.story_dependencies import load_story_dependency_graph
+from services.task_execution_service import (
+    TaskExecutionServiceError,
+    get_task_execution_history,
+    record_task_execution,
+)
 from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
+from utils.api_schemas import TaskExecutionWriteRequest
 from utils.task_metadata import parse_task_metadata
 
 if TYPE_CHECKING:
@@ -44,6 +62,8 @@ else:
     ToolContext = Any
 
 _DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
+_SPRINT_TASK_UPDATE_COMMAND = "agileforge sprint task update"
+_SPRINT_TASK_UPDATE_LEASE_OWNER = "agileforge-cli:sprint-task-update"
 
 
 @dataclass(frozen=True)
@@ -55,6 +75,34 @@ class _StoryDependencyMetadataContext:
     story_statuses: dict[int, StoryStatus]
     execution_index_by_story_id: dict[int, int]
     dependency_order_source: str
+
+
+class _SprintTaskUpdateError(SprintPhaseError):
+    """Sprint task update guard failure with structured details."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        details: dict[str, Any],
+        status_code: int = 409,
+    ) -> None:
+        super().__init__(detail, status_code=status_code)
+        self.details = details
+
+
+class _ResolveSprintId(Protocol):
+    """Callable shape for resolving the active/planned execution Sprint."""
+
+    def __call__(
+        self,
+        project_id: int,
+        *,
+        sprint_id: int | None,
+        session: Session,
+    ) -> int:
+        """Resolve a Sprint id for execution reads."""
+        ...
 
 
 class SprintPhaseRunner:
@@ -210,6 +258,265 @@ class SprintPhaseRunner:
         except SprintPhaseError as exc:
             return _phase_error(exc)
         return _data_envelope(data, warnings=task_view["warnings"])
+
+    def task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return the next agent-executable Sprint task ticket."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                sprint, task_view = _execution_sprint_and_task_view(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    resolve_sprint_id=self._resolve_execution_sprint_id,
+                )
+                ticket, reason = _next_task_ticket(
+                    session=session,
+                    project_id=project_id,
+                    sprint=sprint,
+                    task_view=task_view,
+                )
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": sprint.sprint_id,
+                    "task_ticket": ticket,
+                    "reason": reason,
+                    "dependency_summary": task_view["dependency_summary"],
+                }
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data, warnings=task_view["warnings"])
+
+    def task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task ticket."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                sprint, task_view = _execution_sprint_and_task_view(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    resolve_sprint_id=self._resolve_execution_sprint_id,
+                )
+                row = _task_row_from_view(task_view, task_id=task_id)
+                if row is None:
+                    _raise_task_not_found()
+                ticket = _build_task_ticket(
+                    session=session,
+                    project_id=project_id,
+                    sprint=sprint,
+                    task_row=row,
+                    dependency_summary=task_view["dependency_summary"],
+                )
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": sprint.sprint_id,
+                    "task_ticket": ticket,
+                }
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data, warnings=task_view["warnings"])
+
+    def task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task execution history."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                resolved_sprint_id = self._resolve_execution_sprint_id(
+                    project_id,
+                    sprint_id=sprint_id,
+                    session=session,
+                )
+                history = _task_execution_history(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id,
+                    task_id=task_id,
+                )
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": resolved_sprint_id,
+                    "execution": history,
+                }
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data)
+
+    def task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Log Sprint task execution progress through a guarded mutation."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        engine = get_engine()
+        ledger = MutationLedgerRepository(engine=engine)
+        new_status = _normalize_update_status(status)
+        expected = _normalize_update_status(expected_status)
+        acceptance_result = _normalize_acceptance_result(checklist_result)
+        request_payload = {
+            "project_id": project_id,
+            "sprint_id": sprint_id,
+            "task_id": task_id,
+            "status": new_status.value,
+            "expected_status": expected.value,
+            "expected_task_fingerprint": expected_task_fingerprint,
+            "outcome_summary": outcome_summary,
+            "artifact_refs": artifact_refs or [],
+            "checklist_result": acceptance_result.value if acceptance_result else None,
+            "validation_summary": validation_summary,
+            "notes": notes,
+            "changed_by": changed_by,
+        }
+        request_hash = canonical_hash(request_payload)
+        now = datetime.now(UTC)
+        ledger_result = ledger.create_or_load(
+            command=_SPRINT_TASK_UPDATE_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=f"sprint-task-update:{uuid4()}",
+            changed_by=changed_by,
+            lease_owner=_SPRINT_TASK_UPDATE_LEASE_OWNER,
+            now=now,
+        )
+        if ledger_result.error_code is not None:
+            return _ledger_error(ledger_result)
+        if ledger_result.replayed:
+            replay = ledger_result.response or {}
+            if isinstance(replay.get("data"), dict):
+                replay["data"].setdefault("idempotency", {})["replayed"] = True
+            return replay
+
+        try:
+            write_request = _task_execution_write_request(
+                new_status=new_status,
+                outcome_summary=outcome_summary,
+                artifact_refs=artifact_refs,
+                acceptance_result=acceptance_result,
+                validation_summary=validation_summary,
+                notes=notes,
+                changed_by=changed_by,
+            )
+            with Session(engine) as session:
+                sprint, task_view = _execution_sprint_and_task_view(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    resolve_sprint_id=self._resolve_execution_sprint_id,
+                )
+                row = _task_row_from_view(task_view, task_id=task_id)
+                if row is None:
+                    _raise_task_not_found()
+                current_fingerprint = _task_row_fingerprint(
+                    sprint=sprint,
+                    task_row=row,
+                )
+                _assert_task_update_guards(
+                    task_row=row,
+                    expected_status=expected,
+                    expected_task_fingerprint=expected_task_fingerprint,
+                    current_task_fingerprint=current_fingerprint,
+                    new_status=new_status,
+                    artifact_refs=artifact_refs,
+                )
+                execution = _record_task_execution(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=cast("int", sprint.sprint_id),
+                    task_id=task_id,
+                    write_request=write_request,
+                )
+                refreshed_sprint, refreshed_view = _execution_sprint_and_task_view(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=cast("int", sprint.sprint_id),
+                    resolve_sprint_id=self._resolve_execution_sprint_id,
+                )
+                refreshed_row = _task_row_from_view(refreshed_view, task_id=task_id)
+                if refreshed_row is None:
+                    _raise_task_not_found()
+                ticket = _build_task_ticket(
+                    session=session,
+                    project_id=project_id,
+                    sprint=refreshed_sprint,
+                    task_row=refreshed_row,
+                    dependency_summary=refreshed_view["dependency_summary"],
+                )
+                next_ticket, next_reason = _next_task_ticket(
+                    session=session,
+                    project_id=project_id,
+                    sprint=refreshed_sprint,
+                    task_view=refreshed_view,
+                )
+                data = {
+                    "project_id": project_id,
+                    "sprint_id": refreshed_sprint.sprint_id,
+                    "task_ticket": ticket,
+                    "execution": execution,
+                    "next_recommended_task": next_ticket,
+                    "next_reason": next_reason,
+                    "idempotency": {"replayed": False},
+                }
+                response = _data_envelope(data, warnings=refreshed_view["warnings"])
+        except (SprintPhaseError, ValueError) as exc:
+            response = _task_update_error(exc)
+
+        raw_response_data = response.get("data")
+        response_data = (
+            cast("dict[str, Any]", raw_response_data)
+            if isinstance(raw_response_data, dict)
+            else {}
+        )
+        ledger.finalize_success(
+            mutation_event_id=cast("int", ledger_result.ledger.mutation_event_id),
+            lease_owner=_SPRINT_TASK_UPDATE_LEASE_OWNER,
+            after=response_data,
+            response=response,
+            now=datetime.now(UTC),
+        )
+        return response
 
     async def _generate(  # noqa: PLR0913
         self,
@@ -507,6 +814,11 @@ def _raise_no_execution_sprint_found() -> NoReturn:
     raise SprintPhaseError(message, status_code=404)
 
 
+def _raise_task_not_found() -> NoReturn:
+    message = "Task not found in this Sprint."
+    raise SprintPhaseError(message, status_code=404)
+
+
 def _saved_sprint_query() -> SelectOfScalar[Sprint]:
     """Return saved Sprint query with execution relationships loaded."""
     return select(Sprint).options(
@@ -529,6 +841,63 @@ def _get_saved_sprint(
             Sprint.sprint_id == sprint_id,
         )
     ).first()
+
+
+def _execution_sprint_and_task_view(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int | None,
+    resolve_sprint_id: _ResolveSprintId,
+) -> tuple[Sprint, dict[str, Any]]:
+    """Load the resolved Sprint and its dependency-aware task view."""
+    resolved_sprint_id = resolve_sprint_id(
+        project_id,
+        sprint_id=sprint_id,
+        session=session,
+    )
+    sprint = _get_saved_sprint(session, project_id, resolved_sprint_id)
+    if sprint is None:
+        _raise_sprint_not_found()
+    task_view = _build_sprint_task_view(
+        session=session,
+        project_id=project_id,
+        sprint=sprint,
+    )
+    return sprint, task_view
+
+
+def _task_row_from_view(
+    task_view: dict[str, Any],
+    *,
+    task_id: int,
+) -> dict[str, Any] | None:
+    """Return one serialized task row by id."""
+    tasks = task_view.get("tasks")
+    if not isinstance(tasks, list):
+        return None
+    for row in tasks:
+        if isinstance(row, dict) and row.get("task_id") == task_id:
+            return row
+    return None
+
+
+def _story_for_task_row(sprint: Sprint, task_row: dict[str, Any]) -> UserStory:
+    """Return the Sprint story for one serialized task row."""
+    story_id = task_row.get("story_id")
+    for story in sprint.stories:
+        if story.story_id == story_id:
+            return story
+    _raise_task_not_found()
+
+
+def _task_for_row(story: UserStory, task_row: dict[str, Any]) -> Task:
+    """Return the ORM task for one serialized task row."""
+    task_id = task_row.get("task_id")
+    for task in story.tasks:
+        if task.task_id == task_id:
+            return task
+    _raise_task_not_found()
 
 
 def _enum_value(value: object) -> str | None:
@@ -706,6 +1075,145 @@ def _build_sprint_task_view(
     }
 
 
+def _next_task_ticket(
+    *,
+    session: Session,
+    project_id: int,
+    sprint: Sprint,
+    task_view: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """Return current in-progress work or the first unblocked To Do task."""
+    tasks = [task for task in task_view["tasks"] if isinstance(task, dict)]
+    in_progress = [
+        task for task in tasks if task.get("status") == TaskStatus.IN_PROGRESS.value
+    ]
+    candidates = in_progress or [
+        task
+        for task in tasks
+        if task.get("status") == TaskStatus.TO_DO.value
+        and task.get("is_blocked") is not True
+    ]
+    if not candidates:
+        return None, "no_available_task"
+    row = sorted(
+        candidates,
+        key=lambda task: (
+            int(task.get("task_execution_order") or _DEPENDENCY_ORDER_FALLBACK_INDEX),
+            int(task.get("task_id") or 0),
+        ),
+    )[0]
+    return (
+        _build_task_ticket(
+            session=session,
+            project_id=project_id,
+            sprint=sprint,
+            task_row=row,
+            dependency_summary=task_view["dependency_summary"],
+        ),
+        "in_progress_task" if in_progress else "next_unblocked_todo",
+    )
+
+
+def _build_task_ticket(
+    *,
+    session: Session,
+    project_id: int,
+    sprint: Sprint,
+    task_row: dict[str, Any],
+    dependency_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the agent-native task ticket payload."""
+    story = _story_for_task_row(sprint, task_row)
+    task = _task_for_row(story, task_row)
+    sprint_id = cast("int", sprint.sprint_id)
+    task_id = cast("int", task.task_id)
+    history = _task_execution_history(
+        session=session,
+        project_id=project_id,
+        sprint_id=sprint_id,
+        task_id=task_id,
+    )
+    fingerprint = _task_row_fingerprint(sprint=sprint, task_row=task_row)
+    return {
+        "ticket_type": "sprint_task",
+        "project_id": project_id,
+        "sprint_id": sprint_id,
+        "task": {
+            "task_id": task_id,
+            "description": task.description,
+            "status": _enum_value(task.status),
+            "task_kind": task_row.get("task_kind"),
+            "task_execution_order": task_row.get("task_execution_order"),
+            "task_fingerprint": fingerprint,
+        },
+        "story": {
+            "story_id": story.story_id,
+            "title": story.title,
+            "status": _enum_value(story.status),
+            "story_description": story.story_description,
+            "acceptance_criteria": story.acceptance_criteria,
+            "story_execution_order": task_row.get("story_execution_order"),
+            "story_points": story.story_points,
+            "rank": story.rank,
+        },
+        "execution": {
+            "is_blocked": task_row.get("is_blocked") is True,
+            "blocked_by_story_ids": list(task_row.get("blocked_by_story_ids") or []),
+            "direct_blocked_by_story_ids": list(
+                task_row.get("direct_blocked_by_story_ids") or []
+            ),
+            "unblocks_story_ids": list(task_row.get("unblocks_story_ids") or []),
+            "dependency_summary": dependency_summary,
+            "dependency_order_source": task_row.get("dependency_order_source"),
+        },
+        "work_contract": {
+            "checklist_items": list(task_row.get("checklist_items") or []),
+            "artifact_targets": list(task_row.get("artifact_targets") or []),
+            "relevant_invariant_ids": list(
+                task_row.get("relevant_invariant_ids") or []
+            ),
+            "workstream_tags": list(task_row.get("workstream_tags") or []),
+            "done_requires": {
+                "outcome_summary": True,
+                "checklist_result": True,
+                "artifact_refs": "required_if_artifact_targets_present",
+                "validation_summary": True,
+            },
+        },
+        "history": {
+            "latest_entry": history.get("latest_entry"),
+            "log_count": len(cast("list[Any]", history.get("history") or [])),
+        },
+        "guards": {
+            "expected_status": _enum_value(task.status),
+            "expected_task_fingerprint": fingerprint,
+        },
+        "next_actions": {
+            "update": (
+                f"agileforge sprint task update --project-id {project_id} "
+                f"--task-id {task_id} --expected-status \"{_enum_value(task.status)}\" "
+                f"--expected-task-fingerprint {fingerprint} "
+                "--idempotency-key <idempotency_key> --status <status>"
+            ),
+            "history": (
+                f"agileforge sprint task history --project-id {project_id} "
+                f"--task-id {task_id}"
+            ),
+        },
+    }
+
+
+def _task_row_fingerprint(*, sprint: Sprint, task_row: dict[str, Any]) -> str:
+    """Return a stable guard fingerprint for one task ticket."""
+    return canonical_hash(
+        {
+            "sprint_id": sprint.sprint_id,
+            "sprint_status": _enum_value(sprint.status),
+            "task": task_row,
+        }
+    )
+
+
 def _serialize_sprint_tasks(
     stories: list[UserStory],
     *,
@@ -750,6 +1258,257 @@ def _task_summary(sprint: Sprint) -> dict[str, Any]:
         status = str(task.get("status") or "Unknown")
         counts[status] = counts.get(status, 0) + 1
     return {"task_count": len(tasks), "status_counts": counts}
+
+
+def _normalize_update_status(value: str) -> TaskStatus:
+    """Parse a CLI task status value."""
+    normalized = value.strip().replace("_", " ").replace("-", " ").lower()
+    for status in TaskStatus:
+        if status.value.lower() == normalized:
+            return status
+    message = f"Unsupported task status: {value}"
+    raise ValueError(message)
+
+
+def _normalize_acceptance_result(value: str | None) -> TaskAcceptanceResult | None:
+    """Parse a CLI task acceptance result value."""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    for result in TaskAcceptanceResult:
+        if result.value == normalized:
+            return result
+    message = f"Unsupported checklist result: {value}"
+    raise ValueError(message)
+
+
+def _task_execution_notes(
+    *,
+    notes: str | None,
+    validation_summary: str | None,
+) -> str | None:
+    """Combine optional human notes and validation evidence into one log field."""
+    parts = []
+    if notes and notes.strip():
+        parts.append(notes.strip())
+    if validation_summary and validation_summary.strip():
+        parts.append(f"Validation: {validation_summary.strip()}")
+    return "\n".join(parts) if parts else None
+
+
+def _task_execution_write_request(  # noqa: PLR0913
+    *,
+    new_status: TaskStatus,
+    outcome_summary: str | None,
+    artifact_refs: list[str] | None,
+    acceptance_result: TaskAcceptanceResult | None,
+    validation_summary: str | None,
+    notes: str | None,
+    changed_by: str,
+) -> TaskExecutionWriteRequest:
+    """Build and validate a task execution write request."""
+    if new_status == TaskStatus.DONE and not (
+        validation_summary and validation_summary.strip()
+    ):
+        message = "validation_summary is required when marking a task Done."
+        raise ValueError(message)
+    return TaskExecutionWriteRequest(
+        new_status=new_status,
+        outcome_summary=outcome_summary,
+        artifact_refs=artifact_refs,
+        acceptance_result=acceptance_result,
+        notes=_task_execution_notes(
+            notes=notes,
+            validation_summary=validation_summary,
+        ),
+        changed_by=changed_by,
+    )
+
+
+def _assert_task_update_guards(  # noqa: PLR0913
+    *,
+    task_row: dict[str, Any],
+    expected_status: TaskStatus,
+    expected_task_fingerprint: str,
+    current_task_fingerprint: str,
+    new_status: TaskStatus,
+    artifact_refs: list[str] | None,
+) -> None:
+    """Fail closed when an agent update is stale or unsafe."""
+    current_status = str(task_row.get("status") or "")
+    if current_status != expected_status.value:
+        message = (
+            f"Task {task_row.get('task_id')} has status {current_status!r}, "
+            f"expected {expected_status.value!r}."
+        )
+        raise SprintPhaseError(message, status_code=409)
+    if expected_task_fingerprint != current_task_fingerprint:
+        message = "Task ticket fingerprint is stale."
+        raise SprintPhaseError(message, status_code=409)
+    if current_status in {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}:
+        message = f"Task {task_row.get('task_id')} is terminal."
+        raise SprintPhaseError(message, status_code=409)
+    if (
+        new_status == TaskStatus.DONE
+        and task_row.get("artifact_targets")
+        and not artifact_refs
+    ):
+        message = "SPRINT_TASK_ARTIFACT_REFS_REQUIRED: artifact refs are required."
+        raise _SprintTaskUpdateError(
+            message,
+            status_code=409,
+            details={
+                "reason_code": "SPRINT_TASK_ARTIFACT_REFS_REQUIRED",
+                "task_id": task_row.get("task_id"),
+                "artifact_targets": list(task_row.get("artifact_targets") or []),
+            },
+        )
+    if (
+        new_status in {TaskStatus.IN_PROGRESS, TaskStatus.DONE}
+        and task_row.get("is_blocked") is True
+    ):
+        blocked_by = list(task_row.get("blocked_by_story_ids") or [])
+        message = "SPRINT_TASK_BLOCKED: task cannot start or finish yet."
+        raise _SprintTaskUpdateError(
+            message,
+            status_code=409,
+            details={
+                "reason_code": "SPRINT_TASK_BLOCKED",
+                "task_id": task_row.get("task_id"),
+                "blocked_by_story_ids": blocked_by,
+            },
+        )
+
+
+def _record_task_execution(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+    task_id: int,
+    write_request: TaskExecutionWriteRequest,
+) -> dict[str, Any]:
+    """Persist task execution using the domain service and serialize response."""
+
+    def load_task() -> Task | None:
+        return session.get(Task, task_id)
+
+    def load_sprint() -> Sprint | None:
+        return session.get(Sprint, sprint_id)
+
+    def load_sprint_story(task: object) -> SprintStory | None:
+        task_obj = cast("Task", task)
+        return session.exec(
+            select(SprintStory).where(
+                SprintStory.sprint_id == sprint_id,
+                SprintStory.story_id == task_obj.story_id,
+            )
+        ).first()
+
+    def load_logs() -> list[TaskExecutionLog]:
+        return list(
+            session.exec(
+                select(TaskExecutionLog)
+                .where(TaskExecutionLog.task_id == task_id)
+                .where(TaskExecutionLog.sprint_id == sprint_id)
+                .order_by(
+                    cast("Any", TaskExecutionLog.changed_at).desc(),
+                    cast("Any", TaskExecutionLog.log_id).desc(),
+                )
+            ).all()
+        )
+
+    def persist_execution_log(**kwargs: object) -> None:
+        task = cast("Task", kwargs["task"])
+        session.add(task)
+        session.add(
+            TaskExecutionLog(
+                task_id=cast("int", task.task_id),
+                sprint_id=sprint_id,
+                old_status=kwargs["old_status"],
+                new_status=kwargs["new_status"],
+                outcome_summary=kwargs["outcome_summary"],
+                artifact_refs_json=kwargs["artifact_refs_json"],
+                notes=kwargs["notes"],
+                acceptance_result=kwargs["acceptance_result"],
+                changed_by=kwargs["changed_by"],
+            )
+        )
+        session.commit()
+
+    try:
+        payload = record_task_execution(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+            load_task=load_task,
+            load_sprint=load_sprint,
+            load_sprint_story=load_sprint_story,
+            load_logs=load_logs,
+            new_status=write_request.new_status,
+            outcome_summary=write_request.outcome_summary,
+            artifact_refs=write_request.artifact_refs,
+            notes=write_request.notes,
+            acceptance_result=write_request.acceptance_result,
+            changed_by=write_request.changed_by,
+            parse_task_metadata=parse_task_metadata,
+            persist_execution_log=persist_execution_log,
+        )
+    except TaskExecutionServiceError as exc:
+        raise SprintPhaseError(exc.detail, status_code=exc.status_code) from exc
+    return cast("dict[str, Any]", _json_ready(payload))
+
+
+def _task_execution_history(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+    task_id: int,
+) -> dict[str, Any]:
+    """Load and serialize task execution history."""
+
+    def load_task() -> Task | None:
+        return session.get(Task, task_id)
+
+    def load_sprint() -> Sprint | None:
+        return session.get(Sprint, sprint_id)
+
+    def load_sprint_story(task: object) -> SprintStory | None:
+        task_obj = cast("Task", task)
+        return session.exec(
+            select(SprintStory).where(
+                SprintStory.sprint_id == sprint_id,
+                SprintStory.story_id == task_obj.story_id,
+            )
+        ).first()
+
+    def load_logs() -> list[TaskExecutionLog]:
+        return list(
+            session.exec(
+                select(TaskExecutionLog)
+                .where(TaskExecutionLog.task_id == task_id)
+                .where(TaskExecutionLog.sprint_id == sprint_id)
+                .order_by(
+                    cast("Any", TaskExecutionLog.changed_at).desc(),
+                    cast("Any", TaskExecutionLog.log_id).desc(),
+                )
+            ).all()
+        )
+
+    try:
+        payload = get_task_execution_history(
+            project_id=project_id,
+            sprint_id=sprint_id,
+            task_id=task_id,
+            load_task=load_task,
+            load_sprint=load_sprint,
+            load_sprint_story=load_sprint_story,
+            load_logs=load_logs,
+        )
+    except TaskExecutionServiceError as exc:
+        raise SprintPhaseError(exc.detail, status_code=exc.status_code) from exc
+    return cast("dict[str, Any]", _json_ready(payload))
 
 
 def _topologically_sorted_sprint_stories(
@@ -935,6 +1694,25 @@ def _data_envelope(
     }
 
 
+def _json_ready(value: object) -> object:  # noqa: PLR0911
+    """Return a JSON-serializable projection for nested service payloads."""
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return enum_value
+    if isinstance(value, datetime):
+        return _serialize_temporal(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    return value
+
+
 def _error_envelope(
     code: ErrorCode,
     message: str,
@@ -956,6 +1734,46 @@ def _error_envelope(
             ).to_dict()
         ],
     }
+
+
+def _ledger_error(result: LedgerLoadResult) -> dict[str, Any]:
+    """Return a structured error for mutation ledger guard failures."""
+    raw_code = str(result.error_code or ErrorCode.MUTATION_FAILED.value)
+    try:
+        code = ErrorCode(raw_code)
+    except ValueError:
+        code = ErrorCode.MUTATION_FAILED
+    return _error_envelope(
+        code,
+        raw_code,
+        details={
+            "mutation_event_id": result.ledger.mutation_event_id,
+            "status": result.ledger.status,
+        },
+        remediation=[
+            (
+                "Retry with the same command body, or use a new idempotency key "
+                "for new work."
+            )
+        ],
+    )
+
+
+def _task_update_error(exc: Exception) -> dict[str, Any]:
+    """Map task update validation failures onto mutation failure envelopes."""
+    details = getattr(exc, "details", None)
+    return _error_envelope(
+        ErrorCode.MUTATION_FAILED,
+        str(exc),
+        details=details if isinstance(details, dict) else {},
+        remediation=[
+            (
+                "Run agileforge sprint task show --project-id <project_id> "
+                "--task-id <task_id>."
+            ),
+            "Refresh the task ticket and retry with current guard values.",
+        ],
+    )
 
 
 def _phase_error(exc: SprintPhaseError) -> dict[str, Any]:

@@ -709,6 +709,72 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.INVALID_COMMAND.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge sprint task next",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint task show",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id", "task_id"),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint task history",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id", "task_id"),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint task update",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=(
+            "project_id",
+            "task_id",
+            "status",
+            "expected_status",
+            "expected_task_fingerprint",
+            "idempotency_key",
+        ),
+        input_optional=(
+            "sprint_id",
+            "outcome_summary",
+            "artifact_ref",
+            "checklist_result",
+            "validation_summary",
+            "notes",
+            "changed_by",
+        ),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
 )
 
 

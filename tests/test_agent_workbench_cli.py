@@ -779,6 +779,110 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def sprint_task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint task ticket payload."""
+        self.calls.append(
+            ("sprint_task_next", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_ticket": None},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint task ticket payload."""
+        self.calls.append(
+            (
+                "sprint_task_show",
+                {"project_id": project_id, "task_id": task_id, "sprint_id": sprint_id},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_ticket": {"task_id": task_id}},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint task history payload."""
+        self.calls.append(
+            (
+                "sprint_task_history",
+                {"project_id": project_id, "task_id": task_id, "sprint_id": sprint_id},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "execution": {"history": []}},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a sprint task update payload."""
+        self.calls.append(
+            (
+                "sprint_task_update",
+                {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "status": status,
+                    "expected_status": expected_status,
+                    "expected_task_fingerprint": expected_task_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "sprint_id": sprint_id,
+                    "outcome_summary": outcome_summary,
+                    "artifact_refs": artifact_refs,
+                    "checklist_result": checklist_result,
+                    "validation_summary": validation_summary,
+                    "notes": notes,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_id": task_id},
+            "warnings": [],
+            "errors": [],
+        }
+
     def context_pack(
         self,
         *,
@@ -2205,6 +2309,95 @@ def test_sprint_status_and_tasks_cli_route_optional_sprint_id(
     assert app.calls[-2:] == [
         ("sprint_status", {"project_id": 7, "sprint_id": None}),
         ("sprint_tasks", {"project_id": 7, "sprint_id": None}),
+    ]
+
+
+def test_sprint_task_cli_routes_ticket_commands(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint task CLI exposes agent-native ticket reads and guarded updates."""
+    app = _FakeApplication()
+
+    next_exit = main(["sprint", "task", "next", "--project-id", "7"], application=app)
+    show_exit = main(
+        ["sprint", "task", "show", "--project-id", "7", "--task-id", "123"],
+        application=app,
+    )
+    history_exit = main(
+        ["sprint", "task", "history", "--project-id", "7", "--task-id", "123"],
+        application=app,
+    )
+    update_exit = main(
+        [
+            "sprint",
+            "task",
+            "update",
+            "--project-id",
+            "7",
+            "--task-id",
+            "123",
+            "--status",
+            "Done",
+            "--expected-status",
+            "In Progress",
+            "--expected-task-fingerprint",
+            "sha256:abc",
+            "--idempotency-key",
+            "task-update-123-001",
+            "--outcome-summary",
+            "Implemented the task.",
+            "--artifact-ref",
+            "scripts/run_live_round.py",
+            "--artifact-ref",
+            "tests/test_live_budget.py",
+            "--checklist-result",
+            "fully_met",
+            "--validation-summary",
+            "uv run pytest tests/test_live_budget.py -q",
+            "--notes",
+            "No known gaps.",
+        ],
+        application=app,
+    )
+
+    outputs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert [next_exit, show_exit, history_exit, update_exit] == [0, 0, 0, 0]
+    assert [payload["ok"] for payload in outputs] == [True, True, True, True]
+    assert app.calls[-4:] == [
+        ("sprint_task_next", {"project_id": 7, "sprint_id": None}),
+        (
+            "sprint_task_show",
+            {"project_id": 7, "task_id": 123, "sprint_id": None},
+        ),
+        (
+            "sprint_task_history",
+            {"project_id": 7, "task_id": 123, "sprint_id": None},
+        ),
+        (
+            "sprint_task_update",
+            {
+                "project_id": 7,
+                "task_id": 123,
+                "status": "Done",
+                "expected_status": "In Progress",
+                "expected_task_fingerprint": "sha256:abc",
+                "idempotency_key": "task-update-123-001",
+                "sprint_id": None,
+                "outcome_summary": "Implemented the task.",
+                "artifact_refs": [
+                    "scripts/run_live_round.py",
+                    "tests/test_live_budget.py",
+                ],
+                "checklist_result": "fully_met",
+                "validation_summary": "uv run pytest tests/test_live_budget.py -q",
+                "notes": "No known gaps.",
+                "changed_by": "cli-agent",
+            },
+        ),
     ]
 
 

@@ -39,6 +39,7 @@ PROJECT_ID = 7
 SPRINT_ID = 11
 SPEC_VERSION_ID = 3
 STORY_ID = 12
+TASK_ID = 123
 RECOVERY_MUTATION_EVENT_ID = 42
 ACTIVE_BACKLOG_COUNT = 2
 WORKFLOW_FINGERPRINT = "sha256:" + "1" * 64
@@ -1152,6 +1153,114 @@ class _FakeSprintRunner:
             "errors": [],
         }
 
+    def task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint task next."""
+        self.calls.append(
+            ("task_next", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_ticket": None},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint task show."""
+        self.calls.append(
+            (
+                "task_show",
+                {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "sprint_id": sprint_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_ticket": {"task_id": task_id}},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint task history."""
+        self.calls.append(
+            (
+                "task_history",
+                {"project_id": project_id, "task_id": task_id, "sprint_id": sprint_id},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "execution": {"history": []}},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record Sprint task update."""
+        self.calls.append(
+            (
+                "task_update",
+                {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "status": status,
+                    "expected_status": expected_status,
+                    "expected_task_fingerprint": expected_task_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "sprint_id": sprint_id,
+                    "outcome_summary": outcome_summary,
+                    "artifact_refs": artifact_refs,
+                    "checklist_result": checklist_result,
+                    "validation_summary": validation_summary,
+                    "notes": notes,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "task_id": task_id},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
@@ -1554,6 +1663,28 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
     )
     assert app.sprint_status(project_id=PROJECT_ID)["data"]["sprint_id"] == SPRINT_ID
     assert app.sprint_tasks(project_id=PROJECT_ID)["data"]["tasks"] == []
+    assert app.sprint_task_next(project_id=PROJECT_ID)["data"]["task_ticket"] is None
+    assert (
+        app.sprint_task_show(project_id=PROJECT_ID, task_id=TASK_ID)["data"][
+            "task_ticket"
+        ]["task_id"]
+        == TASK_ID
+    )
+    assert app.sprint_task_history(project_id=PROJECT_ID, task_id=TASK_ID)["data"][
+        "execution"
+    ] == {"history": []}
+    assert (
+        app.sprint_task_update(
+            project_id=PROJECT_ID,
+            task_id=TASK_ID,
+            status="In Progress",
+            expected_status="To Do",
+            expected_task_fingerprint="sha256:abc",
+            idempotency_key="task-update-123-001",
+            notes="Starting work.",
+        )["data"]["task_id"]
+        == TASK_ID
+    )
     assert runner.calls == [
         (
             "start",
@@ -1566,6 +1697,33 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
         ),
         ("status", {"project_id": PROJECT_ID, "sprint_id": None}),
         ("tasks", {"project_id": PROJECT_ID, "sprint_id": None}),
+        ("task_next", {"project_id": PROJECT_ID, "sprint_id": None}),
+        (
+            "task_show",
+            {"project_id": PROJECT_ID, "task_id": TASK_ID, "sprint_id": None},
+        ),
+        (
+            "task_history",
+            {"project_id": PROJECT_ID, "task_id": TASK_ID, "sprint_id": None},
+        ),
+        (
+            "task_update",
+            {
+                "project_id": PROJECT_ID,
+                "task_id": TASK_ID,
+                "status": "In Progress",
+                "expected_status": "To Do",
+                "expected_task_fingerprint": "sha256:abc",
+                "idempotency_key": "task-update-123-001",
+                "sprint_id": None,
+                "outcome_summary": None,
+                "artifact_refs": None,
+                "checklist_result": None,
+                "validation_summary": None,
+                "notes": "Starting work.",
+                "changed_by": "cli-agent",
+            },
+        ),
     ]
 
 
@@ -2135,8 +2293,17 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
 
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == [
+        "agileforge sprint task next --project-id 7",
         "agileforge sprint status --project-id 7",
         "agileforge sprint tasks --project-id 7",
+        "agileforge sprint task show --project-id 7 --task-id <task_id>",
+        (
+            "agileforge sprint task update --project-id 7 "
+            "--task-id <task_id> --status <status> "
+            "--expected-status <expected_status> "
+            "--expected-task-fingerprint <task_fingerprint> "
+            "--idempotency-key <idempotency_key>"
+        ),
         "agileforge sprint history --project-id 7",
     ]
     assert result["data"]["blocked_commands"] == []

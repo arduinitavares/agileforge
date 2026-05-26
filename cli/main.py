@@ -74,6 +74,12 @@ Examples:
     """--idempotency-key start-sprint-001
   agileforge sprint status --project-id 1
   agileforge sprint tasks --project-id 1
+  agileforge sprint task next --project-id 1
+  agileforge sprint task update --project-id 1 --task-id <task_id> """
+    """--status Done --expected-status "In Progress" --expected-task-fingerprint """
+    """<task_fingerprint> --idempotency-key update-task-001 """
+    """--outcome-summary "..." --checklist-result fully_met """
+    """--artifact-ref path/to/file --validation-summary "pytest ..."
   agileforge context pack --project-id 1 --phase sprint-planning
 """
 )
@@ -457,6 +463,55 @@ class _Application(Protocol):
         sprint_id: int | None = None,
     ) -> JsonObject:
         """Return Sprint execution tasks."""
+        ...
+
+    def sprint_task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return the next Sprint task ticket."""
+        ...
+
+    def sprint_task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return one Sprint task ticket."""
+        ...
+
+    def sprint_task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return one Sprint task execution history."""
+        ...
+
+    def sprint_task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Log Sprint task execution progress."""
         ...
 
     def context_pack(
@@ -1176,6 +1231,64 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_tasks.add_argument("--project-id", type=int, required=True)
     sprint_tasks.add_argument("--sprint-id", type=int)
     sprint_tasks.set_defaults(command_handler=_sprint_tasks)
+    sprint_task = sprint_sub.add_parser(
+        "task",
+        help="Work active Sprint task tickets.",
+    )
+    sprint_task_sub = sprint_task.add_subparsers(
+        dest="task_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    sprint_task_next = sprint_task_sub.add_parser(
+        "next",
+        help="Return the next unblocked Sprint task ticket.",
+    )
+    sprint_task_next.add_argument("--project-id", type=int, required=True)
+    sprint_task_next.add_argument("--sprint-id", type=int)
+    sprint_task_next.set_defaults(command_handler=_sprint_task_next)
+    sprint_task_show = sprint_task_sub.add_parser(
+        "show",
+        help="Show one Sprint task ticket.",
+    )
+    sprint_task_show.add_argument("--project-id", type=int, required=True)
+    sprint_task_show.add_argument("--task-id", type=int, required=True)
+    sprint_task_show.add_argument("--sprint-id", type=int)
+    sprint_task_show.set_defaults(command_handler=_sprint_task_show)
+    sprint_task_history = sprint_task_sub.add_parser(
+        "history",
+        help="Show one Sprint task execution history.",
+    )
+    sprint_task_history.add_argument("--project-id", type=int, required=True)
+    sprint_task_history.add_argument("--task-id", type=int, required=True)
+    sprint_task_history.add_argument("--sprint-id", type=int)
+    sprint_task_history.set_defaults(command_handler=_sprint_task_history)
+    sprint_task_update = sprint_task_sub.add_parser(
+        "update",
+        help="Log Sprint task execution progress.",
+    )
+    sprint_task_update.add_argument("--project-id", type=int, required=True)
+    sprint_task_update.add_argument("--task-id", type=int, required=True)
+    sprint_task_update.add_argument("--status", required=True)
+    sprint_task_update.add_argument("--expected-status", required=True)
+    sprint_task_update.add_argument("--expected-task-fingerprint", required=True)
+    sprint_task_update.add_argument("--idempotency-key", required=True)
+    sprint_task_update.add_argument("--sprint-id", type=int)
+    sprint_task_update.add_argument("--outcome-summary")
+    sprint_task_update.add_argument(
+        "--artifact-ref",
+        action="append",
+        default=[],
+        dest="artifact_refs",
+    )
+    sprint_task_update.add_argument(
+        "--checklist-result",
+        choices=("fully_met", "partially_met", "not_checked"),
+    )
+    sprint_task_update.add_argument("--validation-summary")
+    sprint_task_update.add_argument("--notes")
+    sprint_task_update.add_argument("--changed-by", default="cli-agent")
+    sprint_task_update.set_defaults(command_handler=_sprint_task_update)
 
     context = subparsers.add_parser("context", help="Build bounded agent context.")
     context_sub = context.add_subparsers(
@@ -2345,6 +2458,63 @@ def _sprint_tasks(
     return "agileforge sprint tasks", application.sprint_tasks(
         project_id=args.project_id,
         sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_task_next(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint task next to the application facade."""
+    return "agileforge sprint task next", application.sprint_task_next(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_task_show(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint task show to the application facade."""
+    return "agileforge sprint task show", application.sprint_task_show(
+        project_id=args.project_id,
+        task_id=args.task_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_task_history(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint task history to the application facade."""
+    return "agileforge sprint task history", application.sprint_task_history(
+        project_id=args.project_id,
+        task_id=args.task_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_task_update(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint task update to the application facade."""
+    return "agileforge sprint task update", application.sprint_task_update(
+        project_id=args.project_id,
+        task_id=args.task_id,
+        status=args.status,
+        expected_status=args.expected_status,
+        expected_task_fingerprint=args.expected_task_fingerprint,
+        idempotency_key=args.idempotency_key,
+        sprint_id=args.sprint_id,
+        outcome_summary=args.outcome_summary,
+        artifact_refs=args.artifact_refs,
+        checklist_result=args.checklist_result,
+        validation_summary=args.validation_summary,
+        notes=args.notes,
+        changed_by=args.changed_by,
     )
 
 

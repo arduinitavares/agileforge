@@ -375,6 +375,55 @@ class _SprintPhaseRunner(Protocol):
         """Return Sprint execution tasks."""
         ...
 
+    def task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return the next Sprint task ticket."""
+        ...
+
+    def task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task ticket."""
+        ...
+
+    def task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task execution history."""
+        ...
+
+    def task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Log Sprint task execution progress."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -1074,6 +1123,80 @@ class AgentWorkbenchApplication:
         return self._get_sprint_runner().tasks(
             project_id=project_id,
             sprint_id=sprint_id,
+        )
+
+    def sprint_task_next(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return the next Sprint task ticket."""
+        return self._get_sprint_runner().task_next(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_task_show(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task ticket."""
+        return self._get_sprint_runner().task_show(
+            project_id=project_id,
+            task_id=task_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_task_history(
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one Sprint task execution history."""
+        return self._get_sprint_runner().task_history(
+            project_id=project_id,
+            task_id=task_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_task_update(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        task_id: int,
+        status: str,
+        expected_status: str,
+        expected_task_fingerprint: str,
+        idempotency_key: str,
+        sprint_id: int | None = None,
+        outcome_summary: str | None = None,
+        artifact_refs: list[str] | None = None,
+        checklist_result: str | None = None,
+        validation_summary: str | None = None,
+        notes: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Log Sprint task execution progress."""
+        return self._get_sprint_runner().task_update(
+            project_id=project_id,
+            task_id=task_id,
+            status=status,
+            expected_status=expected_status,
+            expected_task_fingerprint=expected_task_fingerprint,
+            idempotency_key=idempotency_key,
+            sprint_id=sprint_id,
+            outcome_summary=outcome_summary,
+            artifact_refs=artifact_refs,
+            checklist_result=checklist_result,
+            validation_summary=validation_summary,
+            notes=notes,
+            changed_by=changed_by,
         )
 
     def _get_read_projection(self) -> _ReadProjection:
@@ -2036,12 +2159,33 @@ def _sprint_command_candidates(
     if fsm_state == "SPRINT_VIEW":
         return [
             (
+                "agileforge sprint task next",
+                f"agileforge sprint task next --project-id {project_id}",
+            ),
+            (
                 "agileforge sprint status",
                 f"agileforge sprint status --project-id {project_id}",
             ),
             (
                 "agileforge sprint tasks",
                 f"agileforge sprint tasks --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint task show",
+                (
+                    f"agileforge sprint task show --project-id {project_id} "
+                    "--task-id <task_id>"
+                ),
+            ),
+            (
+                "agileforge sprint task update",
+                (
+                    f"agileforge sprint task update --project-id {project_id} "
+                    "--task-id <task_id> --status <status> "
+                    "--expected-status <expected_status> "
+                    "--expected-task-fingerprint <task_fingerprint> "
+                    "--idempotency-key <idempotency_key>"
+                ),
             ),
             (
                 "agileforge sprint history",

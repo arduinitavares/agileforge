@@ -22,15 +22,18 @@ The installed CLI supports:
 - Backlog generate, history, and save.
 - Roadmap generate, history, and save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
-- Sprint candidates, generate, history, save, start, status, and tasks.
+- Sprint candidates, generate, history, save, start, status, tasks, and task
+  tickets.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
 
 The installed CLI does not yet support:
 
-- Starting, logging, closing, deleting, or resetting workflow artifacts from the
+- Story close, Sprint close, deleting, or resetting workflow artifacts from the
   CLI.
+- Task claim/lease, per-checklist-item tracking, or automatic validation run
+  capture.
 
 Agents must not invent unavailable commands. Always confirm command availability
 with:
@@ -810,8 +813,111 @@ contain a cycle after the sprint has started, `sprint tasks` still returns
 `ok: true`, emits `SPRINT_TASK_DEPENDENCY_CYCLE_FALLBACK` in `warnings`, and
 uses rank fallback order so execution views remain recoverable.
 
-`workflow next` in `SPRINT_VIEW` should advertise `sprint status`, `sprint
-tasks`, and `sprint history`.
+`workflow next` in `SPRINT_VIEW` should advertise `sprint task next`,
+`sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`, and
+`sprint history`.
+
+### Sprint Task Tickets
+
+For agent execution, use the task-ticket commands instead of copying UI prompts.
+The ticket is the work contract for one task: task metadata, parent story,
+checklist, artifact targets, dependency blockers, history summary, and guard
+values.
+
+Get the next recommended task:
+
+```sh
+agileforge sprint task next --project-id "$PROJECT_ID" > task-next.json
+```
+
+If a task is already `In Progress`, `task next` returns that task before
+offering new `To Do` work. Otherwise it returns the first unblocked `To Do` task
+by dependency-aware execution order. If no work is available, `data.task_ticket`
+is `null` and `data.reason` explains why.
+
+Show a specific ticket or history:
+
+```sh
+agileforge sprint task show \
+  --project-id "$PROJECT_ID" \
+  --task-id "$TASK_ID" > task-show.json
+
+agileforge sprint task history \
+  --project-id "$PROJECT_ID" \
+  --task-id "$TASK_ID" | python -m json.tool
+```
+
+Start work by moving the task to `In Progress` with the guard values from the
+latest ticket:
+
+```sh
+EXPECTED_STATUS="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("task-next.json").read_text())
+print(payload["data"]["task_ticket"]["guards"]["expected_status"])
+PY
+)"
+
+TASK_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("task-next.json").read_text())
+print(payload["data"]["task_ticket"]["guards"]["expected_task_fingerprint"])
+PY
+)"
+
+TASK_ID="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("task-next.json").read_text())
+print(payload["data"]["task_ticket"]["task"]["task_id"])
+PY
+)"
+
+agileforge sprint task update \
+  --project-id "$PROJECT_ID" \
+  --task-id "$TASK_ID" \
+  --status "In Progress" \
+  --expected-status "$EXPECTED_STATUS" \
+  --expected-task-fingerprint "$TASK_FINGERPRINT" \
+  --idempotency-key "task-$TASK_ID-start-$(date +%Y%m%d%H%M%S)" \
+  --notes "Starting work." > task-start.json
+```
+
+Mark a task `Done` only after the work is actually implemented and verified.
+Completion requires evidence:
+
+```sh
+agileforge sprint task update \
+  --project-id "$PROJECT_ID" \
+  --task-id "$TASK_ID" \
+  --status Done \
+  --expected-status "In Progress" \
+  --expected-task-fingerprint "$TASK_FINGERPRINT" \
+  --idempotency-key "task-$TASK_ID-done-$(date +%Y%m%d%H%M%S)" \
+  --outcome-summary "Implemented the required behavior." \
+  --checklist-result fully_met \
+  --artifact-ref path/to/changed_file.py \
+  --validation-summary "uv run --frozen pytest path/to/test.py -q"
+```
+
+If the task has artifact targets, `Done` requires at least one `--artifact-ref`.
+`Done` also requires `--validation-summary`, `--outcome-summary`, and
+`--checklist-result fully_met` or `partially_met`.
+
+Task update safety rules:
+
+- `--idempotency-key`, `--expected-status`, and
+  `--expected-task-fingerprint` are required.
+- Repeating the same command with the same idempotency key replays the stored
+  response. Reusing the key with a different command body fails.
+- Updating a blocked task to `In Progress` or `Done` fails closed.
+- Stale status or stale fingerprint fails closed. Refresh the ticket and retry.
+- `Done` and `Cancelled` are terminal for this phase.
 
 ## JSON Envelope Contract
 
@@ -1074,10 +1180,15 @@ agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date 2
 agileforge sprint start --project-id 1 --expected-state SPRINT_PERSISTENCE --idempotency-key start-sprint-001
 agileforge sprint status --project-id 1
 agileforge sprint tasks --project-id 1
+agileforge sprint task next --project-id 1
+agileforge sprint task show --project-id 1 --task-id 42
+agileforge sprint task history --project-id 1 --task-id 42
+agileforge sprint task update --project-id 1 --task-id 42 --status "In Progress" --expected-status "To Do" --expected-task-fingerprint <fingerprint> --idempotency-key task-42-start-001 --notes "Starting work."
 ```
 
-`candidates`, `history`, `status`, and `tasks` are read-only. `generate`,
-`save`, and `start` mutate state. `save` and `start` require idempotency keys.
+`candidates`, `history`, `status`, `tasks`, `task next`, `task show`, and
+`task history` are read-only. `generate`, `save`, `start`, and `task update`
+mutate state. `save`, `start`, and `task update` require idempotency keys.
 
 ### Context Commands
 

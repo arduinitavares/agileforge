@@ -17,8 +17,14 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
-from models.events import WorkflowEvent
+from models.enums import (
+    SprintStatus,
+    StoryStatus,
+    TaskAcceptanceResult,
+    TaskStatus,
+    WorkflowEventType,
+)
+from models.events import TaskExecutionLog, WorkflowEvent
 from services.agent_workbench import sprint_phase as sprint_phase_module
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.phases import sprint_service
@@ -30,6 +36,7 @@ if TYPE_CHECKING:
 JsonDict = dict[str, Any]
 MIDDLE_STORY_EXECUTION_ORDER = 2
 DEPENDENT_STORY_EXECUTION_ORDER = 3
+TASK_FINGERPRINT_PREFIX = "sha256:"
 
 
 class _FakeProductRepository:
@@ -486,3 +493,303 @@ def test_sprint_runner_tasks_warn_and_fallback_on_dependency_cycle(
         first.story_id,
         second.story_id,
     ]
+
+
+def test_sprint_task_next_returns_in_progress_ticket_before_new_todo(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task next should resume existing work before selecting new work."""
+    product = Product(name="Ticket Product")
+    team = Team(name="Ticket Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Enforce explicit budget",
+        story_description="As an operator, I provide explicit budget.",
+        acceptance_criteria="- Missing budget fails",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.IN_PROGRESS,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Deliver budget guard",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+
+    first = Task(
+        story_id=story.story_id,
+        description="Design budget contract",
+        status=TaskStatus.IN_PROGRESS,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                task_kind="design",
+                artifact_targets=["docs/budget.md"],
+                checklist_items=["Define missing-budget behavior"],
+            )
+        ),
+    )
+    second = Task(
+        story_id=story.story_id,
+        description="Implement budget parser",
+        status=TaskStatus.TO_DO,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                task_kind="implementation",
+                artifact_targets=["scripts/run_live_round.py"],
+                checklist_items=["Require --budget"],
+            )
+        ),
+    )
+    session.add_all([first, second])
+    session.commit()
+    assert first.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_next(project_id=product.product_id)
+
+    assert result["ok"] is True
+    ticket = result["data"]["task_ticket"]
+    assert ticket["task"]["task_id"] == first.task_id
+    assert ticket["task"]["status"] == "In Progress"
+    assert ticket["story"]["story_id"] == story.story_id
+    assert ticket["story"]["acceptance_criteria"] == "- Missing budget fails"
+    assert ticket["execution"]["is_blocked"] is False
+    assert ticket["work_contract"]["artifact_targets"] == ["docs/budget.md"]
+    assert ticket["guards"]["expected_status"] == "In Progress"
+    assert str(ticket["guards"]["expected_task_fingerprint"]).startswith(
+        TASK_FINGERPRINT_PREFIX
+    )
+    assert "agileforge sprint task update" in ticket["next_actions"]["update"]
+
+
+def test_sprint_task_update_replays_done_without_duplicate_logs(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task update idempotency must replay before stale status guards run."""
+    product = Product(name="Replay Product")
+    team = Team(name="Replay Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Budget implementation",
+        story_description="As an operator, I run with explicit budget.",
+        acceptance_criteria="- Budget is explicit",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.IN_PROGRESS,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Deliver budget implementation",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+
+    task = Task(
+        story_id=story.story_id,
+        description="Implement required --budget",
+        status=TaskStatus.IN_PROGRESS,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                task_kind="implementation",
+                artifact_targets=["scripts/run_live_round.py"],
+                checklist_items=["Parser rejects missing budget"],
+            )
+        ),
+    )
+    session.add(task)
+    session.commit()
+    assert task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+    show = runner.task_show(project_id=product.product_id, task_id=task.task_id)
+    fingerprint = show["data"]["task_ticket"]["guards"]["expected_task_fingerprint"]
+
+    first = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=str(fingerprint),
+        idempotency_key="complete-task-budget-001",
+        outcome_summary="Implemented required budget validation.",
+        artifact_refs=["scripts/run_live_round.py"],
+        checklist_result="fully_met",
+        validation_summary="uv run pytest tests/test_live_budget.py -q",
+        changed_by="cli-agent",
+    )
+    replay = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=str(fingerprint),
+        idempotency_key="complete-task-budget-001",
+        outcome_summary="Implemented required budget validation.",
+        artifact_refs=["scripts/run_live_round.py"],
+        checklist_result="fully_met",
+        validation_summary="uv run pytest tests/test_live_budget.py -q",
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+    assert first["data"]["execution"]["current_status"] == "Done"
+    assert replay["data"]["execution"]["current_status"] == "Done"
+    session.expire_all()
+    persisted_task = session.get(Task, task.task_id)
+    assert persisted_task is not None
+    assert persisted_task.status == TaskStatus.DONE
+    logs = session.exec(select(TaskExecutionLog)).all()
+    assert len(logs) == 1
+    assert logs[0].changed_by == "cli-agent"
+    assert logs[0].acceptance_result == TaskAcceptanceResult.FULLY_MET
+
+
+def test_sprint_task_update_rejects_blocked_task_start(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocked tasks cannot be moved into execution."""
+    product = Product(name="Blocked Product")
+    team = Team(name="Blocked Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    prerequisite = UserStory(
+        product_id=product.product_id,
+        title="Capture market data",
+        story_points=3,
+        rank="201",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    dependent = UserStory(
+        product_id=product.product_id,
+        title="Run live workflow",
+        story_points=3,
+        rank="202",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([prerequisite, dependent])
+    session.flush()
+    assert prerequisite.story_id is not None
+    assert dependent.story_id is not None
+    session.add(
+        UserStoryDependency(
+            product_id=product.product_id,
+            dependent_story_id=dependent.story_id,
+            prerequisite_story_id=prerequisite.story_id,
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+        )
+    )
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Respect blockers",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=prerequisite.story_id),
+            SprintStory(sprint_id=sprint.sprint_id, story_id=dependent.story_id),
+        ]
+    )
+    blocked_task = Task(
+        story_id=dependent.story_id,
+        description="Run workflow",
+        status=TaskStatus.TO_DO,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(checklist_items=["Workflow uses captured data"])
+        ),
+    )
+    session.add(blocked_task)
+    session.commit()
+    assert blocked_task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+    show = runner.task_show(
+        project_id=product.product_id,
+        task_id=blocked_task.task_id,
+    )
+    fingerprint = show["data"]["task_ticket"]["guards"]["expected_task_fingerprint"]
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=blocked_task.task_id,
+        status="In Progress",
+        expected_status="To Do",
+        expected_task_fingerprint=str(fingerprint),
+        idempotency_key="start-blocked-task-001",
+        notes="Trying to start blocked work.",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["reason_code"] == "SPRINT_TASK_BLOCKED"
+    assert result["errors"][0]["details"]["blocked_by_story_ids"] == [
+        prerequisite.story_id
+    ]
+    persisted_task = session.get(Task, blocked_task.task_id)
+    assert persisted_task is not None
+    assert persisted_task.status == TaskStatus.TO_DO
