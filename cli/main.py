@@ -385,6 +385,7 @@ class _Application(Protocol):
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None = None,
     ) -> JsonObject:
         """Create a Story dependency proposal artifact."""
         ...
@@ -1165,6 +1166,16 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_dependencies_propose.add_argument("--project-id", type=int, required=True)
     story_dependencies_propose.add_argument("--expected-state", required=True)
     story_dependencies_propose.add_argument("--idempotency-key", required=True)
+    story_dependencies_propose.add_argument(
+        "--manual-edge",
+        action="append",
+        default=[],
+        dest="manual_edges",
+        help=(
+            "Add reviewed edge in dependent_story_id:prerequisite_story_id form. "
+            "Repeat for multiple edges."
+        ),
+    )
     story_dependencies_propose.set_defaults(command_handler=_story_dependencies_propose)
     story_dependencies_apply = story_dependencies_sub.add_parser(
         "apply",
@@ -2422,6 +2433,7 @@ def _story_dependencies_propose(
             project_id=args.project_id,
             expected_state=args.expected_state,
             idempotency_key=args.idempotency_key,
+            manual_edges=args.manual_edges,
         ),
     )
 

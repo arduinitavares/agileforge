@@ -294,6 +294,7 @@ class _StoryPhaseRunner(Protocol):
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a Story dependency proposal artifact."""
         ...
@@ -1038,12 +1039,14 @@ class AgentWorkbenchApplication:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a Story dependency proposal artifact."""
         return self._get_story_runner().dependency_propose(
             project_id=project_id,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
+            manual_edges=manual_edges,
         )
 
     def story_dependencies_apply(
@@ -2272,6 +2275,10 @@ def _sprint_command_candidates(
                     "--idempotency-key <idempotency_key> "
                     "--resolution Completed --completion-notes <notes>"
                 ),
+            ),
+            *_story_dependency_command_candidates(
+                project_id=project_id,
+                expected_state="SPRINT_VIEW",
             ),
             (
                 "agileforge sprint history",

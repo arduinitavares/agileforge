@@ -572,6 +572,7 @@ class _FakeApplication:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None = None,
     ) -> JsonObject:
         """Return a story dependency propose payload."""
         self.calls.append(
@@ -581,6 +582,7 @@ class _FakeApplication:
                     "project_id": project_id,
                     "expected_state": expected_state,
                     "idempotency_key": idempotency_key,
+                    "manual_edges": manual_edges,
                 },
             )
         )
@@ -2050,6 +2052,10 @@ def test_cli_routes_roadmap_commands(
                 "SPRINT_SETUP",
                 "--idempotency-key",
                 "dep-propose-1",
+                "--manual-edge",
+                "85:67",
+                "--manual-edge",
+                "85:68",
             ],
             (
                 "story_dependencies_propose",
@@ -2057,6 +2063,7 @@ def test_cli_routes_roadmap_commands(
                     "project_id": PROJECT_ID,
                     "expected_state": "SPRINT_SETUP",
                     "idempotency_key": "dep-propose-1",
+                    "manual_edges": ["85:67", "85:68"],
                 },
             ),
             "agileforge story dependencies propose",

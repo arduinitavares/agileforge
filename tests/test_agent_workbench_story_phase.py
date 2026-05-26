@@ -19,11 +19,12 @@ from models.core import (
     Product,
     Sprint,
     SprintStory,
+    Task,
     Team,
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, WorkflowEventType
+from models.enums import SprintStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.story_phase import (
     StoryPhaseRunner,
@@ -200,6 +201,43 @@ def _seed_dependency_rows(session: Session) -> tuple[int, int]:
     )
     session.commit()
     return second.story_id, first.story_id
+
+
+def _seed_manual_dependency_stories(session: Session) -> tuple[int, int]:
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    prerequisite = UserStory(
+        product_id=PROJECT_ID,
+        title="Capture market data",
+        story_description="As an operator, I want market capture.",
+        acceptance_criteria="- Verify market capture.",
+        source_requirement="market capture",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=3,
+        rank="201",
+    )
+    dependent = UserStory(
+        product_id=PROJECT_ID,
+        title="Run live workflow",
+        story_description="As an operator, I want the full live workflow.",
+        acceptance_criteria="- Verify workflow uses captured data.",
+        source_requirement="live workflow",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=3,
+        rank="102",
+    )
+    session.add_all([product, prerequisite, dependent])
+    session.commit()
+    session.refresh(prerequisite)
+    session.refresh(dependent)
+    assert prerequisite.story_id is not None
+    assert dependent.story_id is not None
+    return dependent.story_id, prerequisite.story_id
 
 
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,6 +571,54 @@ def test_story_dependency_propose_creates_guarded_attempt(
     )
 
 
+def test_story_dependency_propose_accepts_manual_reviewed_edges(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Manual edges should enter the reviewed dependency proposal artifact."""
+    dependent_story_id, prerequisite_story_id = _seed_manual_dependency_stories(session)
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["fsm_state"] = "SPRINT_SETUP"
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.dependency_propose(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="dep-propose-manual-001",
+        manual_edges=[f"{dependent_story_id}:{prerequisite_story_id}"],
+    )
+
+    assert result["ok"] is True
+    manual_edges = [
+        edge
+        for edge in result["data"]["edges"]
+        if edge["dependent_story_id"] == dependent_story_id
+        and edge["prerequisite_story_id"] == prerequisite_story_id
+    ]
+    assert manual_edges == [
+        {
+            "dependency_id": None,
+            "dependent_story_id": dependent_story_id,
+            "dependent_story_title": "Run live workflow",
+            "prerequisite_story_id": prerequisite_story_id,
+            "prerequisite_story_title": "Capture market data",
+            "status": "proposed",
+            "source": "manual_review",
+            "confidence": "reviewed",
+            "reason": "Manual reviewed dependency edge from CLI.",
+            "selected": True,
+        }
+    ]
+
+
 def test_story_dependency_apply_promotes_reviewed_attempt_and_invalidates_sprint(
     monkeypatch: pytest.MonkeyPatch,
     session: Session,
@@ -602,6 +688,118 @@ def test_story_dependency_apply_promotes_reviewed_attempt_and_invalidates_sprint
         )
     ).all()
     assert len(events) == 1
+
+
+def test_story_dependency_apply_promotes_manual_edges_in_sprint_view(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Reviewed manual edges can repair an active Sprint before work starts."""
+    dependent_story_id, prerequisite_story_id = _seed_manual_dependency_stories(session)
+    team = Team(name="Cartola Team")
+    session.add(team)
+    session.commit()
+    assert team.team_id is not None
+    sprint = Sprint(
+        product_id=PROJECT_ID,
+        team_id=team.team_id,
+        goal="Live workflow",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.commit()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=dependent_story_id),
+            SprintStory(sprint_id=sprint.sprint_id, story_id=prerequisite_story_id),
+            Task(
+                story_id=dependent_story_id,
+                description="Design live workflow",
+                status=TaskStatus.TO_DO,
+            ),
+        ]
+    )
+    session.commit()
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["fsm_state"] = "SPRINT_VIEW"
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+    proposal = runner.dependency_propose(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_VIEW",
+        idempotency_key="dep-propose-active-001",
+        manual_edges=[f"{dependent_story_id}:{prerequisite_story_id}"],
+    )["data"]
+
+    result = runner.dependency_apply(
+        project_id=PROJECT_ID,
+        attempt_id=proposal["attempt_id"],
+        expected_artifact_fingerprint=proposal["artifact_fingerprint"],
+        expected_state="SPRINT_VIEW",
+        idempotency_key="dep-apply-active-001",
+    )
+
+    assert result["ok"] is True
+    session.expire_all()
+    edge = session.exec(
+        select(UserStoryDependency).where(
+            UserStoryDependency.dependent_story_id == dependent_story_id,
+            UserStoryDependency.prerequisite_story_id == prerequisite_story_id,
+        )
+    ).one()
+    assert edge.status == "active"
+    assert edge.source == "manual_review"
+    assert edge.confidence == "reviewed"
+
+
+def test_story_dependency_propose_blocks_manual_edge_after_dependent_work_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Active Sprint dependency repair must not change started dependent stories."""
+    dependent_story_id, prerequisite_story_id = _seed_manual_dependency_stories(session)
+    session.add(
+        Task(
+            story_id=dependent_story_id,
+            description="Started live workflow task",
+            status=TaskStatus.IN_PROGRESS,
+        )
+    )
+    session.commit()
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["fsm_state"] = "SPRINT_VIEW"
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.dependency_propose(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_VIEW",
+        idempotency_key="dep-propose-started-001",
+        manual_edges=[f"{dependent_story_id}:{prerequisite_story_id}"],
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert result["errors"][0]["details"]["reason_code"] == (
+        "MANUAL_DEPENDENCY_DEPENDENT_WORK_STARTED"
+    )
 
 
 def test_story_complete_passes_guard_fields(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -513,6 +513,7 @@ def test_story_dependency_commands_are_registered_and_available() -> None:
         "expected_state",
         "idempotency_key",
     ]
+    assert propose_payload["input"]["optional"] == ["manual_edge"]
     assert propose_payload["idempotency_required"] is True
     assert apply_payload["mutates"] is True
     assert apply_payload["input"]["required"] == [

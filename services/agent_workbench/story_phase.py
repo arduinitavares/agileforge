@@ -12,9 +12,9 @@ from uuid import uuid4
 import anyio
 from sqlmodel import Session, select
 
-from models.core import Sprint, SprintStory, UserStory, UserStoryDependency
+from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependency
 from models.db import get_engine
-from models.enums import WorkflowEventType
+from models.enums import TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
@@ -62,11 +62,25 @@ if TYPE_CHECKING:
 else:
     ToolContext = Any
 
-_DEPENDENCY_REVIEW_STATES = {"STORY_PERSISTENCE", "SPRINT_SETUP", "SPRINT_DRAFT"}
+_DEPENDENCY_REVIEW_STATES = {
+    "STORY_PERSISTENCE",
+    "SPRINT_SETUP",
+    "SPRINT_DRAFT",
+    "SPRINT_VIEW",
+}
 _DEPENDENCY_ATTEMPTS_KEY = "story_dependency_attempts"
 _DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY = "story_dependency_propose_idempotency_keys"
 _DEPENDENCY_APPLY_IDEMPOTENCY_KEY = "story_dependency_apply_idempotency_keys"
 _MAX_DEPENDENCY_ATTEMPTS = 20
+_MANUAL_EDGE_PART_COUNT = 2
+
+
+class _ManualDependencyEdgeError(RuntimeError):
+    """Manual dependency edge validation error safe to expose in CLI JSON."""
+
+    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 class _ProductRepositoryLike(Protocol):
@@ -196,6 +210,7 @@ class StoryPhaseRunner:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a reviewed dependency proposal attempt."""
         return anyio.run(
@@ -203,6 +218,7 @@ class StoryPhaseRunner:
             project_id,
             expected_state,
             idempotency_key,
+            manual_edges,
         )
 
     def dependency_apply(
@@ -519,6 +535,7 @@ class StoryPhaseRunner:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        manual_edges: list[str] | None,
     ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
@@ -544,6 +561,8 @@ class StoryPhaseRunner:
                 artifact = _build_dependency_proposal_artifact(
                     session,
                     project_id=project_id,
+                    manual_edge_specs=manual_edges or [],
+                    expected_state=expected_state,
                 )
                 session.add(
                     WorkflowEvent(
@@ -560,6 +579,12 @@ class StoryPhaseRunner:
                     )
                 )
                 session.commit()
+        except _ManualDependencyEdgeError as exc:
+            return _error_envelope(
+                ErrorCode.INVALID_COMMAND,
+                str(exc),
+                details=exc.details,
+            )
         except RuntimeError as exc:
             return _workflow_error(exc)
 
@@ -855,6 +880,8 @@ def _build_dependency_proposal_artifact(
     session: Session,
     *,
     project_id: int,
+    manual_edge_specs: list[str],
+    expected_state: str,
 ) -> dict[str, Any]:
     attempt_id = f"story-dependencies-{uuid4()}"
     inspect_payload = dependency_inspect_payload(session, project_id=project_id)
@@ -868,17 +895,27 @@ def _build_dependency_proposal_artifact(
         (edge["dependent_story_id"], edge["prerequisite_story_id"])
         for edge in [*active_edges, *proposed_edges]
     }
+    manual_edges = _manual_dependency_edges(
+        session,
+        project_id=project_id,
+        manual_edge_specs=manual_edge_specs,
+        existing_edge_keys=edge_keys,
+        expected_state=expected_state,
+    )
     deterministic_edges = _deterministic_dependency_edges(
         session,
         project_id=project_id,
         existing_edge_keys=edge_keys,
     )
-    edges = [*active_edges, *proposed_edges, *deterministic_edges]
+    edges = [*active_edges, *proposed_edges, *manual_edges, *deterministic_edges]
     artifact: dict[str, Any] = {
         "attempt_id": attempt_id,
         "is_complete": True,
         "active_edge_count": len(active_edges),
-        "proposed_edge_count": len(proposed_edges) + len(deterministic_edges),
+        "proposed_edge_count": (
+            len(proposed_edges) + len(manual_edges) + len(deterministic_edges)
+        ),
+        "manual_edge_count": len(manual_edges),
         "cycle_count": inspect_payload["cycle_count"],
         "cycle_paths": inspect_payload["cycle_paths"],
         "edges": edges,
@@ -887,6 +924,152 @@ def _build_dependency_proposal_artifact(
         {"phase": "story_dependencies", "artifact": artifact}
     )
     return artifact
+
+
+def _manual_dependency_edges(
+    session: Session,
+    *,
+    project_id: int,
+    manual_edge_specs: list[str],
+    existing_edge_keys: set[tuple[int, int]],
+    expected_state: str,
+) -> list[dict[str, Any]]:
+    """Return reviewed manual dependency edges from CLI edge specs."""
+    edges: list[dict[str, Any]] = []
+    for spec in manual_edge_specs:
+        dependent_story_id, prerequisite_story_id = _parse_manual_edge_spec(spec)
+        key = (dependent_story_id, prerequisite_story_id)
+        if key in existing_edge_keys:
+            continue
+        dependent = _load_active_dependency_story(
+            session,
+            project_id=project_id,
+            story_id=dependent_story_id,
+            edge_role="dependent",
+        )
+        prerequisite = _load_active_dependency_story(
+            session,
+            project_id=project_id,
+            story_id=prerequisite_story_id,
+            edge_role="prerequisite",
+        )
+        if expected_state == OrchestratorState.SPRINT_VIEW.value:
+            _assert_manual_dependent_work_not_started(
+                session,
+                dependent_story=dependent,
+            )
+        existing_edge_keys.add(key)
+        edges.append(
+            {
+                "dependency_id": None,
+                "dependent_story_id": dependent_story_id,
+                "dependent_story_title": dependent.title,
+                "prerequisite_story_id": prerequisite_story_id,
+                "prerequisite_story_title": prerequisite.title,
+                "status": "proposed",
+                "source": "manual_review",
+                "confidence": "reviewed",
+                "reason": "Manual reviewed dependency edge from CLI.",
+                "selected": True,
+            }
+        )
+    return edges
+
+
+def _parse_manual_edge_spec(spec: str) -> tuple[int, int]:
+    """Parse a CLI manual edge value in dependent:prerequisite form."""
+    parts = spec.split(":", maxsplit=1)
+    if len(parts) != _MANUAL_EDGE_PART_COUNT:
+        message = (
+            "Manual dependency edge must use dependent_story_id:prerequisite_story_id."
+        )
+        raise _ManualDependencyEdgeError(
+            message,
+            details={
+                "reason_code": "MANUAL_DEPENDENCY_EDGE_FORMAT_INVALID",
+                "manual_edge": spec,
+                "expected_format": "dependent_story_id:prerequisite_story_id",
+            },
+        )
+    try:
+        dependent_story_id = int(parts[0])
+        prerequisite_story_id = int(parts[1])
+    except ValueError as exc:
+        message = "Manual dependency edge story ids must be integers."
+        raise _ManualDependencyEdgeError(
+            message,
+            details={
+                "reason_code": "MANUAL_DEPENDENCY_EDGE_STORY_ID_INVALID",
+                "manual_edge": spec,
+            },
+        ) from exc
+    if dependent_story_id == prerequisite_story_id:
+        message = "Manual dependency edge cannot point a story to itself."
+        raise _ManualDependencyEdgeError(
+            message,
+            details={
+                "reason_code": "MANUAL_DEPENDENCY_EDGE_SELF_REFERENCE",
+                "manual_edge": spec,
+                "story_id": dependent_story_id,
+            },
+        )
+    return dependent_story_id, prerequisite_story_id
+
+
+def _load_active_dependency_story(
+    session: Session,
+    *,
+    project_id: int,
+    story_id: int,
+    edge_role: str,
+) -> UserStory:
+    """Load one active refined story for manual dependency review."""
+    story = session.get(UserStory, story_id)
+    if (
+        story is None
+        or story.product_id != project_id
+        or story.is_superseded
+        or not story.is_refined
+    ):
+        message = (
+            "Manual dependency edge references a story outside the active backlog."
+        )
+        raise _ManualDependencyEdgeError(
+            message,
+            details={
+                "reason_code": "MANUAL_DEPENDENCY_STORY_NOT_ACTIVE",
+                "story_id": story_id,
+                "edge_role": edge_role,
+            },
+        )
+    return story
+
+
+def _assert_manual_dependent_work_not_started(
+    session: Session,
+    *,
+    dependent_story: UserStory,
+) -> None:
+    """Block active-sprint repair after dependent work has started."""
+    started_tasks = session.exec(
+        select(Task)
+        .where(Task.story_id == dependent_story.story_id)
+        .where(Task.status != TaskStatus.TO_DO)
+    ).all()
+    if started_tasks:
+        message = (
+            "Manual dependency repair is unsafe after dependent story work starts."
+        )
+        raise _ManualDependencyEdgeError(
+            message,
+            details={
+                "reason_code": "MANUAL_DEPENDENCY_DEPENDENT_WORK_STARTED",
+                "dependent_story_id": dependent_story.story_id,
+                "started_task_ids": [
+                    task.task_id for task in started_tasks if task.task_id is not None
+                ],
+            },
+        )
 
 
 def _deterministic_dependency_edges(

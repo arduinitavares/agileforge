@@ -2412,6 +2412,19 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
             "--idempotency-key <idempotency_key> "
             "--resolution Completed --completion-notes <notes>"
         ),
+        "agileforge story dependencies inspect --project-id 7",
+        (
+            "agileforge story dependencies propose --project-id 7 "
+            "--expected-state SPRINT_VIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story dependencies apply --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state SPRINT_VIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
         "agileforge sprint history --project-id 7",
     ]
     assert result["data"]["blocked_commands"] == []

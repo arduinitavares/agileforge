@@ -565,6 +565,25 @@ agileforge story dependencies propose \
   > story-dependencies-propose.json
 ```
 
+Add reviewed semantic edges when the deterministic proposal misses real
+prerequisites. `--manual-edge` uses `dependent_story_id:prerequisite_story_id`
+and can be repeated:
+
+```sh
+agileforge story dependencies propose \
+  --project-id "$PROJECT_ID" \
+  --expected-state SPRINT_VIEW \
+  --manual-edge 85:67 \
+  --manual-edge 85:68 \
+  --manual-edge 85:69 \
+  --idempotency-key "dep-propose-live-workflow-prereqs-001" \
+  > story-dependencies-propose.json
+```
+
+During an active Sprint (`SPRINT_VIEW`), manual dependency repair is allowed
+only before the dependent story has any non-`To Do` tasks. If dependent work has
+already started, the command fails closed.
+
 Review `data.edges`, `data.cycle_count`, and `data.artifact_fingerprint`. Apply
 only the exact reviewed attempt:
 
@@ -590,8 +609,9 @@ agileforge story dependencies apply \
 ```
 
 `inspect`, `propose`, and `apply` are allowed in `STORY_PERSISTENCE`,
-`SPRINT_SETUP`, and `SPRINT_DRAFT` so a bad graph cannot deadlock Sprint
-planning. Active cycles still block Sprint candidate readiness until resolved.
+`SPRINT_SETUP`, `SPRINT_DRAFT`, and `SPRINT_VIEW` so a bad graph cannot deadlock
+Sprint planning or execution. Active cycles still block Sprint candidate
+readiness until resolved.
 
 ### Repairing Story Readiness Before Sprint
 
@@ -1229,6 +1249,7 @@ agileforge story reopen --project-id 1 --parent-requirement "Roadmap requirement
 agileforge story repair-readiness --project-id 1 --expected-state SPRINT_SETUP --idempotency-key repair-story-readiness-001
 agileforge story dependencies inspect --project-id 1
 agileforge story dependencies propose --project-id 1 --expected-state SPRINT_SETUP --idempotency-key dep-propose-001
+agileforge story dependencies propose --project-id 1 --expected-state SPRINT_VIEW --manual-edge 85:67 --manual-edge 85:68 --idempotency-key dep-propose-manual-001
 agileforge story dependencies apply --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state SPRINT_SETUP --idempotency-key dep-apply-001
 ```
 
