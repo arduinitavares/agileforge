@@ -20,7 +20,7 @@ OPENROUTER_PROVIDER: dict[str, Any] = {
     "data_collection": "deny",
     "zdr": True,
     "sort": "price",
-    "allow_fallbacks": False,
+    "allow_fallbacks": True,
     "require_parameters": True,
 }
 
