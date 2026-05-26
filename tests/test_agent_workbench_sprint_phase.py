@@ -1242,3 +1242,197 @@ def test_sprint_story_close_rejects_stale_story_fingerprint(
     persisted_story = session.get(UserStory, story.story_id)
     assert persisted_story is not None
     assert persisted_story.status == StoryStatus.TO_DO
+
+
+def test_sprint_close_marks_sprint_completed_and_updates_workflow(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint close should snapshot a fully completed active sprint."""
+    product = Product(name="Sprint Close Product")
+    team = Team(name="Sprint Close Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Closed story",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.DONE,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Close completed sprint",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id),
+            Task(
+                story_id=story.story_id,
+                description="Ship final task",
+                status=TaskStatus.DONE,
+                metadata_json=serialize_task_metadata(
+                    TaskMetadata(checklist_items=["Final task done"])
+                ),
+            ),
+        ]
+    )
+    session.commit()
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {"fsm_state": "SPRINT_VIEW"}
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    readiness = runner.close_readiness(project_id=product.product_id)
+    close = runner.close(
+        project_id=product.product_id,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint=readiness["data"]["sprint_fingerprint"],
+        idempotency_key="close-sprint-001",
+        completion_notes="All committed stories completed.",
+        follow_up_notes="Prepare the next sprint.",
+        changed_by="cli-agent",
+    )
+    replay = runner.close(
+        project_id=product.product_id,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint=readiness["data"]["sprint_fingerprint"],
+        idempotency_key="close-sprint-001",
+        completion_notes="All committed stories completed.",
+        follow_up_notes="Prepare the next sprint.",
+        changed_by="cli-agent",
+    )
+
+    assert readiness["ok"] is True
+    assert readiness["data"]["close_eligible"] is True
+    assert str(readiness["data"]["sprint_fingerprint"]).startswith(
+        TASK_FINGERPRINT_PREFIX
+    )
+    assert readiness["data"]["guards"] == {
+        "expected_state": "SPRINT_VIEW",
+        "expected_status": "Active",
+        "expected_sprint_fingerprint": readiness["data"]["sprint_fingerprint"],
+    }
+    assert close["ok"] is True
+    assert close["data"]["current_status"] == SprintStatus.COMPLETED.value
+    assert close["data"]["fsm_state"] == "SPRINT_COMPLETE"
+    assert close["data"]["idempotency"]["replayed"] is False
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+    assert workflow.state["fsm_state"] == "SPRINT_COMPLETE"
+
+    session.expire_all()
+    persisted_sprint = session.get(Sprint, sprint.sprint_id)
+    assert persisted_sprint is not None
+    assert persisted_sprint.status == SprintStatus.COMPLETED
+    assert persisted_sprint.completed_at is not None
+    assert persisted_sprint.close_snapshot_json is not None
+    completion_event = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == WorkflowEventType.SPRINT_COMPLETED
+        )
+    ).first()
+    assert completion_event is not None
+    assert completion_event.product_id == product.product_id
+
+
+def test_sprint_close_rejects_stale_sprint_fingerprint(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint close should fail when task state changes after readiness."""
+    product = Product(name="Stale Sprint Close Product")
+    team = Team(name="Stale Sprint Close Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Stale sprint story",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.DONE,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Reject stale close",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    task = Task(
+        story_id=story.story_id,
+        description="Mutable task",
+        status=TaskStatus.DONE,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(checklist_items=["Mutable task done"])
+        ),
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id),
+            task,
+        ]
+    )
+    session.commit()
+    assert task.task_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {"fsm_state": "SPRINT_VIEW"}
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+    readiness = runner.close_readiness(project_id=product.product_id)
+    task.status = TaskStatus.CANCELLED
+    session.add(task)
+    session.commit()
+
+    result = runner.close(
+        project_id=product.product_id,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint=readiness["data"]["sprint_fingerprint"],
+        idempotency_key="close-sprint-stale-001",
+        completion_notes="Trying stale close.",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["reason_code"] == (
+        "SPRINT_FINGERPRINT_STALE"
+    )

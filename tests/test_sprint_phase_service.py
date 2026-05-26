@@ -743,6 +743,33 @@ def test_get_sprint_close_readiness_returns_guidance_for_completed_sprint() -> N
     assert payload["history_fidelity"] == "snapshotted"
 
 
+def test_get_sprint_close_readiness_blocks_active_sprint_with_open_stories() -> None:
+    """Verify active sprints are not close eligible until every story is closed."""
+    sprint = SimpleNamespace(
+        status="Active",
+        completed_at=None,
+    )
+    readiness = SimpleNamespace(
+        completed_story_count=1,
+        open_story_count=1,
+        unfinished_story_ids=[12],
+        stories=[],
+    )
+
+    payload = get_sprint_close_readiness(
+        sprint_id=7,
+        load_sprint=lambda: sprint,
+        build_readiness=lambda sprint_obj: readiness,  # noqa: ARG005
+        history_fidelity=lambda sprint_obj: "derived",  # noqa: ARG005
+        load_close_snapshot=lambda sprint_obj: None,  # noqa: ARG005
+    )
+
+    assert payload["sprint_id"] == 7  # noqa: PLR2004
+    assert payload["close_eligible"] is False
+    assert payload["ineligible_reason"] == "Sprint has unfinished stories."
+    assert payload["readiness"].unfinished_story_ids == [12]
+
+
 def test_close_sprint_rejects_non_active_sprint() -> None:
     """Verify close sprint rejects non active sprint."""
     sprint = SimpleNamespace(status="Planned", completed_at=None)
@@ -765,6 +792,30 @@ def test_close_sprint_rejects_non_active_sprint() -> None:
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert exc_info.value.detail == "Only active sprints can be closed."
+
+
+def test_close_sprint_rejects_unfinished_stories() -> None:
+    """Verify close sprint fails closed when active stories remain open."""
+    sprint = SimpleNamespace(status="Active", completed_at=None)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        close_sprint(
+            sprint_id=7,
+            completion_notes="Ship it",
+            follow_up_notes=None,
+            load_sprint=lambda: sprint,
+            build_readiness=lambda sprint_obj: SimpleNamespace(  # noqa: ARG005
+                completed_story_count=1,
+                open_story_count=1,
+                unfinished_story_ids=[12],
+                stories=[],
+            ),
+            now_iso=lambda: "2026-04-04T12:00:00Z",
+            persist_closed_sprint=lambda snapshot: sprint,  # noqa: ARG005
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert exc_info.value.detail == "Sprint has unfinished stories."
 
 
 def test_close_sprint_returns_completed_snapshot_payload() -> None:

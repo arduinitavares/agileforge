@@ -949,6 +949,63 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def sprint_close_readiness(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a sprint close readiness payload."""
+        self.calls.append(
+            (
+                "sprint_close_readiness",
+                {"project_id": project_id, "sprint_id": sprint_id},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_status: str,
+        expected_sprint_fingerprint: str,
+        idempotency_key: str,
+        completion_notes: str,
+        follow_up_notes: str | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a sprint close payload."""
+        self.calls.append(
+            (
+                "sprint_close",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "expected_status": expected_status,
+                    "expected_sprint_fingerprint": expected_sprint_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "completion_notes": completion_notes,
+                    "follow_up_notes": follow_up_notes,
+                    "sprint_id": sprint_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
     def context_pack(
         self,
         *,
@@ -2535,6 +2592,67 @@ def test_sprint_story_cli_routes_readiness_and_close(
                     "scripts/run_live_round.py",
                     "tests/test_live_budget.py",
                 ],
+                "sprint_id": None,
+                "changed_by": "cli-agent",
+            },
+        ),
+    ]
+
+
+def test_sprint_close_cli_routes_readiness_and_guarded_close(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint close CLI exposes readiness reads and guarded close mutation."""
+    app = _FakeApplication()
+
+    readiness_exit = main(
+        ["sprint", "close-readiness", "--project-id", "7"],
+        application=app,
+    )
+    close_exit = main(
+        [
+            "sprint",
+            "close",
+            "--project-id",
+            "7",
+            "--expected-state",
+            "SPRINT_VIEW",
+            "--expected-status",
+            "Active",
+            "--expected-sprint-fingerprint",
+            "sha256:sprint",
+            "--idempotency-key",
+            "close-sprint-001",
+            "--completion-notes",
+            "All committed stories completed.",
+            "--follow-up-notes",
+            "Prepare next sprint.",
+        ],
+        application=app,
+    )
+
+    outputs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert [readiness_exit, close_exit] == [0, 0]
+    assert [payload["ok"] for payload in outputs] == [True, True]
+    assert app.calls[-2:] == [
+        (
+            "sprint_close_readiness",
+            {"project_id": 7, "sprint_id": None},
+        ),
+        (
+            "sprint_close",
+            {
+                "project_id": 7,
+                "expected_state": "SPRINT_VIEW",
+                "expected_status": "Active",
+                "expected_sprint_fingerprint": "sha256:sprint",
+                "idempotency_key": "close-sprint-001",
+                "completion_notes": "All committed stories completed.",
+                "follow_up_notes": "Prepare next sprint.",
                 "sprint_id": None,
                 "changed_by": "cli-agent",
             },

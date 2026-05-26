@@ -816,6 +816,45 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge sprint close-readiness",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("sprint_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge sprint close",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=(
+            "project_id",
+            "expected_state",
+            "expected_status",
+            "expected_sprint_fingerprint",
+            "idempotency_key",
+            "completion_notes",
+        ),
+        input_optional=(
+            "sprint_id",
+            "follow_up_notes",
+            "changed_by",
+        ),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
 )
 
 

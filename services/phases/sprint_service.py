@@ -457,11 +457,14 @@ def get_sprint_close_readiness(
 
     readiness = build_readiness(sprint)
     sprint_status = _status_key(getattr(sprint, "status", None))
-    close_eligible = sprint_status == "active"
+    open_story_count = int(getattr(readiness, "open_story_count", 0) or 0)
+    close_eligible = sprint_status == "active" and open_story_count == 0
     if close_eligible:
         ineligible_reason = None
     elif sprint_status == "completed":
         ineligible_reason = "Sprint is already completed."
+    elif sprint_status == "active":
+        ineligible_reason = "Sprint has unfinished stories."
     else:
         ineligible_reason = "Only active sprints can be closed."
 
@@ -499,6 +502,11 @@ def close_sprint(
         )
 
     readiness = build_readiness(sprint)
+    if int(getattr(readiness, "open_story_count", 0) or 0) > 0:
+        raise SprintPhaseError(
+            "Sprint has unfinished stories.",
+            status_code=409,
+        )
     snapshot = {
         "closed_at": now_iso(),
         "completion_notes": completion_notes,

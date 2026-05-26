@@ -796,14 +796,14 @@ def _build_sprint_close_readiness(
     unfinished_story_ids: list[int] = []
 
     for story in stories:
-        total_tasks, done_tasks, cancelled_tasks, _all_actionable_done = (
+        total_tasks, done_tasks, cancelled_tasks, all_actionable_done = (
             _story_task_progress(story.tasks)
         )
         story_id = int(story.story_id) if story.story_id is not None else 0
+        story_done = story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
+        tasks_done = total_tasks == 0 or all_actionable_done
         completion_state = (
-            "completed"
-            if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
-            else "unfinished"
+            "completed" if story_done and tasks_done else "unfinished"
         )
         if completion_state == "completed":
             completed_story_count += 1

@@ -1325,6 +1325,60 @@ class _FakeSprintRunner:
             "errors": [],
         }
 
+    def close_readiness(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Sprint close readiness."""
+        self.calls.append(
+            ("close_readiness", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_status: str,
+        expected_sprint_fingerprint: str,
+        idempotency_key: str,
+        completion_notes: str,
+        follow_up_notes: str | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record Sprint close."""
+        self.calls.append(
+            (
+                "close",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "expected_status": expected_status,
+                    "expected_sprint_fingerprint": expected_sprint_fingerprint,
+                    "idempotency_key": idempotency_key,
+                    "completion_notes": completion_notes,
+                    "follow_up_notes": follow_up_notes,
+                    "sprint_id": sprint_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 def test_application_delegates_to_read_projection() -> None:
     """Verify application facade is thin and explicit."""
@@ -1763,6 +1817,18 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
         completion_notes="Story complete.",
         evidence_links=["scripts/run_live_round.py"],
     )["data"]["story_id"] == STORY_ID
+    assert app.sprint_close_readiness(project_id=PROJECT_ID)["data"]["sprint_id"] == (
+        SPRINT_ID
+    )
+    assert app.sprint_close(
+        project_id=PROJECT_ID,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint="sha256:sprint",
+        idempotency_key="close-sprint-7-001",
+        completion_notes="Sprint complete.",
+        follow_up_notes="Prepare the next sprint.",
+    )["data"]["sprint_id"] == SPRINT_ID
     assert runner.calls == [
         (
             "start",
@@ -1817,6 +1883,21 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
                 "resolution": "Completed",
                 "completion_notes": "Story complete.",
                 "evidence_links": ["scripts/run_live_round.py"],
+                "sprint_id": None,
+                "changed_by": "cli-agent",
+            },
+        ),
+        ("close_readiness", {"project_id": PROJECT_ID, "sprint_id": None}),
+        (
+            "close",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "SPRINT_VIEW",
+                "expected_status": "Active",
+                "expected_sprint_fingerprint": "sha256:sprint",
+                "idempotency_key": "close-sprint-7-001",
+                "completion_notes": "Sprint complete.",
+                "follow_up_notes": "Prepare the next sprint.",
                 "sprint_id": None,
                 "changed_by": "cli-agent",
             },
@@ -2411,6 +2492,15 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
             "--expected-story-fingerprint <story_fingerprint> "
             "--idempotency-key <idempotency_key> "
             "--resolution Completed --completion-notes <notes>"
+        ),
+        "agileforge sprint close-readiness --project-id 7",
+        (
+            "agileforge sprint close --project-id 7 "
+            "--expected-state SPRINT_VIEW "
+            "--expected-status Active "
+            "--expected-sprint-fingerprint <sprint_fingerprint> "
+            "--idempotency-key <idempotency_key> "
+            "--completion-notes <notes>"
         ),
         "agileforge story dependencies inspect --project-id 7",
         (

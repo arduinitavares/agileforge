@@ -842,7 +842,8 @@ and uses rank fallback order so execution views remain recoverable.
 
 `workflow next` in `SPRINT_VIEW` should advertise `sprint task next`,
 `sprint status`, `sprint tasks`, `sprint task show`, `sprint task update`,
-`sprint story readiness`, `sprint story close`, and `sprint history`.
+`sprint story readiness`, `sprint story close`, `sprint close-readiness`,
+`sprint close`, and `sprint history`.
 
 ### Sprint Task Tickets
 
@@ -965,6 +966,8 @@ Read these fields before closing:
 - `data.close_eligible`
 - `data.current_status`
 - `data.story_fingerprint`
+- `data.guards.expected_status`
+- `data.guards.expected_story_fingerprint`
 - `data.readiness.total_tasks`
 - `data.readiness.done_tasks`
 - `data.readiness.cancelled_tasks`
@@ -977,7 +980,7 @@ STORY_STATUS="$(
 import json
 from pathlib import Path
 payload = json.loads(Path("story-readiness.json").read_text())
-print(payload["data"]["current_status"])
+print(payload["data"]["guards"]["expected_status"])
 PY
 )"
 
@@ -986,7 +989,7 @@ STORY_FINGERPRINT="$(
 import json
 from pathlib import Path
 payload = json.loads(Path("story-readiness.json").read_text())
-print(payload["data"]["story_fingerprint"])
+print(payload["data"]["guards"]["expected_story_fingerprint"])
 PY
 )"
 
@@ -1015,6 +1018,82 @@ Story close safety rules:
 - Close fails if the story is already `Done` or `Accepted`.
 - After close, downstream task blockers recalculate from the persisted story
   status. Run `agileforge sprint task next --project-id "$PROJECT_ID"` again.
+
+### Sprint Close
+
+When `sprint task next` returns `data.task_ticket: null` with
+`data.reason: no_available_task`, do not stop at task execution. Check whether
+the Sprint itself can be closed:
+
+```sh
+agileforge sprint close-readiness \
+  --project-id "$PROJECT_ID" > sprint-close-readiness.json
+```
+
+Read these fields before closing:
+
+- `data.close_eligible`
+- `data.current_status`
+- `data.sprint_fingerprint`
+- `data.readiness.completed_story_count`
+- `data.readiness.open_story_count`
+- `data.readiness.unfinished_story_ids`
+- `data.guards.expected_state`
+- `data.guards.expected_status`
+- `data.guards.expected_sprint_fingerprint`
+
+Close only when `close_eligible` is `true`:
+
+```sh
+EXPECTED_STATE="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("sprint-close-readiness.json").read_text())
+print(payload["data"]["guards"]["expected_state"])
+PY
+)"
+
+SPRINT_STATUS="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("sprint-close-readiness.json").read_text())
+print(payload["data"]["guards"]["expected_status"])
+PY
+)"
+
+SPRINT_FINGERPRINT="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+payload = json.loads(Path("sprint-close-readiness.json").read_text())
+print(payload["data"]["guards"]["expected_sprint_fingerprint"])
+PY
+)"
+
+agileforge sprint close \
+  --project-id "$PROJECT_ID" \
+  --expected-state "$EXPECTED_STATE" \
+  --expected-status "$SPRINT_STATUS" \
+  --expected-sprint-fingerprint "$SPRINT_FINGERPRINT" \
+  --idempotency-key "close-sprint-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  --completion-notes "All committed Sprint stories completed and validated."
+```
+
+Sprint close safety rules:
+
+- `--idempotency-key`, `--expected-state`, `--expected-status`, and
+  `--expected-sprint-fingerprint` are required.
+- The Sprint fingerprint includes sprint id/status plus every committed story
+  id/status and task id/status. Any story or task status change after readiness
+  invalidates the close attempt.
+- Close fails unless the workflow state is `SPRINT_VIEW`.
+- Close fails unless the Sprint is `Active`.
+- Close fails when `readiness.open_story_count` is greater than `0`.
+- Successful close snapshots the Sprint, marks it `Completed`, records a
+  `SPRINT_COMPLETED` workflow event, and moves the workflow to
+  `SPRINT_COMPLETE`.
 
 ## JSON Envelope Contract
 

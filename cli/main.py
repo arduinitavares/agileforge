@@ -543,6 +543,31 @@ class _Application(Protocol):
         """Close one Sprint story."""
         ...
 
+    def sprint_close_readiness(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return close readiness for the active Sprint."""
+        ...
+
+    def sprint_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_status: str,
+        expected_sprint_fingerprint: str,
+        idempotency_key: str,
+        completion_notes: str,
+        follow_up_notes: str | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Close the active Sprint."""
+        ...
+
     def context_pack(
         self,
         *,
@@ -1328,6 +1353,27 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_task_update.add_argument("--notes")
     sprint_task_update.add_argument("--changed-by", default="cli-agent")
     sprint_task_update.set_defaults(command_handler=_sprint_task_update)
+    sprint_close_readiness = sprint_sub.add_parser(
+        "close-readiness",
+        help="Return close readiness for the active Sprint.",
+    )
+    sprint_close_readiness.add_argument("--project-id", type=int, required=True)
+    sprint_close_readiness.add_argument("--sprint-id", type=int)
+    sprint_close_readiness.set_defaults(command_handler=_sprint_close_readiness)
+    sprint_close = sprint_sub.add_parser(
+        "close",
+        help="Close an active Sprint after every story is done.",
+    )
+    sprint_close.add_argument("--project-id", type=int, required=True)
+    sprint_close.add_argument("--expected-state", required=True)
+    sprint_close.add_argument("--expected-status", required=True)
+    sprint_close.add_argument("--expected-sprint-fingerprint", required=True)
+    sprint_close.add_argument("--idempotency-key", required=True)
+    sprint_close.add_argument("--completion-notes", required=True)
+    sprint_close.add_argument("--follow-up-notes")
+    sprint_close.add_argument("--sprint-id", type=int)
+    sprint_close.add_argument("--changed-by", default="cli-agent")
+    sprint_close.set_defaults(command_handler=_sprint_close)
     sprint_story = sprint_sub.add_parser(
         "story",
         help="Inspect and close active Sprint stories.",
@@ -2625,6 +2671,35 @@ def _sprint_story_close(
         resolution=args.resolution,
         completion_notes=args.completion_notes,
         evidence_links=args.evidence_links,
+        sprint_id=args.sprint_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _sprint_close_readiness(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint close readiness to the application facade."""
+    return "agileforge sprint close-readiness", application.sprint_close_readiness(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_close(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint close to the application facade."""
+    return "agileforge sprint close", application.sprint_close(
+        project_id=args.project_id,
+        expected_state=args.expected_state,
+        expected_status=args.expected_status,
+        expected_sprint_fingerprint=args.expected_sprint_fingerprint,
+        idempotency_key=args.idempotency_key,
+        completion_notes=args.completion_notes,
+        follow_up_notes=args.follow_up_notes,
         sprint_id=args.sprint_id,
         changed_by=args.changed_by,
     )

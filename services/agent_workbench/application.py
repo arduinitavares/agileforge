@@ -452,6 +452,31 @@ class _SprintPhaseRunner(Protocol):
         """Close one Sprint story."""
         ...
 
+    def close_readiness(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return close readiness for the active Sprint."""
+        ...
+
+    def close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_status: str,
+        expected_sprint_fingerprint: str,
+        idempotency_key: str,
+        completion_notes: str,
+        follow_up_notes: str | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Close the active Sprint."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -1271,6 +1296,44 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
 
+    def sprint_close_readiness(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return close readiness for the active Sprint."""
+        return self._get_sprint_runner().close_readiness(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_close(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_status: str,
+        expected_sprint_fingerprint: str,
+        idempotency_key: str,
+        completion_notes: str,
+        follow_up_notes: str | None = None,
+        sprint_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Close the active Sprint."""
+        return self._get_sprint_runner().close(
+            project_id=project_id,
+            expected_state=expected_state,
+            expected_status=expected_status,
+            expected_sprint_fingerprint=expected_sprint_fingerprint,
+            idempotency_key=idempotency_key,
+            completion_notes=completion_notes,
+            follow_up_notes=follow_up_notes,
+            sprint_id=sprint_id,
+            changed_by=changed_by,
+        )
+
     def _get_read_projection(self) -> _ReadProjection:
         """Return the read projection, constructing the default lazily."""
         if self._read_projection is None:
@@ -2070,6 +2133,7 @@ def _sprint_workflow_next(
         "SPRINT_DRAFT",
         "SPRINT_PERSISTENCE",
         "SPRINT_VIEW",
+        "SPRINT_COMPLETE",
     }:
         return None
 
@@ -2274,6 +2338,21 @@ def _sprint_command_candidates(
                     "--expected-story-fingerprint <story_fingerprint> "
                     "--idempotency-key <idempotency_key> "
                     "--resolution Completed --completion-notes <notes>"
+                ),
+            ),
+            (
+                "agileforge sprint close-readiness",
+                f"agileforge sprint close-readiness --project-id {project_id}",
+            ),
+            (
+                "agileforge sprint close",
+                (
+                    f"agileforge sprint close --project-id {project_id} "
+                    "--expected-state SPRINT_VIEW "
+                    "--expected-status Active "
+                    "--expected-sprint-fingerprint <sprint_fingerprint> "
+                    "--idempotency-key <idempotency_key> "
+                    "--completion-notes <notes>"
                 ),
             ),
             *_story_dependency_command_candidates(
