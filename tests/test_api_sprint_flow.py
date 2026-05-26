@@ -1143,7 +1143,9 @@ def test_sprint_save_sanitizes_assessment_and_uses_tool_contract(monkeypatch):  
 def test_sprint_save_api_blocks_older_complete_after_latest_failed_attempt(monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_draft_project(repo, workflow)
-    workflow.states[str(project_id)]["sprint_attempts"].append(
+    state = cast("dict[str, Any]", workflow.states[str(project_id)])
+    sprint_attempts = cast("list[dict[str, object]]", state["sprint_attempts"])
+    sprint_attempts.append(
         {
             "attempt_id": "sprint-attempt-2",
             "artifact_fingerprint": "sha256:failed",
@@ -1490,9 +1492,10 @@ def test_start_sprint_rejects_completed_sprint(session, monkeypatch):  # noqa: A
     assert response.json()["detail"] == "Completed sprints cannot be restarted."
 
 
-def test_get_story_packet_returns_bootstrap_context_for_pinned_story(  # noqa: ANN201, D103
-    session, monkeypatch  # noqa: ANN001
-):
+def test_get_story_packet_returns_bootstrap_context_for_pinned_story(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, _task_id = _seed_task_packet_context(
         session,
@@ -1691,9 +1694,10 @@ def test_get_task_packet_returns_cancelled_status(session, monkeypatch):  # noqa
     assert payload["task"]["status"] == "Cancelled"
 
 
-def test_task_packet_metadata_hash_changes_when_task_metadata_changes(  # noqa: ANN201, D103
-    session, monkeypatch  # noqa: ANN001
-):
+def test_task_packet_metadata_hash_changes_when_task_metadata_changes(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, _story_id, task_id = _seed_task_packet_context(
         session,
@@ -1732,9 +1736,10 @@ def test_task_packet_metadata_hash_changes_when_task_metadata_changes(  # noqa: 
     )
 
 
-def test_build_story_task_plan_orders_identical_descriptions_by_task_id(  # noqa: ANN201, D103
-    session, monkeypatch  # noqa: ANN001
-):
+def test_build_story_task_plan_orders_identical_descriptions_by_task_id(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, first_task_id = _seed_task_packet_context(
         session,
@@ -1943,9 +1948,10 @@ def test_unpinned_story_packet_has_no_authority_fallback(session, monkeypatch): 
     assert constraints["validation"]["freshness_status"] == "missing"
 
 
-def test_task_packet_marks_validation_as_stale_when_story_content_changes(  # noqa: ANN201, D103
-    session, monkeypatch  # noqa: ANN001
-):
+def test_task_packet_marks_validation_as_stale_when_story_content_changes(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
         session,
@@ -2030,9 +2036,10 @@ def test_packet_renderer_escapes_html_and_xml_safely(session, monkeypatch):  # n
     assert "Story Acceptance Criteria" not in agent_text
 
 
-def test_story_packet_flavor_render_includes_story_acceptance_criteria(  # noqa: ANN201, D103
-    session, monkeypatch  # noqa: ANN001
-):
+def test_story_packet_flavor_render_includes_story_acceptance_criteria(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, _workflow = _build_client(monkeypatch)
     project_id, sprint_id, story_id, _task_id = _seed_task_packet_context(
         session,

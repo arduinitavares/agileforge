@@ -247,7 +247,7 @@ def _seed_backlog_persisted_project(
 
 
 def _roadmap_save_body(payload: dict[str, object]) -> dict[str, object]:
-    data = payload["data"]
+    data = cast("dict[str, object]", payload["data"])
     assert isinstance(data, dict)
     return {
         "attempt_id": data["attempt_id"],

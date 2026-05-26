@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, cast
+from typing import Any, TypeGuard, cast
 
 from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
     SprintPlannerOutput,
@@ -657,8 +657,11 @@ def _sprint_artifact_fingerprint(output_artifact: dict[str, Any]) -> str:
     return canonical_hash({"phase": "sprint", "output_artifact": output_artifact})
 
 
-def _is_complete_sprint_assessment(value: object) -> bool:
-    return isinstance(value, dict) and value.get("is_complete") is True
+def _is_complete_sprint_assessment(value: object) -> TypeGuard[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return False
+    assessment = cast("dict[str, Any]", value)
+    return assessment.get("is_complete") is True
 
 
 def _restore_latest_complete_sprint_draft(
@@ -809,9 +812,7 @@ def _assert_sprint_start_expected_state(
     expected_state: str,
 ) -> None:
     if expected_state != OrchestratorState.SPRINT_PERSISTENCE.value:
-        raise SprintPhaseError(
-            "Sprint start expected_state must be SPRINT_PERSISTENCE"
-        )
+        raise SprintPhaseError("Sprint start expected_state must be SPRINT_PERSISTENCE")
     fsm_state = _normalize_fsm_state(state.get("fsm_state"))
     if fsm_state != expected_state:
         raise SprintPhaseError(

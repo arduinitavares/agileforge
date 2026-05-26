@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import pytest
 
 from services.agent_workbench.vision_phase import VisionPhaseRunner
 
@@ -50,12 +53,14 @@ class _FakeWorkflowService:
 
 
 def test_vision_generate_hydrates_spec_and_authority_before_agent(
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Vision generate must pass spec and accepted authority to the agent."""
     captured: dict[str, Any] = {}
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"
@@ -109,11 +114,13 @@ def test_vision_generate_hydrates_spec_and_authority_before_agent(
 
 
 def test_vision_generate_returns_failure_envelope_for_runtime_failure(
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Vision runtime failures must be loud to agent-facing CLI callers."""
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"

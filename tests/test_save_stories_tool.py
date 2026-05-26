@@ -7,6 +7,7 @@ inside the error formatting code.
 
 import json
 from datetime import date
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import event
@@ -341,7 +342,7 @@ class TestSaveStoriesTool:
         rows = session.exec(
             select(UserStory)
             .where(UserStory.product_id == 1)
-            .order_by(UserStory.refinement_slot)
+            .order_by(cast("Any", UserStory.refinement_slot))
         ).all()
         assert [row.story_points for row in rows] == [1, 8]
 
@@ -366,7 +367,7 @@ class TestSaveStoriesTool:
         rows = session.exec(
             select(UserStory)
             .where(UserStory.product_id == 1)
-            .order_by(UserStory.refinement_slot)
+            .order_by(cast("Any", UserStory.refinement_slot))
         ).all()
         assert [row.rank for row in rows] == ["301", "302"]
 
@@ -448,7 +449,7 @@ class TestSaveStoriesTool:
         rows = session.exec(
             select(UserStory)
             .where(UserStory.product_id == 1)
-            .order_by(UserStory.refinement_slot)
+            .order_by(cast("Any", UserStory.refinement_slot))
         ).all()
         assert [row.rank for row in rows] == ["1", "2"]
 

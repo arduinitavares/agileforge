@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from orchestrator_agent.agent_tools.story_linkage import (
     normalize_requirement_key,
@@ -170,13 +170,14 @@ def _story_readiness_repair_items(
                     "Story readiness repair found malformed saved Story item.",
                     status_code=409,
                 )
+            story_data = cast("dict[str, Any]", story)
             repair_items.append(
                 {
                     "parent_requirement": parent_requirement,
                     "parent_rank": parent_rank,
                     "slot": slot,
                     "story_points": _story_points_from_effort(
-                        story.get("estimated_effort")
+                        story_data.get("estimated_effort")
                     ),
                     "rank": str(parent_rank * 100 + slot),
                 }
@@ -1121,6 +1122,9 @@ async def save_story_draft(
         expected_state=expected_state,
         idempotency_key=idempotency_key,
     )
+    attempt_id = cast("str", attempt_id)
+    expected_artifact_fingerprint = cast("str", expected_artifact_fingerprint)
+    idempotency_key = cast("str", idempotency_key)
 
     replay_payload = _story_save_replay_payload(
         state,
@@ -1368,8 +1372,7 @@ async def reopen_story_requirement(
 
     story_saved = state.get("story_saved")
     if not (
-        isinstance(story_saved, dict)
-        and story_saved.get(normalized_parent_requirement)
+        isinstance(story_saved, dict) and story_saved.get(normalized_parent_requirement)
     ):
         raise StoryPhaseError(
             "Story correction can reopen only saved Story requirements.",

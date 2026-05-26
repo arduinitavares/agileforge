@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
 
@@ -296,8 +296,9 @@ def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:
     ]
 
 
-def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text(
-) -> None:
+def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text() -> (
+    None
+):
     """Sprint source fingerprint changes when candidate content changes."""
 
     def fetch_with_title(
@@ -476,16 +477,19 @@ def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
         fake_write_failure_artifact,
     )
 
-    result = sprint_runtime._prepare_sprint_payload(
-        project_id=7,
-        options={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
-            "include_task_decomposition": True,
-            "max_story_points": 4,
-            "selected_story_ids": None,
-            "user_input": None,
-        },
+    result = cast(
+        "dict[str, Any]",
+        sprint_runtime._prepare_sprint_payload(
+            project_id=7,
+            options={
+                "team_velocity_assumption": "Medium",
+                "sprint_duration_days": 14,
+                "include_task_decomposition": True,
+                "max_story_points": 4,
+                "selected_story_ids": None,
+                "user_input": None,
+            },
+        ),
     )
 
     assert isinstance(result, dict)
@@ -501,7 +505,7 @@ def test_prepare_sprint_input_context_returns_selection_error(
     """Verify sprint input returns structured selection errors."""
     blocking_story_id = 66
 
-    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, Any]:
         assert product_id == 7  # noqa: PLR2004
         return {
             "success": True,
@@ -538,7 +542,7 @@ def test_prepare_sprint_input_context_returns_selection_error(
 def test_load_sprint_candidates_preserves_readiness_from_fetcher() -> None:
     """Verify candidate normalization keeps readiness diagnostics."""
 
-    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, Any]:
         assert product_id == 7  # noqa: PLR2004
         return {
             "success": True,

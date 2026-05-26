@@ -14,7 +14,7 @@ import pytest
 from cli.main import main
 from services.agent_workbench.error_codes import ErrorCode
 
-type JsonObject = dict[str, object]
+type JsonObject = dict[str, Any]
 PROJECT_ID = 7
 SPEC_VERSION_ID = 3
 STORY_ID = 42

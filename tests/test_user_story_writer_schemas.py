@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+    StoryDependencyCandidate,
     UserStoryItem,
     UserStoryWriterInput,
     UserStoryWriterOutput,
@@ -54,11 +55,11 @@ class TestUserStoryItem:
             invest_score="High",
             estimated_effort="M",
             dependency_candidates=[
-                {
-                    "prerequisite_ref": "Capture market data",
-                    "reason": "Recommendation needs market data before generation.",
-                    "confidence": "explicit",
-                }
+                StoryDependencyCandidate(
+                    prerequisite_ref="Capture market data",
+                    reason="Recommendation needs market data before generation.",
+                    confidence="explicit",
+                )
             ],
         )
 
@@ -79,13 +80,16 @@ class TestUserStoryItem:
                 ],
                 invest_score="High",
                 estimated_effort="M",
-                dependency_candidates=[
-                    {
-                        "prerequisite_ref": "Capture market data",
-                        "reason": "Recommendation needs market data first.",
-                        "confidence": "maybe",
-                    }
-                ],
+                dependency_candidates=cast(
+                    "Any",
+                    [
+                        {
+                            "prerequisite_ref": "Capture market data",
+                            "reason": "Recommendation needs market data first.",
+                            "confidence": "maybe",
+                        }
+                    ],
+                ),
             )
 
     def test_valid_medium_score_item(self) -> None:

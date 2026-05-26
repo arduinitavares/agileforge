@@ -385,6 +385,8 @@ def _candidate_prerequisite_ids(
 
 
 def _parse_int(value: object) -> int | None:
+    if not isinstance(value, str | int | float | bytes | bytearray):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -463,9 +465,7 @@ def _edge_payloads(
     selected_ids: list[int],
 ) -> list[dict[str, int]]:
     selected_id_set = set(selected_ids)
-    selected_index = {
-        story_id: index for index, story_id in enumerate(selected_ids)
-    }
+    selected_index = {story_id: index for index, story_id in enumerate(selected_ids)}
     payloads: list[dict[str, int]] = []
     for dependent_id in sorted(
         selected_id_set,

@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from google.adk.tools import ToolContext
 from pydantic import BaseModel, Field, ValidationError
@@ -52,7 +52,7 @@ class SaveStoriesInput(BaseModel):
                 "1-based Roadmap parent order used to derive deterministic child story rank."
             ),
         ),
-    ]
+    ] = None
     stories: Annotated[
         list[dict[str, Any]],
         Field(
@@ -159,7 +159,10 @@ def _find_story_save_event(
         select(WorkflowEvent)
         .where(WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED)
         .where(WorkflowEvent.product_id == product_id)
-        .order_by(WorkflowEvent.timestamp.desc(), WorkflowEvent.event_id.desc())
+        .order_by(
+            cast("Any", WorkflowEvent.timestamp).desc(),
+            cast("Any", WorkflowEvent.event_id).desc(),
+        )
     ).all()
     for event in events:
         metadata = _metadata_json(event.event_metadata)
@@ -268,13 +271,18 @@ def _active_stories_for_requirement(
     product_id: int,
     normalized_req: str,
 ) -> list[UserStory]:
-    return session.exec(
-        select(UserStory)
-        .where(UserStory.product_id == product_id)
-        .where(UserStory.source_requirement == normalized_req)
-        .where(UserStory.is_superseded == False)  # noqa: E712
-        .order_by(UserStory.refinement_slot, UserStory.story_id)
-    ).all()
+    return list(
+        session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == product_id)
+            .where(UserStory.source_requirement == normalized_req)
+            .where(UserStory.is_superseded == False)  # noqa: E712
+            .order_by(
+                cast("Any", UserStory.refinement_slot),
+                cast("Any", UserStory.story_id),
+            )
+        ).all()
+    )
 
 
 def _active_stories_for_product(
@@ -282,12 +290,17 @@ def _active_stories_for_product(
     *,
     product_id: int,
 ) -> list[UserStory]:
-    return session.exec(
-        select(UserStory)
-        .where(UserStory.product_id == product_id)
-        .where(UserStory.is_superseded == False)  # noqa: E712
-        .order_by(UserStory.source_requirement, UserStory.refinement_slot)
-    ).all()
+    return list(
+        session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == product_id)
+            .where(UserStory.is_superseded == False)  # noqa: E712
+            .order_by(
+                cast("Any", UserStory.source_requirement),
+                cast("Any", UserStory.refinement_slot),
+            )
+        ).all()
+    )
 
 
 def _replay_response(
@@ -615,7 +628,7 @@ def _purge_stale_story_writer_proposals(
     stale_edges = session.exec(
         select(UserStoryDependency)
         .where(UserStoryDependency.product_id == product_id)
-        .where(UserStoryDependency.dependent_story_id.in_(story_ids))
+        .where(cast("Any", UserStoryDependency.dependent_story_id).in_(story_ids))
         .where(UserStoryDependency.status == "proposed")
         .where(UserStoryDependency.source == "story_writer")
     ).all()

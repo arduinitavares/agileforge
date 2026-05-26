@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
 from sqlmodel import Session, select
@@ -32,14 +32,28 @@ else:
     ToolContext = Any
 
 
+class _ProductRepositoryLike(Protocol):
+    def get_by_id(self, product_id: int) -> object: ...
+
+
+class _WorkflowServiceLike(Protocol):
+    def get_session_status(self, session_id: str) -> dict[str, Any]: ...
+    async def initialize_session(self, *, session_id: str) -> object: ...
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None: ...
+
+
 class RoadmapPhaseRunner:
     """Run Roadmap phase commands through the same service boundary as the API."""
 
     def __init__(
         self,
         *,
-        product_repo: ProductRepository | None = None,
-        workflow_service: WorkflowService | None = None,
+        product_repo: ProductRepository | _ProductRepositoryLike | None = None,
+        workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
     ) -> None:
         """Initialize repositories for CLI Roadmap commands."""
         self._product_repo = product_repo or ProductRepository()
@@ -160,7 +174,7 @@ class RoadmapPhaseRunner:
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
-            return product
+            return cast("Product", product)
         return _error_envelope(
             ErrorCode.PROJECT_NOT_FOUND,
             f"Project {project_id} not found.",
@@ -246,7 +260,7 @@ def _hydrate_active_backlog_from_db(
             .where(UserStory.product_id == project_id)
             .where(UserStory.story_origin == "backlog_seed")
             .where(UserStory.is_superseded == False)  # noqa: E712
-            .order_by(UserStory.rank, UserStory.story_id)
+            .order_by(cast("Any", UserStory.rank), cast("Any", UserStory.story_id))
         ).all()
 
     if not stories:

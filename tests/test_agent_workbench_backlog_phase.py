@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlmodel import select
 
@@ -15,6 +15,7 @@ from models.events import WorkflowEvent
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
 
 if TYPE_CHECKING:
+    import pytest
     from sqlmodel import Session
 
 
@@ -65,12 +66,14 @@ class _FakeWorkflowService:
 
 
 def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Backlog generate must pass Vision, spec, and accepted authority to the agent."""
     captured: dict[str, Any] = {}
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"
@@ -136,11 +139,13 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
 
 
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Backlog runtime failures must be loud to agent-facing CLI callers."""
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"
@@ -262,7 +267,7 @@ def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
     rows = session.exec(
         select(UserStory)
         .where(UserStory.product_id == product_id)
-        .order_by(UserStory.story_id)
+        .order_by(cast("Any", UserStory.story_id))
     ).all()
     assert [row.title for row in rows if not row.is_superseded] == [
         "Refined lineup import",

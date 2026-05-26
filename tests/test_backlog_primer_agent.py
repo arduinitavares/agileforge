@@ -1,7 +1,7 @@
 """Schema tests for backlog_primer agent outputs."""
 
 import json
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -343,7 +343,7 @@ class TestSaveBacklogTool:
             rows = session.exec(
                 select(UserStory)
                 .where(UserStory.product_id == 1)
-                .order_by(UserStory.story_id)
+                .order_by(cast("Any", UserStory.story_id))
             ).all()
             assert len(rows) == 3  # noqa: PLR2004
             assert rows[0].is_superseded is True

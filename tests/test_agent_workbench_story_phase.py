@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from sqlmodel import select
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from sqlmodel import Session
 
 from models.core import (
@@ -203,7 +205,9 @@ def _seed_dependency_rows(session: Session) -> tuple[int, int]:
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Story pending returns roadmap requirements grouped by milestone."""
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         del tool_context
         return {"success": True, "project_id": product_id}
 
@@ -254,7 +258,9 @@ def test_story_pending_hydrates_roadmap_from_product_json_when_state_missing(
         ]
     )
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         del tool_context
         return {"success": True, "project_id": product_id}
 
@@ -286,7 +292,9 @@ def test_story_generate_hydrates_spec_authority_and_roadmap(
     """Story generate must pass spec, authority, and Roadmap context to agent."""
     captured: dict[str, Any] = {}
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "HYDRATED SPEC"
         state["compiled_authority_cached"] = "HYDRATED AUTHORITY"
@@ -376,7 +384,9 @@ def test_story_generate_returns_failure_envelope_for_runtime_failure(
 ) -> None:
     """Story runtime failures must be returned as mutation failure envelopes."""
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "HYDRATED SPEC"
         state["compiled_authority_cached"] = "HYDRATED AUTHORITY"
@@ -632,10 +642,18 @@ def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> N
 
     async def fake_reopen_story_requirement(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        state = await kwargs["load_state"]()
+        load_state = cast(
+            "Callable[[], Awaitable[dict[str, Any]]]",
+            kwargs["load_state"],
+        )
+        save_state = cast(
+            "Callable[[dict[str, Any]], None]",
+            kwargs["save_state"],
+        )
+        state = await load_state()
         state["fsm_state"] = "STORY_INTERVIEW"
         state["fsm_state_entered_at"] = "2026-05-25T13:00:00Z"
-        kwargs["save_state"](state)
+        save_state(state)
         return {
             "parent_requirement": kwargs["parent_requirement"],
             "fsm_state": "STORY_INTERVIEW",
@@ -924,7 +942,9 @@ def test_story_complete_hydrates_roadmap_from_product_json_before_coverage(
         }
     )
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         del tool_context
         return {"success": True, "project_id": product_id}
 
@@ -969,7 +989,9 @@ def test_story_generate_hydrates_roadmap_from_product_json_when_state_missing(
         }
     )
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "HYDRATED SPEC"
         state["compiled_authority_cached"] = "HYDRATED AUTHORITY"

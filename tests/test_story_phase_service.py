@@ -1,7 +1,7 @@
 """Tests for story phase service."""
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -24,6 +24,13 @@ from services.phases.story_service import (
 )
 
 JsonDict = dict[str, Any]
+
+
+def _story_runtime_for(state: JsonDict, parent_requirement: str) -> JsonDict:
+    """Return typed story runtime state for a parent requirement."""
+    interview_runtime = cast("JsonDict", state["interview_runtime"])
+    story_runtime = cast("dict[str, JsonDict]", interview_runtime["story"])
+    return story_runtime[parent_requirement]
 
 
 def _story_artifact(
@@ -578,13 +585,14 @@ async def test_generate_story_draft_returns_attempt_guards() -> None:
         "artifact_fingerprint": expected_fingerprint,
         "expected_state": "STORY_REVIEW",
     }
-    runtime = state["interview_runtime"]["story"][parent_requirement]
-    latest_attempt = runtime["attempt_history"][-1]
+    runtime = _story_runtime_for(state, parent_requirement)
+    attempt_history = cast("list[JsonDict]", runtime["attempt_history"])
+    latest_attempt = attempt_history[-1]
+    output_artifact = cast("JsonDict", latest_attempt["output_artifact"])
+    draft_projection = cast("JsonDict", runtime["draft_projection"])
     assert latest_attempt["artifact_fingerprint"] == expected_fingerprint
-    assert latest_attempt["output_artifact"]["artifact_fingerprint"] == (
-        expected_fingerprint
-    )
-    assert runtime["draft_projection"]["artifact_fingerprint"] == expected_fingerprint
+    assert output_artifact["artifact_fingerprint"] == expected_fingerprint
+    assert draft_projection["artifact_fingerprint"] == expected_fingerprint
     assert state["fsm_state"] == "STORY_REVIEW"
     assert len(saved_states) == 1
 
@@ -942,13 +950,14 @@ async def test_retry_story_draft_returns_attempt_guards() -> None:
         "artifact_fingerprint": expected_fingerprint,
         "expected_state": "STORY_REVIEW",
     }
-    runtime = state["interview_runtime"]["story"][parent_requirement]
-    latest_attempt = runtime["attempt_history"][-1]
+    runtime = _story_runtime_for(state, parent_requirement)
+    attempt_history = cast("list[JsonDict]", runtime["attempt_history"])
+    latest_attempt = attempt_history[-1]
+    output_artifact = cast("JsonDict", latest_attempt["output_artifact"])
+    draft_projection = cast("JsonDict", runtime["draft_projection"])
     assert latest_attempt["artifact_fingerprint"] == expected_fingerprint
-    assert latest_attempt["output_artifact"]["artifact_fingerprint"] == (
-        expected_fingerprint
-    )
-    assert runtime["draft_projection"]["artifact_fingerprint"] == expected_fingerprint
+    assert output_artifact["artifact_fingerprint"] == expected_fingerprint
+    assert draft_projection["artifact_fingerprint"] == expected_fingerprint
     assert payload["fsm_state"] == "STORY_REVIEW"
     assert state["fsm_state"] == "STORY_REVIEW"
     assert len(saved_states) == 1
@@ -958,9 +967,9 @@ async def test_retry_story_draft_returns_attempt_guards() -> None:
 async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> None:
     """Verify save story draft marks requirement saved and persists state."""
     state = _state_with_complete_story_draft()
-    artifact = state["interview_runtime"]["story"]["Requirement A"][
-        "attempt_history"
-    ][0]["output_artifact"]
+    artifact = state["interview_runtime"]["story"]["Requirement A"]["attempt_history"][
+        0
+    ]["output_artifact"]
     artifact_fingerprint = state["interview_runtime"]["story"]["Requirement A"][
         "draft_projection"
     ]["artifact_fingerprint"]
@@ -978,9 +987,10 @@ async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> 
 
     def fake_save_stories_tool(save_input: object, _context: object) -> JsonDict:
         assert hasattr(save_input, "stories")
+        save_payload = cast("Any", save_input)
         captured["save_input"] = save_input
-        captured["stories"] = save_input.stories
-        captured["idempotency_key"] = save_input.idempotency_key
+        captured["stories"] = save_payload.stories
+        captured["idempotency_key"] = save_payload.idempotency_key
         return {"success": True, "saved_count": 1}
 
     payload = await save_story_draft(
@@ -1590,9 +1600,7 @@ async def test_complete_story_phase_requires_guards() -> None:
             now_iso=lambda: "2026-04-04T12:00:00Z",
         )
     assert missing_key.value.status_code == 400  # noqa: PLR2004
-    assert missing_key.value.detail == (
-        "story complete requires --idempotency-key"
-    )
+    assert missing_key.value.detail == ("story complete requires --idempotency-key")
 
     payload = await complete_story_phase(
         expected_state="STORY_PERSISTENCE",
@@ -1786,11 +1794,13 @@ async def test_repair_story_readiness_backfills_rank_and_points_from_saved_outpu
         idempotency_key="repair-story-readiness-2",
         load_state=lambda: _async_value(state),
         save_state=state.update,
-        repair_rows=lambda request: repaired.append(request)
-        or {
-            "repaired_count": 1,
-            "story_ids": [66],
-        },
+        repair_rows=lambda request: (
+            repaired.append(request)
+            or {
+                "repaired_count": 1,
+                "story_ids": [66],
+            }
+        ),
         assert_repair_safe=lambda _project_id: None,
     )
 

@@ -27,7 +27,7 @@ class SaveBacklogInput(BaseModel):
             default=None,
             description="Optional save idempotency key supplied by guarded callers.",
         ),
-    ]
+    ] = None
     backlog_items: Annotated[
         list[dict[str, Any]],
         Field(
@@ -84,6 +84,7 @@ async def save_backlog_tool(
     if not normalized_input.backlog_items:
         normalized_input = SaveBacklogInput(
             product_id=normalized_input.product_id,
+            idempotency_key=normalized_input.idempotency_key,
             backlog_items=_resolve_backlog_items_from_state(tool_context),
         )
 

@@ -1,7 +1,7 @@
 """Story dependency graph loading and diagnostics."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlmodel import Session, select
 
@@ -48,7 +48,7 @@ def load_story_dependency_graph(
     edge_rows = session.exec(
         select(UserStoryDependency)
         .where(UserStoryDependency.product_id == project_id)
-        .order_by(UserStoryDependency.dependent_story_id)
+        .order_by(cast("Any", UserStoryDependency.dependent_story_id))
     ).all()
     endpoint_ids = {
         story_id
@@ -209,7 +209,7 @@ def _load_stories_by_id(
     if not story_ids:
         return {}
     rows = session.exec(
-        select(UserStory).where(UserStory.story_id.in_(story_ids))
+        select(UserStory).where(cast("Any", UserStory.story_id).in_(story_ids))
     ).all()
     return {story.story_id: story for story in rows if story.story_id is not None}
 

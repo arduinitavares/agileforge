@@ -72,7 +72,9 @@ def test_roadmap_generate_hydrates_vision_spec_authority_and_backlog(
     """Roadmap generate must pass Vision, spec, authority, and Backlog to agent."""
     captured: dict[str, Any] = {}
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"
@@ -150,7 +152,9 @@ def test_roadmap_generate_returns_failure_envelope_for_runtime_failure(
 ) -> None:
     """Roadmap runtime failures must be loud to agent-facing CLI callers."""
 
-    def fake_select_project(product_id: int, tool_context: object) -> dict[str, Any]:
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"

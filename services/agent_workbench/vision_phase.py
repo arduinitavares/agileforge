@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
 
@@ -29,14 +29,28 @@ else:
     ToolContext = Any
 
 
+class _ProductRepositoryLike(Protocol):
+    def get_by_id(self, product_id: int) -> object: ...
+
+
+class _WorkflowServiceLike(Protocol):
+    def get_session_status(self, session_id: str) -> dict[str, Any]: ...
+    async def initialize_session(self, *, session_id: str) -> object: ...
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None: ...
+
+
 class VisionPhaseRunner:
     """Run Vision phase commands through the same service boundary as the API."""
 
     def __init__(
         self,
         *,
-        product_repo: ProductRepository | None = None,
-        workflow_service: WorkflowService | None = None,
+        product_repo: ProductRepository | _ProductRepositoryLike | None = None,
+        workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
     ) -> None:
         """Initialize repositories for CLI Vision commands."""
         self._product_repo = product_repo or ProductRepository()
@@ -132,7 +146,7 @@ class VisionPhaseRunner:
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
-            return product
+            return cast("Product", product)
         return _error_envelope(
             ErrorCode.PROJECT_NOT_FOUND,
             f"Project {project_id} not found.",

@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from itertools import pairwise
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import anyio
@@ -69,14 +69,28 @@ _DEPENDENCY_APPLY_IDEMPOTENCY_KEY = "story_dependency_apply_idempotency_keys"
 _MAX_DEPENDENCY_ATTEMPTS = 20
 
 
+class _ProductRepositoryLike(Protocol):
+    def get_by_id(self, product_id: int) -> object: ...
+
+
+class _WorkflowServiceLike(Protocol):
+    def get_session_status(self, session_id: str) -> dict[str, Any]: ...
+    async def initialize_session(self, *, session_id: str) -> object: ...
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None: ...
+
+
 class StoryPhaseRunner:
     """Run Story phase commands through the same service boundary as the API."""
 
     def __init__(
         self,
         *,
-        product_repo: ProductRepository | None = None,
-        workflow_service: WorkflowService | None = None,
+        product_repo: ProductRepository | _ProductRepositoryLike | None = None,
+        workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
     ) -> None:
         """Initialize repositories for CLI Story commands."""
         self._product_repo = product_repo or ProductRepository()
@@ -658,7 +672,7 @@ class StoryPhaseRunner:
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
-            return product
+            return cast("Product", product)
         return _error_envelope(
             ErrorCode.PROJECT_NOT_FOUND,
             f"Project {project_id} not found.",
@@ -886,7 +900,10 @@ def _deterministic_dependency_edges(
         .where(UserStory.product_id == project_id)
         .where(UserStory.is_refined == True)  # noqa: E712
         .where(UserStory.is_superseded == False)  # noqa: E712
-        .order_by(UserStory.source_requirement, UserStory.refinement_slot)
+        .order_by(
+            cast("Any", UserStory.source_requirement),
+            cast("Any", UserStory.refinement_slot),
+        )
     ).all()
     by_requirement: dict[str, list[UserStory]] = {}
     for story in stories:
@@ -1135,7 +1152,7 @@ def _assert_reopen_safe(*, project_id: int, normalized_requirement: str) -> None
                 select(UserStory.story_id).where(
                     UserStory.product_id == project_id,
                     UserStory.source_requirement == normalized_key,
-                    UserStory.is_superseded.is_(False),
+                    cast("Any", UserStory.is_superseded).is_(False),
                 )
             ).all()
             if story_id is not None

@@ -1417,7 +1417,7 @@ def test_application_routes_roadmap_commands_to_runner() -> None:
 def test_application_routes_story_commands_to_runner() -> None:
     """Verify Story facade methods delegate to the configured runner."""
     runner = _FakeStoryRunner()
-    app = AgentWorkbenchApplication(story_runner=runner)
+    app = AgentWorkbenchApplication(story_runner=cast("Any", runner))
 
     assert app.story_pending(project_id=PROJECT_ID)["data"]["pending"] == []
     assert (
@@ -1541,7 +1541,7 @@ def test_application_routes_story_commands_to_runner() -> None:
 def test_application_routes_sprint_execution_commands_to_runner() -> None:
     """Verify Sprint execution facade methods delegate to the configured runner."""
     runner = _FakeSprintRunner()
-    app = AgentWorkbenchApplication(sprint_runner=runner)
+    app = AgentWorkbenchApplication(sprint_runner=cast("Any", runner))
 
     assert (
         app.sprint_start(
