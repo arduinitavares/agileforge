@@ -19,6 +19,7 @@ The installed CLI supports:
 - Workflow and status inspection.
 - Spec Authority status, review, accept, reject, and invariant inspection.
 - Vision generate, history, and save.
+- Implementation evidence collection for evidence-aware Backlog generation.
 - Backlog generate, history, and save.
 - Roadmap generate, history, and save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
@@ -256,6 +257,46 @@ Use history only for inspection/debugging:
 ```sh
 agileforge vision history --project-id "$PROJECT_ID" | python -m json.tool
 ```
+
+Before Backlog generation on a brownfield project, collect implementation
+evidence from the caller repository. This stores a raw
+`agileforge.reconciliation_report.v1` JSON report in workflow state under
+`implementation_evidence_cached`; Backlog generation consumes that cached report
+as advisory evidence so it can avoid treating already implemented behavior as
+greenfield work.
+
+```sh
+agileforge evidence collect \
+  --project-id "$PROJECT_ID" \
+  --repo-path "$(pwd)" \
+  --idempotency-key "evidence-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > evidence-collect.json
+```
+
+Use `--from-file` to import a reviewed external or hand-authored report with the
+same schema:
+
+```sh
+agileforge evidence collect \
+  --project-id "$PROJECT_ID" \
+  --from-file evidence_report.json \
+  --idempotency-key "evidence-import-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > evidence-collect.json
+```
+
+`evidence collect` is deterministic and exact-tag based. It searches for
+accepted authority item IDs and linked invariant IDs, classifies each finding as
+`evidenced`, `evidence_missing`, `missing`, or `unknown`, and records
+`validation_state: "not_run"` because Phase 1a does not execute tests. The
+collector is intentionally conservative: `missing` means no exact tag was found,
+not proof that behavior is absent. Treat low-confidence findings as PO review
+inputs.
+
+The command is a guarded state mutation. Exactly one of `--repo-path` or
+`--from-file` is required, and `--idempotency-key` is required. If the same key
+is replayed with the same authority and source fingerprint, AgileForge returns
+the original report; if the key is reused with different inputs, the command
+fails closed with `IDEMPOTENCY_KEY_REUSED`.
 
 After Vision save, the next installed command should be Backlog generation:
 
@@ -1295,6 +1336,18 @@ Use `vision generate` without `--input` for the initial Vision run. Use
 explicit refinement feedback. `vision save` is valid only after the current
 Vision draft is complete.
 
+### Evidence Commands
+
+```sh
+agileforge evidence collect --project-id 1 --repo-path /path/to/repo --idempotency-key evidence-001
+agileforge evidence collect --project-id 1 --from-file evidence_report.json --idempotency-key evidence-import-001
+```
+
+Use `evidence collect` before Backlog generation when the caller repository may
+already implement some accepted requirements. The command caches a raw
+reconciliation report in workflow state for the Backlog agent. It is advisory
+input, not proof that all behavior is correct.
+
 ### Backlog Commands
 
 ```sh
@@ -1411,6 +1464,7 @@ Installed domain mutations:
 
 - `agileforge project create`
 - `agileforge project setup retry`
+- `agileforge evidence collect`
 - `agileforge backlog save`
 - `agileforge backlog reconcile`
 - `agileforge roadmap save`
