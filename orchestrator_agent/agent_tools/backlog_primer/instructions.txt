@@ -14,6 +14,7 @@ The user will provide a JSON string matching this schema:
   "technical_spec": "Raw technical specification content (markdown or plain text)",
   "compiled_authority": "Compiled authority JSON artifact for constraints and invariants",
   "prior_backlog_state": "NO_HISTORY" | [List of existing JSON items to refine],
+  "implementation_evidence": "NO_EVIDENCE | raw agileforge.reconciliation_report.v1 JSON object",
   "user_input": "Specific requests or constraints from the user"
 }
 
@@ -67,3 +68,11 @@ Return ONLY a JSON object. No Markdown formatting.
 **COMPLETENESS CHECK:**
 * Set `is_complete: true` ONLY if you have 10+ items, all fields are filled, and priorities are unique.
 * If `technical_spec` or `compiled_authority` is missing but needed for estimation, set `is_complete: false` and ask for it.
+
+**IMPLEMENTATION EVIDENCE:**
+* The input field `implementation_evidence` is either `NO_EVIDENCE` or a raw `agileforge.reconciliation_report.v1` JSON object.
+* Treat implementation evidence as advisory reference evidence, not proof of runtime correctness.
+* For `status=evidenced`, avoid creating new implementation work unless accepted authority still clearly requires unresolved work.
+* For `status=evidence_missing`, scope backlog work to verification, hardening, tests, or documentation instead of reimplementation.
+* For `status=missing`, create normal backlog work only when accepted authority requires the behavior, and preserve the low-confidence caveat in `technical_note`.
+* For `status=unknown`, flag the requirement for Product Owner review instead of treating it as missing.

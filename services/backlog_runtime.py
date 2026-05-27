@@ -88,6 +88,9 @@ def build_backlog_input_context(
     """Build the serialized backlog-agent input payload from workflow state."""
     vision_assessment = state.get("product_vision_assessment") or {}
     vision_stmt = vision_assessment.get("product_vision_statement") or ""
+    implementation_evidence = _as_text(
+        state.get("implementation_evidence_cached")
+    ).strip()
 
     return {
         "product_vision_statement": vision_stmt,
@@ -96,6 +99,7 @@ def build_backlog_input_context(
         "prior_backlog_state": _normalize_prior_backlog_state(
             state.get("backlog_items")
         ),
+        "implementation_evidence": implementation_evidence or "NO_EVIDENCE",
         "user_input": user_input or "",
     }
 

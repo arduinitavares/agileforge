@@ -89,6 +89,15 @@ class InputSchema(BaseModel):
             ),
         ),
     ]
+    implementation_evidence: Annotated[
+        str,
+        Field(
+            description=(
+                "Raw ReconciliationReport JSON from implementation_evidence_cached "
+                "or 'NO_EVIDENCE' when no evidence cache is available."
+            ),
+        ),
+    ]
     user_input: Annotated[
         str | None,
         Field(

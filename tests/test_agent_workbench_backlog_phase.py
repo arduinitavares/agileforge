@@ -13,6 +13,7 @@ from models.core import Product, UserStory
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
+from services.backlog_runtime import build_backlog_input_context
 
 if TYPE_CHECKING:
     import pytest
@@ -77,6 +78,9 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
         state = tool_context.state
         state["pending_spec_content"] = "SPEC CONTENT"
         state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["implementation_evidence_cached"] = (
+            '{"schema_version":"agileforge.reconciliation_report.v1","findings":[]}'
+        )
         state["product_vision_assessment"] = {
             "product_vision_statement": "A clear saved vision.",
             "is_complete": True,
@@ -101,6 +105,7 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
                 "technical_spec": state.get("pending_spec_content"),
                 "compiled_authority": state.get("compiled_authority_cached"),
                 "prior_backlog_state": "NO_HISTORY",
+                "implementation_evidence": state.get("implementation_evidence_cached"),
                 "user_input": user_input or "",
             },
             "output_artifact": {
@@ -136,6 +141,52 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
     )
     assert result["data"]["input_context"]["technical_spec"] == "SPEC CONTENT"
     assert result["data"]["input_context"]["compiled_authority"] == "AUTHORITY JSON"
+    assert result["data"]["input_context"]["implementation_evidence"] == (
+        '{"schema_version":"agileforge.reconciliation_report.v1","findings":[]}'
+    )
+    assert result["data"]["input_context"]["implementation_evidence"].startswith(
+        '{"schema_version"'
+    )
+
+
+def test_build_backlog_input_context_uses_no_evidence_when_cache_missing() -> None:
+    """Backlog input context should use NO_EVIDENCE without cached evidence."""
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+        },
+        user_input=None,
+    )
+
+    assert context["implementation_evidence"] == "NO_EVIDENCE"
+
+
+def test_build_backlog_input_context_serializes_cached_evidence() -> None:
+    """Backlog input context should pass cached evidence through as JSON text."""
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            "implementation_evidence_cached": {
+                "schema_version": "agileforge.reconciliation_report.v1",
+                "findings": [],
+            },
+        },
+        user_input=None,
+    )
+
+    assert context["implementation_evidence"] == (
+        '{"schema_version": "agileforge.reconciliation_report.v1", "findings": []}'
+    )
 
 
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
