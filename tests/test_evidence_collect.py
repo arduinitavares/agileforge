@@ -502,6 +502,28 @@ def test_targets_from_compiled_authority_uses_item_and_invariant_ids() -> None:
     ]
 
 
+def test_targets_from_compiled_authority_warns_when_items_list_is_missing() -> None:
+    """Verify unsupported authority shapes explain how exact targets are derived."""
+    targets, warnings = evidence_collect_module.targets_from_compiled_authority(
+        {"spec_version_id": 7}
+    )
+
+    assert targets == []
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning.code == "EVIDENCE_AUTHORITY_ITEMS_MISSING"
+    assert warning.details == {
+        "expected_path": "items",
+        "supported_item_types": ["REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"],
+        "target_terms": ["spec item id", "related INV-* ids"],
+    }
+    assert warning.remediation == [
+        "Ensure compiled authority exposes normative items under an items list.",
+        "Reference normative item ids or related INV-* ids in repo files "
+        "to create exact evidence matches.",
+    ]
+
+
 def test_targets_from_compiled_authority_keeps_only_normative_item_types() -> None:
     """Verify targets are created only for supported normative item types."""
     compiled = {
@@ -609,7 +631,11 @@ class _ProductRepoStub:
         return SimpleNamespace(product_id=product_id, name="Evidence Project")
 
 
-def _seed_authority(engine: Engine) -> str:
+def _seed_authority(
+    engine: Engine,
+    *,
+    compiled_artifact: dict[str, object] | None = None,
+) -> str:
     """Seed one accepted authority row for runner tests."""
     with Session(engine) as session:
         product = Product(name="Evidence Project")
@@ -630,7 +656,8 @@ def _seed_authority(engine: Engine) -> str:
             prompt_hash="prompt",
             compiled_at=datetime(2026, 5, 27, tzinfo=UTC),
             compiled_artifact_json=json.dumps(
-                {
+                compiled_artifact
+                or {
                     "spec_version_id": 1,
                     "items": [
                         {
@@ -699,6 +726,68 @@ def test_runner_stores_report_and_event(tmp_path: Path) -> None:
     with Session(engine) as session:
         event = session.exec(select(WorkflowEvent)).one()
         assert event.event_type == WorkflowEventType.EVIDENCE_COLLECTED
+
+
+def test_runner_caches_empty_report_when_authority_has_no_supported_targets(
+    tmp_path: Path,
+) -> None:
+    """Verify unsupported authority items produce an advisory empty report."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(
+        engine,
+        compiled_artifact={
+            "spec_version_id": 1,
+            "items": [
+                {
+                    "id": "GOAL.budget-control",
+                    "type": "GOAL",
+                    "verification": "inspection",
+                }
+            ],
+        },
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "budget.py").write_text("# REQ.budget-validation\n", encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="empty-targets",
+    )
+
+    assert result["ok"] is True
+    warnings = cast("list[dict[str, object]]", result["warnings"])
+    assert [warning["code"] for warning in warnings] == ["EVIDENCE_TARGETS_EMPTY"]
+    warning = warnings[0]
+    assert _mapping(warning)["details"] == {
+        "supported_item_types": ["REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"],
+        "target_terms": ["spec item id", "related INV-* ids"],
+    }
+    assert _mapping(warning)["remediation"] == [
+        "Ensure compiled authority contains normative items with stable ids.",
+        "Reference those ids or related INV-* ids in repo files "
+        "to create exact evidence matches.",
+    ]
+    assert IMPLEMENTATION_EVIDENCE_STATE_KEY in workflow.state
+    data = _mapping(result["data"])
+    report = _mapping(data["report"])
+    assert report["summary"] == {
+        "finding_count": 0,
+        "evidenced": 0,
+        "evidence_missing": 0,
+        "missing": 0,
+        "unknown": 0,
+    }
+    assert report["findings"] == []
 
 
 def test_runner_replays_same_idempotency_key_for_same_import(

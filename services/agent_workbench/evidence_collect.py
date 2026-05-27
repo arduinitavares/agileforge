@@ -41,13 +41,14 @@ IMPLEMENTATION_EVIDENCE_STATE_KEY: str = "implementation_evidence_cached"
 EVIDENCE_COLLECT_COMMAND: str = "agileforge evidence collect"
 MAX_SCAN_BYTES: int = 500 * 1024
 GIT_BINARY: str = shutil.which("git") or "git"
-NORMATIVE_ITEM_TYPES: set[str] = {
+NORMATIVE_ITEM_TYPES_ORDERED: tuple[str, ...] = (
     "REQ",
     "QUALITY",
     "CONSTRAINT",
     "INTERFACE",
     "DATA",
-}
+)
+NORMATIVE_ITEM_TYPES: set[str] = set(NORMATIVE_ITEM_TYPES_ORDERED)
 
 FindingStatus = Literal["evidenced", "evidence_missing", "missing", "unknown"]
 EvidenceConfidence = Literal["medium", "low"]
@@ -323,6 +324,17 @@ def targets_from_compiled_authority(
                 WorkbenchWarning(
                     code="EVIDENCE_AUTHORITY_ITEMS_MISSING",
                     message="Compiled authority has no items list.",
+                    details={
+                        "expected_path": "items",
+                        "supported_item_types": list(NORMATIVE_ITEM_TYPES_ORDERED),
+                        "target_terms": ["spec item id", "related INV-* ids"],
+                    },
+                    remediation=[
+                        "Ensure compiled authority exposes normative items "
+                        "under an items list.",
+                        "Reference normative item ids or related INV-* ids "
+                        "in repo files to create exact evidence matches.",
+                    ],
                 )
             ],
         )
@@ -361,6 +373,16 @@ def targets_from_compiled_authority(
             WorkbenchWarning(
                 code="EVIDENCE_TARGETS_EMPTY",
                 message="No supported normative spec items were found.",
+                details={
+                    "supported_item_types": list(NORMATIVE_ITEM_TYPES_ORDERED),
+                    "target_terms": ["spec item id", "related INV-* ids"],
+                },
+                remediation=[
+                    "Ensure compiled authority contains normative items "
+                    "with stable ids.",
+                    "Reference those ids or related INV-* ids in repo files "
+                    "to create exact evidence matches.",
+                ],
             )
         )
     return (targets, warnings)
@@ -632,10 +654,11 @@ class EvidenceCollectionRunner:
             msg = "repo path is not a readable directory"
             raise ValueError(msg)
         targets, target_warnings = targets_from_compiled_authority(compiled)
-        if not targets:
-            msg = "no supported evidence targets found"
-            raise ValueError(msg)
-        findings, scan_warnings = collect_repo_evidence(repo, targets)
+        if targets:
+            findings, scan_warnings = collect_repo_evidence(repo, targets)
+        else:
+            findings = []
+            scan_warnings = []
         repo_metadata = self._repo_metadata(repo.resolve())
         report = ReconciliationReport(
             project_id=project_id,
