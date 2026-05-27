@@ -478,6 +478,21 @@ class _SprintPhaseRunner(Protocol):
         ...
 
 
+class _EvidenceCollectionRunner(Protocol):
+    """Evidence collection commands exposed through the facade."""
+
+    def collect(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Collect or import evidence and cache it in workflow state."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
@@ -494,6 +509,7 @@ class AgentWorkbenchApplication:
         roadmap_runner: _RoadmapPhaseRunner | None = None,
         story_runner: _StoryPhaseRunner | None = None,
         sprint_runner: _SprintPhaseRunner | None = None,
+        evidence_runner: _EvidenceCollectionRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -506,6 +522,7 @@ class AgentWorkbenchApplication:
         self._roadmap_runner = roadmap_runner
         self._story_runner = story_runner
         self._sprint_runner = sprint_runner
+        self._evidence_runner = evidence_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -911,6 +928,22 @@ class AgentWorkbenchApplication:
         """Repair legacy duplicate active Backlog seed rows."""
         return self._get_backlog_runner().reconcile(
             project_id=project_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def evidence_collect(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Collect or import implementation evidence for backlog generation."""
+        return self._get_evidence_runner().collect(
+            project_id=project_id,
+            repo_path=repo_path,
+            from_file=from_file,
             idempotency_key=idempotency_key,
         )
 
@@ -1422,6 +1455,16 @@ class AgentWorkbenchApplication:
 
             self._sprint_runner = SprintPhaseRunner()
         return self._sprint_runner
+
+    def _get_evidence_runner(self) -> _EvidenceCollectionRunner:
+        """Return the evidence runner, constructing the default lazily."""
+        if self._evidence_runner is None:
+            from services.agent_workbench.evidence_collect import (  # noqa: PLC0415
+                EvidenceCollectionRunner,
+            )
+
+            self._evidence_runner = EvidenceCollectionRunner()
+        return self._evidence_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:

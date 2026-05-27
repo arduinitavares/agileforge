@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import create_engine
+from sqlmodel import Session as SQLModelSession
 
 from cli.main import main
 from models.core import Product, Sprint, SprintStory, Team, UserStory
@@ -21,7 +22,14 @@ from models.specs import (
     SpecRegistry,
 )
 from services.agent_workbench.application import AgentWorkbenchApplication
-from services.agent_workbench.authority_projection import AuthorityProjectionService
+from services.agent_workbench.authority_projection import (
+    AuthorityProjectionService,
+    pending_authority_fingerprint,
+)
+from services.agent_workbench.evidence_collect import (
+    IMPLEMENTATION_EVIDENCE_STATE_KEY,
+    EvidenceCollectionRunner,
+)
 from services.agent_workbench.read_projection import ReadProjectionService
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
@@ -49,6 +57,7 @@ PHASE_1_GROUPS = (
     "project",
     "workflow",
     "authority",
+    "evidence",
     "story",
     "sprint",
     "context",
@@ -103,6 +112,39 @@ class _SprintPlanningSessionReader:
             "setup_status": "passed",
             "setup_error": None,
         }
+
+
+class _EvidenceWorkflowStub:
+    """Workflow-state stub used by evidence CLI integration tests."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return cached workflow state."""
+        _ = session_id
+        return dict(self.state)
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Merge cached workflow state."""
+        _ = session_id
+        self.state.update(partial_update)
+
+
+class _EvidenceProductRepo:
+    """Product repository facade over the test engine."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Return the seeded product when present."""
+        with SQLModelSession(self._engine) as local_session:
+            return local_session.get(Product, product_id)
 
 
 def _spec_hash(content: str) -> str:
@@ -243,6 +285,7 @@ def _app_for_engine(
     engine: Engine,
     repo_root: Path,
     session_reader: _SprintPlanningSessionReader | None = None,
+    evidence_runner: EvidenceCollectionRunner | None = None,
 ) -> AgentWorkbenchApplication:
     """Build the real application facade over injected read-only dependencies."""
     read_projection = ReadProjectionService(
@@ -259,6 +302,7 @@ def _app_for_engine(
     return AgentWorkbenchApplication(
         read_projection=read_projection,
         authority_projection=authority_projection,
+        evidence_runner=evidence_runner,
     )
 
 
@@ -479,6 +523,77 @@ def test_phase1_cli_preserves_schema_not_ready_error_envelope(
     assert error["retryable"] is True
     assert "products" in _mapping(_mapping(error["details"])["missing"])
     assert not db_path.exists()
+
+
+def test_evidence_collect_cli_writes_workflow_state(
+    session: Session,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify evidence collect routes through the CLI and caches the report."""
+    project_id, _story_id, _spec_version_id = _seed_phase1_project(
+        session,
+        repo_root=tmp_path,
+    )
+    authority = session.get(CompiledSpecAuthority, 1)
+    assert authority is not None
+    authority.compiled_artifact_json = json.dumps(
+        {
+            "spec_version_id": 1,
+            "items": [
+                {
+                    "id": "REQ.phase1-context",
+                    "type": "REQ",
+                    "verification": "inspection",
+                }
+            ],
+        }
+    )
+    session.add(authority)
+    session.flush()
+    acceptance = session.get(SpecAuthorityAcceptance, 1)
+    assert acceptance is not None
+    acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+    session.add(acceptance)
+    session.commit()
+
+    repo = tmp_path / "cartola"
+    repo.mkdir()
+    (repo / "phase1.py").write_text("# REQ.phase1-context\n", encoding="utf-8")
+    engine = cast("Engine", session.get_bind())
+    workflow = _EvidenceWorkflowStub()
+    evidence_runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_EvidenceProductRepo(engine),
+        workflow_service=workflow,
+    )
+    app = _app_for_engine(
+        engine=engine,
+        repo_root=tmp_path,
+        evidence_runner=evidence_runner,
+    )
+
+    payload = _cli_payload(
+        [
+            "evidence",
+            "collect",
+            "--project-id",
+            str(project_id),
+            "--repo-path",
+            str(repo),
+            "--idempotency-key",
+            "evidence-phase1",
+        ],
+        app=app,
+        capsys=capsys,
+    )
+
+    assert _mapping(payload["meta"])["command"] == "agileforge evidence collect"
+    data = _mapping(payload["data"])
+    assert data["stored_state_key"] == IMPLEMENTATION_EVIDENCE_STATE_KEY
+    report = _mapping(data["report"])
+    assert report["schema_version"] == "agileforge.reconciliation_report.v1"
+    assert IMPLEMENTATION_EVIDENCE_STATE_KEY in workflow.state
 
 
 def test_phase1_console_script_help_is_wired(tmp_path: Path) -> None:

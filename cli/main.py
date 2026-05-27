@@ -62,6 +62,10 @@ Examples:
     """--expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW """
     """--idempotency-key save-backlog-001
   agileforge backlog reconcile --project-id 1 --idempotency-key reconcile-backlog-001
+  agileforge evidence collect --project-id 1 --repo-path /path/to/repo """
+    """--idempotency-key evidence-001
+  agileforge evidence collect --project-id 1 --from-file evidence_report.json """
+    """--idempotency-key evidence-import-001
   agileforge roadmap generate --project-id 1 --input "optional guidance"
   agileforge roadmap save --project-id 1 --attempt-id <attempt_id> """
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
@@ -273,6 +277,17 @@ class _Application(Protocol):
         idempotency_key: str,
     ) -> JsonObject:
         """Repair legacy duplicate active Backlog seed rows."""
+        ...
+
+    def evidence_collect(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Collect or import evidence and cache it in workflow state."""
         ...
 
     def roadmap_generate(
@@ -1069,6 +1084,25 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     backlog_reconcile.add_argument("--project-id", type=int, required=True)
     backlog_reconcile.add_argument("--idempotency-key", required=True)
     backlog_reconcile.set_defaults(command_handler=_backlog_reconcile)
+
+    evidence = subparsers.add_parser(
+        "evidence",
+        help="Collect implementation evidence for backlog generation.",
+    )
+    evidence_sub = evidence.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    evidence_collect = evidence_sub.add_parser(
+        "collect",
+        help="Collect exact-tag evidence or import a reconciliation report.",
+    )
+    evidence_collect.add_argument("--project-id", type=int, required=True)
+    evidence_collect.add_argument("--repo-path")
+    evidence_collect.add_argument("--from-file")
+    evidence_collect.add_argument("--idempotency-key", required=True)
+    evidence_collect.set_defaults(command_handler=_evidence_collect)
 
     roadmap = subparsers.add_parser("roadmap", help="Run Roadmap phase commands.")
     roadmap_sub = roadmap.add_subparsers(
@@ -2317,6 +2351,19 @@ def _backlog_reconcile(
     """Route Backlog reconcile to the application facade."""
     return "agileforge backlog reconcile", application.backlog_reconcile(
         project_id=args.project_id,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _evidence_collect(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route evidence collection to the application facade."""
+    return "agileforge evidence collect", application.evidence_collect(
+        project_id=args.project_id,
+        repo_path=args.repo_path,
+        from_file=args.from_file,
         idempotency_key=args.idempotency_key,
     )
 

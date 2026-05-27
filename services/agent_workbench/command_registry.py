@@ -419,6 +419,23 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge evidence collect",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=("project_id", "idempotency_key"),
+        input_optional=("repo_path", "from_file"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.AUTHORITY_NOT_COMPILED.value,
+            ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge roadmap generate",
         mutates=True,
         phase="phase_2d",
