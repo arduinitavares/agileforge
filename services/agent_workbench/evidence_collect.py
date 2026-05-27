@@ -79,6 +79,7 @@ BEHAVIOR_EVIDENCE_KINDS: frozenset[EvidenceKind] = frozenset(
 SKIP_DIR_NAMES: frozenset[str] = frozenset(
     {
         ".git",
+        ".codegraph",
         ".hg",
         ".mypy_cache",
         ".pytest_cache",
@@ -688,11 +689,12 @@ class EvidenceCollectionRunner:
         for file_path, relative_path in files:
             if _skip_file_reason(file_path, relative_path) is not None:
                 continue
+            try:
+                digest = _file_sha256(file_path)
+            except OSError as exc:
+                digest = canonical_hash({"unreadable": str(exc)})
             file_fingerprints.append(
-                {
-                    "path": relative_path.as_posix(),
-                    "sha256": _file_sha256(file_path),
-                }
+                {"path": relative_path.as_posix(), "sha256": digest}
             )
         return canonical_hash(
             {
@@ -1067,19 +1069,26 @@ def _skip_file_reason(file_path: Path, relative_path: Path) -> str | None:
     """Return a skip reason for files that should not be scanned."""
     lower_name = relative_path.name.lower()
     lower_suffix = relative_path.suffix.lower()
-
-    if lower_name in SKIP_FILE_NAMES:
-        return "file_name"
-    if lower_suffix in SKIP_FILE_SUFFIXES:
-        return "file_suffix"
+    reason: str | None = None
 
     try:
-        size = file_path.stat().st_size
+        if not file_path.is_file():
+            reason = "non_regular_file"
     except OSError:
-        return None
-    if size > MAX_SCAN_BYTES:
-        return "file_too_large"
-    return None
+        reason = "non_regular_file"
+    if reason is None and lower_name in SKIP_FILE_NAMES:
+        reason = "file_name"
+    if reason is None and lower_suffix in SKIP_FILE_SUFFIXES:
+        reason = "file_suffix"
+
+    if reason is None:
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            size = 0
+        if size > MAX_SCAN_BYTES:
+            reason = "file_too_large"
+    return reason
 
 
 def _evidence_path_for_content(

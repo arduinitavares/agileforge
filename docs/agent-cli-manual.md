@@ -113,6 +113,34 @@ agileforge project create --dry-run \
   --spec-file specs/spec.json
 ```
 
+### Branch Smoke Testing
+
+Before a feature branch is merged, the installed `agileforge` shim still points
+at the central root checkout. To smoke-test a worktree branch, invoke that
+worktree directly and provide the same environment the shim normally loads from
+the central repo.
+
+```sh
+cd /path/to/caller-project
+set -a
+. /Users/aaat/projects/agileforge/.env
+set +a
+
+uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+  python -m cli.main command schema "agileforge evidence collect"
+```
+
+If the root `.env` is not available, export absolute database URLs before
+running the worktree CLI:
+
+```sh
+export AGILEFORGE_DB_URL="sqlite:////absolute/path/to/agileforge.db"
+export AGILEFORGE_SESSION_DB_URL="sqlite:////absolute/path/to/agileforge_session.db"
+```
+
+Do not copy `.env` into temporary worktrees just to test a branch. Keeping the
+environment explicit makes it harder to validate the wrong checkout or database.
+
 ## Environment Expectations
 
 The CLI reads AgileForge configuration from the central repo runtime. The usual
@@ -1257,6 +1285,7 @@ machine-readable command contract, including:
 
 - required input fields
 - optional input fields
+- explicit CLI option flags and `option_count`
 - whether the command mutates state
 - whether idempotency is required
 - guard policy

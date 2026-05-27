@@ -56,6 +56,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge backlog history",
     "agileforge backlog save",
     "agileforge backlog reconcile",
+    "agileforge evidence collect",
     "agileforge roadmap generate",
     "agileforge roadmap history",
     "agileforge roadmap save",
@@ -415,6 +416,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
         "agileforge backlog history",
         "agileforge backlog save",
         "agileforge backlog reconcile",
+        "agileforge evidence collect",
     }
 
     assert backlog_command_names.issubset(names)
@@ -427,6 +429,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
     history = command_schema_payload("agileforge backlog history")
     save = command_schema_payload("agileforge backlog save")
     reconcile = command_schema_payload("agileforge backlog reconcile")
+    evidence = command_schema_payload("agileforge evidence collect")
 
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id"]
@@ -448,6 +451,22 @@ def test_backlog_commands_are_registered_and_available() -> None:
     assert reconcile["input"]["required"] == ["project_id", "idempotency_key"]
     assert reconcile["idempotency_required"] is True
     assert ErrorCode.MUTATION_FAILED.value in reconcile["errors"]
+    assert evidence["mutates"] is True
+    assert evidence["input"]["required"] == ["project_id", "idempotency_key"]
+    assert evidence["input"]["optional"] == ["repo_path", "from_file"]
+    assert evidence["input"]["options"] == [
+        {"name": "project_id", "flag": "--project-id", "required": True},
+        {
+            "name": "idempotency_key",
+            "flag": "--idempotency-key",
+            "required": True,
+        },
+        {"name": "repo_path", "flag": "--repo-path", "required": False},
+        {"name": "from_file", "flag": "--from-file", "required": False},
+    ]
+    assert evidence["input"]["option_count"] == len(evidence["input"]["options"])
+    assert evidence["idempotency_required"] is True
+    assert ErrorCode.MUTATION_FAILED.value in evidence["errors"]
 
 
 def test_roadmap_commands_are_registered_and_available() -> None:

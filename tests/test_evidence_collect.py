@@ -1,6 +1,8 @@
 """Tests for evidence-aware reconciliation collection models."""
 
 import json
+import socket
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,6 +163,57 @@ def test_collect_repo_evidence_skips_database_lock_binary_and_oversized_files(
     ]
     assert {evidence.kind for evidence in findings[0].evidence_paths} == {"source"}
     assert any(warning.code == "EVIDENCE_FILE_SKIPPED" for warning in warnings)
+
+
+def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
+    """Verify runtime sockets do not abort evidence collection."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    with tempfile.TemporaryDirectory(prefix="afsock-", dir="/tmp") as repo_dir:
+        repo = Path(repo_dir)
+        (repo / "budget.py").write_text(
+            "# REQ.budget-validation\n",
+            encoding="utf-8",
+        )
+        codegraph_dir = repo / ".codegraph"
+        codegraph_dir.mkdir()
+        (codegraph_dir / "daemon.pid").write_text(
+            "REQ.budget-validation\n",
+            encoding="utf-8",
+        )
+        socket_path = repo / "daemon.sock"
+        sock = socket.socket(socket.AF_UNIX)
+        try:
+            sock.bind(str(socket_path))
+            runner = EvidenceCollectionRunner(
+                engine=engine,
+                product_repo=_ProductRepoStub(),
+                workflow_service=_WorkflowStub(),
+            )
+
+            result = runner.collect(
+                project_id=1,
+                repo_path=str(repo),
+                from_file=None,
+                idempotency_key="socket-repo",
+            )
+        finally:
+            sock.close()
+
+    assert result["ok"] is True
+    warnings = cast("list[dict[str, object]]", result["warnings"])
+    skipped_paths = {
+        str(_mapping(warning)["details"]["path"])
+        for warning in warnings
+        if warning.get("code") == "EVIDENCE_FILE_SKIPPED"
+    }
+    data = _mapping(result["data"])
+    report = _mapping(data["report"])
+    findings = cast("list[dict[str, object]]", report["findings"])
+    evidence_paths = cast("list[dict[str, object]]", findings[0]["evidence_paths"])
+    assert [path["path"] for path in evidence_paths] == ["budget.py"]
+    assert "daemon.sock" in skipped_paths
 
 
 def test_collect_repo_evidence_uses_tag_boundaries_not_substrings(

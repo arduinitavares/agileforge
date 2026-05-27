@@ -2183,6 +2183,36 @@ def _sprint_workflow_next(
     next_valid_commands: list[str] = []
     blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
+    if fsm_state == "SPRINT_COMPLETE":
+        data: dict[str, Any] = {
+            "project_id": project_id,
+            "next_valid_commands": next_valid_commands,
+            "blocked_commands": blocked_commands,
+            "blocked_future_commands": blocked_future_commands,
+            "status": "sprint_complete",
+        }
+        data["source_fingerprint"] = canonical_hash(
+            {
+                "command": WORKFLOW_NEXT_COMMAND,
+                "project_id": project_id,
+                "workflow": _fingerprint_input(_envelope_data(workflow)),
+                "installed_command_names": sorted(installed_command_names()),
+                "next_valid_commands": data["next_valid_commands"],
+                "blocked_commands": data["blocked_commands"],
+                "blocked_future_commands": data["blocked_future_commands"],
+                "status": data["status"],
+            }
+        )
+        return {
+            "ok": True,
+            "data": data,
+            "warnings": _section_warnings(
+                section="workflow",
+                source="workflow_state",
+                envelope=workflow,
+            ),
+            "errors": [],
+        }
     save_blocker = (
         _sprint_save_blocker(workflow) if fsm_state == "SPRINT_DRAFT" else None
     )

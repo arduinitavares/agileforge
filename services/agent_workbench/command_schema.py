@@ -15,6 +15,7 @@ from services.agent_workbench.error_codes import error_metadata
 from services.agent_workbench.version import COMMAND_VERSION, STORAGE_SCHEMA_VERSION
 
 CAPABILITIES_SCHEMA_VERSION: str = "agileforge.cli.capabilities.v1"
+POSITIONAL_INPUT_NAMES: frozenset[str] = frozenset({"command_name"})
 
 
 def capabilities_payload() -> dict[str, Any]:
@@ -76,6 +77,10 @@ def command_schema_payload(command_name: str) -> dict[str, Any]:
         input=CommandInputSchema(
             required=list(command.input_required),
             optional=list(command.input_optional),
+            option_count=(
+                len(command.input_required) + len(command.input_optional)
+            ),
+            options=_input_options(command),
         ),
         output=CommandOutputSchema(
             data_schema={"type": "object"},
@@ -102,6 +107,29 @@ def _command_metadata(command_name: str) -> CommandMetadata:
             return command
     msg = f"Unknown command: {command_name}"
     raise ValueError(msg)
+
+
+def _input_options(command: CommandMetadata) -> list[dict[str, Any]]:
+    """Return explicit CLI option metadata for command inputs."""
+    return [
+        _input_option(name, required=True) for name in command.input_required
+    ] + [_input_option(name, required=False) for name in command.input_optional]
+
+
+def _input_option(name: str, *, required: bool) -> dict[str, Any]:
+    """Return one command input description with flag or positional syntax."""
+    if name in POSITIONAL_INPUT_NAMES:
+        return {
+            "name": name,
+            "flag": f"<{name}>",
+            "required": required,
+            "positional": True,
+        }
+    return {
+        "name": name,
+        "flag": f"--{name.replace('_', '-')}",
+        "required": required,
+    }
 
 
 def _guard_policy(command: CommandMetadata) -> list[str]:

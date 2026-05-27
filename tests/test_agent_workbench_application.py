@@ -219,6 +219,20 @@ class _SprintViewReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintCompleteReadProjection(_FakeReadProjection):
+    """Fake read projection for a completed Sprint state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return sprint complete workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "setup_status": "passed",
+            "active_sprint_id": 11,
+        }
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -2518,6 +2532,22 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
         "agileforge sprint history --project-id 7",
     ]
     assert result["data"]["blocked_commands"] == []
+
+
+def test_workflow_next_does_not_route_sprint_complete_to_empty_history() -> None:
+    """Avoid advertising draft history as the only command after Sprint close."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "sprint_complete"
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

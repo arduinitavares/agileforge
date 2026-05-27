@@ -12,6 +12,8 @@ class CommandInputSchema(BaseModel):
 
     required: list[str]
     optional: list[str]
+    option_count: int
+    options: list[dict[str, Any]]
 
 
 class CommandOutputSchema(BaseModel):
