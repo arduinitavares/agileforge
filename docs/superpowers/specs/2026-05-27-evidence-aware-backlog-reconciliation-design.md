@@ -91,6 +91,9 @@ Rules:
 - Exactly one of `--repo-path` or `--from-file` is required.
 - `--repo-path` runs the exact-match collector against the target repository.
 - `--from-file` validates and imports a supplied `ReconciliationReport`.
+- `--from-file` fingerprints the file content, not only the file path.
+- Imported reports must match the project's current accepted authority
+  fingerprint. Authority-fingerprint mismatch is a guard error.
 - The command writes canonical JSON to
   `workflow_state["implementation_evidence_cached"]`.
 - The command requires a non-empty `--idempotency-key`.
@@ -169,6 +172,12 @@ Canonical shape:
 }
 ```
 
+For imported reports, `repo` may be `null` when the report was produced
+manually or by an external process without repository metadata. The import
+preserves the imported `repo` and `collector` blocks as-is after schema
+validation. A missing `repo` block produces a warning, not a failure, because
+the imported file content fingerprint still pins the mutation input.
+
 The report must be serialized canonically before being stored and fingerprinted.
 
 ### Finding Statuses
@@ -177,8 +186,9 @@ Phase 1a supports exactly four statuses:
 
 - `evidenced`: exact behavior reference exists and either a test reference
   exists or the verification method does not require tests.
-- `evidence_missing`: exact behavior reference exists, verification requires
-  tests, and no test reference exists.
+- `evidence_missing`: exact behavior reference exists but required test evidence
+  is missing, or exact test evidence exists but no behavior/source reference was
+  found.
 - `missing`: no behavior reference and no test reference exist.
 - `unknown`: inputs are ambiguous or unsupported.
 
@@ -190,7 +200,7 @@ find references; it cannot assess degree of implementation.
 Phase 1a supports:
 
 - `medium`: deterministic exact-match finding.
-- `low`: unknown or unsupported finding.
+- `low`: missing, unknown, or unsupported finding.
 
 The collector must never emit `strong` confidence in Phase 1a. Strong evidence
 requires executed validation with recorded output, which is out of scope.
@@ -232,8 +242,11 @@ normative item IDs and verification methods for supported item types:
 - `INTERFACE`
 - `DATA`
 
-It may also use invariant IDs such as `INV-*` as additional matched terms when
-those IDs are available from compiled authority.
+For each item, the collector must resolve associated invariant IDs such as
+`INV-*` from compiled authority relations when those relations are available.
+Resolved invariant IDs are treated as equivalent matched terms for the parent
+item. If invariant relationships cannot be resolved, the collector matches only
+the item ID and emits a warning.
 
 The collector searches text files under the supplied repository path and ignores
 known noisy or irrelevant locations:
@@ -242,9 +255,14 @@ known noisy or irrelevant locations:
 - virtual environments
 - cache directories
 - build output directories
+- SQLite/database files such as `.db`, `.sqlite`, and `.sqlite3`
+- lockfiles such as `uv.lock`, `package-lock.json`, and similar dependency
+  lock outputs
 - binary files
 - large generated files
-- lockfiles when they would dominate the scan
+
+Phase 1a uses a default file-size scan limit of 500 KiB per file. Files above
+that limit are skipped and reported in warnings.
 
 The collector performs exact matching only. It does not infer behavior from
 function names, comments without IDs, natural language similarity, or semantic
@@ -252,10 +270,15 @@ code structure.
 
 File kind classification is path-based:
 
-- `test`: test directory or test filename patterns.
+- `test`: directories named exactly `test` or `tests`, or filenames matching
+  conventional test patterns such as `test_*.py`, `*_test.py`, `*.test.js`,
+  `*.spec.js`, and equivalent extension variants.
 - `doc`: Markdown or documentation paths.
 - `config`: common config file paths.
 - `source`: other textual source files.
+
+The collector must not classify a file as `test` merely because an arbitrary
+path segment contains the substring `test`.
 
 ## Classification Rule
 
@@ -273,8 +296,11 @@ needs_test = verification_method in {
 
 if not has_behavior_ref and not has_test_ref:
     status = "missing"
-    confidence = "medium"
+    confidence = "low"
 elif has_behavior_ref and needs_test and not has_test_ref:
+    status = "evidence_missing"
+    confidence = "medium"
+elif has_test_ref and not has_behavior_ref:
     status = "evidence_missing"
     confidence = "medium"
 elif has_behavior_ref and (has_test_ref or not needs_test):
@@ -307,6 +333,27 @@ workflow_state["implementation_evidence_source"]
 Only `implementation_evidence_cached` is required for Phase 1a backlog-agent
 consumption.
 
+The command also records idempotency metadata in a `WorkflowEvent`. Phase 1a
+adds a new event type:
+
+```text
+EVIDENCE_COLLECTED
+```
+
+The event metadata contains:
+
+```json
+{
+  "action": "evidence_collected",
+  "idempotency_key": "...",
+  "request_fingerprint": "sha256:...",
+  "report_fingerprint": "sha256:..."
+}
+```
+
+Idempotent replay is resolved by scanning `EVIDENCE_COLLECTED` events for the
+matching key. The report schema is not polluted with idempotency metadata.
+
 ## Backlog Agent Input
 
 Extend the backlog primer `InputSchema` with:
@@ -333,7 +380,8 @@ Prompt guidance:
   product authority still clearly requires unresolved work.
 - For `evidence_missing`, create verification, hardening, test, or documentation
   work rather than reimplementation work.
-- For `missing`, create normal product backlog work when authority requires it.
+- For `missing`, create normal product backlog work when authority requires it,
+  but preserve the low-confidence caveat for Product Owner review.
 - For `unknown`, flag the item for Product Owner review instead of treating it as
   missing.
 
@@ -345,6 +393,8 @@ The command fails closed when:
 - `--repo-path` does not exist or is unreadable.
 - `--from-file` does not parse or validate as
   `agileforge.reconciliation_report.v1`.
+- an imported report's `compiled_authority_fingerprint` does not match the
+  project's current accepted authority fingerprint.
 - the idempotency key is reused with a different request fingerprint.
 
 The command warns and continues when:
@@ -354,19 +404,22 @@ The command warns and continues when:
 - some files are skipped because they are binary, generated, or too large.
 - a spec item lacks a verification method.
 - a verification method is unsupported by Phase 1a classification.
+- an imported report has `repo: null`.
 
 Warnings must be returned in the envelope `warnings` array.
 
 ## Idempotency
 
-The request fingerprint includes:
+The request fingerprint is computed with `canonical_hash` from
+`services.agent_workbench.fingerprints` over deterministic JSON data. The hash
+input includes:
 
 - command name.
 - project id.
 - source mode: `repo_path` or `from_file`.
 - compiled authority fingerprint.
 - repo path and git commit for `--repo-path`.
-- imported file fingerprint for `--from-file`.
+- SHA-256 content fingerprint of the imported file for `--from-file`.
 - collector strategy and version.
 
 Idempotent replay returns the previously stored response for the same key and
@@ -396,19 +449,32 @@ Unit tests:
   `not_run`.
 - exact source reference without required test reference classifies as
   `evidence_missing`, `medium`, `not_run`.
-- no exact references classifies as `missing`, `medium`, `not_run`.
+- exact test reference without behavior/source reference classifies as
+  `evidence_missing`, `medium`, `not_run`.
+- no exact references classifies as `missing`, `low`, `not_run`.
 - unsupported or ambiguous inputs classify as `unknown`, `low`, `not_run`.
+- associated invariant IDs are resolved as equivalent matched terms for their
+  parent item when compiled authority relations are available.
+- test file classification only matches exact test directories and conventional
+  test filename patterns, not arbitrary `test` substrings.
+- database files, dependency lockfiles, binary files, and files above the size
+  limit are skipped with warnings.
 - `--from-file` validation stores canonical JSON.
+- `--from-file` request fingerprint changes when the file content changes.
+- `--from-file` rejects authority-fingerprint mismatch.
 - backlog input includes `implementation_evidence`.
 - absent evidence becomes `NO_EVIDENCE`.
 
 Integration tests:
 
 - `evidence collect` writes `implementation_evidence_cached` to workflow state.
+- `evidence collect` records an `EVIDENCE_COLLECTED` workflow event with
+  idempotency key, request fingerprint, and report fingerprint.
 - repeated idempotency key and same request fingerprint replay the prior result.
 - reused idempotency key with changed input returns a guard error.
-- warnings are returned for dirty repo, skipped files, and missing verification
-  methods without failing the command.
+- dirty repo state succeeds and appends a warning to the response envelope.
+- warnings are returned for skipped files and missing verification methods
+  without failing the command.
 
 ## Later Phases
 
