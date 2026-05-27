@@ -2,21 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess  # nosec B404
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlmodel import Session, select
 
-from services.agent_workbench.envelope import WorkbenchWarning
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from services.agent_workbench.envelope import (
+    WorkbenchError,
+    WorkbenchWarning,
+    error_envelope,
+    success_envelope,
+)
+from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from sqlalchemy.engine import Engine
 
 REPORT_SCHEMA_VERSION: str = "agileforge.reconciliation_report.v1"
 COLLECTOR_STRATEGY: str = "exact_tag_match"
@@ -24,6 +40,7 @@ COLLECTOR_VERSION: str = "agileforge.evidence_collect.v1"
 IMPLEMENTATION_EVIDENCE_STATE_KEY: str = "implementation_evidence_cached"
 EVIDENCE_COLLECT_COMMAND: str = "agileforge evidence collect"
 MAX_SCAN_BYTES: int = 500 * 1024
+GIT_BINARY: str = shutil.which("git") or "git"
 NORMATIVE_ITEM_TYPES: set[str] = {
     "REQ",
     "QUALITY",
@@ -138,6 +155,30 @@ class SpecEvidenceTarget:
     item_type: str
     verification_method: str
     matched_terms: list[str]
+
+
+class _ProductRepository(Protocol):
+    """Product lookup dependency used by the runner."""
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Fetch a product by ID."""
+        ...
+
+
+class _WorkflowService(Protocol):
+    """Workflow-state dependency used by the runner."""
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return workflow state for a project session."""
+        ...
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Apply a partial workflow-state update."""
+        ...
 
 
 class EvidencePath(BaseModel):
@@ -348,6 +389,478 @@ def import_report_json(
             )
         )
     return (report, warnings)
+
+
+class EvidenceCollectionRunner:
+    """Collect or import evidence and cache it in workflow state."""
+
+    def __init__(
+        self,
+        *,
+        engine: Engine | None = None,
+        product_repo: _ProductRepository | None = None,
+        workflow_service: _WorkflowService | None = None,
+    ) -> None:
+        """Initialize runner dependencies."""
+        if engine is None:
+            from models.db import get_engine  # noqa: PLC0415
+
+            engine = get_engine()
+        if product_repo is None:
+            from repositories.product import ProductRepository  # noqa: PLC0415
+
+            product_repo = ProductRepository()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._engine = engine
+        self._product_repo = product_repo
+        self._workflow_service = workflow_service
+
+    def collect(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Collect evidence from a repo or import a report file."""
+        validation_error = self._validate_request(
+            project_id=project_id,
+            repo_path=repo_path,
+            from_file=from_file,
+            idempotency_key=idempotency_key,
+        )
+        if validation_error is not None:
+            return error_envelope(
+                command=EVIDENCE_COLLECT_COMMAND,
+                error=validation_error,
+            )
+
+        authority_result = self._load_authority(project_id)
+        if isinstance(authority_result, dict):
+            return authority_result
+        authority_fingerprint, spec_version_id, compiled = authority_result
+
+        try:
+            source_mode, source_fingerprint = self._source_identity(
+                repo_path=repo_path,
+                from_file=from_file,
+            )
+        except OSError as exc:
+            return error_envelope(
+                command=EVIDENCE_COLLECT_COMMAND,
+                error=_mutation_failed(str(exc), {"project_id": project_id}),
+            )
+
+        request_fingerprint = canonical_hash(
+            {
+                "command": EVIDENCE_COLLECT_COMMAND,
+                "project_id": project_id,
+                "source_mode": source_mode,
+                "compiled_authority_fingerprint": authority_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "collector_strategy": COLLECTOR_STRATEGY,
+                "collector_version": COLLECTOR_VERSION,
+            }
+        )
+        replay = self._idempotent_replay(
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if replay is not None:
+            return replay
+
+        try:
+            report, warnings = self._build_report(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                authority_fingerprint=authority_fingerprint,
+                compiled=compiled,
+                repo_path=repo_path,
+                from_file=from_file,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return error_envelope(
+                command=EVIDENCE_COLLECT_COMMAND,
+                error=_mutation_failed(str(exc), {"project_id": project_id}),
+            )
+
+        fingerprint = report_fingerprint(report)
+        self._workflow_service.update_session_status(
+            str(project_id),
+            {
+                IMPLEMENTATION_EVIDENCE_STATE_KEY: canonical_report_json(report),
+                "implementation_evidence_fingerprint": fingerprint,
+                "implementation_evidence_collected_at": report.generated_at,
+                "implementation_evidence_source": source_mode,
+            },
+        )
+        self._record_event(
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            report_fingerprint=fingerprint,
+            report=report,
+        )
+        return success_envelope(
+            command=EVIDENCE_COLLECT_COMMAND,
+            data={
+                "project_id": project_id,
+                "report_fingerprint": fingerprint,
+                "stored_state_key": IMPLEMENTATION_EVIDENCE_STATE_KEY,
+                "report": report.model_dump(mode="json"),
+            },
+            warnings=warnings,
+            source_fingerprint=fingerprint,
+        )
+
+    def _validate_request(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+    ) -> WorkbenchError | None:
+        if bool(repo_path) == bool(from_file):
+            return _invalid_command(
+                "Exactly one of --repo-path or --from-file is required.",
+                {"repo_path": repo_path, "from_file": from_file},
+            )
+        if not idempotency_key.strip():
+            return _invalid_command("--idempotency-key is required.", {})
+        if self._product_repo.get_by_id(project_id) is None:
+            return _project_not_found(project_id)
+        return None
+
+    def _load_authority(
+        self,
+        project_id: int,
+    ) -> tuple[str, int, dict[str, Any]] | dict[str, Any]:
+        with Session(self._engine) as session:
+            accepted = session.exec(
+                select(SpecAuthorityAcceptance)
+                .where(SpecAuthorityAcceptance.product_id == project_id)
+                .where(SpecAuthorityAcceptance.status == "accepted")
+                .order_by(SpecAuthorityAcceptance.decided_at.desc())
+            ).first()
+            if accepted is None or not accepted.authority_fingerprint:
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_not_accepted(project_id),
+                )
+
+            authority = session.exec(
+                select(CompiledSpecAuthority).where(
+                    CompiledSpecAuthority.spec_version_id == accepted.spec_version_id
+                )
+            ).first()
+            if authority is None or not authority.compiled_artifact_json:
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_not_compiled(project_id),
+                )
+            if _authority_mismatches_acceptance(
+                authority=authority,
+                accepted=accepted,
+            ):
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_acceptance_mismatch(project_id),
+                )
+            try:
+                compiled_artifact = json.loads(authority.compiled_artifact_json)
+            except json.JSONDecodeError:
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority artifact JSON is invalid.",
+                    ),
+                )
+            if not isinstance(compiled_artifact, dict):
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority artifact JSON is not an object.",
+                    ),
+                )
+            return (
+                str(accepted.authority_fingerprint),
+                int(accepted.spec_version_id),
+                compiled_artifact,
+            )
+
+    def _source_identity(
+        self,
+        *,
+        repo_path: str | None,
+        from_file: str | None,
+    ) -> tuple[str, str]:
+        if from_file:
+            digest = canonical_hash({"file_sha256": _file_sha256(Path(from_file))})
+            return "from_file", digest
+        repo = Path(repo_path or "").resolve()
+        return "repo_path", canonical_hash(self._repo_metadata(repo).model_dump())
+
+    def _build_report(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        authority_fingerprint: str,
+        compiled: dict[str, Any],
+        repo_path: str | None,
+        from_file: str | None,
+    ) -> tuple[ReconciliationReport, list[WorkbenchWarning]]:
+        if from_file:
+            return import_report_json(
+                Path(from_file).read_text(encoding="utf-8"),
+                project_id=project_id,
+                current_authority_fingerprint=authority_fingerprint,
+            )
+
+        repo = Path(repo_path or "")
+        if not repo.exists() or not repo.is_dir():
+            msg = "repo path is not a readable directory"
+            raise ValueError(msg)
+        targets, target_warnings = targets_from_compiled_authority(compiled)
+        if not targets:
+            msg = "no supported evidence targets found"
+            raise ValueError(msg)
+        findings, scan_warnings = collect_repo_evidence(repo, targets)
+        repo_metadata = self._repo_metadata(repo.resolve())
+        report = ReconciliationReport(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            compiled_authority_fingerprint=authority_fingerprint,
+            repo=repo_metadata,
+            generated_at=utc_now_iso(),
+            collector=CollectorMetadata(),
+            summary=build_summary(findings),
+            findings=findings,
+        )
+        warnings = [*target_warnings, *scan_warnings]
+        if repo_metadata.dirty:
+            warnings.append(
+                WorkbenchWarning(
+                    code="EVIDENCE_REPO_DIRTY",
+                    message="Repository has uncommitted changes.",
+                    details={"repo_path": repo_metadata.path},
+                )
+            )
+        return report, warnings
+
+    def _repo_metadata(self, repo: Path) -> RepoMetadata:
+        git_commit: str | None = None
+        dirty = False
+        try:
+            commit = subprocess.run(  # noqa: S603  # nosec B603
+                [GIT_BINARY, "-C", str(repo), "rev-parse", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if commit.returncode == 0:
+                git_commit = commit.stdout.strip() or None
+                status = subprocess.run(  # noqa: S603  # nosec B603
+                    [GIT_BINARY, "-C", str(repo), "status", "--porcelain"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                dirty = bool(status.stdout.strip()) if status.returncode == 0 else False
+        except OSError:
+            git_commit = None
+            dirty = False
+        return RepoMetadata(path=str(repo), git_commit=git_commit, dirty=dirty)
+
+    def _idempotent_replay(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        with Session(self._engine) as session:
+            events = session.exec(
+                select(WorkflowEvent)
+                .where(WorkflowEvent.product_id == project_id)
+                .where(WorkflowEvent.event_type == WorkflowEventType.EVIDENCE_COLLECTED)
+            ).all()
+            for event in events:
+                metadata = _json_object(event.event_metadata)
+                if metadata.get("idempotency_key") != idempotency_key:
+                    continue
+                if metadata.get("request_fingerprint") != request_fingerprint:
+                    return error_envelope(
+                        command=EVIDENCE_COLLECT_COMMAND,
+                        error=_idempotency_key_reused(idempotency_key),
+                    )
+
+                report = self._report_from_event_metadata(metadata, project_id)
+                if report is None:
+                    return error_envelope(
+                        command=EVIDENCE_COLLECT_COMMAND,
+                        error=_mutation_failed(
+                            "Idempotent replay report is unavailable.",
+                            {
+                                "project_id": project_id,
+                                "idempotency_key": idempotency_key,
+                            },
+                        ),
+                    )
+                report_fingerprint_value = str(
+                    metadata.get("report_fingerprint") or report_fingerprint(report)
+                )
+                return success_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    data={
+                        "project_id": project_id,
+                        "report_fingerprint": report_fingerprint_value,
+                        "stored_state_key": IMPLEMENTATION_EVIDENCE_STATE_KEY,
+                        "idempotent_replay": True,
+                        "report": report.model_dump(mode="json"),
+                    },
+                    source_fingerprint=report_fingerprint_value,
+                )
+        return None
+
+    def _record_event(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+        request_fingerprint: str,
+        report_fingerprint: str,
+        report: ReconciliationReport,
+    ) -> None:
+        with Session(self._engine) as session:
+            session.add(
+                WorkflowEvent(
+                    event_type=WorkflowEventType.EVIDENCE_COLLECTED,
+                    product_id=project_id,
+                    session_id=str(project_id),
+                    event_metadata=json.dumps(
+                        {
+                            "action": "evidence_collected",
+                            "idempotency_key": idempotency_key,
+                            "request_fingerprint": request_fingerprint,
+                            "report_fingerprint": report_fingerprint,
+                            "report": report.model_dump(mode="json"),
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            )
+            session.commit()
+
+    def _report_from_event_metadata(
+        self,
+        metadata: dict[str, Any],
+        project_id: int,
+    ) -> ReconciliationReport | None:
+        """Return immutable replay report payload from event metadata."""
+        report_payload = metadata.get("report")
+        if isinstance(report_payload, dict):
+            return ReconciliationReport.model_validate(report_payload)
+
+        state = self._workflow_service.get_session_status(str(project_id)) or {}
+        raw_report = state.get(IMPLEMENTATION_EVIDENCE_STATE_KEY)
+        if not isinstance(raw_report, str):
+            return None
+        report = ReconciliationReport.model_validate_json(raw_report)
+        if report_fingerprint(report) != metadata.get("report_fingerprint"):
+            return None
+        return report
+
+
+def _file_sha256(path: Path) -> str:
+    """Return a SHA-256 checksum for file content."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    """Decode a JSON object field, returning empty dict on invalid payloads."""
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _invalid_command(message: str, details: dict[str, Any]) -> WorkbenchError:
+    return workbench_error(ErrorCode.INVALID_COMMAND, message=message, details=details)
+
+
+def _project_not_found(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.PROJECT_NOT_FOUND,
+        message=f"Project {project_id} not found.",
+        details={"project_id": project_id},
+    )
+
+
+def _authority_not_accepted(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_NOT_ACCEPTED,
+        message="No accepted authority fingerprint is available.",
+        details={"project_id": project_id},
+    )
+
+
+def _authority_mismatches_acceptance(
+    *,
+    authority: CompiledSpecAuthority,
+    accepted: SpecAuthorityAcceptance,
+) -> bool:
+    """Return whether a compiled authority no longer matches its acceptance."""
+    current_fingerprint = pending_authority_fingerprint(authority)
+    return (
+        authority.authority_id != accepted.pending_authority_id
+        or authority.compiler_version != accepted.compiler_version
+        or authority.prompt_hash != accepted.prompt_hash
+        or current_fingerprint != accepted.authority_fingerprint
+    )
+
+
+def _authority_acceptance_mismatch(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH,
+        message="Accepted authority decision does not match compiled authority.",
+        details={"project_id": project_id},
+    )
+
+
+def _authority_not_compiled(
+    project_id: int,
+    *,
+    message: str = "Accepted authority has no compiled artifact JSON.",
+) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_NOT_COMPILED,
+        message=message,
+        details={"project_id": project_id},
+    )
+
+
+def _mutation_failed(message: str, details: dict[str, Any]) -> WorkbenchError:
+    return workbench_error(ErrorCode.MUTATION_FAILED, message=message, details=details)
+
+
+def _idempotency_key_reused(idempotency_key: str) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.IDEMPOTENCY_KEY_REUSED,
+        message="Idempotency key was reused with different inputs.",
+        details={"idempotency_key": idempotency_key},
+    )
 
 
 def _invariant_terms_from_relations(raw_relations: list[object]) -> set[str]:

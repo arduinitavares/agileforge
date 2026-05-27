@@ -1,14 +1,31 @@
 """Tests for evidence-aware reconciliation collection models."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.engine import Engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from models.core import Product
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.specs import (
+    CompiledSpecAuthority,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 from services.agent_workbench import evidence_collect as evidence_collect_module
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.evidence_collect import (
+    EVIDENCE_COLLECT_COMMAND,
+    IMPLEMENTATION_EVIDENCE_STATE_KEY,
     CollectorMetadata,
+    EvidenceCollectionRunner,
     EvidencePath,
     ReconciliationFinding,
     ReconciliationReport,
@@ -504,3 +521,401 @@ def test_import_report_json_preserves_null_repo_and_external_collector() -> None
     assert [warning.code for warning in warnings] == [
         "EVIDENCE_REPO_METADATA_MISSING"
     ]
+
+
+class _WorkflowStub:
+    """Workflow state stub used by evidence collection runner tests."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {"fsm_state": "BACKLOG_INTERVIEW"}
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return the current test workflow state."""
+        _ = session_id
+        return dict(self.state)
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Merge a partial workflow state update."""
+        _ = session_id
+        self.state.update(partial_update)
+
+
+class _ProductRepoStub:
+    """Product repository stub used by evidence collection runner tests."""
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Return a product placeholder for positive project lookups."""
+        return SimpleNamespace(product_id=product_id, name="Evidence Project")
+
+
+def _seed_authority(engine: Engine) -> str:
+    """Seed one accepted authority row for runner tests."""
+    with Session(engine) as session:
+        product = Product(name="Evidence Project")
+        session.add(product)
+        session.commit()
+        spec = SpecRegistry(
+            product_id=1,
+            spec_hash="spec-hash",
+            content="{}",
+            status="approved",
+            approved_at=datetime(2026, 5, 27, tzinfo=UTC),
+        )
+        session.add(spec)
+        session.commit()
+        authority = CompiledSpecAuthority(
+            spec_version_id=1,
+            compiler_version="1",
+            prompt_hash="prompt",
+            compiled_at=datetime(2026, 5, 27, tzinfo=UTC),
+            compiled_artifact_json=json.dumps(
+                {
+                    "spec_version_id": 1,
+                    "items": [
+                        {
+                            "id": "REQ.budget-validation",
+                            "type": "REQ",
+                            "verification": "unit-test",
+                        }
+                    ],
+                }
+            ),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+        )
+        session.add(authority)
+        session.commit()
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=1,
+                spec_version_id=1,
+                status="accepted",
+                policy="test",
+                decided_by="test",
+                decided_at=datetime(2026, 5, 27, tzinfo=UTC),
+                compiler_version="1",
+                prompt_hash="prompt",
+                spec_hash="spec-hash",
+                pending_authority_id=1,
+                authority_fingerprint=authority_fingerprint,
+            )
+        )
+        session.commit()
+        return authority_fingerprint
+
+
+def test_runner_stores_report_and_event(tmp_path: Path) -> None:
+    """Verify collection stores workflow cache and audit event."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "budget.py").write_text("# REQ.budget-validation\n", encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="evidence-1",
+    )
+
+    assert result["ok"] is True
+    assert IMPLEMENTATION_EVIDENCE_STATE_KEY in workflow.state
+    assert _mapping(result["meta"])["command"] == EVIDENCE_COLLECT_COMMAND
+    data = _mapping(result["data"])
+    report = _mapping(data["report"])
+    assert report["schema_version"] == "agileforge.reconciliation_report.v1"
+    with Session(engine) as session:
+        event = session.exec(select(WorkflowEvent)).one()
+        assert event.event_type == WorkflowEventType.EVIDENCE_COLLECTED
+
+
+def test_runner_replays_same_idempotency_key_for_same_import(
+    tmp_path: Path,
+) -> None:
+    """Verify identical idempotent imports replay successfully."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    authority_fingerprint = _seed_authority(engine)
+    report_file = tmp_path / "report.json"
+    report_file.write_text(
+        json.dumps(_report_payload(project_id=1, fingerprint=authority_fingerprint)),
+        encoding="utf-8",
+    )
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    first = runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(report_file),
+        idempotency_key="same-key",
+    )
+    second = runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(report_file),
+        idempotency_key="same-key",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    data = _mapping(second["data"])
+    assert data["idempotent_replay"] is True
+
+
+def test_runner_replays_original_report_after_later_collection(
+    tmp_path: Path,
+) -> None:
+    """Verify replay uses immutable event data, not overwritten workflow cache."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    authority_fingerprint = _seed_authority(engine)
+    first_file = tmp_path / "first.json"
+    second_file = tmp_path / "second.json"
+    first_payload = _report_payload(project_id=1, fingerprint=authority_fingerprint)
+    first_payload["generated_at"] = "2026-05-27T12:00:00Z"
+    second_payload = _report_payload(project_id=1, fingerprint=authority_fingerprint)
+    second_payload["generated_at"] = "2026-05-27T12:02:00Z"
+    first_file.write_text(json.dumps(first_payload), encoding="utf-8")
+    second_file.write_text(json.dumps(second_payload), encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    assert runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(first_file),
+        idempotency_key="first-key",
+    )["ok"] is True
+    assert runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(second_file),
+        idempotency_key="second-key",
+    )["ok"] is True
+    replay = runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(first_file),
+        idempotency_key="first-key",
+    )
+
+    assert replay["ok"] is True
+    report = _mapping(_mapping(replay["data"])["report"])
+    assert report["generated_at"] == "2026-05-27T12:00:00Z"
+
+
+def test_runner_rejects_authority_row_mismatched_to_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Verify stale accepted decisions do not scan a changed authority row."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "budget.py").write_text("# REQ.budget-validation\n", encoding="utf-8")
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.prompt_hash = "changed"
+        session.add(authority)
+        session.commit()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="mismatch",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
+
+
+def test_runner_rejects_authority_artifact_mismatched_to_acceptance(
+    tmp_path: Path,
+) -> None:
+    """Verify artifact changes cannot keep the old accepted fingerprint."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.compiled_artifact_json = json.dumps(
+            {
+                "spec_version_id": 1,
+                "items": [
+                    {
+                        "id": "REQ.changed",
+                        "type": "REQ",
+                        "verification": "unit-test",
+                    }
+                ],
+            }
+        )
+        session.add(authority)
+        session.commit()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="artifact-mismatch",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
+
+
+def test_runner_returns_error_envelope_for_invalid_compiled_authority_json(
+    tmp_path: Path,
+) -> None:
+    """Verify malformed authority JSON does not escape as an exception."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.compiled_artifact_json = "{"
+        session.add(authority)
+        session.flush()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="invalid-json",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "AUTHORITY_NOT_COMPILED"
+
+
+def test_runner_returns_error_envelope_for_non_object_compiled_authority_json(
+    tmp_path: Path,
+) -> None:
+    """Verify non-object authority JSON fails closed."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.compiled_artifact_json = "[]"
+        session.add(authority)
+        session.flush()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="non-object-json",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "AUTHORITY_NOT_COMPILED"
+
+
+def test_runner_rejects_idempotency_key_reuse_with_changed_file(
+    tmp_path: Path,
+) -> None:
+    """Verify reused keys with different imported content fail closed."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    authority_fingerprint = _seed_authority(engine)
+    report_file = tmp_path / "report.json"
+    base = _report_payload(project_id=1, fingerprint=authority_fingerprint)
+    report_file.write_text(json.dumps(base), encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    assert runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(report_file),
+        idempotency_key="same-key",
+    )["ok"] is True
+    changed = dict(base)
+    changed["generated_at"] = "2026-05-27T12:01:00Z"
+    report_file.write_text(json.dumps(changed), encoding="utf-8")
+    result = runner.collect(
+        project_id=1,
+        repo_path=None,
+        from_file=str(report_file),
+        idempotency_key="same-key",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def _mapping(value: object) -> dict[str, object]:
+    """Return a JSON object from an envelope field."""
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
