@@ -1,60 +1,74 @@
 # OpenSpec and AgileForge Workflow Scheme
 
-This scheme captures the working hypothesis for using OpenSpec as the change/spec layer and AgileForge as the planning, reconciliation, and sprint execution layer.
+This scheme captures the current working model for spec-driven Scrum in
+AgileForge.
 
-OpenSpec remains fluid and change-oriented. AgileForge should consume OpenSpec artifacts, reconcile them against product authority and repo evidence, produce ordered backlog/sprint work, and feed implementation results back into OpenSpec when delivered.
+AgileForge remains the Scrum workflow authority. It owns intake, Product
+Authority, evidence-aware reconciliation, Product Backlog, Product Owner
+ordering, Sprint Planning, Sprint task tickets, evidence, story close, and
+sprint close.
+
+Superpowers is the preferred implementation methodology after AgileForge issues
+a work ticket.
+
+OpenSpec is optional. In this model, `/opsx:propose` may draft a behavior-change
+proposal when a backlog candidate needs a clearer behavior contract. AgileForge
+does not use `/opsx:apply` or `/opsx:archive` as workflow gates.
 
 ```mermaid
 flowchart TD
-    A["User intent / product request"] --> B{"Project type?"}
+    A["User or product request"] --> B["AgileForge intake"]
+    B --> C["Product Authority / accepted intent"]
+    B --> D{"Behavior unclear or non-trivial?"}
 
-    B -->|"Greenfield"| C["Create initial OpenSpec specs or first OpenSpec change"]
-    B -->|"Brownfield"| D["Read existing OpenSpec specs + code/tests/docs evidence"]
+    D -->|"Yes, optional"| E["/opsx:propose drafts behavior proposal"]
+    E --> F["PO / reviewer reviews proposal"]
+    F --> G["AgileForge links reviewed proposal as context"]
+    D -->|"No"| H["No OpenSpec artifact required"]
 
-    C --> E["AgileForge imports OpenSpec capability/change map"]
-    D --> F["AgileForge reconciles Product Spec vs OpenSpec vs repo evidence"]
+    C --> I{"Project mode?"}
+    I -->|"Greenfield"| J["Generate backlog from Product Authority"]
+    I -->|"Brownfield"| K["agileforge evidence collect"]
+    K --> L["ReconciliationReport in workflow state"]
+    L --> M["Evidence-aware backlog generation"]
+    J --> N["Backlog candidates"]
+    M --> N
+    G --> N
+    H --> N
 
-    F --> G{"Capability status"}
-    G -->|"Already implemented + evidenced"| H["No work backlog item"]
-    G -->|"Implemented but missing tests/evidence"| I["Create verification/hardening backlog item"]
-    G -->|"Implemented but conflicts with accepted spec"| J["Create authority-fix backlog item"]
-    G -->|"Partial or missing"| K["Create product backlog item"]
+    N --> O["Product Owner reviews and orders Product Backlog"]
+    O --> P["Sprint Planning selects ready work"]
+    P --> Q["AgileForge Sprint task ticket"]
 
-    E --> K
-    H --> L["Capability map only"]
-    I --> M["Product Backlog"]
-    J --> M
-    K --> M
-
-    M --> N["Product Owner orders backlog"]
-    N --> O["Sprint Planning selects ordered, ready work"]
-    O --> P["AgileForge Sprint task tickets"]
-
-    P --> Q{"Implementation engine"}
-    Q -->|"AgileForge agent task loop"| R["Task next/show/update/story close/sprint close"]
-    Q -->|"Superpowers / Codex / Claude / human / other"| S["External implementation using same tickets"]
-
-    R --> T["Verification evidence"]
-    S --> T
-
-    T --> U{"Change delivered?"}
-    U -->|"No"| P
-    U -->|"Yes"| V["Archive/sync OpenSpec change"]
-    V --> W["OpenSpec specs updated as current behavior"]
-    W --> X["AgileForge reconciliation baseline updated"]
-
-    Y["New feature not in tech spec"] --> Z["/opsx:propose new-feature"]
-    Z --> AA["OpenSpec change folder: proposal.md + specs + design.md + tasks.md"]
-    AA --> AB["AgileForge imports change as backlog candidate"]
-    AB --> M
+    Q --> R["Superpowers execution workflow"]
+    R --> S["Design / plan / worktree / TDD / review / finish branch"]
+    S --> T["Artifacts and validation evidence"]
+    T --> U["agileforge sprint task update"]
+    U --> V{"Story or Sprint done?"}
+    V -->|"No"| Q
+    V -->|"Yes"| W["Story close / Sprint close in AgileForge"]
+    W --> X["Future evidence baseline updated by next evidence collect"]
+    W --> Y["If behavior contract changed, update technical spec deliberately"]
 ```
 
 ## Working Rules
 
 - Product authority defines what should be true.
-- OpenSpec specs describe current or proposed system behavior.
-- Repo evidence includes code, tests, docs, CLI output, and runtime behavior.
-- AgileForge should not create a work backlog from the product spec alone for brownfield repositories.
-- New feature requests should enter as OpenSpec changes first, then AgileForge can import and reconcile them into backlog candidates.
-- `/opsx:apply` is optional because implementation may happen through AgileForge task tickets, Superpowers, Codex, Claude, humans, or another engine.
-- OpenSpec archive/sync remains important after delivery because it updates the repo behavior spec.
+- Repo evidence describes what can be observed in the implementation.
+- AgileForge must not create a brownfield work backlog from Product Authority
+  alone. It should collect evidence first and feed the resulting
+  `ReconciliationReport` to backlog generation.
+- Greenfield projects do not require evidence collection before the first
+  backlog.
+- User requests enter AgileForge intake first, not OpenSpec.
+- OpenSpec `/opsx:propose` is optional behavior-contract drafting context for
+  unclear or non-trivial behavior changes.
+- OpenSpec `tasks.md` is not the canonical execution tracker.
+- `/opsx:apply` and `/opsx:archive` are not AgileForge workflow gates.
+- AgileForge Sprint task tickets are the canonical work tickets.
+- Superpowers is the preferred execution workflow after a task ticket exists.
+- Delivery evidence returns to AgileForge through task updates, story close, and
+  sprint close.
+- Technical specs are living behavior contracts. If implementation intentionally
+  diverges from the technical spec while still satisfying Product Authority, the
+  spec should be updated deliberately rather than drift silently.
