@@ -133,6 +133,10 @@ def test_collect_repo_evidence_skips_database_lock_binary_and_oversized_files(
         "REQ.budget-validation\n",
         encoding="utf-8",
     )
+    (repo_path / "Cargo.lock").write_text(
+        "REQ.budget-validation\n",
+        encoding="utf-8",
+    )
     (repo_path / "chart.png").write_bytes(b"REQ.budget-validation")
     (repo_path / "large.txt").write_text(
         f"{'x' * (500 * 1024)}REQ.budget-validation\n",
@@ -909,6 +913,41 @@ def test_runner_rejects_idempotency_key_reuse_with_changed_file(
         repo_path=None,
         from_file=str(report_file),
         idempotency_key="same-key",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_runner_rejects_idempotency_key_reuse_with_changed_repo_file(
+    tmp_path: Path,
+) -> None:
+    """Verify reused keys with different repo content fail closed."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source_file = repo / "budget.py"
+    source_file.write_text("# REQ.budget-validation\n", encoding="utf-8")
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    assert runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="same-repo-key",
+    )["ok"] is True
+    source_file.write_text("# REQ.budget-validation\n# changed\n", encoding="utf-8")
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="same-repo-key",
     )
 
     assert result["ok"] is False

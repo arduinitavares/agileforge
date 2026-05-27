@@ -105,6 +105,7 @@ SKIP_FILE_SUFFIXES: frozenset[str] = frozenset(
         ".db",
         ".sqlite",
         ".sqlite3",
+        ".lock",
         ".pyc",
         ".pyo",
         ".png",
@@ -606,7 +607,7 @@ class EvidenceCollectionRunner:
             digest = canonical_hash({"file_sha256": _file_sha256(Path(from_file))})
             return "from_file", digest
         repo = Path(repo_path or "").resolve()
-        return "repo_path", canonical_hash(self._repo_metadata(repo).model_dump())
+        return "repo_path", self._repo_source_fingerprint(repo)
 
     def _build_report(  # noqa: PLR0913
         self,
@@ -679,6 +680,26 @@ class EvidenceCollectionRunner:
             git_commit = None
             dirty = False
         return RepoMetadata(path=str(repo), git_commit=git_commit, dirty=dirty)
+
+    def _repo_source_fingerprint(self, repo: Path) -> str:
+        """Return a fingerprint of repo identity plus scanned file content."""
+        files, _warnings = _iter_scannable_files(repo)
+        file_fingerprints: list[dict[str, str]] = []
+        for file_path, relative_path in files:
+            if _skip_file_reason(file_path, relative_path) is not None:
+                continue
+            file_fingerprints.append(
+                {
+                    "path": relative_path.as_posix(),
+                    "sha256": _file_sha256(file_path),
+                }
+            )
+        return canonical_hash(
+            {
+                "repo": self._repo_metadata(repo).model_dump(mode="json"),
+                "files": file_fingerprints,
+            }
+        )
 
     def _idempotent_replay(
         self,
