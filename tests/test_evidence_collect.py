@@ -1,5 +1,6 @@
 """Tests for evidence-aware reconciliation collection models."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -350,3 +351,156 @@ def test_report_schema_matches_phase_1a_contract() -> None:
         "missing": 0,
         "unknown": 0,
     }
+
+
+def _report_payload(
+    *,
+    project_id: int = 2,
+    fingerprint: str = "sha256:current",
+) -> dict[str, object]:
+    """Build a minimal importable reconciliation report payload."""
+    return {
+        "schema_version": "agileforge.reconciliation_report.v1",
+        "project_id": project_id,
+        "spec_version_id": 7,
+        "compiled_authority_fingerprint": fingerprint,
+        "repo": None,
+        "generated_at": "2026-05-27T12:00:00Z",
+        "collector": {"strategy": "manual", "version": "external.v1"},
+        "summary": {
+            "finding_count": 0,
+            "evidenced": 0,
+            "evidence_missing": 0,
+            "missing": 0,
+            "unknown": 0,
+        },
+        "findings": [],
+    }
+
+
+def test_targets_from_compiled_authority_uses_item_and_invariant_ids() -> None:
+    """Verify normative items include related invariant IDs as match terms."""
+    compiled = {
+        "spec_version_id": 7,
+        "items": [
+            {
+                "id": "REQ.budget-validation",
+                "type": "REQ",
+                "verification": "unit-test",
+                "relations": [
+                    {"type": "verifies", "target": "INV-budget-positive"},
+                    {"type": "implements", "to": "INV-budget-cli"},
+                    {"type": "satisfies", "target": "GOAL-budget"},
+                    {
+                        "type": "relates",
+                        "target": "REQ.other",
+                        "to": "INV-budget-shadow",
+                    },
+                ],
+            },
+            {
+                "id": "GOAL.budget-control",
+                "type": "GOAL",
+                "verification": "inspection",
+                "relations": [{"type": "verifies", "target": "INV-ignored"}],
+            },
+        ],
+        "invariants": [{"id": "INV-budget-positive"}],
+    }
+
+    targets, warnings = evidence_collect_module.targets_from_compiled_authority(
+        compiled
+    )
+
+    assert warnings == []
+    assert targets == [
+        evidence_collect_module.SpecEvidenceTarget(
+            spec_item_id="REQ.budget-validation",
+            item_type="REQ",
+            verification_method="unit-test",
+            matched_terms=[
+                "INV-budget-cli",
+                "INV-budget-positive",
+                "INV-budget-shadow",
+                "REQ.budget-validation",
+            ],
+        )
+    ]
+
+
+def test_targets_from_compiled_authority_keeps_only_normative_item_types() -> None:
+    """Verify targets are created only for supported normative item types."""
+    compiled = {
+        "items": [
+            {"id": "REQ.example", "type": "REQ"},
+            {"id": "QUALITY.example", "type": "QUALITY"},
+            {"id": "CONSTRAINT.example", "type": "CONSTRAINT"},
+            {"id": "INTERFACE.example", "type": "INTERFACE"},
+            {"id": "DATA.example", "type": "DATA"},
+            {"id": "GOAL.example", "type": "GOAL"},
+            {"id": "TERM.example", "type": "TERM"},
+        ]
+    }
+
+    targets, warnings = evidence_collect_module.targets_from_compiled_authority(
+        compiled
+    )
+
+    assert warnings == []
+    assert [target.item_type for target in targets] == [
+        "REQ",
+        "QUALITY",
+        "CONSTRAINT",
+        "INTERFACE",
+        "DATA",
+    ]
+    assert [target.verification_method for target in targets] == [
+        "not-yet-defined",
+        "not-yet-defined",
+        "not-yet-defined",
+        "not-yet-defined",
+        "not-yet-defined",
+    ]
+
+
+def test_import_report_json_rejects_authority_fingerprint_mismatch() -> None:
+    """Verify stale reports cannot be imported against current authority."""
+    report = _report_payload(fingerprint="sha256:old")
+
+    with pytest.raises(ValueError, match="authority fingerprint mismatch"):
+        evidence_collect_module.import_report_json(
+            json.dumps(report),
+            project_id=2,
+            current_authority_fingerprint="sha256:current",
+        )
+
+
+def test_import_report_json_rejects_project_id_mismatch() -> None:
+    """Verify reports from another project are rejected."""
+    report = _report_payload(project_id=3)
+
+    with pytest.raises(ValueError, match="project_id mismatch"):
+        evidence_collect_module.import_report_json(
+            json.dumps(report),
+            project_id=2,
+            current_authority_fingerprint="sha256:current",
+        )
+
+
+def test_import_report_json_preserves_null_repo_and_external_collector() -> None:
+    """Verify external reports keep metadata and warn when repo data is absent."""
+    report = _report_payload()
+
+    imported, warnings = evidence_collect_module.import_report_json(
+        json.dumps(report),
+        project_id=2,
+        current_authority_fingerprint="sha256:current",
+    )
+
+    assert isinstance(imported, ReconciliationReport)
+    assert imported.repo is None
+    assert imported.collector.strategy == "manual"
+    assert imported.collector.version == "external.v1"
+    assert [warning.code for warning in warnings] == [
+        "EVIDENCE_REPO_METADATA_MISSING"
+    ]

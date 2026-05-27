@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,6 +24,13 @@ COLLECTOR_VERSION: str = "agileforge.evidence_collect.v1"
 IMPLEMENTATION_EVIDENCE_STATE_KEY: str = "implementation_evidence_cached"
 EVIDENCE_COLLECT_COMMAND: str = "agileforge evidence collect"
 MAX_SCAN_BYTES: int = 500 * 1024
+NORMATIVE_ITEM_TYPES: set[str] = {
+    "REQ",
+    "QUALITY",
+    "CONSTRAINT",
+    "INTERFACE",
+    "DATA",
+}
 
 FindingStatus = Literal["evidenced", "evidence_missing", "missing", "unknown"]
 EvidenceConfidence = Literal["medium", "low"]
@@ -258,6 +266,101 @@ def canonical_report_json(report: ReconciliationReport) -> str:
 def report_fingerprint(report: ReconciliationReport) -> str:
     """Return the canonical report fingerprint."""
     return canonical_hash(report.model_dump(mode="json"))
+
+
+def targets_from_compiled_authority(
+    compiled_authority: dict[str, Any],
+) -> tuple[list[SpecEvidenceTarget], list[WorkbenchWarning]]:
+    """Extract exact evidence targets from compiled authority JSON."""
+    raw_items = compiled_authority.get("items")
+    if not isinstance(raw_items, list):
+        return (
+            [],
+            [
+                WorkbenchWarning(
+                    code="EVIDENCE_AUTHORITY_ITEMS_MISSING",
+                    message="Compiled authority has no items list.",
+                )
+            ],
+        )
+
+    targets: list[SpecEvidenceTarget] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        item_id = str(raw_item.get("id") or "").strip()
+        item_type = str(raw_item.get("type") or "").strip()
+        if not item_id or item_type not in NORMATIVE_ITEM_TYPES:
+            continue
+
+        verification_method = (
+            str(raw_item.get("verification") or "not-yet-defined").strip()
+            or "not-yet-defined"
+        )
+        matched_terms = {item_id}
+        raw_relations = raw_item.get("relations")
+        if isinstance(raw_relations, list):
+            matched_terms.update(_invariant_terms_from_relations(raw_relations))
+
+        targets.append(
+            SpecEvidenceTarget(
+                spec_item_id=item_id,
+                item_type=item_type,
+                verification_method=verification_method,
+                matched_terms=sorted(matched_terms),
+            )
+        )
+
+    warnings: list[WorkbenchWarning] = []
+    if not targets:
+        warnings.append(
+            WorkbenchWarning(
+                code="EVIDENCE_TARGETS_EMPTY",
+                message="No supported normative spec items were found.",
+            )
+        )
+    return (targets, warnings)
+
+
+def import_report_json(
+    raw_json: str,
+    *,
+    project_id: int,
+    current_authority_fingerprint: str,
+) -> tuple[ReconciliationReport, list[WorkbenchWarning]]:
+    """Validate and import a reconciliation report JSON string."""
+    payload = json.loads(raw_json)
+    report = ReconciliationReport.model_validate(payload)
+    if report.project_id != project_id:
+        msg = "project_id mismatch"
+        raise ValueError(msg)
+    if report.compiled_authority_fingerprint != current_authority_fingerprint:
+        msg = "authority fingerprint mismatch"
+        raise ValueError(msg)
+
+    warnings: list[WorkbenchWarning] = []
+    if report.repo is None:
+        warnings.append(
+            WorkbenchWarning(
+                code="EVIDENCE_REPO_METADATA_MISSING",
+                message="Imported report has no repo metadata.",
+            )
+        )
+    return (report, warnings)
+
+
+def _invariant_terms_from_relations(raw_relations: list[object]) -> set[str]:
+    """Extract invariant reference terms from authority item relations."""
+    invariant_terms: set[str] = set()
+    for raw_relation in raw_relations:
+        if not isinstance(raw_relation, dict):
+            continue
+        for relation_key in ("target", "to"):
+            relation_target = str(raw_relation.get(relation_key) or "").strip()
+            if relation_target.startswith("INV-"):
+                invariant_terms.add(relation_target)
+    return invariant_terms
 
 
 def classify_finding(
