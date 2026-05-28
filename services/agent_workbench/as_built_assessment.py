@@ -28,6 +28,7 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     AsBuiltAssessmentCacheMeta,
     AsBuiltAssessorInput,
     AuthorityTarget,
+    CapabilityAssessment,
     EvidenceKind,
     EvidencePack,
     EvidenceSnippet,
@@ -906,6 +907,75 @@ def split_evidence_pack_for_assessment(
         end = start + batch_size
         batches.append(_slice_evidence_pack(pack=pack, start=start, end=end))
     return batches
+
+
+def merge_batch_assessments(
+    *,
+    project_id: int,
+    assessment_id: str,
+    full_pack: EvidencePack,
+    batch_assessments: list[AsBuiltAssessment],
+) -> AsBuiltAssessment:
+    """Merge validated batch assessments into one full-pack assessment."""
+    expected_keys = [_target_key(target) for target in full_pack.authority_targets]
+    capabilities: dict[tuple[str, tuple[str, ...]], CapabilityAssessment] = {}
+    cross_cutting_findings: list[str] = []
+    open_questions: list[str] = []
+    clarifying_questions: list[str] = []
+    for index, assessment in enumerate(batch_assessments, start=1):
+        for capability in assessment.capability_assessments:
+            capabilities[_capability_key(capability)] = capability
+        cross_cutting_findings.extend(
+            f"[batch {index}] {item}" for item in assessment.cross_cutting_findings
+        )
+        open_questions.extend(
+            f"[batch {index}] {item}" for item in assessment.open_questions
+        )
+        clarifying_questions.extend(
+            f"[batch {index}] {item}" for item in assessment.clarifying_questions
+        )
+
+    missing = [key for key in expected_keys if key not in capabilities]
+    extra = [key for key in capabilities if key not in expected_keys]
+    if missing or extra:
+        msg = (
+            "Batch assessment coverage did not match authority targets: "
+            f"missing={len(missing)} extra={len(extra)}"
+        )
+        raise ValueError(msg)
+
+    ordered_capabilities = [capabilities[key] for key in expected_keys]
+    batch_count = len(batch_assessments)
+    return AsBuiltAssessment(
+        schema_version=ASSESSMENT_SCHEMA_VERSION,
+        project_id=project_id,
+        assessment_id=assessment_id,
+        agent_version=AGENT_VERSION,
+        evidence_pack_builder_version=EVIDENCE_PACK_BUILDER_VERSION,
+        authority_fingerprint=full_pack.authority_fingerprint,
+        evidence_pack_fingerprint=full_pack.evidence_pack_fingerprint,
+        generated_at=utc_now_iso(),
+        assessment_summary=(
+            f"Merged {batch_count} As-Built assessment batch(es) covering "
+            f"{len(ordered_capabilities)} authority target(s)."
+        ),
+        repo_snapshot=full_pack.repo_snapshot,
+        capability_assessments=ordered_capabilities,
+        cross_cutting_findings=cross_cutting_findings,
+        open_questions=open_questions,
+        is_complete=all(assessment.is_complete for assessment in batch_assessments),
+        clarifying_questions=clarifying_questions,
+    )
+
+
+def _target_key(target: AuthorityTarget) -> tuple[str, tuple[str, ...]]:
+    return (target.authority_ref, tuple(target.invariant_refs))
+
+
+def _capability_key(
+    capability: CapabilityAssessment,
+) -> tuple[str, tuple[str, ...]]:
+    return (capability.authority_ref, tuple(capability.invariant_refs))
 
 
 def _slice_evidence_pack(

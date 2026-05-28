@@ -185,7 +185,6 @@ def _seed_authority(engine: Engine) -> str:
 def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return a schema-valid assessment for runner tests."""
     pack = payload.repo_evidence_pack
-    target = pack.authority_targets[0]
     return AsBuiltAssessment(
         schema_version=ASSESSMENT_SCHEMA_VERSION,
         project_id=payload.project_id,
@@ -203,9 +202,9 @@ def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
         ),
         capability_assessments=[
             CapabilityAssessment(
-                authority_ref=target.authority_ref,
-                invariant_refs=target.invariant_refs,
-                capability_title=target.title,
+                authority_ref=item.authority_ref,
+                invariant_refs=item.invariant_refs,
+                capability_title=item.title,
                 status="observed",
                 confidence="medium",
                 evidence=[],
@@ -213,6 +212,7 @@ def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
                 recommended_backlog_treatment="skip_new_implementation",
                 reasoning="Repo evidence supports the capability.",
             )
+            for item in pack.authority_targets
         ],
         cross_cutting_findings=[],
         open_questions=[],
@@ -582,6 +582,77 @@ def test_split_evidence_pack_filters_snippets_to_batch_paths(
     assert [observation.query for observation in first_batch.search_observations] == [
         "REQ.batch-a"
     ]
+
+
+def test_merge_batch_assessments_restores_full_pack_identity(
+    tmp_path: Path,
+) -> None:
+    """Merged assessment should use the full pack identity, not a batch identity."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "live.py").write_text(
+        "# INV-a4b296c058e88663\n# INV-ffe2e17832c41874\n",
+        encoding="utf-8",
+    )
+    full_pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    batches = split_evidence_pack_for_assessment(full_pack, batch_size=1)
+    batch_assessments = [
+        _fake_assessment(
+            _input_payload_for_pack(batch).model_copy(
+                update={"assessment_id": f"batch-{index}"}
+            )
+        )
+        for index, batch in enumerate(batches, start=1)
+    ]
+
+    merged = as_built_module.merge_batch_assessments(
+        project_id=2,
+        assessment_id="as-built-2-full",
+        full_pack=full_pack,
+        batch_assessments=batch_assessments,
+    )
+
+    assert merged.assessment_id == "as-built-2-full"
+    assert merged.evidence_pack_fingerprint == full_pack.evidence_pack_fingerprint
+    assert len(merged.capability_assessments) == len(full_pack.authority_targets)
+    assert [
+        item.authority_ref for item in merged.capability_assessments
+    ] == [target.authority_ref for target in full_pack.authority_targets]
+    assert merged.is_complete is True
+
+
+def test_merge_batch_assessments_rejects_missing_capability(
+    tmp_path: Path,
+) -> None:
+    """Batch merge must fail if an agent omits an authority target."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    full_pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    empty_batch = _fake_assessment(_input_payload_for_pack(full_pack)).model_copy(
+        update={"capability_assessments": []}
+    )
+
+    with pytest.raises(ValueError, match="coverage did not match authority targets"):
+        as_built_module.merge_batch_assessments(
+            project_id=2,
+            assessment_id="as-built-2-full",
+            full_pack=full_pack,
+            batch_assessments=[empty_batch],
+        )
 
 
 def test_build_evidence_pack_reads_each_file_once(
