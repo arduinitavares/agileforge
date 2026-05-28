@@ -674,6 +674,17 @@ class AsBuiltAssessmentRunner:
             )
             if identity_error is not None:
                 raise _AssessmentIdentityError(identity_error)
+            coverage_error = _batch_assessment_coverage_error(
+                assessment=batch_assessment,
+                batch_pack=batch_pack,
+            )
+            if coverage_error is not None:
+                msg = (
+                    f"Batch {index}/{batch_count} failed after "
+                    f"{len(batch_assessments)} completed batch(es): "
+                    f"{coverage_error}"
+                )
+                raise ValueError(msg)
             batch_assessments.append(batch_assessment)
         return merge_batch_assessments(
             project_id=project_id,
@@ -1172,6 +1183,29 @@ def merge_batch_assessments(
         open_questions=open_questions,
         is_complete=all(assessment.is_complete for assessment in batch_assessments),
         clarifying_questions=clarifying_questions,
+    )
+
+
+def _batch_assessment_coverage_error(
+    *,
+    assessment: AsBuiltAssessment,
+    batch_pack: EvidencePack,
+) -> str | None:
+    expected_keys = [_target_key(target) for target in batch_pack.authority_targets]
+    actual_keys = [
+        _capability_key(capability)
+        for capability in assessment.capability_assessments
+    ]
+    duplicates = len(actual_keys) - len(set(actual_keys))
+    expected_set = set(expected_keys)
+    actual_set = set(actual_keys)
+    missing = [key for key in expected_keys if key not in actual_set]
+    extra = [key for key in actual_keys if key not in expected_set]
+    if not missing and not extra and not duplicates:
+        return None
+    return (
+        "Batch assessment coverage did not match batch authority targets: "
+        f"missing={len(missing)} extra={len(extra)} duplicates={duplicates}"
     )
 
 

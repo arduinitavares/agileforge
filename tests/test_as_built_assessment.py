@@ -247,6 +247,33 @@ class _SecondBatchTimeoutInvoker:
         return _fake_assessment(payload)
 
 
+class _CrossBatchCoverageInvoker:
+    """Fake invoker that returns capabilities assigned to the wrong batch."""
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        wrong_target = CARTOLA_AUTHORITY["invariants"][1]
+        assert isinstance(wrong_target, dict)
+        parameters = wrong_target["parameters"]
+        assert isinstance(parameters, dict)
+        return _fake_assessment(payload).model_copy(
+            update={
+                "capability_assessments": [
+                    CapabilityAssessment(
+                        authority_ref=str(parameters["source_item_id"]),
+                        invariant_refs=[str(wrong_target["id"])],
+                        capability_title="Wrong Batch Capability",
+                        status="observed",
+                        confidence="medium",
+                        evidence=[],
+                        limitations=["Tests were not executed."],
+                        recommended_backlog_treatment="skip_new_implementation",
+                        reasoning="This capability belongs to another batch.",
+                    )
+                ]
+            }
+        )
+
+
 def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
     return _fake_assessment(payload).model_copy(
@@ -1091,6 +1118,46 @@ def test_runner_batch_failure_does_not_cache_or_record_event(
     assert details["batch_size"] == 1
     assert details["failed_batch_index"] == FAILING_BATCH_INDEX
     assert details["completed_batches"] == 1
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_runner_rejects_cross_batch_capability_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each batch assessment must cover only its own authority targets."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_CrossBatchCoverageInvoker(),
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="cross-batch-coverage",
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert details["failed_batch_index"] == 1
+    assert details["completed_batches"] == 0
+    assert "coverage did not match batch authority targets" in details["detail"]
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
