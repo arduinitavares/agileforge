@@ -14,6 +14,7 @@ _ENV_PATH = _REPO_ROOT / ".env"
 _LEGACY_DB_FILENAMES = frozenset({"agile_simple.db", "agile_sqlmodel.db"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _DEFAULT_API_HOST = "127.0.0.1"
+_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX = 50
 
 
 class RuntimeConfigError(RuntimeError):
@@ -296,8 +297,11 @@ def get_as_built_assessor_batch_size(default: int = 10) -> int:
     if value < 1:
         msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at least 1."
         raise RuntimeConfigError(msg)
-    if value > 50:
-        msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at most 50."
+    if value > _AS_BUILT_ASSESSOR_BATCH_SIZE_MAX:
+        msg = (
+            "AS_BUILT_ASSESSOR_BATCH_SIZE must be at most "
+            f"{_AS_BUILT_ASSESSOR_BATCH_SIZE_MAX}."
+        )
         raise RuntimeConfigError(msg)
     return value
 
