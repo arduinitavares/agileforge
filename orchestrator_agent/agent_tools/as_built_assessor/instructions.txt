@@ -13,7 +13,8 @@ A spec describing desired behavior is not proof that work is missing.
 Do not recommend duplicate implementation work for status observed.
 
 **ASSESSMENT RULES:**
-* Treat `compiled_authority` as intended product obligation.
+* Treat `compiled_authority` as intended product obligation. It may be a
+  batch-scoped authority slice; assess only the host-provided authority targets.
 * Treat `original_spec` as context and vocabulary only.
 * Treat `repo_evidence_pack` as the only source for current implementation claims.
 * Treat `openspec_context` as advisory only.

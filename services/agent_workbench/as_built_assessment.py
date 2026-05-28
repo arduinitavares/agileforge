@@ -781,7 +781,10 @@ def _assessor_input_for_pack(  # noqa: PLR0913
     return AsBuiltAssessorInput(
         project_id=project_id,
         assessment_id=assessment_id,
-        compiled_authority=canonical_json(compiled),
+        compiled_authority=_compiled_authority_for_pack(
+            compiled=compiled,
+            pack=pack,
+        ),
         original_spec=_original_spec_context(
             spec_file=spec_file,
             spec_mode=spec_mode,
@@ -795,6 +798,111 @@ def _assessor_input_for_pack(  # noqa: PLR0913
         prior_as_built_assessment="NO_HISTORY",
         user_input=user_input or "",
     )
+
+
+def _compiled_authority_for_pack(
+    *,
+    compiled: dict[str, Any],
+    pack: EvidencePack,
+) -> str:
+    """Return a compact authority slice for one assessor evidence pack."""
+    target_refs = {target.authority_ref for target in pack.authority_targets}
+    target_refs.update(
+        target.source_requirement_id
+        for target in pack.authority_targets
+        if target.source_requirement_id
+    )
+    invariant_refs = {
+        invariant_ref
+        for target in pack.authority_targets
+        for invariant_ref in target.invariant_refs
+    }
+    target_refs.update(invariant_refs)
+    authority_slice: dict[str, Any] = {
+        "schema_version": "agileforge.as_built_compiled_authority_slice.v1",
+        "authority_fingerprint": pack.authority_fingerprint,
+        "authority_target_count": len(pack.authority_targets),
+        "authority_targets": [
+            target.model_dump(mode="json") for target in pack.authority_targets
+        ],
+        "invariants": _matching_invariants(
+            compiled=compiled,
+            target_refs=target_refs,
+            invariant_refs=invariant_refs,
+        ),
+        "source_map": _matching_source_map(
+            compiled=compiled,
+            target_refs=target_refs,
+        ),
+    }
+    items = _matching_items(compiled=compiled, target_refs=target_refs)
+    if items:
+        authority_slice["items"] = items
+    compiler_version = _str_or_none(compiled.get("compiler_version"))
+    if compiler_version is not None:
+        authority_slice["compiler_version"] = compiler_version
+    return canonical_json(authority_slice)
+
+
+def _matching_invariants(
+    *,
+    compiled: dict[str, Any],
+    target_refs: set[str],
+    invariant_refs: set[str],
+) -> list[dict[str, Any]]:
+    invariants = compiled.get("invariants")
+    if not isinstance(invariants, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for invariant in invariants:
+        if not isinstance(invariant, dict):
+            continue
+        invariant_id = _str_or_none(invariant.get("id"))
+        parameters = _dict_or_empty(invariant.get("parameters"))
+        source_id = _str_or_none(parameters.get("source_item_id"))
+        if (
+            invariant_id in invariant_refs
+            or invariant_id in target_refs
+            or source_id in target_refs
+        ):
+            result.append(dict(invariant))
+    return result
+
+
+def _matching_source_map(
+    *,
+    compiled: dict[str, Any],
+    target_refs: set[str],
+) -> list[dict[str, Any]]:
+    source_map = compiled.get("source_map")
+    if not isinstance(source_map, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for entry in source_map:
+        if not isinstance(entry, dict):
+            continue
+        source_id = _str_or_none(entry.get("source_item_id"))
+        if source_id in target_refs:
+            result.append(dict(entry))
+    return result
+
+
+def _matching_items(
+    *,
+    compiled: dict[str, Any],
+    target_refs: set[str],
+) -> list[dict[str, Any]]:
+    items = compiled.get("items")
+    if not isinstance(items, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = _str_or_none(item.get("id"))
+        if item_id in target_refs:
+            result.append(dict(item))
+    return result
 
 
 def _spec_file_fingerprint(spec_file: str | None) -> str | None:

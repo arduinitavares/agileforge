@@ -996,6 +996,14 @@ def test_runner_invokes_assessor_in_batches_and_merges_cache(
 
     assert result["ok"] is True
     assert len(invoker.payloads) == EXPECTED_CARTOLA_TARGET_COUNT
+    first_compiled = json.loads(invoker.payloads[0].compiled_authority)
+    second_compiled = json.loads(invoker.payloads[1].compiled_authority)
+    assert [item["id"] for item in first_compiled["invariants"]] == [
+        "INV-a4b296c058e88663"
+    ]
+    assert [item["id"] for item in second_compiled["invariants"]] == [
+        "INV-ffe2e17832c41874"
+    ]
     assert result["data"]["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
     assert result["data"]["batch_size"] == 1
     assert result["data"]["authority_target_count"] == EXPECTED_CARTOLA_TARGET_COUNT
