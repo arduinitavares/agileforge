@@ -232,6 +232,20 @@ class _RecordingBatchInvoker:
         return _fake_assessment(payload)
 
 
+class _SecondBatchTimeoutInvoker:
+    """Fake invoker that fails on the second batch."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        self.call_count += 1
+        if self.call_count == 2:
+            msg = "As-Built assessor timed out after 120 seconds."
+            raise RuntimeError(msg)
+        return _fake_assessment(payload)
+
+
 def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
     return _fake_assessment(payload).model_copy(
@@ -1034,6 +1048,48 @@ def test_runner_timeout_failure_does_not_cache_or_record_event(tmp_path: Path) -
     )
     assert details["failed_batch_index"] == 1
     assert details["completed_batches"] == 0
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_runner_batch_failure_does_not_cache_or_record_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any batch failure should fail the whole command without partial cache."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    invoker = _SecondBatchTimeoutInvoker()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=invoker,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="batch-failure",
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert details["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
+    assert details["batch_size"] == 1
+    assert details["failed_batch_index"] == 2
+    assert details["completed_batches"] == 1
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
