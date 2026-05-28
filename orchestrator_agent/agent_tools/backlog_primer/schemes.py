@@ -89,6 +89,16 @@ class InputSchema(BaseModel):
             ),
         ),
     ]
+    as_built_assessment: Annotated[
+        str,
+        Field(
+            description=(
+                "Raw agileforge.as_built_assessment.v1 JSON from "
+                "as_built_assessment_cached or 'NO_AS_BUILT_ASSESSMENT' when no "
+                "fresh assessment cache is available."
+            ),
+        ),
+    ]
     implementation_evidence: Annotated[
         str,
         Field(

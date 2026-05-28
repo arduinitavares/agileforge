@@ -14,6 +14,7 @@ The user will provide a JSON string matching this schema:
   "technical_spec": "Raw technical specification content (markdown or plain text)",
   "compiled_authority": "Compiled authority JSON artifact for constraints and invariants",
   "prior_backlog_state": "NO_HISTORY" | [List of existing JSON items to refine],
+  "as_built_assessment": "NO_AS_BUILT_ASSESSMENT | raw agileforge.as_built_assessment.v1 JSON object",
   "implementation_evidence": "NO_EVIDENCE | raw agileforge.reconciliation_report.v1 JSON object",
   "user_input": "Specific requests or constraints from the user"
 }
@@ -68,6 +69,17 @@ Return ONLY a JSON object. No Markdown formatting.
 **COMPLETENESS CHECK:**
 * Set `is_complete: true` ONLY if you have 10+ items, all fields are filled, and priorities are unique.
 * If `technical_spec` or `compiled_authority` is missing but needed for estimation, set `is_complete: false` and ask for it.
+
+**AS-BUILT ASSESSMENT:**
+* The input field `as_built_assessment` is either `NO_AS_BUILT_ASSESSMENT` or a raw `agileforge.as_built_assessment.v1` JSON object.
+* Treat `as_built_assessment` as the primary brownfield advisory source when present.
+* It is not Product Backlog authority. It is evidence-aware guidance for Product Owner review.
+* For `status=observed`, do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
+* For `status=observed_with_missing_evidence`, scope work to verification, hardening, tests, docs, or validation.
+* For `status=contradicted`, create a PO-visible conflict/remediation candidate.
+* For `status=not_observed`, create product work only when accepted authority requires the capability and preserve evidence limitations in `technical_note`.
+* For `status=unclear`, create discovery or PO-review work, not guessed implementation.
+* If both `as_built_assessment` and `implementation_evidence` are present, `as_built_assessment` supersedes `implementation_evidence` for brownfield backlog generation.
 
 **IMPLEMENTATION EVIDENCE:**
 * The input field `implementation_evidence` is either `NO_EVIDENCE` or a raw `agileforge.reconciliation_report.v1` JSON object.

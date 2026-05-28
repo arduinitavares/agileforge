@@ -13,6 +13,7 @@ from models.core import Product, UserStory
 from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
+from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.backlog_runtime import build_backlog_input_context
 
 if TYPE_CHECKING:
@@ -66,6 +67,75 @@ class _FakeWorkflowService:
         self.state.update(partial_update)
 
 
+def _as_built_assessment_payload(
+    *,
+    evidence_pack_fingerprint: str = "sha256:pack",
+    builder_version: str = "agileforge.as_built_pack_builder.v1",
+) -> dict[str, Any]:
+    """Return a schema-valid as-built assessment payload."""
+    return {
+        "schema_version": "agileforge.as_built_assessment.v1",
+        "project_id": 2,
+        "assessment_id": "as-built-2-pack",
+        "agent_version": "agileforge.as_built_assessor.v1",
+        "evidence_pack_builder_version": builder_version,
+        "authority_fingerprint": "sha256:authority",
+        "evidence_pack_fingerprint": evidence_pack_fingerprint,
+        "generated_at": "2026-05-28T12:00:00Z",
+        "assessment_summary": "Observed current behavior.",
+        "repo_snapshot": {
+            "path": "/repo",
+            "git_commit": "abc123",
+            "dirty": False,
+        },
+        "capability_assessments": [
+            {
+                "authority_ref": "REQ.live-squad-recommendation",
+                "invariant_refs": ["INV-a4b296c058e88663"],
+                "capability_title": "Live squad recommendation",
+                "status": "observed",
+                "confidence": "medium",
+                "evidence": [],
+                "limitations": ["Tests were not executed."],
+                "recommended_backlog_treatment": "skip_new_implementation",
+                "reasoning": "Repo evidence supports the capability.",
+            }
+        ],
+        "cross_cutting_findings": [],
+        "open_questions": [],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+
+def _as_built_state(
+    assessment: dict[str, Any],
+    *,
+    meta_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return workflow state containing cached assessment and metadata."""
+    canonical = canonical_json(assessment)
+    meta = {
+        "schema_version": "agileforge.as_built_assessment.v1",
+        "agent_version": assessment["agent_version"],
+        "evidence_pack_builder_version": assessment[
+            "evidence_pack_builder_version"
+        ],
+        "authority_fingerprint": assessment["authority_fingerprint"],
+        "repo_git_commit": assessment["repo_snapshot"]["git_commit"],
+        "repo_dirty": assessment["repo_snapshot"]["dirty"],
+        "evidence_pack_fingerprint": assessment["evidence_pack_fingerprint"],
+        "assessment_fingerprint": canonical_hash(assessment),
+        "generated_at": assessment["generated_at"],
+    }
+    if meta_overrides:
+        meta.update(meta_overrides)
+    return {
+        "as_built_assessment_cached": canonical,
+        "as_built_assessment_cache_meta": meta,
+    }
+
+
 def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,6 +175,7 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
                 "technical_spec": state.get("pending_spec_content"),
                 "compiled_authority": state.get("compiled_authority_cached"),
                 "prior_backlog_state": "NO_HISTORY",
+                "as_built_assessment": "NO_AS_BUILT_ASSESSMENT",
                 "implementation_evidence": state.get("implementation_evidence_cached"),
                 "user_input": user_input or "",
             },
@@ -141,6 +212,9 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
     )
     assert result["data"]["input_context"]["technical_spec"] == "SPEC CONTENT"
     assert result["data"]["input_context"]["compiled_authority"] == "AUTHORITY JSON"
+    assert result["data"]["input_context"]["as_built_assessment"] == (
+        "NO_AS_BUILT_ASSESSMENT"
+    )
     assert result["data"]["input_context"]["implementation_evidence"] == (
         '{"schema_version":"agileforge.reconciliation_report.v1","findings":[]}'
     )
@@ -164,6 +238,7 @@ def test_build_backlog_input_context_uses_no_evidence_when_cache_missing() -> No
     )
 
     assert context["implementation_evidence"] == "NO_EVIDENCE"
+    assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
 
 
 def test_build_backlog_input_context_serializes_cached_evidence() -> None:
@@ -187,6 +262,69 @@ def test_build_backlog_input_context_serializes_cached_evidence() -> None:
     assert context["implementation_evidence"] == (
         '{"schema_version": "agileforge.reconciliation_report.v1", "findings": []}'
     )
+    assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
+
+
+def test_build_backlog_input_context_serializes_cached_as_built_assessment() -> None:
+    """Backlog input context should pass fresh as-built assessment through."""
+    assessment = _as_built_assessment_payload()
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            **_as_built_state(assessment),
+        },
+        user_input=None,
+    )
+
+    assert context["as_built_assessment"] == canonical_json(assessment)
+
+
+def test_build_backlog_input_context_rejects_stale_as_built_fingerprint() -> None:
+    """Evidence-pack fingerprint mismatch suppresses stale assessment cache."""
+    assessment = _as_built_assessment_payload()
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            **_as_built_state(
+                assessment,
+                meta_overrides={"evidence_pack_fingerprint": "sha256:changed"},
+            ),
+        },
+        user_input=None,
+    )
+
+    assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
+
+
+def test_build_backlog_input_context_rejects_stale_builder_version() -> None:
+    """Builder version mismatch suppresses stale assessment cache."""
+    assessment = _as_built_assessment_payload(
+        builder_version="agileforge.as_built_pack_builder.v0"
+    )
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            **_as_built_state(assessment),
+        },
+        user_input=None,
+    )
+
+    assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
 
 
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
@@ -221,6 +359,7 @@ def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
                 "technical_spec": "SPEC CONTENT",
                 "compiled_authority": "AUTHORITY JSON",
                 "prior_backlog_state": "NO_HISTORY",
+                "as_built_assessment": "NO_AS_BUILT_ASSESSMENT",
                 "user_input": "",
             },
             "output_artifact": {

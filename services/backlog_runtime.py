@@ -17,6 +17,7 @@ from orchestrator_agent.agent_tools.backlog_primer.schemes import (
     InputSchema,
     OutputSchema,
 )
+from services.agent_workbench.as_built_assessment import cached_assessment_for_backlog
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
@@ -99,6 +100,7 @@ def build_backlog_input_context(
         "prior_backlog_state": _normalize_prior_backlog_state(
             state.get("backlog_items")
         ),
+        "as_built_assessment": cached_assessment_for_backlog(state),
         "implementation_evidence": implementation_evidence or "NO_EVIDENCE",
         "user_input": user_input or "",
     }

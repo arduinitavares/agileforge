@@ -33,11 +33,13 @@ class TestBacklogPrimerSchemas:
             "technical_spec": "Spec: must support SSO and audit logging.",
             "compiled_authority": '{"scope_themes":["Auth"],"invariants":[]}',
             "prior_backlog_state": "NO_HISTORY",
+            "as_built_assessment": "NO_AS_BUILT_ASSESSMENT",
             "implementation_evidence": "NO_EVIDENCE",
             "user_input": "Focus on onboarding and analytics.",
         }
         parsed = InputSchema.model_validate_json(json.dumps(payload))
         assert parsed.product_vision_statement.startswith("For teams")
+        assert parsed.as_built_assessment == "NO_AS_BUILT_ASSESSMENT"
         assert parsed.implementation_evidence == "NO_EVIDENCE"
 
     def test_output_schema_valid_payload(self) -> None:
