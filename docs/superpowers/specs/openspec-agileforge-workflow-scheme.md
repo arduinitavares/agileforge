@@ -4,9 +4,9 @@ This scheme captures the current working model for spec-driven Scrum in
 AgileForge.
 
 AgileForge remains the Scrum workflow authority. It owns intake, Product
-Authority, evidence-aware reconciliation, Product Backlog, Product Owner
-ordering, Sprint Planning, Sprint task tickets, evidence, story close, and
-sprint close.
+Authority, as-built assessment, evidence-aware reconciliation, Product Backlog,
+Product Owner ordering, Sprint Planning, Sprint task tickets, evidence, story
+close, and sprint close.
 
 Superpowers is the preferred implementation methodology after AgileForge issues
 a work ticket.
@@ -28,11 +28,12 @@ flowchart TD
 
     C --> I{"Project mode?"}
     I -->|"Greenfield"| J["Generate backlog from Product Authority"]
-    I -->|"Brownfield"| K["agileforge evidence collect"]
-    K --> L["ReconciliationReport in workflow state"]
-    L --> M["Evidence-aware backlog generation"]
+    I -->|"Brownfield"| K["Build bounded evidence pack"]
+    K --> L["As-Built Assessment Agent"]
+    L --> M["AsBuiltAssessment in workflow state"]
+    M --> Z["Assessment-aware backlog generation"]
     J --> N["Backlog candidates"]
-    M --> N
+    Z --> N
     G --> N
     H --> N
 
@@ -47,17 +48,19 @@ flowchart TD
     U --> V{"Story or Sprint done?"}
     V -->|"No"| Q
     V -->|"Yes"| W["Story close / Sprint close in AgileForge"]
-    W --> X["Future evidence baseline updated by next evidence collect"]
+    W --> X["Future evidence baseline updated by next As-Built Assessment"]
     W --> Y["If behavior contract changed, update technical spec deliberately"]
 ```
 
 ## Working Rules
 
 - Product authority defines what should be true.
+- The original technical spec provides context and must declare whether it is
+  `current_state`, `desired_state`, or `proposed_change`.
 - Repo evidence describes what can be observed in the implementation.
 - AgileForge must not create a brownfield work backlog from Product Authority
-  alone. It should collect evidence first and feed the resulting
-  `ReconciliationReport` to backlog generation.
+  alone. It should build a bounded evidence pack, run the As-Built Assessment
+  Agent, and feed the resulting `AsBuiltAssessment` to backlog generation.
 - Greenfield projects do not require evidence collection before the first
   backlog.
 - User requests enter AgileForge intake first, not OpenSpec.
@@ -66,6 +69,9 @@ flowchart TD
 - OpenSpec `tasks.md` is not the canonical execution tracker.
 - `/opsx:apply` and `/opsx:archive` are not AgileForge workflow gates.
 - AgileForge Sprint task tickets are the canonical work tickets.
+- The deterministic `ReconciliationReport` / `implementation_evidence_cached`
+  collector is compatibility evidence only. Brownfield backlog generation should
+  prefer `as_built_assessment_cached` when present and fresh.
 - Superpowers is the preferred execution workflow after a task ticket exists.
 - Delivery evidence returns to AgileForge through task updates, story close, and
   sprint close.
