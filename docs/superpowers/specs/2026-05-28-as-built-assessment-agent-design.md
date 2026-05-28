@@ -110,11 +110,17 @@ existing tools such as `roadmap_builder`.
 
 ## Input Schema
 
-Draft shape:
+Phase 1 implementation must define exact Pydantic models with
+`model_config = ConfigDict(extra="forbid")` for agent output and for host-side
+cache envelopes. Input models may use `extra="ignore"` only where existing agent
+runtime context can add unrelated keys.
+
+Draft agent input shape:
 
 ```json
 {
   "project_id": 2,
+  "assessment_id": "as-built-...",
   "compiled_authority": "{...}",
   "original_spec": {
     "spec_mode": "current_state | desired_state | proposed_change | unknown",
@@ -122,10 +128,17 @@ Draft shape:
     "markdown": "..."
   },
   "repo_evidence_pack": {
+    "schema_version": "agileforge.as_built_evidence_pack.v1",
+    "builder_version": "agileforge.as_built_pack_builder.v1",
+    "authority_fingerprint": "sha256:...",
+    "evidence_pack_fingerprint": "sha256:...",
+    "generated_at": "2026-05-28T12:00:00Z",
     "repo_path": "/path/to/repo",
     "git_commit": "abc123",
     "dirty": false,
+    "warnings": [],
     "file_manifest_summary": {},
+    "authority_targets": [],
     "source_snippets": [],
     "test_snippets": [],
     "doc_snippets": [],
@@ -142,9 +155,23 @@ Draft shape:
 }
 ```
 
-The exact Pydantic model can evolve during implementation, but Phase 1 must keep
-the input bounded and serializable. If the host does not have a source type, it
-passes an empty list or `"NO_HISTORY"` instead of letting the agent fetch it.
+The implementation plan may refine field names for consistency with local
+schema conventions, but it must preserve the required metadata, enum semantics,
+and bounded-input contract in this section. If the host does not have a source
+type, it passes an empty list or `"NO_HISTORY"` instead of letting the agent
+fetch it.
+
+### `spec_mode` Provenance
+
+`spec_mode` is required in the agent input. The host resolves it in this order:
+
+1. explicit workflow/spec metadata when available
+2. a user-provided mode override
+3. `"unknown"`
+
+When `spec_mode` is `"unknown"`, the agent must include a limitation explaining
+that current behavior, desired behavior, and proposed changes may be mixed. It
+must not infer backlog scope from the spec alone.
 
 ## Output Schema
 
@@ -154,6 +181,10 @@ Draft shape:
 {
   "schema_version": "agileforge.as_built_assessment.v1",
   "project_id": 2,
+  "assessment_id": "as-built-...",
+  "authority_fingerprint": "sha256:...",
+  "evidence_pack_fingerprint": "sha256:...",
+  "generated_at": "2026-05-28T12:00:00Z",
   "assessment_summary": "...",
   "repo_snapshot": {
     "path": "/path/to/repo",
@@ -186,6 +217,14 @@ Draft shape:
   "clarifying_questions": []
 }
 ```
+
+`is_complete` is `true` only when the agent has produced one assessment for
+every host-provided `authority_targets` entry, all enum fields are valid, and no
+required schema fields are empty. It may still be `true` when many statuses are
+`unclear`; completeness means the assessment pass finished, not that evidence is
+strong. If required input is missing, schema content is inconsistent, or target
+coverage is incomplete, `is_complete` must be `false` with clarifying questions
+or limitations.
 
 ### Assessment Statuses
 
@@ -235,8 +274,9 @@ The pack should include:
 
 - repo identity: path, git commit, dirty flag
 - source/test/doc/config file manifest summaries
-- snippets selected by authority terms, domain terms, and spec item IDs when
-  present
+- authority targets derived from accepted compiled authority
+- snippets selected by invariant IDs, invariant types, behavioral parameters,
+  source-map excerpts, structured profile item IDs, and normalized domain nouns
 - original spec content or summaries
 - compiled authority JSON
 - warnings about skipped files, oversized files, unreadable files, and dirty
@@ -245,13 +285,80 @@ The pack should include:
 The builder does not classify implementation state. It prepares evidence for the
 agent to assess.
 
+### Authority Target Extraction Contract
+
+The host evidence pack builder must not assume `compiled_authority.items[]`
+exists. Real AgileForge authority artifacts may be invariant/source-map shaped.
+Target extraction must inspect, in order:
+
+1. `compiled_authority.invariants[]`
+   - target id: invariant `id`, such as `INV-a4b296c058e88663`
+   - target type: invariant `type`, such as `DATA_CONTRACT`
+   - source requirement: `parameters.source_item_id` when present
+   - behavioral terms: stable strings from `parameters`
+2. `compiled_authority.source_map[]`
+   - source item ids, excerpts, and relationships that explain where invariants
+     came from
+3. structured profile items when available
+   - `REQ.*`, `QUALITY.*`, `CONSTRAINT.*`, `INTERFACE.*`, and `DATA.*`
+4. normalized domain nouns from accepted spec statements and invariant
+   parameters
+
+For caRtola-like artifacts with `invariants[]` and no useful `items[]`, the
+builder must still produce non-empty `authority_targets`. A Phase 1 acceptance
+test must cover this shape.
+
+### Evidence Pack Budgets
+
+Phase 1 must enforce concrete caps before calling the agent:
+
+- maximum authority targets: 150
+- maximum snippets per target: 5
+- maximum snippet size: 40 lines or 8 KiB, whichever is smaller
+- maximum full evidence pack JSON size: 750 KiB
+- maximum file manifest entries included verbatim: 300
+
+Skipped or truncated content must be represented as warnings in the evidence
+pack. Warnings must include path, reason, and count fields where applicable.
+
+### Cache Metadata And Invalidation
+
+The cached assessment must include enough metadata to detect stale reuse:
+
+- `schema_version`
+- `agent_version`
+- `evidence_pack_builder_version`
+- `authority_fingerprint`
+- `repo_git_commit`
+- `repo_dirty`
+- `evidence_pack_fingerprint`
+- `generated_at`
+
+The assessment is stale when the accepted authority fingerprint changes, the
+repo commit changes, the dirty flag changes, or the evidence-pack builder
+version changes. Stale assessments must not be silently passed into backlog
+generation.
+
 ## Backlog Integration
 
-Backlog generation should receive the cached assessment as advisory context:
+Backlog generation must receive the cached assessment as advisory context through
+a first-class Backlog Primer input field:
 
 ```text
-workflow_state["as_built_assessment_cached"]
+as_built_assessment
 ```
+
+`build_backlog_input_context` must serialize
+`workflow_state["as_built_assessment_cached"]` into
+`InputSchema.as_built_assessment`, or pass `"NO_AS_BUILT_ASSESSMENT"` when no
+fresh assessment is available. Tests must fail if the field is omitted.
+
+The existing `implementation_evidence` field and
+`implementation_evidence_cached` are retained only for compatibility with the
+Phase 1a deterministic collector. The new `as_built_assessment` field supersedes
+it for brownfield backlog generation. If both are present, backlog instructions
+must treat `as_built_assessment` as the richer advisory source and may treat
+`implementation_evidence` as a low-level supporting signal.
 
 Backlog generation must use the assessment conservatively:
 
@@ -260,9 +367,42 @@ Backlog generation must use the assessment conservatively:
 - `observed_with_missing_evidence` should become verification or hardening work,
   not new implementation.
 - `contradicted` should become a PO-visible conflict finding.
-- `not_observed` should be treated as possible product work, but with confidence
-  visible.
+- `not_observed` may produce `create_product_item` only when accepted authority
+  requires the capability and no stronger `unclear` or `contradicted` evidence
+  exists.
 - `unclear` should become discovery or PO review, not guessed implementation.
+
+### Backlog Adapter Contract
+
+The Backlog Primer input schema must add:
+
+```python
+as_built_assessment: str
+```
+
+The field contains raw canonical `agileforge.as_built_assessment.v1` JSON or the
+literal `"NO_AS_BUILT_ASSESSMENT"`.
+
+Required backlog instruction mapping:
+
+| Assessment status | Recommended treatment | Backlog behavior |
+| --- | --- | --- |
+| `observed` | `skip_new_implementation` | Do not create duplicate implementation work; mention only as context if needed. |
+| `observed_with_missing_evidence` | `create_verification_item` or `create_hardening_item` | Scope work to tests, validation, docs, or hardening. |
+| `contradicted` | `create_authority_conflict_item` | Create PO-visible conflict/remediation candidate. |
+| `not_observed` | `create_product_item` or `po_review_required` | Create product work only with confidence and evidence limitations visible. |
+| `unclear` | `create_discovery_item` or `po_review_required` | Create discovery/review item, not implementation by guess. |
+
+Required tests:
+
+- `build_backlog_input_context` passes cached `as_built_assessment_cached` into
+  `as_built_assessment`.
+- missing cache becomes `"NO_AS_BUILT_ASSESSMENT"`.
+- Backlog Primer schema accepts the new field.
+- Backlog instructions include mappings for `observed`, `contradicted`,
+  `not_observed`, and `unclear`.
+- A caRtola-shaped assessment with `observed` capability does not produce a
+  duplicate implementation backlog item in the brownfield smoke path.
 
 ## OpenSpec Role
 
