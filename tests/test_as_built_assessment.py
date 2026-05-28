@@ -1213,6 +1213,47 @@ def test_runner_rejects_reused_idempotency_key_with_changed_pack(
     assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_runner_rejects_reused_idempotency_key_with_changed_batch_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch size affects assessor execution and must guard idempotency replay."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 2)
+
+    assert runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="batch-size-key",
+    )["ok"] is True
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    second = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="batch-size-key",
+    )
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
 def test_runner_rejects_reused_idempotency_key_with_changed_user_input(
     tmp_path: Path,
 ) -> None:
