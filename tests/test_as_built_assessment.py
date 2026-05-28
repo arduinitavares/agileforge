@@ -33,6 +33,7 @@ from services.agent_workbench.as_built_assessment import (
     AS_BUILT_ASSESSMENT_META_STATE_KEY,
     AS_BUILT_ASSESSMENT_STATE_KEY,
     MAX_AUTHORITY_TARGETS,
+    MAX_FILE_MANIFEST_ENTRIES,
     MAX_SNIPPETS_PER_TARGET,
     AsBuiltAssessmentRunner,
     build_authority_targets,
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
 
 EXPECTED_CARTOLA_TARGET_COUNT = 2
 MIN_SKIPPED_RUNTIME_FILES = 3
+OMITTED_MANIFEST_FILES = 3
 OVERSIZED_FILE_BYTES = 501 * 1024
 
 CARTOLA_AUTHORITY = {
@@ -205,6 +207,13 @@ def _fake_assessment(input_payload: object) -> AsBuiltAssessment:
         open_questions=[],
         is_complete=True,
         clarifying_questions=[],
+    )
+
+
+def _mismatched_assessment(input_payload: object) -> AsBuiltAssessment:
+    """Return an assessment with stale host identity fields."""
+    return _fake_assessment(input_payload).model_copy(
+        update={"evidence_pack_fingerprint": "sha256:wrong-pack"}
     )
 
 
@@ -469,6 +478,59 @@ def test_build_evidence_pack_reports_skipped_runtime_directories(
     assert warning.details["counts"]["runtime_dir"] == 1
 
 
+def test_build_evidence_pack_reports_manifest_truncation(tmp_path: Path) -> None:
+    """File caps should be visible to the agent and manifest summary."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for index in range(MAX_FILE_MANIFEST_ENTRIES + OMITTED_MANIFEST_FILES):
+        (repo / f"file_{index:03d}.py").write_text(
+            "# INV-a4b296c058e88663\n",
+            encoding="utf-8",
+        )
+
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    warning_codes = {warning.code for warning in pack.warnings}
+    assert "AS_BUILT_FILE_MANIFEST_TRUNCATED" in warning_codes
+    assert pack.file_manifest_summary["included_files"] == MAX_FILE_MANIFEST_ENTRIES
+    assert (
+        pack.file_manifest_summary["skipped_counts"]["manifest_truncated"]
+        == OMITTED_MANIFEST_FILES
+    )
+    assert any("File manifest was truncated" in item for item in pack.limitations)
+
+
+def test_build_evidence_pack_skips_symlinked_files(tmp_path: Path) -> None:
+    """Evidence collection should stay inside regular repo files."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside_secret.py"
+    outside.write_text("# INV-a4b296c058e88663\n", encoding="utf-8")
+    (repo / "linked.py").symlink_to(outside)
+
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    assert pack.source_snippets == []
+    warning = next(
+        warning for warning in pack.warnings if warning.code == "AS_BUILT_SKIPPED_PATHS"
+    )
+    assert warning.details["counts"]["symlink"] == 1
+
+
 def test_build_evidence_pack_includes_spec_file_content_hash(
     tmp_path: Path,
 ) -> None:
@@ -569,6 +631,39 @@ def test_runner_stores_assessment_cache_and_event(tmp_path: Path) -> None:
     with Session(engine) as session:
         event = session.exec(select(WorkflowEvent)).one()
         assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
+
+
+def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
+    """Agent output must match host evidence identity before caching."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_mismatched_assessment,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="identity-mismatch",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert "evidence_pack_fingerprint" in result["errors"][0]["details"]["mismatches"]
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
 
 
 def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> None:

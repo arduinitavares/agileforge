@@ -156,7 +156,7 @@ class EvidencePack(_StrictModel):
 class AsBuiltAssessorInput(BaseModel):
     """Input for the As-Built Assessment agent."""
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     project_id: int
     assessment_id: Annotated[str, Field(min_length=1)]

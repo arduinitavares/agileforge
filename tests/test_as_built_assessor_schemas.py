@@ -154,6 +154,24 @@ def test_input_schema_accepts_unknown_spec_mode_and_no_history() -> None:
     )
 
 
+def test_input_schema_rejects_extra_fields() -> None:
+    """Unexpected input fields should fail before agent invocation."""
+    with pytest.raises(ValidationError):
+        AsBuiltAssessorInput(
+            project_id=2,
+            assessment_id="as-built-2-abc",
+            compiled_authority='{"invariants":[]}',
+            original_spec=OriginalSpecContext(
+                spec_mode="unknown",
+                json="{}",
+                markdown="",
+            ),
+            repo_evidence_pack=_evidence_pack([]),
+            openspec_context=OpenSpecContext(),
+            unexpected="blocked",
+        )
+
+
 def test_empty_authority_targets_requires_explicit_limitation() -> None:
     """Make empty target packs inspectable rather than silently complete."""
     pack = _evidence_pack([])

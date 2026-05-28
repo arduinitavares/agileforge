@@ -248,7 +248,7 @@ class AsBuiltAssessmentRunner:
         self._workflow_service = workflow_service
         self._invoke_agent = invoke_agent or _default_invoke_agent
 
-    def assess(  # noqa: PLR0913
+    def assess(  # noqa: PLR0911, PLR0913
         self,
         *,
         project_id: int,
@@ -341,6 +341,17 @@ class AsBuiltAssessmentRunner:
                     "As-built assessment agent failed.",
                     {"project_id": project_id, "detail": str(exc)},
                 ),
+            )
+        assessment_identity_error = _validate_assessment_identity(
+            assessment=assessment,
+            pack=pack,
+            project_id=project_id,
+            assessment_id=input_payload.assessment_id,
+        )
+        if assessment_identity_error is not None:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=assessment_identity_error,
             )
 
         fingerprint = assessment_fingerprint(assessment)
@@ -610,6 +621,51 @@ def _workbench_warnings(warnings: list[EvidenceWarning]) -> list[WorkbenchWarnin
     ]
 
 
+def _validate_assessment_identity(
+    *,
+    assessment: AsBuiltAssessment,
+    pack: EvidencePack,
+    project_id: int,
+    assessment_id: str,
+) -> WorkbenchError | None:
+    expected: dict[str, object] = {
+        "project_id": project_id,
+        "assessment_id": assessment_id,
+        "agent_version": AGENT_VERSION,
+        "evidence_pack_builder_version": EVIDENCE_PACK_BUILDER_VERSION,
+        "authority_fingerprint": pack.authority_fingerprint,
+        "evidence_pack_fingerprint": pack.evidence_pack_fingerprint,
+        "repo_snapshot.path": pack.repo_snapshot.path,
+        "repo_snapshot.git_commit": pack.repo_snapshot.git_commit,
+        "repo_snapshot.dirty": pack.repo_snapshot.dirty,
+    }
+    actual: dict[str, object] = {
+        "project_id": assessment.project_id,
+        "assessment_id": assessment.assessment_id,
+        "agent_version": assessment.agent_version,
+        "evidence_pack_builder_version": assessment.evidence_pack_builder_version,
+        "authority_fingerprint": assessment.authority_fingerprint,
+        "evidence_pack_fingerprint": assessment.evidence_pack_fingerprint,
+        "repo_snapshot.path": assessment.repo_snapshot.path,
+        "repo_snapshot.git_commit": assessment.repo_snapshot.git_commit,
+        "repo_snapshot.dirty": assessment.repo_snapshot.dirty,
+    }
+    mismatches = [
+        field
+        for field, expected_value in expected.items()
+        if actual[field] != expected_value
+    ]
+    if not mismatches:
+        return None
+    return _mutation_failed(
+        "As-built assessment identity does not match the host evidence pack.",
+        {
+            "project_id": project_id,
+            "mismatches": mismatches,
+        },
+    )
+
+
 def _invalid_command(message: str, details: dict[str, Any]) -> WorkbenchError:
     return workbench_error(
         ErrorCode.INVALID_COMMAND,
@@ -751,6 +807,22 @@ def build_evidence_pack(  # noqa: PLR0913
                 message="Some repository paths were skipped during bounded scanning.",
                 details={"counts": skipped_counts},
             )
+        )
+    truncated_count = skipped_counts.get("manifest_truncated", 0)
+    if truncated_count:
+        warnings.append(
+            EvidenceWarning(
+                code="AS_BUILT_FILE_MANIFEST_TRUNCATED",
+                message="Repository file manifest exceeded the Phase 1 cap.",
+                details={
+                    "omitted_file_count": truncated_count,
+                    "max_file_manifest_entries": MAX_FILE_MANIFEST_ENTRIES,
+                },
+            )
+        )
+        limitations.append(
+            "File manifest was truncated by the Phase 1 scan cap; omitted files "
+            "were not searched."
         )
 
     summary = _manifest_summary(
@@ -1011,10 +1083,17 @@ def _scannable_files(
                 continue
             files.append((file_path, relative_path, _file_kind(relative_path)))
     files.sort(key=lambda entry: entry[1].as_posix())
+    if len(files) > MAX_FILE_MANIFEST_ENTRIES:
+        skipped["manifest_truncated"] = len(files) - MAX_FILE_MANIFEST_ENTRIES
     return files[:MAX_FILE_MANIFEST_ENTRIES], skipped
 
 
-def _skip_file_reason(file_path: Path, relative_path: Path) -> str | None:
+def _skip_file_reason(  # noqa: PLR0911
+    file_path: Path,
+    relative_path: Path,
+) -> str | None:
+    if file_path.is_symlink():
+        return "symlink"
     if not file_path.is_file():
         return "non_regular"
     if file_path.name in _SKIP_FILE_NAMES:
