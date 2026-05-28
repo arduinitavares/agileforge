@@ -29,6 +29,7 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     AsBuiltAssessorInput,
     AuthorityTarget,
     CapabilityAssessment,
+    CapabilityEvidence,
     EvidenceKind,
     EvidencePack,
     EvidenceSnippet,
@@ -279,6 +280,7 @@ class AsBuiltAssessmentRunner:
         self._engine = engine
         self._product_repo = product_repo
         self._workflow_service = workflow_service
+        self._use_deterministic_assessment = invoke_agent is None
         self._invoke_agent = invoke_agent or _default_invoke_agent
 
     def assess(  # noqa: PLR0911, PLR0913
@@ -365,37 +367,44 @@ class AsBuiltAssessmentRunner:
             batch_size=batch_size,
         )
         assessment_id = _assessment_id(project_id, pack.evidence_pack_fingerprint)
-        try:
-            assessment = self._invoke_agent_batches(
+        if self._use_deterministic_assessment:
+            assessment = _deterministic_assessment_for_pack(
                 project_id=project_id,
                 assessment_id=assessment_id,
-                compiled=compiled,
-                spec_file=Path(spec_file) if spec_file else None,
-                spec_mode=_normalize_spec_mode(spec_mode),
-                full_pack=pack,
-                batch_packs=batch_packs,
-                batch_size=batch_size,
-                user_input=user_input,
+                pack=pack,
             )
-        except _AssessmentIdentityError as exc:
-            return error_envelope(
-                command=AS_BUILT_ASSESS_COMMAND,
-                error=exc.error,
-            )
-        except (RuntimeError, ValidationError, ValueError) as exc:
-            return error_envelope(
-                command=AS_BUILT_ASSESS_COMMAND,
-                error=_mutation_failed(
-                    "As-built assessment agent failed.",
-                    _batch_failure_details(
-                        project_id=project_id,
-                        detail=str(exc),
-                        full_pack=pack,
-                        batch_count=len(batch_packs),
-                        batch_size=batch_size,
+        else:
+            try:
+                assessment = self._invoke_agent_batches(
+                    project_id=project_id,
+                    assessment_id=assessment_id,
+                    compiled=compiled,
+                    spec_file=Path(spec_file) if spec_file else None,
+                    spec_mode=_normalize_spec_mode(spec_mode),
+                    full_pack=pack,
+                    batch_packs=batch_packs,
+                    batch_size=batch_size,
+                    user_input=user_input,
+                )
+            except _AssessmentIdentityError as exc:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=exc.error,
+                )
+            except (RuntimeError, ValidationError, ValueError) as exc:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_mutation_failed(
+                        "As-built assessment agent failed.",
+                        _batch_failure_details(
+                            project_id=project_id,
+                            detail=str(exc),
+                            full_pack=pack,
+                            batch_count=len(batch_packs),
+                            batch_size=batch_size,
+                        ),
                     ),
-                ),
-            )
+                )
         assessment_identity_error = _validate_assessment_identity(
             assessment=assessment,
             pack=pack,
@@ -692,6 +701,150 @@ class AsBuiltAssessmentRunner:
             full_pack=full_pack,
             batch_assessments=batch_assessments,
         )
+
+
+def _deterministic_assessment_for_pack(
+    *,
+    project_id: int,
+    assessment_id: str,
+    pack: EvidencePack,
+) -> AsBuiltAssessment:
+    """Build a conservative host-side assessment without model inference."""
+    observations = {item.query: item for item in pack.search_observations}
+    capabilities = [
+        _deterministic_capability_for_target(
+            target=target,
+            pack=pack,
+            observation=observations.get(target.authority_ref),
+        )
+        for target in pack.authority_targets
+    ]
+    return AsBuiltAssessment(
+        schema_version=ASSESSMENT_SCHEMA_VERSION,
+        project_id=project_id,
+        assessment_id=assessment_id,
+        agent_version=AGENT_VERSION,
+        evidence_pack_builder_version=EVIDENCE_PACK_BUILDER_VERSION,
+        authority_fingerprint=pack.authority_fingerprint,
+        evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
+        generated_at=utc_now_iso(),
+        assessment_summary=(
+            "Deterministic Phase 1 As-Built assessment completed without "
+            "model-based semantic inference."
+        ),
+        repo_snapshot=pack.repo_snapshot,
+        capability_assessments=capabilities,
+        cross_cutting_findings=[
+            (
+                "Deterministic Phase 1 assessment used bounded host evidence only; "
+                "tests and CLI validation were not executed."
+            )
+        ],
+        open_questions=[],
+        is_complete=True,
+        clarifying_questions=[],
+    )
+
+
+def _deterministic_capability_for_target(
+    *,
+    target: AuthorityTarget,
+    pack: EvidencePack,
+    observation: SearchObservation | None,
+) -> CapabilityAssessment:
+    matched_paths = set(observation.paths) if observation is not None else set()
+    snippets = [
+        snippet
+        for snippet in [
+            *pack.source_snippets,
+            *pack.test_snippets,
+            *pack.doc_snippets,
+        ]
+        if snippet.path in matched_paths
+    ]
+    has_source = any(snippet.kind == "source" for snippet in snippets)
+    has_test = any(snippet.kind == "test" for snippet in snippets)
+    has_doc = any(snippet.kind == "doc" for snippet in snippets)
+    evidence = _deterministic_evidence(
+        target=target,
+        snippets=snippets,
+        observation=observation,
+    )
+    if has_source and has_test:
+        status = "observed"
+        confidence = "medium"
+        treatment = "skip_new_implementation"
+        reasoning = "Bounded source and test evidence matched this authority target."
+    elif has_source or has_test:
+        status = "observed_with_missing_evidence"
+        confidence = "medium"
+        treatment = "create_verification_item"
+        reasoning = (
+            "Bounded repo evidence matched this authority target, but complete "
+            "validation evidence was not observed."
+        )
+    elif has_doc:
+        status = "unclear"
+        confidence = "low"
+        treatment = "po_review_required"
+        reasoning = (
+            "Only documentation evidence matched this authority target; current "
+            "implementation state remains unclear."
+        )
+    else:
+        status = "not_observed"
+        confidence = "low"
+        treatment = "create_discovery_item"
+        reasoning = (
+            "No bounded source, test, or documentation evidence matched this "
+            "authority target. Absence of evidence is not proof of absence."
+        )
+    return CapabilityAssessment(
+        authority_ref=target.authority_ref,
+        invariant_refs=target.invariant_refs,
+        capability_title=target.title,
+        status=status,
+        confidence=confidence,
+        evidence=evidence,
+        limitations=[
+            (
+                "Deterministic Phase 1 assessment did not execute tests, CLI "
+                "commands, or semantic code analysis."
+            )
+        ],
+        recommended_backlog_treatment=treatment,
+        reasoning=reasoning,
+    )
+
+
+def _deterministic_evidence(
+    *,
+    target: AuthorityTarget,
+    snippets: list[EvidenceSnippet],
+    observation: SearchObservation | None,
+) -> list[CapabilityEvidence]:
+    evidence = [
+        CapabilityEvidence(
+            kind=snippet.kind,
+            path=snippet.path,
+            summary=snippet.summary or "Matched bounded repository evidence.",
+            supports=target.authority_ref,
+        )
+        for snippet in snippets[:3]
+    ]
+    if evidence or observation is None or observation.match_count == 0:
+        return evidence
+    return [
+        CapabilityEvidence(
+            kind="search",
+            path=None,
+            summary=(
+                f"Search observation matched {observation.match_count} path(s), "
+                "but snippets were unavailable after host-side caps."
+            ),
+            supports=target.authority_ref,
+        )
+    ]
 
 
 def _default_invoke_agent(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:

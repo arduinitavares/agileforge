@@ -961,6 +961,49 @@ def test_runner_stores_assessment_cache_and_event(tmp_path: Path) -> None:
         assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
 
 
+def test_runner_default_invocation_uses_deterministic_assessment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI default path should produce an artifact without model invocation."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+
+    def forbidden_agent(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        _ = payload
+        msg = "default agent should not be invoked"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(as_built_module, "_default_invoke_agent", forbidden_agent)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="deterministic-default",
+    )
+
+    assert result["ok"] is True
+    assessment = result["data"]["assessment"]
+    assert "Deterministic" in assessment["assessment_summary"]
+    assert len(assessment["capability_assessments"]) == EXPECTED_CARTOLA_TARGET_COUNT
+    assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
+    with Session(engine) as session:
+        event = session.exec(select(WorkflowEvent)).one()
+        assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
+
+
 def test_runner_invokes_assessor_in_batches_and_merges_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
