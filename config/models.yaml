@@ -23,6 +23,7 @@ models:
   roadmap_builder: "openrouter/deepseek/deepseek-v4-pro"
   user_story_writer: "openrouter/deepseek/deepseek-v4-pro"
   sprint_planner: "openrouter/deepseek/deepseek-v4-pro"
+  as_built_assessor: "openrouter/deepseek/deepseek-v4-pro"
 
 story_pipeline:
   mode: "single"
