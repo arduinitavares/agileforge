@@ -47,15 +47,21 @@ from services.agent_workbench.as_built_assessment import (
     split_evidence_pack_for_assessment,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from utils.failure_artifacts import AgentInvocationError
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EXPECTED_CARTOLA_TARGET_COUNT = 2
 FAILING_BATCH_INDEX = 2
+EXPECTED_TRANSIENT_RETRY_CALLS = 2
 MIN_SKIPPED_RUNTIME_FILES = 3
 OMITTED_MANIFEST_FILES = 3
 OVERSIZED_FILE_BYTES = 501 * 1024
+TRANSIENT_PROVIDER_JSON_ERROR = (
+    "litellm.APIError: OpenrouterException - "
+    "Unable to get json response - Expecting value"
+)
 
 CARTOLA_AUTHORITY: dict[str, Any] = {
     "invariants": [
@@ -1373,6 +1379,58 @@ async def test_default_invoker_times_out_with_clear_error(
                 agent=object(),
                 payload=_input_payload_for_pack(pack),
             )
+
+
+@pytest.mark.anyio
+async def test_default_invoker_retries_transient_provider_json_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Transient OpenRouter/LiteLLM JSON transport errors should retry once."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    payload = _input_payload_for_pack(pack)
+    valid = _fake_assessment(payload).model_dump_json()
+    calls = 0
+
+    async def flaky_provider(**_kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = TRANSIENT_PROVIDER_JSON_ERROR
+            raise AgentInvocationError(msg)
+        return valid
+
+    monkeypatch.setattr(as_built_module, "invoke_agent_to_text", flaky_provider)
+
+    assessment = await as_built_module._invoke_agent_payload_async(
+        agent=object(),
+        payload=payload,
+    )
+
+    assert calls == EXPECTED_TRANSIENT_RETRY_CALLS
+    assert assessment.assessment_id == payload.assessment_id
+    stderr_events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
+    retry_events = [
+        event
+        for event in stderr_events
+        if event["event"] == "as_built.model_call_retrying"
+    ]
+    assert retry_events[0]["attempt_index"] == 1
+    assert retry_events[0]["next_attempt_index"] == EXPECTED_TRANSIENT_RETRY_CALLS
 
 
 def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> None:

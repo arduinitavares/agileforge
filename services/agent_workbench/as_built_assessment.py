@@ -56,6 +56,7 @@ from utils.adk_runner import (
     invoke_agent_to_text,
     parse_json_payload,
 )
+from utils.failure_artifacts import AgentInvocationError
 from utils.runtime_config import (
     AS_BUILT_RUNNER_IDENTITY,
     RuntimeConfigError,
@@ -76,6 +77,7 @@ MAX_SNIPPET_LINES: int = 40
 MAX_SNIPPET_BYTES: int = 8 * 1024
 MAX_PACK_BYTES: int = 750 * 1024
 MAX_FILE_MANIFEST_ENTRIES: int = 300
+MAX_TRANSIENT_MODEL_ATTEMPTS: int = 3
 GIT_BINARY: str = shutil.which("git") or "git"
 
 _SKIP_DIR_NAMES: frozenset[str] = frozenset(
@@ -115,6 +117,21 @@ def _progress_timeout_seconds() -> float | None:
         return get_as_built_assessor_timeout_seconds()
     except (RuntimeConfigError, ValueError):
         return None
+
+
+def _is_transient_model_error(exc: BaseException) -> bool:
+    """Return whether a model exception is worth retrying within one batch."""
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in (
+            "OpenrouterException",
+            "Unable to get json response",
+            "RateLimitError",
+            "429",
+            "5xx",
+        )
+    )
 _SKIP_FILE_NAMES: frozenset[str] = frozenset(
     {"uv.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
 )
@@ -826,32 +843,67 @@ async def _invoke_agent_payload_async(
     timeout_seconds = get_as_built_assessor_timeout_seconds()
     model_call_started = time.monotonic()
     payload_json = payload.model_dump_json(by_alias=True)
-    _emit_progress(
-        "as_built.model_call_started",
-        project_id=payload.project_id,
-        assessment_id=payload.assessment_id,
-        model=get_agent_model_info(agent),
-        payload_chars=len(payload_json),
-        timeout_seconds=timeout_seconds,
-    )
-    try:
-        with anyio.fail_after(timeout_seconds):
-            raw_text = await invoke_agent_to_text(
-                agent=agent,
-                runner_identity=AS_BUILT_RUNNER_IDENTITY,
-                payload_json=payload_json,
-                no_text_error="As-Built assessor returned no text response",
-            )
-    except TimeoutError as exc:
+    raw_text: str | None = None
+    for attempt_index in range(1, MAX_TRANSIENT_MODEL_ATTEMPTS + 1):
         _emit_progress(
-            "as_built.model_call_failed",
+            "as_built.model_call_started",
             project_id=payload.project_id,
             assessment_id=payload.assessment_id,
-            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-            error=f"As-Built assessor timed out after {timeout_seconds:g} seconds.",
+            model=get_agent_model_info(agent),
+            payload_chars=len(payload_json),
+            timeout_seconds=timeout_seconds,
+            attempt_index=attempt_index,
+            max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
         )
-        msg = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
-        raise RuntimeError(msg) from exc
+        try:
+            with anyio.fail_after(timeout_seconds):
+                raw_text = await invoke_agent_to_text(
+                    agent=agent,
+                    runner_identity=AS_BUILT_RUNNER_IDENTITY,
+                    payload_json=payload_json,
+                    no_text_error="As-Built assessor returned no text response",
+                )
+            break
+        except TimeoutError as exc:
+            _emit_progress(
+                "as_built.model_call_failed",
+                project_id=payload.project_id,
+                assessment_id=payload.assessment_id,
+                elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+                error=f"As-Built assessor timed out after {timeout_seconds:g} seconds.",
+                attempt_index=attempt_index,
+                max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
+            )
+            msg = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
+            raise RuntimeError(msg) from exc
+        except AgentInvocationError as exc:
+            if (
+                attempt_index >= MAX_TRANSIENT_MODEL_ATTEMPTS
+                or not _is_transient_model_error(exc)
+            ):
+                _emit_progress(
+                    "as_built.model_call_failed",
+                    project_id=payload.project_id,
+                    assessment_id=payload.assessment_id,
+                    elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+                    error=str(exc),
+                    attempt_index=attempt_index,
+                    max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
+                )
+                raise
+            _emit_progress(
+                "as_built.model_call_retrying",
+                project_id=payload.project_id,
+                assessment_id=payload.assessment_id,
+                elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+                error=str(exc),
+                attempt_index=attempt_index,
+                next_attempt_index=attempt_index + 1,
+                max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
+            )
+    if raw_text is None:
+        msg = "As-Built assessor returned no text response"
+        raise ValueError(msg)
     parsed = parse_json_payload(raw_text)
     if parsed is None:
         _emit_progress(
