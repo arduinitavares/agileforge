@@ -221,6 +221,17 @@ def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     )
 
 
+class _RecordingBatchInvoker:
+    """Fake invoker that records every batch payload."""
+
+    def __init__(self) -> None:
+        self.payloads: list[AsBuiltAssessorInput] = []
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        self.payloads.append(payload)
+        return _fake_assessment(payload)
+
+
 def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
     return _fake_assessment(payload).model_copy(
@@ -908,6 +919,54 @@ def test_runner_stores_assessment_cache_and_event(tmp_path: Path) -> None:
         assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
 
 
+def test_runner_invokes_assessor_in_batches_and_merges_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large target sets should invoke the agent per batch and cache one result."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "live.py").write_text(
+        "# INV-a4b296c058e88663\n# INV-ffe2e17832c41874\n",
+        encoding="utf-8",
+    )
+    workflow = _WorkflowStub()
+    invoker = _RecordingBatchInvoker()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=invoker,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="batched-key",
+    )
+
+    assert result["ok"] is True
+    assert len(invoker.payloads) == EXPECTED_CARTOLA_TARGET_COUNT
+    assert result["data"]["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
+    assert result["data"]["batch_size"] == 1
+    assert result["data"]["authority_target_count"] == EXPECTED_CARTOLA_TARGET_COUNT
+    cached = AsBuiltAssessment.model_validate_json(
+        workflow.state[AS_BUILT_ASSESSMENT_STATE_KEY]
+    )
+    assert (
+        cached.evidence_pack_fingerprint
+        == result["data"]["evidence_pack_fingerprint"]
+    )
+    assert len(cached.capability_assessments) == EXPECTED_CARTOLA_TARGET_COUNT
+
+
 def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
     """Agent output must match host evidence identity before caching."""
     engine = create_engine("sqlite://")
@@ -934,7 +993,13 @@ def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
-    assert "evidence_pack_fingerprint" in result["errors"][0]["details"]["mismatches"]
+    details = result["errors"][0]["details"]
+    assert details["failed_batch_index"] == 1
+    assert details["completed_batches"] == 0
+    assert details["detail"] == (
+        "Batch 1/1 failed identity validation: "
+        "As-built assessment identity does not match the host evidence pack."
+    )
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
@@ -967,9 +1032,13 @@ def test_runner_timeout_failure_does_not_cache_or_record_event(tmp_path: Path) -
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
-    assert result["errors"][0]["details"]["detail"] == (
+    details = result["errors"][0]["details"]
+    assert details["detail"] == (
+        "Batch 1/1 failed after 0 completed batch(es): "
         "As-Built assessor timed out after 120 seconds."
     )
+    assert details["failed_batch_index"] == 1
+    assert details["completed_batches"] == 0
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:

@@ -51,6 +51,8 @@ from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from utils.adk_runner import invoke_agent_to_text, parse_json_payload
 from utils.runtime_config import (
     AS_BUILT_RUNNER_IDENTITY,
+    RuntimeConfigError,
+    get_as_built_assessor_batch_size,
     get_as_built_assessor_timeout_seconds,
 )
 
@@ -314,6 +316,17 @@ class AsBuiltAssessmentRunner:
                 error=_mutation_failed(str(exc), {"project_id": project_id}),
             )
 
+        try:
+            batch_size = get_as_built_assessor_batch_size()
+        except (RuntimeConfigError, ValueError) as exc:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=_mutation_failed(
+                    "As-built assessment configuration is invalid.",
+                    {"project_id": project_id, "detail": str(exc)},
+                ),
+            )
+
         request_fingerprint = canonical_hash(
             {
                 "command": AS_BUILT_ASSESS_COMMAND,
@@ -327,6 +340,7 @@ class AsBuiltAssessmentRunner:
                 "evidence_pack_fingerprint": pack.evidence_pack_fingerprint,
                 "agent_version": AGENT_VERSION,
                 "evidence_pack_builder_version": EVIDENCE_PACK_BUILDER_VERSION,
+                "assessor_batch_size": batch_size,
                 "user_input": user_input or "",
             }
         )
@@ -338,38 +352,42 @@ class AsBuiltAssessmentRunner:
         if replay is not None:
             return replay
 
-        input_payload = AsBuiltAssessorInput(
-            project_id=project_id,
-            assessment_id=_assessment_id(project_id, pack.evidence_pack_fingerprint),
-            compiled_authority=canonical_json(compiled),
-            original_spec=_original_spec_context(
+        batch_packs = split_evidence_pack_for_assessment(
+            pack,
+            batch_size=batch_size,
+        )
+        assessment_id = _assessment_id(project_id, pack.evidence_pack_fingerprint)
+        try:
+            assessment = self._invoke_agent_batches(
+                project_id=project_id,
+                assessment_id=assessment_id,
+                compiled=compiled,
                 spec_file=Path(spec_file) if spec_file else None,
                 spec_mode=_normalize_spec_mode(spec_mode),
-            ),
-            repo_evidence_pack=pack,
-            openspec_context=OpenSpecContext(
-                present=False,
-                spec_summaries=[],
-                change_summaries=[],
-            ),
-            prior_as_built_assessment="NO_HISTORY",
-            user_input=user_input or "",
-        )
-        try:
-            assessment = self._invoke_agent(input_payload)
+                full_pack=pack,
+                batch_packs=batch_packs,
+                batch_size=batch_size,
+                user_input=user_input,
+            )
         except (RuntimeError, ValidationError, ValueError) as exc:
             return error_envelope(
                 command=AS_BUILT_ASSESS_COMMAND,
                 error=_mutation_failed(
                     "As-built assessment agent failed.",
-                    {"project_id": project_id, "detail": str(exc)},
+                    _batch_failure_details(
+                        project_id=project_id,
+                        detail=str(exc),
+                        full_pack=pack,
+                        batch_count=len(batch_packs),
+                        batch_size=batch_size,
+                    ),
                 ),
             )
         assessment_identity_error = _validate_assessment_identity(
             assessment=assessment,
             pack=pack,
             project_id=project_id,
-            assessment_id=input_payload.assessment_id,
+            assessment_id=assessment_id,
         )
         if assessment_identity_error is not None:
             return error_envelope(
@@ -403,6 +421,9 @@ class AsBuiltAssessmentRunner:
                 "stored_state_key": AS_BUILT_ASSESSMENT_STATE_KEY,
                 "stored_meta_key": AS_BUILT_ASSESSMENT_META_STATE_KEY,
                 "idempotent_replay": False,
+                "authority_target_count": len(pack.authority_targets),
+                "batch_count": len(batch_packs),
+                "batch_size": batch_size,
                 "assessment": assessment.model_dump(mode="json"),
             },
             warnings=_workbench_warnings(pack.warnings),
@@ -570,6 +591,69 @@ class AsBuiltAssessmentRunner:
             )
             session.commit()
 
+    def _invoke_agent_batches(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        assessment_id: str,
+        compiled: dict[str, Any],
+        spec_file: Path | None,
+        spec_mode: SpecMode,
+        full_pack: EvidencePack,
+        batch_packs: list[EvidencePack],
+        batch_size: int,
+        user_input: str | None,
+    ) -> AsBuiltAssessment:
+        batch_assessments: list[AsBuiltAssessment] = []
+        batch_count = len(batch_packs)
+        for index, batch_pack in enumerate(batch_packs, start=1):
+            batch_input = _assessor_input_for_pack(
+                project_id=project_id,
+                assessment_id=_assessment_id(
+                    project_id,
+                    batch_pack.evidence_pack_fingerprint,
+                    batch_index=index,
+                    batch_count=batch_count,
+                ),
+                compiled=compiled,
+                spec_file=spec_file,
+                spec_mode=spec_mode,
+                pack=batch_pack,
+                user_input=_batch_user_input(
+                    user_input=user_input,
+                    index=index,
+                    batch_count=batch_count,
+                    batch_size=batch_size,
+                ),
+            )
+            try:
+                batch_assessment = self._invoke_agent(batch_input)
+            except (RuntimeError, ValidationError, ValueError) as exc:
+                msg = (
+                    f"Batch {index}/{batch_count} failed after "
+                    f"{len(batch_assessments)} completed batch(es): {exc}"
+                )
+                raise RuntimeError(msg) from exc
+            identity_error = _validate_assessment_identity(
+                assessment=batch_assessment,
+                pack=batch_pack,
+                project_id=project_id,
+                assessment_id=batch_input.assessment_id,
+            )
+            if identity_error is not None:
+                msg = (
+                    f"Batch {index}/{batch_count} failed identity validation: "
+                    f"{identity_error.message}"
+                )
+                raise ValueError(msg)
+            batch_assessments.append(batch_assessment)
+        return merge_batch_assessments(
+            project_id=project_id,
+            assessment_id=assessment_id,
+            full_pack=full_pack,
+            batch_assessments=batch_assessments,
+        )
+
 
 def _default_invoke_agent(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Invoke the ADK assessor synchronously for CLI callers."""
@@ -609,9 +693,18 @@ async def _invoke_agent_payload_async(
     return AsBuiltAssessment.model_validate(parsed)
 
 
-def _assessment_id(project_id: int, evidence_pack_fingerprint: str) -> str:
+def _assessment_id(
+    project_id: int,
+    evidence_pack_fingerprint: str,
+    *,
+    batch_index: int | None = None,
+    batch_count: int | None = None,
+) -> str:
     suffix = evidence_pack_fingerprint.replace("sha256:", "")[:12]
-    return f"as-built-{project_id}-{suffix}"
+    base = f"as-built-{project_id}-{suffix}"
+    if batch_index is None or batch_count is None:
+        return base
+    return f"{base}-batch-{batch_index:03d}-of-{batch_count:03d}"
 
 
 def _normalize_spec_mode(value: str) -> SpecMode:
@@ -636,6 +729,35 @@ def _original_spec_context(
     return OriginalSpecContext(spec_mode=spec_mode, json="", markdown=text)
 
 
+def _assessor_input_for_pack(  # noqa: PLR0913
+    *,
+    project_id: int,
+    assessment_id: str,
+    compiled: dict[str, Any],
+    spec_file: Path | None,
+    spec_mode: SpecMode,
+    pack: EvidencePack,
+    user_input: str | None,
+) -> AsBuiltAssessorInput:
+    return AsBuiltAssessorInput(
+        project_id=project_id,
+        assessment_id=assessment_id,
+        compiled_authority=canonical_json(compiled),
+        original_spec=_original_spec_context(
+            spec_file=spec_file,
+            spec_mode=spec_mode,
+        ),
+        repo_evidence_pack=pack,
+        openspec_context=OpenSpecContext(
+            present=False,
+            spec_summaries=[],
+            change_summaries=[],
+        ),
+        prior_as_built_assessment="NO_HISTORY",
+        user_input=user_input or "",
+    )
+
+
 def _spec_file_fingerprint(spec_file: str | None) -> str | None:
     if not spec_file:
         return None
@@ -657,6 +779,57 @@ def _workbench_warnings(warnings: list[EvidenceWarning]) -> list[WorkbenchWarnin
         )
         for warning in warnings
     ]
+
+
+def _batch_user_input(
+    *,
+    user_input: str | None,
+    index: int,
+    batch_count: int,
+    batch_size: int,
+) -> str:
+    prefix = (
+        f"Assess only the authority_targets in this evidence pack. "
+        f"This is batch {index} of {batch_count}; configured batch size is "
+        f"{batch_size}."
+    )
+    if user_input and user_input.strip():
+        return f"{prefix}\n\nUser input: {user_input.strip()}"
+    return prefix
+
+
+def _batch_failure_details(
+    *,
+    project_id: int,
+    detail: str,
+    full_pack: EvidencePack,
+    batch_count: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    failed_batch_index = _extract_failed_batch_index(detail)
+    completed_batches = max(failed_batch_index - 1, 0) if failed_batch_index else 0
+    return {
+        "project_id": project_id,
+        "detail": detail,
+        "authority_target_count": len(full_pack.authority_targets),
+        "batch_count": batch_count,
+        "batch_size": batch_size,
+        "completed_batches": completed_batches,
+        "failed_batch_index": failed_batch_index,
+        "evidence_pack_fingerprint": full_pack.evidence_pack_fingerprint,
+    }
+
+
+def _extract_failed_batch_index(detail: str) -> int | None:
+    marker = "Batch "
+    if marker not in detail:
+        return None
+    suffix = detail.split(marker, 1)[1]
+    raw_index = suffix.split("/", 1)[0]
+    try:
+        return int(raw_index)
+    except ValueError:
+        return None
 
 
 def _validate_assessment_identity(
