@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 EXPECTED_CARTOLA_TARGET_COUNT = 2
+FAILING_BATCH_INDEX = 2
 MIN_SKIPPED_RUNTIME_FILES = 3
 OMITTED_MANIFEST_FILES = 3
 OVERSIZED_FILE_BYTES = 501 * 1024
@@ -240,7 +241,7 @@ class _SecondBatchTimeoutInvoker:
 
     def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
         self.call_count += 1
-        if self.call_count == 2:
+        if self.call_count == FAILING_BATCH_INDEX:
             msg = "As-Built assessor timed out after 120 seconds."
             raise RuntimeError(msg)
         return _fake_assessment(payload)
@@ -1088,7 +1089,7 @@ def test_runner_batch_failure_does_not_cache_or_record_event(
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
     assert details["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
     assert details["batch_size"] == 1
-    assert details["failed_batch_index"] == 2
+    assert details["failed_batch_index"] == FAILING_BATCH_INDEX
     assert details["completed_batches"] == 1
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
