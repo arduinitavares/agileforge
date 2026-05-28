@@ -550,7 +550,7 @@ async def _invoke_agent_async(payload: AsBuiltAssessorInput) -> AsBuiltAssessmen
     raw_text = await invoke_agent_to_text(
         agent=root_agent,
         runner_identity=AS_BUILT_RUNNER_IDENTITY,
-        payload_json=payload.model_dump_json(),
+        payload_json=payload.model_dump_json(by_alias=True),
         no_text_error="As-Built assessor returned no text response",
     )
     parsed = parse_json_payload(raw_text)
