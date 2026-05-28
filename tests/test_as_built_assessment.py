@@ -972,9 +972,9 @@ def test_runner_invokes_assessor_in_batches_and_merges_cache(
     assert result["data"]["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
     assert result["data"]["batch_size"] == 1
     assert result["data"]["authority_target_count"] == EXPECTED_CARTOLA_TARGET_COUNT
-    cached = AsBuiltAssessment.model_validate_json(
-        workflow.state[AS_BUILT_ASSESSMENT_STATE_KEY]
-    )
+    raw_cached = workflow.state[AS_BUILT_ASSESSMENT_STATE_KEY]
+    assert isinstance(raw_cached, str)
+    cached = AsBuiltAssessment.model_validate_json(raw_cached)
     assert (
         cached.evidence_pack_fingerprint
         == result["data"]["evidence_pack_fingerprint"]
