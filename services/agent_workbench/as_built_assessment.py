@@ -889,6 +889,62 @@ def build_evidence_pack(  # noqa: PLR0913
     return _finalize_pack(pack)
 
 
+def split_evidence_pack_for_assessment(
+    pack: EvidencePack,
+    *,
+    batch_size: int,
+) -> list[EvidencePack]:
+    """Split one full evidence pack into deterministic assessor batch packs."""
+    if batch_size < 1:
+        msg = "batch_size must be at least 1"
+        raise ValueError(msg)
+    if not pack.authority_targets or len(pack.authority_targets) <= batch_size:
+        return [pack]
+
+    batches: list[EvidencePack] = []
+    for start in range(0, len(pack.authority_targets), batch_size):
+        end = start + batch_size
+        batches.append(_slice_evidence_pack(pack=pack, start=start, end=end))
+    return batches
+
+
+def _slice_evidence_pack(
+    *,
+    pack: EvidencePack,
+    start: int,
+    end: int,
+) -> EvidencePack:
+    selected_observations = pack.search_observations[start:end]
+    referenced_paths = {
+        path
+        for observation in selected_observations
+        for path in observation.paths
+    }
+    sliced = pack.model_copy(
+        update={
+            "evidence_pack_fingerprint": "sha256:pending",
+            "authority_targets": pack.authority_targets[start:end],
+            "source_snippets": [
+                snippet
+                for snippet in pack.source_snippets
+                if snippet.path in referenced_paths
+            ],
+            "test_snippets": [
+                snippet
+                for snippet in pack.test_snippets
+                if snippet.path in referenced_paths
+            ],
+            "doc_snippets": [
+                snippet
+                for snippet in pack.doc_snippets
+                if snippet.path in referenced_paths
+            ],
+            "search_observations": selected_observations,
+        }
+    )
+    return _finalize_pack(sliced)
+
+
 def _collect_target_evidence(
     *,
     files: list[tuple[Path, Path, EvidenceKind]],

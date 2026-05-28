@@ -44,6 +44,7 @@ from services.agent_workbench.as_built_assessment import (
     AsBuiltAssessmentRunner,
     build_authority_targets,
     build_evidence_pack,
+    split_evidence_pack_for_assessment,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 
@@ -492,6 +493,95 @@ def test_build_evidence_pack_includes_search_observation_paths(
 
     assert pack.search_observations[0].match_count == 1
     assert pack.search_observations[0].paths == ["live.py"]
+
+
+def test_split_evidence_pack_batches_targets_in_order(tmp_path: Path) -> None:
+    """Batch packs should preserve authority-target order and fingerprints."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    authority = {
+        "invariants": [
+            {
+                "id": f"INV-batch-{index:04d}",
+                "type": "DATA_CONTRACT",
+                "parameters": {
+                    "source_item_id": f"REQ.batch-{index}",
+                    "rule": f"rule {index}",
+                },
+            }
+            for index in range(5)
+        ]
+    }
+    for index in range(5):
+        (repo / f"file_{index}.py").write_text(
+            f"# INV-batch-{index:04d}\n",
+            encoding="utf-8",
+        )
+    full_pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=authority,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    batches = split_evidence_pack_for_assessment(full_pack, batch_size=2)
+
+    assert [len(batch.authority_targets) for batch in batches] == [2, 2, 1]
+    assert [
+        target.authority_ref
+        for batch in batches
+        for target in batch.authority_targets
+    ] == [target.authority_ref for target in full_pack.authority_targets]
+    assert all(
+        batch.evidence_pack_fingerprint.startswith("sha256:") for batch in batches
+    )
+    assert {batch.evidence_pack_fingerprint for batch in batches} != {
+        full_pack.evidence_pack_fingerprint
+    }
+
+
+def test_split_evidence_pack_filters_snippets_to_batch_paths(
+    tmp_path: Path,
+) -> None:
+    """Batch packs should not carry snippets unrelated to the selected targets."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-batch-a",
+                "type": "DATA_CONTRACT",
+                "parameters": {"source_item_id": "REQ.batch-a"},
+            },
+            {
+                "id": "INV-batch-b",
+                "type": "DATA_CONTRACT",
+                "parameters": {"source_item_id": "REQ.batch-b"},
+            },
+        ]
+    }
+    (repo / "a.py").write_text("# INV-batch-a\n", encoding="utf-8")
+    (repo / "b.py").write_text("# INV-batch-b\n", encoding="utf-8")
+    full_pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=authority,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    first_batch = split_evidence_pack_for_assessment(full_pack, batch_size=1)[0]
+
+    assert [target.authority_ref for target in first_batch.authority_targets] == [
+        "REQ.batch-a"
+    ]
+    assert [snippet.path for snippet in first_batch.source_snippets] == ["a.py"]
+    assert [observation.query for observation in first_batch.search_observations] == [
+        "REQ.batch-a"
+    ]
 
 
 def test_build_evidence_pack_reads_each_file_once(
