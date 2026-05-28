@@ -1218,6 +1218,10 @@ def test_runner_rejects_cross_batch_capability_coverage(
     assert details["failed_batch_index"] == 1
     assert details["completed_batches"] == 0
     assert "coverage did not match batch authority targets" in details["detail"]
+    assert "missing_refs" in details["detail"]
+    assert "REQ.live-squad-recommendation" in details["detail"]
+    assert "extra_refs" in details["detail"]
+    assert "REQ.legal-roster" in details["detail"]
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:

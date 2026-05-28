@@ -8,6 +8,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1390,15 +1391,14 @@ def merge_batch_assessments(
             f"[batch {index}] {item}" for item in assessment.clarifying_questions
         )
 
-    missing = [key for key in expected_keys if key not in capabilities]
-    extra = [key for key in capabilities if key not in expected_keys]
-    if missing or extra or duplicates:
-        msg = (
-            "Batch assessment coverage did not match authority targets: "
-            f"missing={len(missing)} extra={len(extra)} "
-            f"duplicates={len(duplicates)}"
-        )
-        raise ValueError(msg)
+    coverage_error = _coverage_mismatch_message(
+        scope="Batch assessment coverage did not match authority targets",
+        expected_keys=expected_keys,
+        actual_keys=list(capabilities),
+        duplicate_keys=sorted(duplicates),
+    )
+    if coverage_error is not None:
+        raise ValueError(coverage_error)
 
     ordered_capabilities = [capabilities[key] for key in expected_keys]
     batch_count = len(batch_assessments)
@@ -1424,6 +1424,50 @@ def merge_batch_assessments(
     )
 
 
+def _coverage_mismatch_message(
+    *,
+    scope: str,
+    expected_keys: Sequence[tuple[str, tuple[str, ...]]],
+    actual_keys: Sequence[tuple[str, tuple[str, ...]]],
+    duplicate_keys: Sequence[tuple[str, tuple[str, ...]]] | None = None,
+) -> str | None:
+    """Return a human-diagnostic coverage mismatch message, if any."""
+    expected_set = set(expected_keys)
+    actual_counts = Counter(actual_keys)
+    actual_set = set(actual_keys)
+    missing = [key for key in expected_keys if key not in actual_set]
+    extra = [key for key in actual_keys if key not in expected_set]
+    duplicates = (
+        list(duplicate_keys)
+        if duplicate_keys is not None
+        else [key for key, count in actual_counts.items() if count > 1]
+    )
+    if not missing and not extra and not duplicates:
+        return None
+    return (
+        f"{scope}: "
+        f"missing={len(missing)} extra={len(extra)} duplicates={len(duplicates)} "
+        f"missing_refs={json.dumps(_format_coverage_keys(missing), sort_keys=True)} "
+        f"extra_refs={json.dumps(_format_coverage_keys(extra), sort_keys=True)} "
+        "duplicate_refs="
+        f"{json.dumps(_format_coverage_keys(duplicates), sort_keys=True)}"
+    )
+
+
+def _format_coverage_keys(
+    keys: Sequence[tuple[str, tuple[str, ...]]],
+) -> list[str]:
+    """Format authority coverage keys for operator-facing diagnostics."""
+    return [
+        (
+            f"{authority_ref} [{', '.join(invariant_refs)}]"
+            if invariant_refs
+            else authority_ref
+        )
+        for authority_ref, invariant_refs in keys
+    ]
+
+
 def _batch_assessment_coverage_error(
     *,
     assessment: AsBuiltAssessment,
@@ -1434,16 +1478,10 @@ def _batch_assessment_coverage_error(
         _capability_key(capability)
         for capability in assessment.capability_assessments
     ]
-    duplicates = len(actual_keys) - len(set(actual_keys))
-    expected_set = set(expected_keys)
-    actual_set = set(actual_keys)
-    missing = [key for key in expected_keys if key not in actual_set]
-    extra = [key for key in actual_keys if key not in expected_set]
-    if not missing and not extra and not duplicates:
-        return None
-    return (
-        "Batch assessment coverage did not match batch authority targets: "
-        f"missing={len(missing)} extra={len(extra)} duplicates={duplicates}"
+    return _coverage_mismatch_message(
+        scope="Batch assessment coverage did not match batch authority targets",
+        expected_keys=expected_keys,
+        actual_keys=actual_keys,
     )
 
 
