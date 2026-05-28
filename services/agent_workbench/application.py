@@ -493,6 +493,23 @@ class _EvidenceCollectionRunner(Protocol):
         ...
 
 
+class _AsBuiltAssessmentRunner(Protocol):
+    """As-Built Assessment command exposed through the facade."""
+
+    def assess(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_file: str | None,
+        spec_mode: str,
+        user_input: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Assess implementation state and cache it in workflow state."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
@@ -510,6 +527,7 @@ class AgentWorkbenchApplication:
         story_runner: _StoryPhaseRunner | None = None,
         sprint_runner: _SprintPhaseRunner | None = None,
         evidence_runner: _EvidenceCollectionRunner | None = None,
+        as_built_runner: _AsBuiltAssessmentRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -523,6 +541,7 @@ class AgentWorkbenchApplication:
         self._story_runner = story_runner
         self._sprint_runner = sprint_runner
         self._evidence_runner = evidence_runner
+        self._as_built_runner = as_built_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -944,6 +963,26 @@ class AgentWorkbenchApplication:
             project_id=project_id,
             repo_path=repo_path,
             from_file=from_file,
+            idempotency_key=idempotency_key,
+        )
+
+    def as_built_assess(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_file: str | None,
+        spec_mode: str,
+        user_input: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Assess implementation state and cache it for backlog generation."""
+        return self._get_as_built_runner().assess(
+            project_id=project_id,
+            repo_path=repo_path,
+            spec_file=spec_file,
+            spec_mode=spec_mode,
+            user_input=user_input,
             idempotency_key=idempotency_key,
         )
 
@@ -1465,6 +1504,16 @@ class AgentWorkbenchApplication:
 
             self._evidence_runner = EvidenceCollectionRunner()
         return self._evidence_runner
+
+    def _get_as_built_runner(self) -> _AsBuiltAssessmentRunner:
+        """Return the As-Built Assessment runner, constructing it lazily."""
+        if self._as_built_runner is None:
+            from services.agent_workbench.as_built_assessment import (  # noqa: PLC0415
+                AsBuiltAssessmentRunner,
+            )
+
+            self._as_built_runner = AsBuiltAssessmentRunner()
+        return self._as_built_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:

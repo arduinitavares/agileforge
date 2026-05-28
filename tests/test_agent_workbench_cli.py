@@ -294,6 +294,37 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def as_built_assess(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_file: str | None,
+        spec_mode: str,
+        user_input: str | None,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return an as-built assessment payload."""
+        self.calls.append(
+            (
+                "as_built_assess",
+                {
+                    "project_id": project_id,
+                    "repo_path": repo_path,
+                    "spec_file": spec_file,
+                    "spec_mode": spec_mode,
+                    "user_input": user_input,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "is_complete": True},
+            "warnings": [],
+            "errors": [],
+        }
+
     def roadmap_generate(
         self,
         *,
@@ -1852,6 +1883,50 @@ def test_cli_routes_backlog_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+def test_cli_routes_as_built_assess_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify As-Built Assessment routes through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "as-built",
+            "assess",
+            "--project-id",
+            str(PROJECT_ID),
+            "--repo-path",
+            "/repo",
+            "--spec-file",
+            "/repo/spec.md",
+            "--spec-mode",
+            "unknown",
+            "--user-input",
+            "brownfield check",
+            "--idempotency-key",
+            "as-built-1",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge as-built assess"
+    assert app.calls == [
+        (
+            "as_built_assess",
+            {
+                "project_id": PROJECT_ID,
+                "repo_path": "/repo",
+                "spec_file": "/repo/spec.md",
+                "spec_mode": "unknown",
+                "user_input": "brownfield check",
+                "idempotency_key": "as-built-1",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

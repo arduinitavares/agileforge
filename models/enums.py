@@ -65,6 +65,7 @@ class WorkflowEventType(StrEnum):
     SPEC_COMPILED = "spec_compiled"
     BACKLOG_SAVED = "backlog_saved"
     EVIDENCE_COLLECTED = "evidence_collected"
+    AS_BUILT_ASSESSED = "as_built_assessed"
     ROADMAP_SAVED = "roadmap_saved"
     STORIES_SAVED = "stories_saved"
     STORY_DEPENDENCIES_PROPOSED = "story_dependencies_proposed"

@@ -57,6 +57,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge backlog save",
     "agileforge backlog reconcile",
     "agileforge evidence collect",
+    "agileforge as-built assess",
     "agileforge roadmap generate",
     "agileforge roadmap history",
     "agileforge roadmap save",
@@ -417,6 +418,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
         "agileforge backlog save",
         "agileforge backlog reconcile",
         "agileforge evidence collect",
+        "agileforge as-built assess",
     }
 
     assert backlog_command_names.issubset(names)
@@ -430,6 +432,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
     save = command_schema_payload("agileforge backlog save")
     reconcile = command_schema_payload("agileforge backlog reconcile")
     evidence = command_schema_payload("agileforge evidence collect")
+    as_built = command_schema_payload("agileforge as-built assess")
 
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id"]
@@ -467,6 +470,20 @@ def test_backlog_commands_are_registered_and_available() -> None:
     assert evidence["input"]["option_count"] == len(evidence["input"]["options"])
     assert evidence["idempotency_required"] is True
     assert ErrorCode.MUTATION_FAILED.value in evidence["errors"]
+    assert as_built["mutates"] is True
+    assert as_built["input"]["required"] == [
+        "project_id",
+        "repo_path",
+        "idempotency_key",
+    ]
+    assert as_built["input"]["optional"] == [
+        "spec_file",
+        "spec_mode",
+        "user_input",
+    ]
+    assert as_built["idempotency_required"] is True
+    assert ErrorCode.PROJECT_NOT_FOUND.value in as_built["errors"]
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in as_built["errors"]
 
 
 def test_roadmap_commands_are_registered_and_available() -> None:

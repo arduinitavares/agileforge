@@ -2,22 +2,48 @@
 
 from __future__ import annotations
 
+import json
 import socket
 from contextlib import suppress
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import EvidencePack
+from models.core import Product
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.specs import (
+    CompiledSpecAuthority,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
+from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+    AGENT_VERSION,
+    ASSESSMENT_SCHEMA_VERSION,
+    EVIDENCE_PACK_BUILDER_VERSION,
+    AsBuiltAssessment,
+    CapabilityAssessment,
+    EvidencePack,
+    RepoSnapshot,
+)
 from services.agent_workbench.as_built_assessment import (
+    AS_BUILT_ASSESSMENT_META_STATE_KEY,
+    AS_BUILT_ASSESSMENT_STATE_KEY,
     MAX_AUTHORITY_TARGETS,
     MAX_SNIPPETS_PER_TARGET,
+    AsBuiltAssessmentRunner,
     build_authority_targets,
     build_evidence_pack,
 )
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sqlalchemy.engine import Engine
 
 EXPECTED_CARTOLA_TARGET_COUNT = 2
 MIN_SKIPPED_RUNTIME_FILES = 3
@@ -56,6 +82,130 @@ CARTOLA_AUTHORITY = {
     "requirement_candidates": [],
     "authority_mappings": [],
 }
+
+
+class _WorkflowStub:
+    """Workflow state stub used by runner tests."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {"fsm_state": "BACKLOG_INTERVIEW"}
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return current workflow state."""
+        _ = session_id
+        return dict(self.state)
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Merge workflow state updates."""
+        _ = session_id
+        self.state.update(partial_update)
+
+
+class _ProductRepoStub:
+    """Product repository stub used by runner tests."""
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Return a product placeholder for positive project lookups."""
+        return SimpleNamespace(product_id=product_id, name="As-Built Project")
+
+
+class _MissingProductRepoStub:
+    """Product repository stub for missing project tests."""
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Return no project."""
+        _ = product_id
+        return None
+
+
+def _seed_authority(engine: Engine) -> str:
+    """Seed one accepted authority row for runner tests."""
+    with Session(engine) as session:
+        product = Product(name="As-Built Project")
+        session.add(product)
+        session.commit()
+        spec = SpecRegistry(
+            product_id=1,
+            spec_hash="spec-hash",
+            content="{}",
+            status="approved",
+            approved_at=datetime(2026, 5, 28, tzinfo=UTC),
+        )
+        session.add(spec)
+        session.commit()
+        authority = CompiledSpecAuthority(
+            spec_version_id=1,
+            compiler_version="1",
+            prompt_hash="prompt",
+            compiled_at=datetime(2026, 5, 28, tzinfo=UTC),
+            compiled_artifact_json=json.dumps(CARTOLA_AUTHORITY),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+        )
+        session.add(authority)
+        session.commit()
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        acceptance = SpecAuthorityAcceptance(
+            product_id=1,
+            spec_version_id=1,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            decided_at=datetime(2026, 5, 28, tzinfo=UTC),
+            compiler_version="1",
+            prompt_hash="prompt",
+            spec_hash="spec-hash",
+            pending_authority_id=1,
+            authority_fingerprint=authority_fingerprint,
+        )
+        session.add(acceptance)
+        session.commit()
+        return authority_fingerprint
+
+
+def _fake_assessment(input_payload: object) -> AsBuiltAssessment:
+    """Return a schema-valid assessment for runner tests."""
+    pack = input_payload.repo_evidence_pack
+    target = pack.authority_targets[0]
+    return AsBuiltAssessment(
+        schema_version=ASSESSMENT_SCHEMA_VERSION,
+        project_id=input_payload.project_id,
+        assessment_id=input_payload.assessment_id,
+        agent_version=AGENT_VERSION,
+        evidence_pack_builder_version=EVIDENCE_PACK_BUILDER_VERSION,
+        authority_fingerprint=pack.authority_fingerprint,
+        evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
+        generated_at="2026-05-28T12:05:00Z",
+        assessment_summary="Assessment completed.",
+        repo_snapshot=RepoSnapshot(
+            path=pack.repo_snapshot.path,
+            git_commit=pack.repo_snapshot.git_commit,
+            dirty=pack.repo_snapshot.dirty,
+        ),
+        capability_assessments=[
+            CapabilityAssessment(
+                authority_ref=target.authority_ref,
+                invariant_refs=target.invariant_refs,
+                capability_title=target.title,
+                status="observed",
+                confidence="medium",
+                evidence=[],
+                limitations=["Tests were not executed."],
+                recommended_backlog_treatment="skip_new_implementation",
+                reasoning="Repo evidence supports the capability.",
+            )
+        ],
+        cross_cutting_findings=[],
+        open_questions=[],
+        is_complete=True,
+        clarifying_questions=[],
+    )
 
 
 def test_build_authority_targets_extracts_cartola_invariants_without_items() -> None:
@@ -381,3 +531,181 @@ def test_skipped_socket_does_not_leave_runtime_file(tmp_path: Path) -> None:
         assert not sock_path.is_file()
     finally:
         sock.close()
+
+
+def test_runner_stores_assessment_cache_and_event(tmp_path: Path) -> None:
+    """As-built assessment stores workflow cache and audit event."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "live.py").write_text("# INV-a4b296c058e88663\n", encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="as-built-1",
+    )
+
+    assert result["ok"] is True
+    assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
+    assert AS_BUILT_ASSESSMENT_META_STATE_KEY in workflow.state
+    data = result["data"]
+    assert data["stored_state_key"] == AS_BUILT_ASSESSMENT_STATE_KEY
+    assert data["stored_meta_key"] == AS_BUILT_ASSESSMENT_META_STATE_KEY
+    assert data["idempotent_replay"] is False
+    assert data["assessment"]["schema_version"] == ASSESSMENT_SCHEMA_VERSION
+    with Session(engine) as session:
+        event = session.exec(select(WorkflowEvent)).one()
+        assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
+
+
+def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> None:
+    """Same idempotency key and same request fingerprint should replay."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+
+    first = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="same-key",
+    )
+    second = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="same-key",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["data"]["idempotent_replay"] is True
+
+
+def test_runner_rejects_reused_idempotency_key_with_changed_pack(
+    tmp_path: Path,
+) -> None:
+    """Reused idempotency keys are guarded by request fingerprint."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+
+    assert runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="reused-key",
+    )["ok"] is True
+    (repo / "changed.py").write_text("# INV-a4b296c058e88663\n", encoding="utf-8")
+    second = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="reused-key",
+    )
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_runner_rejects_reused_idempotency_key_with_changed_user_input(
+    tmp_path: Path,
+) -> None:
+    """User input affects assessment and must participate in idempotency."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+
+    assert runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input="first assessment focus",
+        idempotency_key="user-input-key",
+    )["ok"] is True
+    second = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input="different assessment focus",
+        idempotency_key="user-input-key",
+    )
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_runner_rejects_missing_project(tmp_path: Path) -> None:
+    """Missing projects fail closed before scanning."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_MissingProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+        invoke_agent=_fake_assessment,
+    )
+
+    result = runner.assess(
+        project_id=404,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="missing-project",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "PROJECT_NOT_FOUND"

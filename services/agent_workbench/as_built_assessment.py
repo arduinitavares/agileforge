@@ -9,27 +9,49 @@ import shutil
 import subprocess  # nosec B404
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
+import anyio
+from pydantic import ValidationError
+from sqlmodel import Session, select
+
+from models.enums import WorkflowEventType
+from models.events import WorkflowEvent
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+    AGENT_VERSION,
     ASSESSMENT_SCHEMA_VERSION,
     EVIDENCE_PACK_BUILDER_VERSION,
     EVIDENCE_PACK_SCHEMA_VERSION,
     AsBuiltAssessment,
     AsBuiltAssessmentCacheMeta,
+    AsBuiltAssessorInput,
     AuthorityTarget,
     EvidenceKind,
     EvidencePack,
     EvidenceSnippet,
     EvidenceWarning,
+    OpenSpecContext,
+    OriginalSpecContext,
     RepoSnapshot,
     SearchObservation,
     SpecMode,
 )
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from services.agent_workbench.envelope import (
+    WorkbenchError,
+    WorkbenchWarning,
+    error_envelope,
+    success_envelope,
+)
+from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from utils.adk_runner import invoke_agent_to_text, parse_json_payload
+from utils.runtime_config import AS_BUILT_RUNNER_IDENTITY
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from sqlalchemy.engine import Engine
 
 AS_BUILT_ASSESS_COMMAND: str = "agileforge as-built assess"
 AS_BUILT_ASSESSMENT_STATE_KEY: str = "as_built_assessment_cached"
@@ -110,6 +132,38 @@ _ID_TERM_RE: re.Pattern[str] = re.compile(
 )
 
 
+class _ProductRepository(Protocol):
+    """Product lookup dependency used by the runner."""
+
+    def get_by_id(self, product_id: int) -> object | None:
+        """Fetch a product by ID."""
+        ...
+
+
+class _WorkflowService(Protocol):
+    """Workflow-state dependency used by the runner."""
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return workflow state for a project session."""
+        ...
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Apply a partial workflow-state update."""
+        ...
+
+
+class _AgentInvoker(Protocol):
+    """Agent invocation dependency used by runner tests."""
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        """Return a validated As-Built Assessment."""
+        ...
+
+
 def utc_now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -163,6 +217,453 @@ def cached_assessment_for_backlog(state: dict[str, Any]) -> str:
     ):
         return "NO_AS_BUILT_ASSESSMENT"
     return canonical_json(assessment.model_dump(mode="json"))
+
+
+class AsBuiltAssessmentRunner:
+    """Assess current implementation state and cache the assessment."""
+
+    def __init__(
+        self,
+        *,
+        product_repo: _ProductRepository | None = None,
+        workflow_service: _WorkflowService | None = None,
+        engine: Engine | None = None,
+        invoke_agent: _AgentInvoker | None = None,
+    ) -> None:
+        """Initialize runner dependencies."""
+        if engine is None:
+            from models.db import get_engine  # noqa: PLC0415
+
+            engine = get_engine()
+        if product_repo is None:
+            from repositories.product import ProductRepository  # noqa: PLC0415
+
+            product_repo = ProductRepository()
+        if workflow_service is None:
+            from services.workflow import WorkflowService  # noqa: PLC0415
+
+            workflow_service = WorkflowService()
+        self._engine = engine
+        self._product_repo = product_repo
+        self._workflow_service = workflow_service
+        self._invoke_agent = invoke_agent or _default_invoke_agent
+
+    def assess(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_file: str | None,
+        spec_mode: str,
+        user_input: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Assess current implementation state and cache it in workflow state."""
+        validation_error = self._validate_request(
+            project_id=project_id,
+            repo_path=repo_path,
+            spec_mode=spec_mode,
+            idempotency_key=idempotency_key,
+        )
+        if validation_error is not None:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=validation_error,
+            )
+
+        authority_result = self._load_authority(project_id)
+        if isinstance(authority_result, dict):
+            return authority_result
+        authority_fingerprint, compiled = authority_result
+
+        try:
+            pack = build_evidence_pack(
+                project_id=project_id,
+                authority_fingerprint=authority_fingerprint,
+                compiled_authority=compiled,
+                repo_path=Path(repo_path),
+                spec_mode=_normalize_spec_mode(spec_mode),
+                spec_file=Path(spec_file) if spec_file else None,
+            )
+        except (OSError, ValueError) as exc:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=_mutation_failed(str(exc), {"project_id": project_id}),
+            )
+
+        request_fingerprint = canonical_hash(
+            {
+                "command": AS_BUILT_ASSESS_COMMAND,
+                "project_id": project_id,
+                "repo_path": str(Path(repo_path).resolve()),
+                "repo_git_commit": pack.repo_snapshot.git_commit,
+                "repo_dirty": pack.repo_snapshot.dirty,
+                "spec_file_fingerprint": _spec_file_fingerprint(spec_file),
+                "spec_mode": _normalize_spec_mode(spec_mode),
+                "authority_fingerprint": authority_fingerprint,
+                "evidence_pack_fingerprint": pack.evidence_pack_fingerprint,
+                "agent_version": AGENT_VERSION,
+                "evidence_pack_builder_version": EVIDENCE_PACK_BUILDER_VERSION,
+                "user_input": user_input or "",
+            }
+        )
+        replay = self._idempotent_replay(
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if replay is not None:
+            return replay
+
+        input_payload = AsBuiltAssessorInput(
+            project_id=project_id,
+            assessment_id=_assessment_id(project_id, pack.evidence_pack_fingerprint),
+            compiled_authority=canonical_json(compiled),
+            original_spec=_original_spec_context(
+                spec_file=Path(spec_file) if spec_file else None,
+                spec_mode=_normalize_spec_mode(spec_mode),
+            ),
+            repo_evidence_pack=pack,
+            openspec_context=OpenSpecContext(
+                present=False,
+                spec_summaries=[],
+                change_summaries=[],
+            ),
+            prior_as_built_assessment="NO_HISTORY",
+            user_input=user_input or "",
+        )
+        try:
+            assessment = self._invoke_agent(input_payload)
+        except (RuntimeError, ValidationError, ValueError) as exc:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=_mutation_failed(
+                    "As-built assessment agent failed.",
+                    {"project_id": project_id, "detail": str(exc)},
+                ),
+            )
+
+        fingerprint = assessment_fingerprint(assessment)
+        meta = cache_meta_for_assessment(assessment)
+        self._workflow_service.update_session_status(
+            str(project_id),
+            {
+                AS_BUILT_ASSESSMENT_STATE_KEY: canonical_assessment_json(assessment),
+                AS_BUILT_ASSESSMENT_META_STATE_KEY: meta.model_dump(mode="json"),
+            },
+        )
+        self._record_event(
+            project_id=project_id,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            assessment_fingerprint_value=fingerprint,
+            evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
+            assessment=assessment,
+        )
+        return success_envelope(
+            command=AS_BUILT_ASSESS_COMMAND,
+            data={
+                "project_id": project_id,
+                "assessment_fingerprint": fingerprint,
+                "evidence_pack_fingerprint": pack.evidence_pack_fingerprint,
+                "stored_state_key": AS_BUILT_ASSESSMENT_STATE_KEY,
+                "stored_meta_key": AS_BUILT_ASSESSMENT_META_STATE_KEY,
+                "idempotent_replay": False,
+                "assessment": assessment.model_dump(mode="json"),
+            },
+            warnings=_workbench_warnings(pack.warnings),
+            source_fingerprint=fingerprint,
+        )
+
+    def _validate_request(
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_mode: str,
+        idempotency_key: str,
+    ) -> WorkbenchError | None:
+        if not idempotency_key.strip():
+            return _invalid_command("--idempotency-key is required.", {})
+        if not repo_path.strip():
+            return _invalid_command("--repo-path is required.", {})
+        if spec_mode not in {
+            "current_state",
+            "desired_state",
+            "proposed_change",
+            "unknown",
+        }:
+            return _invalid_command(
+                (
+                    "--spec-mode must be current_state, desired_state, "
+                    "proposed_change, or unknown."
+                ),
+                {"spec_mode": spec_mode},
+            )
+        if self._product_repo.get_by_id(project_id) is None:
+            return _project_not_found(project_id)
+        return None
+
+    def _load_authority(
+        self,
+        project_id: int,
+    ) -> tuple[str, dict[str, Any]] | dict[str, Any]:
+        with Session(self._engine) as session:
+            accepted = session.exec(
+                select(SpecAuthorityAcceptance)
+                .where(SpecAuthorityAcceptance.product_id == project_id)
+                .where(SpecAuthorityAcceptance.status == "accepted")
+                .order_by(SpecAuthorityAcceptance.decided_at.desc())
+            ).first()
+            if accepted is None or not accepted.authority_fingerprint:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_accepted(project_id),
+                )
+
+            authority = session.exec(
+                select(CompiledSpecAuthority).where(
+                    CompiledSpecAuthority.spec_version_id == accepted.spec_version_id
+                )
+            ).first()
+            if authority is None or not authority.compiled_artifact_json:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(project_id),
+                )
+            current_fingerprint = pending_authority_fingerprint(authority)
+            if current_fingerprint != accepted.authority_fingerprint:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority does not match compiled authority.",
+                    ),
+                )
+            try:
+                compiled = json.loads(authority.compiled_artifact_json)
+            except json.JSONDecodeError:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority artifact JSON is invalid.",
+                    ),
+                )
+            if not isinstance(compiled, dict):
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority artifact JSON is not an object.",
+                    ),
+                )
+            return str(accepted.authority_fingerprint), compiled
+
+    def _idempotent_replay(
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        with Session(self._engine) as session:
+            events = session.exec(
+                select(WorkflowEvent)
+                .where(WorkflowEvent.product_id == project_id)
+                .where(WorkflowEvent.event_type == WorkflowEventType.AS_BUILT_ASSESSED)
+            ).all()
+            for event in events:
+                metadata = _json_object(event.event_metadata)
+                if metadata.get("idempotency_key") != idempotency_key:
+                    continue
+                if metadata.get("request_fingerprint") != request_fingerprint:
+                    return error_envelope(
+                        command=AS_BUILT_ASSESS_COMMAND,
+                        error=_idempotency_key_reused(idempotency_key),
+                    )
+                assessment = AsBuiltAssessment.model_validate(metadata["assessment"])
+                fingerprint = str(
+                    metadata.get("assessment_fingerprint")
+                    or assessment_fingerprint(assessment)
+                )
+                return success_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    data={
+                        "project_id": project_id,
+                        "assessment_fingerprint": fingerprint,
+                        "evidence_pack_fingerprint": str(
+                            metadata.get("evidence_pack_fingerprint")
+                            or assessment.evidence_pack_fingerprint
+                        ),
+                        "stored_state_key": AS_BUILT_ASSESSMENT_STATE_KEY,
+                        "stored_meta_key": AS_BUILT_ASSESSMENT_META_STATE_KEY,
+                        "idempotent_replay": True,
+                        "assessment": assessment.model_dump(mode="json"),
+                    },
+                    source_fingerprint=fingerprint,
+                )
+        return None
+
+    def _record_event(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        idempotency_key: str,
+        request_fingerprint: str,
+        assessment_fingerprint_value: str,
+        evidence_pack_fingerprint: str,
+        assessment: AsBuiltAssessment,
+    ) -> None:
+        with Session(self._engine) as session:
+            session.add(
+                WorkflowEvent(
+                    event_type=WorkflowEventType.AS_BUILT_ASSESSED,
+                    product_id=project_id,
+                    session_id=str(project_id),
+                    event_metadata=json.dumps(
+                        {
+                            "action": "as_built_assessed",
+                            "idempotency_key": idempotency_key,
+                            "request_fingerprint": request_fingerprint,
+                            "assessment_fingerprint": assessment_fingerprint_value,
+                            "evidence_pack_fingerprint": evidence_pack_fingerprint,
+                            "assessment": assessment.model_dump(mode="json"),
+                        },
+                        sort_keys=True,
+                    ),
+                )
+            )
+            session.commit()
+
+
+def _default_invoke_agent(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+    """Invoke the ADK assessor synchronously for CLI callers."""
+    return anyio.run(_invoke_agent_async, payload)
+
+
+async def _invoke_agent_async(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+    from orchestrator_agent.agent_tools.as_built_assessor.agent import (  # noqa: PLC0415
+        root_agent,
+    )
+
+    raw_text = await invoke_agent_to_text(
+        agent=root_agent,
+        runner_identity=AS_BUILT_RUNNER_IDENTITY,
+        payload_json=payload.model_dump_json(),
+        no_text_error="As-Built assessor returned no text response",
+    )
+    parsed = parse_json_payload(raw_text)
+    if parsed is None:
+        msg = "As-Built assessor returned invalid JSON."
+        raise ValueError(msg)
+    return AsBuiltAssessment.model_validate(parsed)
+
+
+def _assessment_id(project_id: int, evidence_pack_fingerprint: str) -> str:
+    suffix = evidence_pack_fingerprint.replace("sha256:", "")[:12]
+    return f"as-built-{project_id}-{suffix}"
+
+
+def _normalize_spec_mode(value: str) -> SpecMode:
+    if value in {"current_state", "desired_state", "proposed_change", "unknown"}:
+        return cast("SpecMode", value)
+    return "unknown"
+
+
+def _original_spec_context(
+    *,
+    spec_file: Path | None,
+    spec_mode: SpecMode,
+) -> OriginalSpecContext:
+    if spec_file is None:
+        return OriginalSpecContext(spec_mode=spec_mode, json_text="", markdown="")
+    try:
+        text = spec_file.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    if spec_file.suffix.lower() == ".json":
+        return OriginalSpecContext(spec_mode=spec_mode, json_text=text, markdown="")
+    return OriginalSpecContext(spec_mode=spec_mode, json_text="", markdown=text)
+
+
+def _spec_file_fingerprint(spec_file: str | None) -> str | None:
+    if not spec_file:
+        return None
+    path = Path(spec_file)
+    try:
+        return canonical_hash(
+            {"path": str(path.resolve()), "sha256": _file_sha256(path)}
+        )
+    except OSError as exc:
+        return canonical_hash({"path": str(path), "error": str(exc)})
+
+
+def _workbench_warnings(warnings: list[EvidenceWarning]) -> list[WorkbenchWarning]:
+    return [
+        WorkbenchWarning(
+            code=warning.code,
+            message=warning.message,
+            details=warning.details,
+        )
+        for warning in warnings
+    ]
+
+
+def _invalid_command(message: str, details: dict[str, Any]) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.INVALID_COMMAND,
+        message=message,
+        details=details,
+    )
+
+
+def _project_not_found(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.PROJECT_NOT_FOUND,
+        message=f"Project {project_id} was not found.",
+        details={"project_id": project_id},
+        remediation=["agileforge project list"],
+    )
+
+
+def _authority_not_accepted(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_NOT_ACCEPTED,
+        message="Project has no accepted authority.",
+        details={"project_id": project_id},
+        remediation=["agileforge authority status --project-id <id>"],
+    )
+
+
+def _authority_not_compiled(
+    project_id: int,
+    *,
+    message: str = "Accepted authority is not compiled.",
+) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_NOT_COMPILED,
+        message=message,
+        details={"project_id": project_id},
+        remediation=["agileforge authority status --project-id <id>"],
+    )
+
+
+def _mutation_failed(message: str, details: dict[str, Any]) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.MUTATION_FAILED,
+        message=message,
+        details=details,
+    )
+
+
+def _idempotency_key_reused(idempotency_key: str) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.IDEMPOTENCY_KEY_REUSED,
+        message="Idempotency key was already used for different inputs.",
+        details={"idempotency_key": idempotency_key},
+        remediation=["Use a new --idempotency-key for changed assessment inputs."],
+    )
 
 
 def build_authority_targets(

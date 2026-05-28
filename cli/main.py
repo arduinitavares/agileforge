@@ -66,6 +66,8 @@ Examples:
     """--idempotency-key evidence-001
   agileforge evidence collect --project-id 1 --from-file evidence_report.json """
     """--idempotency-key evidence-import-001
+  agileforge as-built assess --project-id 1 --repo-path /path/to/repo """
+    """--spec-mode unknown --idempotency-key as-built-001
   agileforge roadmap generate --project-id 1 --input "optional guidance"
   agileforge roadmap save --project-id 1 --attempt-id <attempt_id> """
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
@@ -288,6 +290,19 @@ class _Application(Protocol):
         idempotency_key: str,
     ) -> JsonObject:
         """Collect or import evidence and cache it in workflow state."""
+        ...
+
+    def as_built_assess(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        spec_file: str | None,
+        spec_mode: str,
+        user_input: str | None,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Assess implementation state and cache it in workflow state."""
         ...
 
     def roadmap_generate(
@@ -1103,6 +1118,31 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     evidence_collect.add_argument("--from-file")
     evidence_collect.add_argument("--idempotency-key", required=True)
     evidence_collect.set_defaults(command_handler=_evidence_collect)
+
+    as_built = subparsers.add_parser(
+        "as-built",
+        help="Assess repository implementation state before backlog generation.",
+    )
+    as_built_sub = as_built.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    as_built_assess = as_built_sub.add_parser(
+        "assess",
+        help="Assess current implementation state against accepted authority.",
+    )
+    as_built_assess.add_argument("--project-id", type=int, required=True)
+    as_built_assess.add_argument("--repo-path", required=True)
+    as_built_assess.add_argument("--spec-file")
+    as_built_assess.add_argument(
+        "--spec-mode",
+        choices=("current_state", "desired_state", "proposed_change", "unknown"),
+        default="unknown",
+    )
+    as_built_assess.add_argument("--user-input")
+    as_built_assess.add_argument("--idempotency-key", required=True)
+    as_built_assess.set_defaults(command_handler=_as_built_assess)
 
     roadmap = subparsers.add_parser("roadmap", help="Run Roadmap phase commands.")
     roadmap_sub = roadmap.add_subparsers(
@@ -2364,6 +2404,21 @@ def _evidence_collect(
         project_id=args.project_id,
         repo_path=args.repo_path,
         from_file=args.from_file,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _as_built_assess(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route As-Built Assessment to the application facade."""
+    return "agileforge as-built assess", application.as_built_assess(
+        project_id=args.project_id,
+        repo_path=args.repo_path,
+        spec_file=args.spec_file,
+        spec_mode=args.spec_mode,
+        user_input=args.user_input,
         idempotency_key=args.idempotency_key,
     )
 
