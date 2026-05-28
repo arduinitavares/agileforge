@@ -9,6 +9,7 @@ import pytest
 from utils.runtime_config import (
     RuntimeConfigError,
     clear_runtime_config_cache,
+    get_as_built_assessor_batch_size,
     get_as_built_assessor_timeout_seconds,
     get_business_db_target,
     get_database_echo,
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 
 DEFAULT_AS_BUILT_TIMEOUT_SECONDS = 120.0
 CUSTOM_AS_BUILT_TIMEOUT_SECONDS = 0.25
+DEFAULT_AS_BUILT_BATCH_SIZE = 10
+CUSTOM_AS_BUILT_BATCH_SIZE = 7
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +153,43 @@ def test_as_built_timeout_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert get_as_built_assessor_timeout_seconds() == CUSTOM_AS_BUILT_TIMEOUT_SECONDS
+
+
+def test_as_built_batch_size_defaults_to_bounded_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As-built assessor batches should be bounded by default."""
+    monkeypatch.delenv("AS_BUILT_ASSESSOR_BATCH_SIZE", raising=False)
+
+    assert get_as_built_assessor_batch_size() == DEFAULT_AS_BUILT_BATCH_SIZE
+
+
+def test_as_built_batch_size_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As-built assessor batch size can be tuned for smoke tests."""
+    monkeypatch.setenv(
+        "AS_BUILT_ASSESSOR_BATCH_SIZE",
+        str(CUSTOM_AS_BUILT_BATCH_SIZE),
+    )
+
+    assert get_as_built_assessor_batch_size() == CUSTOM_AS_BUILT_BATCH_SIZE
+
+
+def test_as_built_batch_size_rejects_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch size must be positive."""
+    monkeypatch.setenv("AS_BUILT_ASSESSOR_BATCH_SIZE", "0")
+
+    with pytest.raises(RuntimeConfigError, match="at least 1"):
+        get_as_built_assessor_batch_size()
+
+
+def test_as_built_batch_size_rejects_too_large(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch size must stay under the host-side safety cap."""
+    monkeypatch.setenv("AS_BUILT_ASSESSOR_BATCH_SIZE", "51")
+
+    with pytest.raises(RuntimeConfigError, match="at most 50"):
+        get_as_built_assessor_batch_size()
 
 
 def test_spec_compiler_agent_schema_is_disabled_by_default(

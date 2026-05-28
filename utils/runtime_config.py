@@ -290,6 +290,18 @@ def get_as_built_assessor_timeout_seconds(default: float = 120.0) -> float:
     return float(value)
 
 
+def get_as_built_assessor_batch_size(default: int = 10) -> int:
+    """Return the maximum authority targets per as-built assessor batch."""
+    value = get_int_env("AS_BUILT_ASSESSOR_BATCH_SIZE", default)
+    if value < 1:
+        msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at least 1."
+        raise RuntimeConfigError(msg)
+    if value > 50:
+        msg = "AS_BUILT_ASSESSOR_BATCH_SIZE must be at most 50."
+        raise RuntimeConfigError(msg)
+    return value
+
+
 def is_spec_compiler_schema_disabled() -> bool:
     """Return whether the spec compiler should skip output schema enforcement."""
     return get_bool_env("SPEC_COMPILER_DISABLE_SCHEMA", default=True)
