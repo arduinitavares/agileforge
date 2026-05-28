@@ -998,10 +998,59 @@ def test_runner_default_invocation_uses_deterministic_assessment(
     assessment = result["data"]["assessment"]
     assert "Deterministic" in assessment["assessment_summary"]
     assert len(assessment["capability_assessments"]) == EXPECTED_CARTOLA_TARGET_COUNT
+    assert {
+        item["status"] for item in assessment["capability_assessments"]
+    } <= {
+        "observed_with_missing_evidence",
+        "unclear",
+        "not_observed",
+    }
     assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
     with Session(engine) as session:
         event = session.exec(select(WorkflowEvent)).one()
         assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
+
+
+def test_deterministic_assessment_uses_positional_observations_for_duplicate_refs(
+    tmp_path: Path,
+) -> None:
+    """Duplicate authority refs should not collapse search observations."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("# INV-duplicate-a\n", encoding="utf-8")
+    (repo / "b.py").write_text("# INV-duplicate-b\n", encoding="utf-8")
+    authority = {
+        "invariants": [
+            {
+                "id": "INV-duplicate-a",
+                "type": "DATA_CONTRACT",
+                "parameters": {"source_item_id": "REQ.duplicate"},
+            },
+            {
+                "id": "INV-duplicate-b",
+                "type": "DATA_CONTRACT",
+                "parameters": {"source_item_id": "REQ.duplicate"},
+            },
+        ]
+    }
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=authority,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    assessment = as_built_module._deterministic_assessment_for_pack(
+        project_id=2,
+        assessment_id="as-built-2-duplicate",
+        pack=pack,
+    )
+
+    assert [
+        item.evidence[0].path for item in assessment.capability_assessments
+    ] == ["a.py", "b.py"]
 
 
 def test_runner_invokes_assessor_in_batches_and_merges_cache(

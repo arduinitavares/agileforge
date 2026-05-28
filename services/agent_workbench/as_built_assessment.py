@@ -710,14 +710,17 @@ def _deterministic_assessment_for_pack(
     pack: EvidencePack,
 ) -> AsBuiltAssessment:
     """Build a conservative host-side assessment without model inference."""
-    observations = {item.query: item for item in pack.search_observations}
     capabilities = [
         _deterministic_capability_for_target(
             target=target,
             pack=pack,
-            observation=observations.get(target.authority_ref),
+            observation=observation,
         )
-        for target in pack.authority_targets
+        for target, observation in zip(
+            pack.authority_targets,
+            pack.search_observations,
+            strict=False,
+        )
     ]
     return AsBuiltAssessment(
         schema_version=ASSESSMENT_SCHEMA_VERSION,
@@ -771,10 +774,13 @@ def _deterministic_capability_for_target(
         observation=observation,
     )
     if has_source and has_test:
-        status = "observed"
+        status = "observed_with_missing_evidence"
         confidence = "medium"
-        treatment = "skip_new_implementation"
-        reasoning = "Bounded source and test evidence matched this authority target."
+        treatment = "create_verification_item"
+        reasoning = (
+            "Bounded source and test evidence matched this authority target, but "
+            "deterministic Phase 1 assessment does not prove behavior."
+        )
     elif has_source or has_test:
         status = "observed_with_missing_evidence"
         confidence = "medium"
