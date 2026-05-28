@@ -919,12 +919,17 @@ def merge_batch_assessments(
     """Merge validated batch assessments into one full-pack assessment."""
     expected_keys = [_target_key(target) for target in full_pack.authority_targets]
     capabilities: dict[tuple[str, tuple[str, ...]], CapabilityAssessment] = {}
+    duplicates: set[tuple[str, tuple[str, ...]]] = set()
     cross_cutting_findings: list[str] = []
     open_questions: list[str] = []
     clarifying_questions: list[str] = []
     for index, assessment in enumerate(batch_assessments, start=1):
         for capability in assessment.capability_assessments:
-            capabilities[_capability_key(capability)] = capability
+            key = _capability_key(capability)
+            if key in capabilities:
+                duplicates.add(key)
+            else:
+                capabilities[key] = capability
         cross_cutting_findings.extend(
             f"[batch {index}] {item}" for item in assessment.cross_cutting_findings
         )
@@ -937,10 +942,11 @@ def merge_batch_assessments(
 
     missing = [key for key in expected_keys if key not in capabilities]
     extra = [key for key in capabilities if key not in expected_keys]
-    if missing or extra:
+    if missing or extra or duplicates:
         msg = (
             "Batch assessment coverage did not match authority targets: "
-            f"missing={len(missing)} extra={len(extra)}"
+            f"missing={len(missing)} extra={len(extra)} "
+            f"duplicates={len(duplicates)}"
         )
         raise ValueError(msg)
 

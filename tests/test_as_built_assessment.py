@@ -655,6 +655,37 @@ def test_merge_batch_assessments_rejects_missing_capability(
         )
 
 
+def test_merge_batch_assessments_rejects_duplicate_capability(
+    tmp_path: Path,
+) -> None:
+    """Batch merge must fail if an authority target appears more than once."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "live.py").write_text(
+        "# INV-a4b296c058e88663\n# INV-ffe2e17832c41874\n",
+        encoding="utf-8",
+    )
+    full_pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    batches = split_evidence_pack_for_assessment(full_pack, batch_size=1)
+    first_assessment = _fake_assessment(_input_payload_for_pack(batches[0]))
+    second_assessment = _fake_assessment(_input_payload_for_pack(batches[1]))
+
+    with pytest.raises(ValueError, match="coverage did not match authority targets"):
+        as_built_module.merge_batch_assessments(
+            project_id=2,
+            assessment_id="as-built-2-full",
+            full_pack=full_pack,
+            batch_assessments=[first_assessment, second_assessment, first_assessment],
+        )
+
+
 def test_build_evidence_pack_reads_each_file_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
