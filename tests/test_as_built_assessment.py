@@ -1017,6 +1017,58 @@ def test_runner_invokes_assessor_in_batches_and_merges_cache(
     assert len(cached.capability_assessments) == EXPECTED_CARTOLA_TARGET_COUNT
 
 
+def test_runner_emits_batch_progress_to_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Long-running assessor batches should be observable through stderr."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_fake_assessment,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="progress-key",
+    )
+
+    assert result["ok"] is True
+    stderr_events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
+    assert [event["event"] for event in stderr_events] == [
+        "as_built.pack_built",
+        "as_built.batch_started",
+        "as_built.batch_completed",
+        "as_built.batch_started",
+        "as_built.batch_completed",
+        "as_built.assessment_stored",
+    ]
+    first_batch = stderr_events[1]
+    assert first_batch["project_id"] == 1
+    assert first_batch["batch_index"] == 1
+    assert first_batch["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
+    assert first_batch["batch_target_count"] == 1
+    assert first_batch["payload_chars"] > 0
+    assert "timeout_seconds" in first_batch
+
+
 def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
     """Agent output must match host evidence identity before caching."""
     engine = create_engine("sqlite://")

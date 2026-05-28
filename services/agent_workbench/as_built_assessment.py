@@ -6,6 +6,8 @@ import hashlib
 import json
 import shutil
 import subprocess  # nosec B404
+import sys
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,7 +50,11 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
-from utils.adk_runner import invoke_agent_to_text, parse_json_payload
+from utils.adk_runner import (
+    get_agent_model_info,
+    invoke_agent_to_text,
+    parse_json_payload,
+)
 from utils.runtime_config import (
     AS_BUILT_RUNNER_IDENTITY,
     RuntimeConfigError,
@@ -88,6 +94,26 @@ _SKIP_DIR_NAMES: frozenset[str] = frozenset(
         "venv",
     }
 )
+
+
+def _emit_progress(event: str, **details: object) -> None:
+    """Emit machine-readable command progress without contaminating stdout JSON."""
+    payload = {
+        "event": event,
+        "command": AS_BUILT_ASSESS_COMMAND,
+        "timestamp": utc_now_iso(),
+        **details,
+    }
+    sys.stderr.write(f"{json.dumps(payload, sort_keys=True, default=str)}\n")
+    sys.stderr.flush()
+
+
+def _progress_timeout_seconds() -> float | None:
+    """Return timeout seconds for diagnostics without masking the main failure path."""
+    try:
+        return get_as_built_assessor_timeout_seconds()
+    except (RuntimeConfigError, ValueError):
+        return None
 _SKIP_FILE_NAMES: frozenset[str] = frozenset(
     {"uv.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
 )
@@ -364,6 +390,17 @@ class AsBuiltAssessmentRunner:
             pack,
             batch_size=batch_size,
         )
+        _emit_progress(
+            "as_built.pack_built",
+            project_id=project_id,
+            authority_target_count=len(pack.authority_targets),
+            batch_count=len(batch_packs),
+            batch_size=batch_size,
+            evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
+            repo_git_commit=pack.repo_snapshot.git_commit,
+            repo_dirty=pack.repo_snapshot.dirty,
+            timeout_seconds=_progress_timeout_seconds(),
+        )
         assessment_id = _assessment_id(project_id, pack.evidence_pack_fingerprint)
         try:
             assessment = self._invoke_agent_batches(
@@ -427,6 +464,16 @@ class AsBuiltAssessmentRunner:
             batch_count=len(batch_packs),
             batch_size=batch_size,
             assessment=assessment,
+        )
+        _emit_progress(
+            "as_built.assessment_stored",
+            project_id=project_id,
+            authority_target_count=len(pack.authority_targets),
+            batch_count=len(batch_packs),
+            batch_size=batch_size,
+            capability_count=len(assessment.capability_assessments),
+            assessment_fingerprint=fingerprint,
+            evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
         )
         return success_envelope(
             command=AS_BUILT_ASSESS_COMMAND,
@@ -639,6 +686,7 @@ class AsBuiltAssessmentRunner:
         batch_assessments: list[AsBuiltAssessment] = []
         batch_count = len(batch_packs)
         for index, batch_pack in enumerate(batch_packs, start=1):
+            batch_started = time.monotonic()
             batch_input = _assessor_input_for_pack(
                 project_id=project_id,
                 assessment_id=_assessment_id(
@@ -658,9 +706,31 @@ class AsBuiltAssessmentRunner:
                     batch_size=batch_size,
                 ),
             )
+            batch_payload_json = batch_input.model_dump_json(by_alias=True)
+            _emit_progress(
+                "as_built.batch_started",
+                project_id=project_id,
+                batch_index=index,
+                batch_count=batch_count,
+                batch_size=batch_size,
+                batch_target_count=len(batch_pack.authority_targets),
+                completed_batches=len(batch_assessments),
+                payload_chars=len(batch_payload_json),
+                evidence_pack_fingerprint=batch_pack.evidence_pack_fingerprint,
+                timeout_seconds=_progress_timeout_seconds(),
+            )
             try:
                 batch_assessment = self._invoke_agent(batch_input)
             except (RuntimeError, ValidationError, ValueError) as exc:
+                _emit_progress(
+                    "as_built.batch_failed",
+                    project_id=project_id,
+                    batch_index=index,
+                    batch_count=batch_count,
+                    completed_batches=len(batch_assessments),
+                    elapsed_seconds=round(time.monotonic() - batch_started, 3),
+                    error=str(exc),
+                )
                 msg = (
                     f"Batch {index}/{batch_count} failed after "
                     f"{len(batch_assessments)} completed batch(es): {exc}"
@@ -679,12 +749,30 @@ class AsBuiltAssessmentRunner:
                 batch_pack=batch_pack,
             )
             if coverage_error is not None:
+                _emit_progress(
+                    "as_built.batch_failed",
+                    project_id=project_id,
+                    batch_index=index,
+                    batch_count=batch_count,
+                    completed_batches=len(batch_assessments),
+                    elapsed_seconds=round(time.monotonic() - batch_started, 3),
+                    error=coverage_error,
+                )
                 msg = (
                     f"Batch {index}/{batch_count} failed after "
                     f"{len(batch_assessments)} completed batch(es): "
                     f"{coverage_error}"
                 )
                 raise ValueError(msg)
+            _emit_progress(
+                "as_built.batch_completed",
+                project_id=project_id,
+                batch_index=index,
+                batch_count=batch_count,
+                completed_batches=len(batch_assessments) + 1,
+                elapsed_seconds=round(time.monotonic() - batch_started, 3),
+                capability_count=len(batch_assessment.capability_assessments),
+            )
             batch_assessments.append(batch_assessment)
         return merge_batch_assessments(
             project_id=project_id,
@@ -714,22 +802,64 @@ async def _invoke_agent_payload_async(
 ) -> AsBuiltAssessment:
     """Invoke an as-built assessor agent with a bounded runtime."""
     timeout_seconds = get_as_built_assessor_timeout_seconds()
+    model_call_started = time.monotonic()
+    payload_json = payload.model_dump_json(by_alias=True)
+    _emit_progress(
+        "as_built.model_call_started",
+        project_id=payload.project_id,
+        assessment_id=payload.assessment_id,
+        model=get_agent_model_info(agent),
+        payload_chars=len(payload_json),
+        timeout_seconds=timeout_seconds,
+    )
     try:
         with anyio.fail_after(timeout_seconds):
             raw_text = await invoke_agent_to_text(
                 agent=agent,
                 runner_identity=AS_BUILT_RUNNER_IDENTITY,
-                payload_json=payload.model_dump_json(by_alias=True),
+                payload_json=payload_json,
                 no_text_error="As-Built assessor returned no text response",
             )
     except TimeoutError as exc:
+        _emit_progress(
+            "as_built.model_call_failed",
+            project_id=payload.project_id,
+            assessment_id=payload.assessment_id,
+            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+            error=f"As-Built assessor timed out after {timeout_seconds:g} seconds.",
+        )
         msg = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
         raise RuntimeError(msg) from exc
     parsed = parse_json_payload(raw_text)
     if parsed is None:
+        _emit_progress(
+            "as_built.model_call_failed",
+            project_id=payload.project_id,
+            assessment_id=payload.assessment_id,
+            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+            error="As-Built assessor returned invalid JSON.",
+        )
         msg = "As-Built assessor returned invalid JSON."
         raise ValueError(msg)
-    return AsBuiltAssessment.model_validate(parsed)
+    try:
+        assessment = AsBuiltAssessment.model_validate(parsed)
+    except ValidationError:
+        _emit_progress(
+            "as_built.model_call_failed",
+            project_id=payload.project_id,
+            assessment_id=payload.assessment_id,
+            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+            error="As-Built assessor returned schema-invalid JSON.",
+        )
+        raise
+    _emit_progress(
+        "as_built.model_call_completed",
+        project_id=payload.project_id,
+        assessment_id=payload.assessment_id,
+        elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+        capability_count=len(assessment.capability_assessments),
+    )
+    return assessment
 
 
 def _assessment_id(
