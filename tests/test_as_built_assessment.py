@@ -994,12 +994,7 @@ def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
     details = result["errors"][0]["details"]
-    assert details["failed_batch_index"] == 1
-    assert details["completed_batches"] == 0
-    assert details["detail"] == (
-        "Batch 1/1 failed identity validation: "
-        "As-built assessment identity does not match the host evidence pack."
-    )
+    assert "evidence_pack_fingerprint" in details["mismatches"]
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
@@ -1116,6 +1111,11 @@ def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> 
     assert first["ok"] is True
     assert second["ok"] is True
     assert second["data"]["idempotent_replay"] is True
+    assert second["data"]["authority_target_count"] == first["data"][
+        "authority_target_count"
+    ]
+    assert second["data"]["batch_count"] == first["data"]["batch_count"]
+    assert second["data"]["batch_size"] == first["data"]["batch_size"]
 
 
 def test_runner_rejects_reused_idempotency_key_with_changed_pack(

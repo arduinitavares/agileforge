@@ -189,6 +189,14 @@ class _AgentInvoker(Protocol):
         ...
 
 
+class _AssessmentIdentityError(RuntimeError):
+    """Carry structured assessment identity diagnostics through batch invocation."""
+
+    def __init__(self, error: WorkbenchError) -> None:
+        super().__init__(error.message)
+        self.error = error
+
+
 def utc_now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -369,6 +377,11 @@ class AsBuiltAssessmentRunner:
                 batch_size=batch_size,
                 user_input=user_input,
             )
+        except _AssessmentIdentityError as exc:
+            return error_envelope(
+                command=AS_BUILT_ASSESS_COMMAND,
+                error=exc.error,
+            )
         except (RuntimeError, ValidationError, ValueError) as exc:
             return error_envelope(
                 command=AS_BUILT_ASSESS_COMMAND,
@@ -410,6 +423,9 @@ class AsBuiltAssessmentRunner:
             request_fingerprint=request_fingerprint,
             assessment_fingerprint_value=fingerprint,
             evidence_pack_fingerprint=pack.evidence_pack_fingerprint,
+            authority_target_count=len(pack.authority_targets),
+            batch_count=len(batch_packs),
+            batch_size=batch_size,
             assessment=assessment,
         )
         return success_envelope(
@@ -554,6 +570,16 @@ class AsBuiltAssessmentRunner:
                         "stored_state_key": AS_BUILT_ASSESSMENT_STATE_KEY,
                         "stored_meta_key": AS_BUILT_ASSESSMENT_META_STATE_KEY,
                         "idempotent_replay": True,
+                        "authority_target_count": int(
+                            metadata.get("authority_target_count")
+                            or len(assessment.capability_assessments)
+                        ),
+                        "batch_count": int(metadata.get("batch_count") or 1),
+                        "batch_size": int(
+                            metadata.get("batch_size")
+                            or len(assessment.capability_assessments)
+                            or 1
+                        ),
                         "assessment": assessment.model_dump(mode="json"),
                     },
                     source_fingerprint=fingerprint,
@@ -568,6 +594,9 @@ class AsBuiltAssessmentRunner:
         request_fingerprint: str,
         assessment_fingerprint_value: str,
         evidence_pack_fingerprint: str,
+        authority_target_count: int,
+        batch_count: int,
+        batch_size: int,
         assessment: AsBuiltAssessment,
     ) -> None:
         with Session(self._engine) as session:
@@ -583,6 +612,9 @@ class AsBuiltAssessmentRunner:
                             "request_fingerprint": request_fingerprint,
                             "assessment_fingerprint": assessment_fingerprint_value,
                             "evidence_pack_fingerprint": evidence_pack_fingerprint,
+                            "authority_target_count": authority_target_count,
+                            "batch_count": batch_count,
+                            "batch_size": batch_size,
                             "assessment": assessment.model_dump(mode="json"),
                         },
                         sort_keys=True,
@@ -641,11 +673,7 @@ class AsBuiltAssessmentRunner:
                 assessment_id=batch_input.assessment_id,
             )
             if identity_error is not None:
-                msg = (
-                    f"Batch {index}/{batch_count} failed identity validation: "
-                    f"{identity_error.message}"
-                )
-                raise ValueError(msg)
+                raise _AssessmentIdentityError(identity_error)
             batch_assessments.append(batch_assessment)
         return merge_batch_assessments(
             project_id=project_id,
