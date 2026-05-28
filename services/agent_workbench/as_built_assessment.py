@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 import subprocess  # nosec B404
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -48,7 +48,10 @@ from services.agent_workbench.envelope import (
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from utils.adk_runner import invoke_agent_to_text, parse_json_payload
-from utils.runtime_config import AS_BUILT_RUNNER_IDENTITY
+from utils.runtime_config import (
+    AS_BUILT_RUNNER_IDENTITY,
+    get_as_built_assessor_timeout_seconds,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -125,11 +128,30 @@ _TEST_SUFFIXES: tuple[str, ...] = (
     ".test.tsx",
     ".spec.tsx",
 )
-_ID_TERM_RE: re.Pattern[str] = re.compile(
-    r"^(INV-[A-Za-z0-9_-]+|REQ\.[A-Za-z0-9_.-]+|QUALITY\.[A-Za-z0-9_.-]+|"
-    r"CONSTRAINT\.[A-Za-z0-9_.-]+|INTERFACE\.[A-Za-z0-9_.-]+|"
-    r"DATA\.[A-Za-z0-9_.-]+)$"
+_ID_TERM_PREFIXES: tuple[str, ...] = (
+    "INV-",
+    "REQ.",
+    "QUALITY.",
+    "CONSTRAINT.",
+    "INTERFACE.",
+    "DATA.",
 )
+_ID_BOUNDARY_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "_.-"
+)
+
+
+@dataclass(frozen=True)
+class _ScannedFile:
+    """One already-read repository file for evidence matching."""
+
+    relative_path: Path
+    kind: EvidenceKind
+    text: str
+    lower_text: str
 
 
 class _ProductRepository(Protocol):
@@ -558,12 +580,27 @@ async def _invoke_agent_async(payload: AsBuiltAssessorInput) -> AsBuiltAssessmen
         root_agent,
     )
 
-    raw_text = await invoke_agent_to_text(
-        agent=root_agent,
-        runner_identity=AS_BUILT_RUNNER_IDENTITY,
-        payload_json=payload.model_dump_json(by_alias=True),
-        no_text_error="As-Built assessor returned no text response",
-    )
+    return await _invoke_agent_payload_async(agent=root_agent, payload=payload)
+
+
+async def _invoke_agent_payload_async(
+    *,
+    agent: object,
+    payload: AsBuiltAssessorInput,
+) -> AsBuiltAssessment:
+    """Invoke an as-built assessor agent with a bounded runtime."""
+    timeout_seconds = get_as_built_assessor_timeout_seconds()
+    try:
+        with anyio.fail_after(timeout_seconds):
+            raw_text = await invoke_agent_to_text(
+                agent=agent,
+                runner_identity=AS_BUILT_RUNNER_IDENTITY,
+                payload_json=payload.model_dump_json(by_alias=True),
+                no_text_error="As-Built assessor returned no text response",
+            )
+    except TimeoutError as exc:
+        msg = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
+        raise RuntimeError(msg) from exc
     parsed = parse_json_payload(raw_text)
     if parsed is None:
         msg = "As-Built assessor returned invalid JSON."
@@ -869,34 +906,43 @@ def _collect_target_evidence(
         "doc": {},
     }
     search_observations: list[SearchObservation] = []
+    scanned_files = _read_scannable_file_contents(
+        files=files,
+        skipped_counts=skipped_counts,
+    )
 
     for target in targets:
         target_matches = 0
         matched_paths: list[str] = []
         target_snippet_count = 0
-        for file_path, relative_path, kind in files:
-            try:
-                text = file_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                skipped_counts["unreadable"] = skipped_counts.get("unreadable", 0) + 1
-                continue
-            matches = _matched_terms(text, target.terms)
+        for scanned_file in scanned_files:
+            matches = _matched_terms(
+                scanned_file.text,
+                target.terms,
+                lower_text=scanned_file.lower_text,
+            )
             if not matches:
                 continue
             target_matches += 1
-            matched_paths.append(relative_path.as_posix())
+            matched_paths.append(scanned_file.relative_path.as_posix())
             if target_snippet_count >= MAX_SNIPPETS_PER_TARGET:
                 continue
             target_snippet_count += 1
             snippet = _snippet_for_match(
-                text=text,
-                relative_path=relative_path,
-                kind=kind,
+                text=scanned_file.text,
+                relative_path=scanned_file.relative_path,
+                kind=scanned_file.kind,
                 matched_terms=matches,
             )
-            bucket = "test" if kind == "test" else "doc" if kind == "doc" else "source"
+            bucket = (
+                "test"
+                if scanned_file.kind == "test"
+                else "doc"
+                if scanned_file.kind == "doc"
+                else "source"
+            )
             snippet_buckets[bucket].setdefault(
-                f"{kind}:{relative_path.as_posix()}",
+                f"{scanned_file.kind}:{scanned_file.relative_path.as_posix()}",
                 snippet,
             )
         search_observations.append(
@@ -912,6 +958,30 @@ def _collect_target_evidence(
         snippet_buckets["doc"],
         search_observations,
     )
+
+
+def _read_scannable_file_contents(
+    *,
+    files: list[tuple[Path, Path, EvidenceKind]],
+    skipped_counts: dict[str, int],
+) -> list[_ScannedFile]:
+    """Read each candidate file once before matching authority targets."""
+    scanned_files: list[_ScannedFile] = []
+    for file_path, relative_path, kind in files:
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            skipped_counts["unreadable"] = skipped_counts.get("unreadable", 0) + 1
+            continue
+        scanned_files.append(
+            _ScannedFile(
+                relative_path=relative_path,
+                kind=kind,
+                text=text,
+                lower_text=text.lower(),
+            )
+        )
+    return scanned_files
 
 
 def _targets_from_invariants(compiled: dict[str, Any]) -> list[AuthorityTarget]:
@@ -1126,15 +1196,41 @@ def _file_kind(relative_path: Path) -> EvidenceKind:
     return "source"
 
 
-def _matched_terms(text: str, terms: list[str]) -> list[str]:
-    return [term for term in terms if _term_matches(text, term)]
+def _matched_terms(
+    text: str,
+    terms: list[str],
+    *,
+    lower_text: str | None = None,
+) -> list[str]:
+    """Return terms found in text, reusing lowercased content when supplied."""
+    lowered = text.lower() if lower_text is None else lower_text
+    return [term for term in terms if _term_matches(text, lowered, term)]
 
 
-def _term_matches(text: str, term: str) -> bool:
-    if _ID_TERM_RE.match(term):
-        pattern = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(term)}(?![A-Za-z0-9_.-])")
-        return bool(pattern.search(text))
-    return term.lower() in text.lower()
+def _term_matches(text: str, lower_text: str, term: str) -> bool:
+    if term.startswith(_ID_TERM_PREFIXES):
+        return _id_term_matches(text, term)
+    return term.lower() in lower_text
+
+
+def _id_term_matches(text: str, term: str) -> bool:
+    """Return whether an authority ID term appears with token boundaries."""
+    start = 0
+    term_length = len(term)
+    while True:
+        index = text.find(term, start)
+        if index < 0:
+            return False
+        before_index = index - 1
+        after_index = index + term_length
+        before_ok = before_index < 0 or text[before_index] not in _ID_BOUNDARY_CHARS
+        after_ok = (
+            after_index >= len(text)
+            or text[after_index] not in _ID_BOUNDARY_CHARS
+        )
+        if before_ok and after_ok:
+            return True
+        start = index + 1
 
 
 def _snippet_for_match(

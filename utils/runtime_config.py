@@ -282,6 +282,14 @@ def get_as_built_assessor_max_tokens(default: int = 8192) -> int:
     return get_int_env("AS_BUILT_ASSESSOR_MAX_TOKENS", default)
 
 
+def get_as_built_assessor_timeout_seconds(default: float = 120.0) -> float:
+    """Return the bounded runtime for the as-built assessor model call."""
+    value = get_optional_env("AS_BUILT_ASSESSOR_TIMEOUT_SECONDS")
+    if value is None:
+        return default
+    return float(value)
+
+
 def is_spec_compiler_schema_disabled() -> bool:
     """Return whether the spec compiler should skip output schema enforcement."""
     return get_bool_env("SPEC_COMPILER_DISABLE_SCHEMA", default=True)

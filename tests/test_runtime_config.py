@@ -9,6 +9,7 @@ import pytest
 from utils.runtime_config import (
     RuntimeConfigError,
     clear_runtime_config_cache,
+    get_as_built_assessor_timeout_seconds,
     get_business_db_target,
     get_database_echo,
     get_session_db_target,
@@ -18,6 +19,9 @@ from utils.runtime_config import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+DEFAULT_AS_BUILT_TIMEOUT_SECONDS = 120.0
+CUSTOM_AS_BUILT_TIMEOUT_SECONDS = 0.25
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +131,25 @@ def test_database_echo_honors_true_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGILEFORGE_DB_ECHO", "true")
 
     assert get_database_echo() is True
+
+
+def test_as_built_timeout_defaults_to_bounded_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As-built assessor model calls should be bounded by default."""
+    monkeypatch.delenv("AS_BUILT_ASSESSOR_TIMEOUT_SECONDS", raising=False)
+
+    assert get_as_built_assessor_timeout_seconds() == DEFAULT_AS_BUILT_TIMEOUT_SECONDS
+
+
+def test_as_built_timeout_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As-built assessor timeout can be tuned for smoke tests."""
+    monkeypatch.setenv(
+        "AS_BUILT_ASSESSOR_TIMEOUT_SECONDS",
+        str(CUSTOM_AS_BUILT_TIMEOUT_SECONDS),
+    )
+
+    assert get_as_built_assessor_timeout_seconds() == CUSTOM_AS_BUILT_TIMEOUT_SECONDS
 
 
 def test_spec_compiler_agent_schema_is_disabled_by_default(

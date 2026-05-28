@@ -6,9 +6,11 @@ import json
 import socket
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import anyio
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -28,8 +30,11 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     AsBuiltAssessorInput,
     CapabilityAssessment,
     EvidencePack,
+    OpenSpecContext,
+    OriginalSpecContext,
     RepoSnapshot,
 )
+from services.agent_workbench import as_built_assessment as as_built_module
 from services.agent_workbench.as_built_assessment import (
     AS_BUILT_ASSESSMENT_META_STATE_KEY,
     AS_BUILT_ASSESSMENT_STATE_KEY,
@@ -43,8 +48,6 @@ from services.agent_workbench.as_built_assessment import (
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.engine import Engine
 
 EXPECTED_CARTOLA_TARGET_COUNT = 2
@@ -123,6 +126,12 @@ class _MissingProductRepoStub:
         """Return no project."""
         _ = product_id
         return None
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run async tests on the installed backend only."""
+    return "asyncio"
 
 
 def _seed_authority(engine: Engine) -> str:
@@ -215,6 +224,35 @@ def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
     return _fake_assessment(payload).model_copy(
         update={"evidence_pack_fingerprint": "sha256:wrong-pack"}
+    )
+
+
+def _timeout_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+    """Raise the timeout error produced by default invocation."""
+    _ = payload
+    msg = "As-Built assessor timed out after 120 seconds."
+    raise RuntimeError(msg)
+
+
+def _input_payload_for_pack(pack: EvidencePack) -> AsBuiltAssessorInput:
+    """Build a minimal default-invoker payload for tests."""
+    return AsBuiltAssessorInput(
+        project_id=2,
+        assessment_id="as-built-2-timeout",
+        compiled_authority=json.dumps(CARTOLA_AUTHORITY),
+        original_spec=OriginalSpecContext(
+            spec_mode="unknown",
+            json="",
+            markdown="",
+        ),
+        repo_evidence_pack=pack,
+        openspec_context=OpenSpecContext(
+            present=False,
+            spec_summaries=[],
+            change_summaries=[],
+        ),
+        prior_as_built_assessment="NO_HISTORY",
+        user_input="",
     )
 
 
@@ -456,6 +494,50 @@ def test_build_evidence_pack_includes_search_observation_paths(
     assert pack.search_observations[0].paths == ["live.py"]
 
 
+def test_build_evidence_pack_reads_each_file_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple targets should not reread every repository file repeatedly."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "live.py"
+    source.write_text(
+        "# INV-a4b296c058e88663\n# INV-ffe2e17832c41874\n",
+        encoding="utf-8",
+    )
+    read_counts: dict[str, int] = {}
+    original_read_text = Path.read_text
+
+    def counted_read_text(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        if path == source:
+            read_counts[str(path)] = read_counts.get(str(path), 0) + 1
+        return original_read_text(
+            path,
+            encoding=encoding,
+            errors=errors,
+        )
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    assert pack.search_observations[0].match_count == 1
+    assert pack.search_observations[1].match_count == 1
+    assert read_counts[str(source)] == 1
+
+
 def test_build_evidence_pack_reports_skipped_runtime_directories(
     tmp_path: Path,
 ) -> None:
@@ -665,6 +747,77 @@ def test_runner_rejects_assessment_identity_mismatch(tmp_path: Path) -> None:
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
         assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_runner_timeout_failure_does_not_cache_or_record_event(tmp_path: Path) -> None:
+    """Timeout failures should return an envelope without mutating workflow state."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_timeout_assessment,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="timeout-key",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["detail"] == (
+        "As-Built assessor timed out after 120 seconds."
+    )
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
+
+
+@pytest.mark.anyio
+async def test_default_invoker_times_out_with_clear_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ADK invocation should be bounded instead of hanging forever."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+
+    async def never_returns(**_kwargs: object) -> str:
+        await anyio.sleep(10)
+        return "{}"
+
+    monkeypatch.setattr(as_built_module, "invoke_agent_to_text", never_returns)
+    monkeypatch.setattr(
+        as_built_module,
+        "get_as_built_assessor_timeout_seconds",
+        lambda: 0.01,
+    )
+
+    with anyio.fail_after(1):
+        with pytest.raises(RuntimeError, match=r"timed out after 0\.01 seconds"):
+            await as_built_module._invoke_agent_payload_async(
+                agent=object(),
+                payload=_input_payload_for_pack(pack),
+            )
 
 
 def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> None:
