@@ -184,6 +184,15 @@ class _ScannedFile:
     lower_text: str
 
 
+@dataclass(frozen=True)
+class _CoverageMismatch:
+    """Structured authority coverage mismatch diagnostics."""
+
+    missing: list[tuple[str, tuple[str, ...]]]
+    extra: list[tuple[str, tuple[str, ...]]]
+    duplicates: list[tuple[str, tuple[str, ...]]]
+
+
 class _ProductRepository(Protocol):
     """Product lookup dependency used by the runner."""
 
@@ -745,11 +754,22 @@ class AsBuiltAssessmentRunner:
             )
             if identity_error is not None:
                 raise _AssessmentIdentityError(identity_error)
-            coverage_error = _batch_assessment_coverage_error(
+            batch_assessment = _normalize_grouped_batch_capabilities(
                 assessment=batch_assessment,
                 batch_pack=batch_pack,
             )
-            if coverage_error is not None:
+            coverage_mismatch = _batch_assessment_coverage_mismatch(
+                assessment=batch_assessment,
+                batch_pack=batch_pack,
+            )
+            if coverage_mismatch is not None:
+                coverage_error = _coverage_mismatch_message(
+                    scope=(
+                        "Batch assessment coverage did not match batch "
+                        "authority targets"
+                    ),
+                    mismatch=coverage_mismatch,
+                )
                 _emit_progress(
                     "as_built.batch_failed",
                     project_id=project_id,
@@ -758,6 +778,7 @@ class AsBuiltAssessmentRunner:
                     completed_batches=len(batch_assessments),
                     elapsed_seconds=round(time.monotonic() - batch_started, 3),
                     error=coverage_error,
+                    **_coverage_mismatch_progress_fields(coverage_mismatch),
                 )
                 msg = (
                     f"Batch {index}/{batch_count} failed after "
@@ -1391,14 +1412,18 @@ def merge_batch_assessments(
             f"[batch {index}] {item}" for item in assessment.clarifying_questions
         )
 
-    coverage_error = _coverage_mismatch_message(
-        scope="Batch assessment coverage did not match authority targets",
+    coverage_mismatch = _coverage_mismatch(
         expected_keys=expected_keys,
         actual_keys=list(capabilities),
         duplicate_keys=sorted(duplicates),
     )
-    if coverage_error is not None:
-        raise ValueError(coverage_error)
+    if coverage_mismatch is not None:
+        raise ValueError(
+            _coverage_mismatch_message(
+                scope="Batch assessment coverage did not match authority targets",
+                mismatch=coverage_mismatch,
+            )
+        )
 
     ordered_capabilities = [capabilities[key] for key in expected_keys]
     batch_count = len(batch_assessments)
@@ -1424,14 +1449,13 @@ def merge_batch_assessments(
     )
 
 
-def _coverage_mismatch_message(
+def _coverage_mismatch(
     *,
-    scope: str,
     expected_keys: Sequence[tuple[str, tuple[str, ...]]],
     actual_keys: Sequence[tuple[str, tuple[str, ...]]],
     duplicate_keys: Sequence[tuple[str, tuple[str, ...]]] | None = None,
-) -> str | None:
-    """Return a human-diagnostic coverage mismatch message, if any."""
+) -> _CoverageMismatch | None:
+    """Return structured coverage mismatch diagnostics, if any."""
     expected_set = set(expected_keys)
     actual_counts = Counter(actual_keys)
     actual_set = set(actual_keys)
@@ -1444,14 +1468,37 @@ def _coverage_mismatch_message(
     )
     if not missing and not extra and not duplicates:
         return None
+    return _CoverageMismatch(missing=missing, extra=extra, duplicates=duplicates)
+
+
+def _coverage_mismatch_message(
+    *,
+    scope: str,
+    mismatch: _CoverageMismatch,
+) -> str:
+    """Return a human-diagnostic coverage mismatch message."""
     return (
         f"{scope}: "
-        f"missing={len(missing)} extra={len(extra)} duplicates={len(duplicates)} "
-        f"missing_refs={json.dumps(_format_coverage_keys(missing), sort_keys=True)} "
-        f"extra_refs={json.dumps(_format_coverage_keys(extra), sort_keys=True)} "
+        f"missing={len(mismatch.missing)} extra={len(mismatch.extra)} "
+        f"duplicates={len(mismatch.duplicates)} "
+        "missing_refs="
+        f"{json.dumps(_format_coverage_keys(mismatch.missing), sort_keys=True)} "
+        "extra_refs="
+        f"{json.dumps(_format_coverage_keys(mismatch.extra), sort_keys=True)} "
         "duplicate_refs="
-        f"{json.dumps(_format_coverage_keys(duplicates), sort_keys=True)}"
+        f"{json.dumps(_format_coverage_keys(mismatch.duplicates), sort_keys=True)}"
     )
+
+
+def _coverage_mismatch_progress_fields(
+    mismatch: _CoverageMismatch,
+) -> dict[str, object]:
+    """Return structured progress fields for coverage diagnostics."""
+    return {
+        "missing_refs": _format_coverage_keys(mismatch.missing),
+        "extra_refs": _format_coverage_keys(mismatch.extra),
+        "duplicate_refs": _format_coverage_keys(mismatch.duplicates),
+    }
 
 
 def _format_coverage_keys(
@@ -1468,21 +1515,51 @@ def _format_coverage_keys(
     ]
 
 
-def _batch_assessment_coverage_error(
+def _batch_assessment_coverage_mismatch(
     *,
     assessment: AsBuiltAssessment,
     batch_pack: EvidencePack,
-) -> str | None:
+) -> _CoverageMismatch | None:
     expected_keys = [_target_key(target) for target in batch_pack.authority_targets]
     actual_keys = [
         _capability_key(capability)
         for capability in assessment.capability_assessments
     ]
-    return _coverage_mismatch_message(
-        scope="Batch assessment coverage did not match batch authority targets",
+    return _coverage_mismatch(
         expected_keys=expected_keys,
         actual_keys=actual_keys,
     )
+
+
+def _normalize_grouped_batch_capabilities(
+    *,
+    assessment: AsBuiltAssessment,
+    batch_pack: EvidencePack,
+) -> AsBuiltAssessment:
+    """Split model-grouped same-requirement invariants into target-shaped rows."""
+    expected_keys = {_target_key(target) for target in batch_pack.authority_targets}
+    normalized: list[CapabilityAssessment] = []
+    changed = False
+    for capability in assessment.capability_assessments:
+        key = _capability_key(capability)
+        if key in expected_keys or len(capability.invariant_refs) <= 1:
+            normalized.append(capability)
+            continue
+        split_keys = [
+            (capability.authority_ref, (invariant_ref,))
+            for invariant_ref in capability.invariant_refs
+        ]
+        if split_keys and all(split_key in expected_keys for split_key in split_keys):
+            changed = True
+            normalized.extend(
+                capability.model_copy(update={"invariant_refs": [invariant_ref]})
+                for _, (invariant_ref,) in split_keys
+            )
+            continue
+        normalized.append(capability)
+    if not changed:
+        return assessment
+    return assessment.model_copy(update={"capability_assessments": normalized})
 
 
 def _target_key(target: AuthorityTarget) -> tuple[str, tuple[str, ...]]:

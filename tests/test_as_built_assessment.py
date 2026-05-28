@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import pytest
@@ -57,7 +57,7 @@ MIN_SKIPPED_RUNTIME_FILES = 3
 OMITTED_MANIFEST_FILES = 3
 OVERSIZED_FILE_BYTES = 501 * 1024
 
-CARTOLA_AUTHORITY = {
+CARTOLA_AUTHORITY: dict[str, Any] = {
     "invariants": [
         {
             "id": "INV-a4b296c058e88663",
@@ -87,6 +87,33 @@ CARTOLA_AUTHORITY = {
             "excerpt": "Recommend a live squad while the market is open.",
         }
     ],
+    "requirement_candidates": [],
+    "authority_mappings": [],
+}
+
+GROUPED_INVARIANT_AUTHORITY: dict[str, Any] = {
+    "invariants": [
+        {
+            "id": "INV-group-a",
+            "type": "DATA_CONTRACT",
+            "parameters": {
+                "source_item_id": "REQ.grouped-capability",
+                "rule": "first grouped rule",
+            },
+        },
+        {
+            "id": "INV-group-b",
+            "type": "DATA_CONTRACT",
+            "parameters": {
+                "source_item_id": "REQ.grouped-capability",
+                "rule": "second grouped rule",
+            },
+        },
+    ],
+    "source_map": [],
+    "scope_themes": [],
+    "gaps": [],
+    "assumptions": [],
     "requirement_candidates": [],
     "authority_mappings": [],
 }
@@ -136,8 +163,12 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _seed_authority(engine: Engine) -> str:
+def _seed_authority(
+    engine: Engine,
+    compiled_authority: dict[str, object] | None = None,
+) -> str:
     """Seed one accepted authority row for runner tests."""
+    authority_json = json.dumps(compiled_authority or CARTOLA_AUTHORITY)
     with Session(engine) as session:
         product = Product(name="As-Built Project")
         session.add(product)
@@ -156,7 +187,7 @@ def _seed_authority(engine: Engine) -> str:
             compiler_version="1",
             prompt_hash="prompt",
             compiled_at=datetime(2026, 5, 28, tzinfo=UTC),
-            compiled_artifact_json=json.dumps(CARTOLA_AUTHORITY),
+            compiled_artifact_json=authority_json,
             scope_themes="[]",
             invariants="[]",
             eligible_feature_ids="[]",
@@ -268,6 +299,32 @@ class _CrossBatchCoverageInvoker:
                         limitations=["Tests were not executed."],
                         recommended_backlog_treatment="skip_new_implementation",
                         reasoning="This capability belongs to another batch.",
+                    )
+                ]
+            }
+        )
+
+
+class _GroupedInvariantCoverageInvoker:
+    """Fake invoker that groups same-requirement invariants into one capability."""
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        return _fake_assessment(payload).model_copy(
+            update={
+                "capability_assessments": [
+                    CapabilityAssessment(
+                        authority_ref="REQ.grouped-capability",
+                        invariant_refs=["INV-group-a", "INV-group-b"],
+                        capability_title="Grouped Capability",
+                        status="observed_with_missing_evidence",
+                        confidence="medium",
+                        evidence=[],
+                        limitations=["Tests were not executed."],
+                        recommended_backlog_treatment="create_verification_item",
+                        reasoning=(
+                            "The agent grouped two invariants that share one "
+                            "source requirement."
+                        ),
                     )
                 ]
             }
@@ -1187,6 +1244,7 @@ def test_runner_batch_failure_does_not_cache_or_record_event(
 def test_runner_rejects_cross_batch_capability_coverage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Each batch assessment must cover only its own authority targets."""
     engine = create_engine("sqlite://")
@@ -1222,10 +1280,63 @@ def test_runner_rejects_cross_batch_capability_coverage(
     assert "REQ.live-squad-recommendation" in details["detail"]
     assert "extra_refs" in details["detail"]
     assert "REQ.legal-roster" in details["detail"]
+    stderr_events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
+    failed_event = stderr_events[-1]
+    assert failed_event["event"] == "as_built.batch_failed"
+    assert failed_event["missing_refs"] == [
+        "REQ.live-squad-recommendation [INV-a4b296c058e88663]"
+    ]
+    assert failed_event["extra_refs"] == [
+        "REQ.legal-roster [INV-ffe2e17832c41874]"
+    ]
+    assert failed_event["duplicate_refs"] == []
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
     with Session(engine) as session:
         assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_runner_splits_grouped_same_requirement_invariant_assessment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model may group same-requirement invariants; cache still needs target rows."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine, GROUPED_INVARIANT_AUTHORITY)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 10)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_GroupedInvariantCoverageInvoker(),
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="grouped-invariant-coverage",
+    )
+
+    assert result["ok"] is True
+    capabilities = result["data"]["assessment"]["capability_assessments"]
+    assert [
+        (item["authority_ref"], item["invariant_refs"]) for item in capabilities
+    ] == [
+        ("REQ.grouped-capability", ["INV-group-a"]),
+        ("REQ.grouped-capability", ["INV-group-b"]),
+    ]
+    assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
 
 
 @pytest.mark.anyio
