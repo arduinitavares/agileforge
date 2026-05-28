@@ -182,6 +182,8 @@ Draft shape:
   "schema_version": "agileforge.as_built_assessment.v1",
   "project_id": 2,
   "assessment_id": "as-built-...",
+  "agent_version": "agileforge.as_built_assessor.v1",
+  "evidence_pack_builder_version": "agileforge.as_built_pack_builder.v1",
   "authority_fingerprint": "sha256:...",
   "evidence_pack_fingerprint": "sha256:...",
   "generated_at": "2026-05-28T12:00:00Z",
@@ -224,7 +226,9 @@ required schema fields are empty. It may still be `true` when many statuses are
 `unclear`; completeness means the assessment pass finished, not that evidence is
 strong. If required input is missing, schema content is inconsistent, or target
 coverage is incomplete, `is_complete` must be `false` with clarifying questions
-or limitations.
+or limitations. An empty `authority_targets` list is complete only when the
+evidence pack includes an explicit no-targets limitation; otherwise it is an
+incomplete assessment input.
 
 ### Assessment Statuses
 
@@ -334,10 +338,10 @@ The cached assessment must include enough metadata to detect stale reuse:
 - `evidence_pack_fingerprint`
 - `generated_at`
 
-The assessment is stale when the accepted authority fingerprint changes, the
-repo commit changes, the dirty flag changes, or the evidence-pack builder
-version changes. Stale assessments must not be silently passed into backlog
-generation.
+The assessment is stale when the accepted authority fingerprint, repo commit,
+dirty flag, evidence-pack builder version, or evidence-pack fingerprint differs
+from the cached assessment metadata. Stale assessments must not be silently
+passed into backlog generation.
 
 ## Backlog Integration
 
@@ -432,7 +436,9 @@ Planning, or Sprint execution tickets.
 - Brownfield backlog generation can receive the assessment as advisory context.
 - caRtola smoke can produce non-empty capability assessments or explicit
   `unclear` findings with evidence limitations.
-- No Product Backlog items are created automatically from assessment findings.
+- The assessment command does not mutate persisted Product Backlog rows; later
+  backlog draft generation may use it only as advisory input for PO-reviewed
+  candidates.
 
 ## Deferred
 
