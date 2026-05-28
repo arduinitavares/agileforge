@@ -424,7 +424,7 @@ class AsBuiltAssessmentRunner:
                 select(SpecAuthorityAcceptance)
                 .where(SpecAuthorityAcceptance.product_id == project_id)
                 .where(SpecAuthorityAcceptance.status == "accepted")
-                .order_by(SpecAuthorityAcceptance.decided_at.desc())
+                .order_by(cast("Any", SpecAuthorityAcceptance.decided_at).desc())
             ).first()
             if accepted is None or not accepted.authority_fingerprint:
                 return error_envelope(
@@ -588,14 +588,14 @@ def _original_spec_context(
     spec_mode: SpecMode,
 ) -> OriginalSpecContext:
     if spec_file is None:
-        return OriginalSpecContext(spec_mode=spec_mode, json_text="", markdown="")
+        return OriginalSpecContext(spec_mode=spec_mode, json="", markdown="")
     try:
         text = spec_file.read_text(encoding="utf-8")
     except OSError:
         text = ""
     if spec_file.suffix.lower() == ".json":
-        return OriginalSpecContext(spec_mode=spec_mode, json_text=text, markdown="")
-    return OriginalSpecContext(spec_mode=spec_mode, json_text="", markdown=text)
+        return OriginalSpecContext(spec_mode=spec_mode, json=text, markdown="")
+    return OriginalSpecContext(spec_mode=spec_mode, json="", markdown=text)
 
 
 def _spec_file_fingerprint(spec_file: str | None) -> str | None:
@@ -1036,7 +1036,9 @@ def _str_or_none(value: object) -> str | None:
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items()}
 
 
 def _repo_snapshot(repo: Path) -> RepoSnapshot:

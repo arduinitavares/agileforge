@@ -12,6 +12,7 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     AsBuiltAssessment,
     AsBuiltAssessmentCacheMeta,
     AsBuiltAssessorInput,
+    AssessmentStatus,
     AuthorityTarget,
     CapabilityAssessment,
     EvidencePack,
@@ -47,7 +48,7 @@ def _evidence_pack(authority_targets: list[AuthorityTarget]) -> EvidencePack:
 
 def test_output_schema_accepts_all_statuses() -> None:
     """Accept each status while allowing low-confidence complete assessments."""
-    statuses = [
+    statuses: list[AssessmentStatus] = [
         "observed",
         "observed_with_missing_evidence",
         "contradicted",
@@ -157,18 +158,20 @@ def test_input_schema_accepts_unknown_spec_mode_and_no_history() -> None:
 def test_input_schema_rejects_extra_fields() -> None:
     """Unexpected input fields should fail before agent invocation."""
     with pytest.raises(ValidationError):
-        AsBuiltAssessorInput(
-            project_id=2,
-            assessment_id="as-built-2-abc",
-            compiled_authority='{"invariants":[]}',
-            original_spec=OriginalSpecContext(
-                spec_mode="unknown",
-                json="{}",
-                markdown="",
-            ),
-            repo_evidence_pack=_evidence_pack([]),
-            openspec_context=OpenSpecContext(),
-            unexpected="blocked",
+        AsBuiltAssessorInput.model_validate(
+            {
+                "project_id": 2,
+                "assessment_id": "as-built-2-abc",
+                "compiled_authority": '{"invariants":[]}',
+                "original_spec": OriginalSpecContext(
+                    spec_mode="unknown",
+                    json="{}",
+                    markdown="",
+                ).model_dump(mode="json", by_alias=True),
+                "repo_evidence_pack": _evidence_pack([]).model_dump(mode="json"),
+                "openspec_context": OpenSpecContext().model_dump(mode="json"),
+                "unexpected": "blocked",
+            }
         )
 
 

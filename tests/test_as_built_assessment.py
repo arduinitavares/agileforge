@@ -25,6 +25,7 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     ASSESSMENT_SCHEMA_VERSION,
     EVIDENCE_PACK_BUILDER_VERSION,
     AsBuiltAssessment,
+    AsBuiltAssessorInput,
     CapabilityAssessment,
     EvidencePack,
     RepoSnapshot,
@@ -171,14 +172,14 @@ def _seed_authority(engine: Engine) -> str:
         return authority_fingerprint
 
 
-def _fake_assessment(input_payload: object) -> AsBuiltAssessment:
+def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return a schema-valid assessment for runner tests."""
-    pack = input_payload.repo_evidence_pack
+    pack = payload.repo_evidence_pack
     target = pack.authority_targets[0]
     return AsBuiltAssessment(
         schema_version=ASSESSMENT_SCHEMA_VERSION,
-        project_id=input_payload.project_id,
-        assessment_id=input_payload.assessment_id,
+        project_id=payload.project_id,
+        assessment_id=payload.assessment_id,
         agent_version=AGENT_VERSION,
         evidence_pack_builder_version=EVIDENCE_PACK_BUILDER_VERSION,
         authority_fingerprint=pack.authority_fingerprint,
@@ -210,9 +211,9 @@ def _fake_assessment(input_payload: object) -> AsBuiltAssessment:
     )
 
 
-def _mismatched_assessment(input_payload: object) -> AsBuiltAssessment:
+def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
-    return _fake_assessment(input_payload).model_copy(
+    return _fake_assessment(payload).model_copy(
         update={"evidence_pack_fingerprint": "sha256:wrong-pack"}
     )
 

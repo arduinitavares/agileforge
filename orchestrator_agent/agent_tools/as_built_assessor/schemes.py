@@ -6,10 +6,18 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ASSESSMENT_SCHEMA_VERSION: str = "agileforge.as_built_assessment.v1"
-EVIDENCE_PACK_SCHEMA_VERSION: str = "agileforge.as_built_evidence_pack.v1"
-AGENT_VERSION: str = "agileforge.as_built_assessor.v1"
-EVIDENCE_PACK_BUILDER_VERSION: str = "agileforge.as_built_pack_builder.v1"
+ASSESSMENT_SCHEMA_VERSION: Literal["agileforge.as_built_assessment.v1"] = (
+    "agileforge.as_built_assessment.v1"
+)
+EVIDENCE_PACK_SCHEMA_VERSION: Literal["agileforge.as_built_evidence_pack.v1"] = (
+    "agileforge.as_built_evidence_pack.v1"
+)
+AGENT_VERSION: Literal["agileforge.as_built_assessor.v1"] = (
+    "agileforge.as_built_assessor.v1"
+)
+EVIDENCE_PACK_BUILDER_VERSION: Literal["agileforge.as_built_pack_builder.v1"] = (
+    "agileforge.as_built_pack_builder.v1"
+)
 
 SpecMode = Literal["current_state", "desired_state", "proposed_change", "unknown"]
 AssessmentStatus = Literal[

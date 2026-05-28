@@ -8,10 +8,11 @@ import os
 import re
 import shutil
 import subprocess  # nosec B404
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlmodel import Session, select
@@ -570,7 +571,7 @@ class EvidenceCollectionRunner:
                 select(SpecAuthorityAcceptance)
                 .where(SpecAuthorityAcceptance.product_id == project_id)
                 .where(SpecAuthorityAcceptance.status == "accepted")
-                .order_by(SpecAuthorityAcceptance.decided_at.desc())
+                .order_by(cast("Any", SpecAuthorityAcceptance.decided_at).desc())
             ).first()
             if accepted is None or not accepted.authority_fingerprint:
                 return error_envelope(
@@ -913,10 +914,11 @@ def _invariant_terms_from_relations(raw_relations: list[object]) -> set[str]:
     """Extract invariant reference terms from authority item relations."""
     invariant_terms: set[str] = set()
     for raw_relation in raw_relations:
-        if not isinstance(raw_relation, dict):
+        if not isinstance(raw_relation, Mapping):
             continue
+        relation = cast("Mapping[str, object]", raw_relation)
         for relation_key in ("target", "to"):
-            relation_target = str(raw_relation.get(relation_key) or "").strip()
+            relation_target = str(relation.get(relation_key) or "").strip()
             if relation_target.startswith("INV-"):
                 invariant_terms.add(relation_target)
     return invariant_terms

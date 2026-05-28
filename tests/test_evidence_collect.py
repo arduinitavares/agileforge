@@ -3,6 +3,7 @@
 import json
 import socket
 import tempfile
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from services.agent_workbench.evidence_collect import (
     IMPLEMENTATION_EVIDENCE_STATE_KEY,
     CollectorMetadata,
     EvidenceCollectionRunner,
+    EvidenceKind,
     EvidencePath,
     ReconciliationFinding,
     ReconciliationReport,
@@ -37,7 +39,7 @@ from services.agent_workbench.evidence_collect import (
 )
 
 
-def _evidence(kind: str, path: str = "services/example.py") -> EvidencePath:
+def _evidence(kind: EvidenceKind, path: str = "services/example.py") -> EvidencePath:
     """Build a minimal evidence path for classification tests."""
     return EvidencePath(
         kind=kind,
@@ -170,7 +172,7 @@ def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
     engine = create_engine("sqlite://")
     SQLModel.metadata.create_all(engine)
     _seed_authority(engine)
-    with tempfile.TemporaryDirectory(prefix="afsock-", dir="/tmp") as repo_dir:
+    with tempfile.TemporaryDirectory(prefix="afsock-", dir="/tmp") as repo_dir:  # nosec B108
         repo = Path(repo_dir)
         (repo / "budget.py").write_text(
             "# REQ.budget-validation\n",
@@ -183,7 +185,10 @@ def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
             encoding="utf-8",
         )
         socket_path = repo / "daemon.sock"
-        sock = socket.socket(socket.AF_UNIX)
+        af_unix = getattr(socket, "AF_UNIX", None)
+        if af_unix is None:
+            return
+        sock = socket.socket(af_unix)
         try:
             sock.bind(str(socket_path))
             runner = EvidenceCollectionRunner(
@@ -204,7 +209,7 @@ def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
     assert result["ok"] is True
     warnings = cast("list[dict[str, object]]", result["warnings"])
     skipped_paths = {
-        str(_mapping(warning)["details"]["path"])
+        str(_mapping(_mapping(warning)["details"])["path"])
         for warning in warnings
         if warning.get("code") == "EVIDENCE_FILE_SKIPPED"
     }
@@ -285,12 +290,16 @@ def test_collect_repo_evidence_warns_when_directory_cannot_be_read(
     """Verify unreadable repository subtrees produce a warning."""
 
     def fake_walk(
-        repo_root: Path,
-        onerror: object | None = None,
-    ) -> object:
+        repo_root: str | Path,
+        topdown: bool = True,
+        onerror: Callable[[OSError], None] | None = None,
+        followlinks: bool = False,
+    ) -> Iterator[tuple[str, list[str], list[str]]]:
+        _ = (topdown, followlinks)
+        root_path = Path(repo_root)
         error = OSError("blocked")
-        error.filename = str(repo_root / "secret")
-        if callable(onerror):
+        error.filename = str(root_path / "secret")
+        if onerror is not None:
             onerror(error)
         return iter(())
 
@@ -379,7 +388,7 @@ def test_evidence_path_rejects_empty_required_evidence_fields(
 ) -> None:
     """Verify evidence paths require useful location and matching context."""
     with pytest.raises(ValidationError, match=message):
-        EvidencePath(**payload)
+        EvidencePath.model_validate(payload)
 
 
 def test_report_schema_matches_phase_1a_contract() -> None:
