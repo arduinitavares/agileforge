@@ -1731,15 +1731,16 @@ def _normalize_grouped_batch_capabilities(
         if key in expected_keys or len(capability.invariant_refs) <= 1:
             normalized.append(capability)
             continue
-        split_keys = [
+        matching_split_keys = [
             (capability.authority_ref, (invariant_ref,))
             for invariant_ref in capability.invariant_refs
+            if (capability.authority_ref, (invariant_ref,)) in expected_keys
         ]
-        if split_keys and all(split_key in expected_keys for split_key in split_keys):
+        if matching_split_keys:
             changed = True
             normalized.extend(
                 capability.model_copy(update={"invariant_refs": [invariant_ref]})
-                for _, (invariant_ref,) in split_keys
+                for _, (invariant_ref,) in matching_split_keys
             )
             continue
         normalized.append(capability)

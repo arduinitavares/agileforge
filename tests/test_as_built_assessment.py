@@ -1355,6 +1355,44 @@ def test_runner_splits_grouped_same_requirement_invariant_assessment(
     assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
 
 
+def test_runner_splits_grouped_refs_that_include_out_of_batch_invariants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grouped rows may include related refs outside the current batch."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine, GROUPED_INVARIANT_AUTHORITY)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_GroupedInvariantCoverageInvoker(),
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="grouped-out-of-batch-invariant-coverage",
+    )
+
+    assert result["ok"] is True
+    capabilities = result["data"]["assessment"]["capability_assessments"]
+    assert [
+        (item["authority_ref"], item["invariant_refs"]) for item in capabilities
+    ] == [
+        ("REQ.grouped-capability", ["INV-group-a"]),
+        ("REQ.grouped-capability", ["INV-group-b"]),
+    ]
+
+
 def test_runner_adds_batch_context_to_invoker_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
