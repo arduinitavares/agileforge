@@ -337,6 +337,16 @@ class _GroupedInvariantCoverageInvoker:
         )
 
 
+class _ProgressContextFailureInvoker:
+    """Fake invoker that emits model-level progress while inside a batch."""
+
+    def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
+        _ = payload
+        as_built_module._emit_progress("as_built.model_call_failed", error="boom")
+        msg = "boom"
+        raise RuntimeError(msg)
+
+
 def _mismatched_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
     """Return an assessment with stale host identity fields."""
     return _fake_assessment(payload).model_copy(
@@ -1345,6 +1355,51 @@ def test_runner_splits_grouped_same_requirement_invariant_assessment(
     assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
 
 
+def test_runner_adds_batch_context_to_invoker_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Deep model progress events should include current batch context."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=_ProgressContextFailureInvoker(),
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="progress-context",
+    )
+
+    assert result["ok"] is False
+    stderr_events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip()
+    ]
+    model_failure = next(
+        event
+        for event in stderr_events
+        if event["event"] == "as_built.model_call_failed"
+    )
+    assert model_failure["batch_index"] == 1
+    assert model_failure["batch_count"] == EXPECTED_CARTOLA_TARGET_COUNT
+    assert model_failure["batch_target_count"] == 1
+
+
 @pytest.mark.anyio
 async def test_default_invoker_times_out_with_clear_error(
     tmp_path: Path,
@@ -1431,6 +1486,103 @@ async def test_default_invoker_retries_transient_provider_json_error(
     ]
     assert retry_events[0]["attempt_index"] == 1
     assert retry_events[0]["next_attempt_index"] == EXPECTED_TRANSIENT_RETRY_CALLS
+
+
+@pytest.mark.anyio
+async def test_default_invoker_retries_schema_invalid_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema-invalid model JSON should retry before failing the whole batch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    payload = _input_payload_for_pack(pack)
+    valid = _fake_assessment(payload).model_dump_json()
+    calls = 0
+    payloads: list[str] = []
+
+    async def flaky_schema(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        payloads.append(str(kwargs["payload_json"]))
+        if calls == 1:
+            return '{"metadata": {"bad": true}}'
+        return valid
+
+    monkeypatch.setattr(as_built_module, "invoke_agent_to_text", flaky_schema)
+
+    assessment = await as_built_module._invoke_agent_payload_async(
+        agent=object(),
+        payload=payload,
+    )
+
+    assert calls == EXPECTED_TRANSIENT_RETRY_CALLS
+    assert assessment.assessment_id == payload.assessment_id
+    retry_input = AsBuiltAssessorInput.model_validate_json(payloads[1])
+    assert "SYSTEM_FEEDBACK" in retry_input.user_input
+    assert "schema-invalid JSON" in retry_input.user_input
+    assert "metadata" in retry_input.user_input
+
+
+@pytest.mark.anyio
+async def test_default_invoker_retries_adk_schema_validation_error_with_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADK output_schema validation failures should feed back before retrying."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pack = build_evidence_pack(
+        project_id=2,
+        authority_fingerprint="sha256:authority",
+        compiled_authority=CARTOLA_AUTHORITY,
+        repo_path=repo,
+        spec_mode="unknown",
+        spec_file=None,
+    )
+    payload = _input_payload_for_pack(pack)
+    valid = _fake_assessment(payload).model_dump_json()
+    calls = 0
+    payloads: list[str] = []
+
+    async def flaky_adk_schema(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        payloads.append(str(kwargs["payload_json"]))
+        if calls == 1:
+            message = "13 validation errors for AsBuiltAssessment"
+            raise AgentInvocationError(
+                message,
+                validation_errors=[
+                    {
+                        "loc": ("schema_version",),
+                        "msg": "Field required",
+                        "type": "missing",
+                    }
+                ],
+            )
+        return valid
+
+    monkeypatch.setattr(as_built_module, "invoke_agent_to_text", flaky_adk_schema)
+
+    assessment = await as_built_module._invoke_agent_payload_async(
+        agent=object(),
+        payload=payload,
+    )
+
+    assert calls == EXPECTED_TRANSIENT_RETRY_CALLS
+    assert assessment.assessment_id == payload.assessment_id
+    retry_input = AsBuiltAssessorInput.model_validate_json(payloads[1])
+    assert "SYSTEM_FEEDBACK" in retry_input.user_input
+    assert "schema_version" in retry_input.user_input
 
 
 def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> None:

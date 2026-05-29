@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import shutil
@@ -78,7 +79,11 @@ MAX_SNIPPET_BYTES: int = 8 * 1024
 MAX_PACK_BYTES: int = 750 * 1024
 MAX_FILE_MANIFEST_ENTRIES: int = 300
 MAX_TRANSIENT_MODEL_ATTEMPTS: int = 3
+MAX_MODEL_RETRY_FEEDBACK_CHARS: int = 2_000
 GIT_BINARY: str = shutil.which("git") or "git"
+_PROGRESS_CONTEXT: contextvars.ContextVar[
+    dict[str, object] | None
+] = contextvars.ContextVar("as_built_progress_context", default=None)
 
 _SKIP_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -101,10 +106,12 @@ _SKIP_DIR_NAMES: frozenset[str] = frozenset(
 
 def _emit_progress(event: str, **details: object) -> None:
     """Emit machine-readable command progress without contaminating stdout JSON."""
+    progress_context = _PROGRESS_CONTEXT.get() or {}
     payload = {
         "event": event,
         "command": AS_BUILT_ASSESS_COMMAND,
         "timestamp": utc_now_iso(),
+        **progress_context,
         **details,
     }
     sys.stderr.write(f"{json.dumps(payload, sort_keys=True, default=str)}\n")
@@ -132,6 +139,118 @@ def _is_transient_model_error(exc: BaseException) -> bool:
             "5xx",
         )
     )
+
+
+def _is_schema_validation_invocation_error(exc: AgentInvocationError) -> bool:
+    """Return whether ADK failed while validating the model's structured output."""
+    return bool(exc.validation_errors)
+
+
+def _retry_feedback_text(
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> str:
+    """Build bounded feedback for the next model attempt."""
+    details = ""
+    if validation_errors is not None:
+        details = json.dumps(validation_errors, sort_keys=True, default=str)
+    feedback = (
+        "SYSTEM_FEEDBACK: Your previous As-Built response failed validation.\n"
+        f"ERROR: {error}\n"
+        f"VALIDATION_ERRORS: {details}\n"
+        "Return JSON only. Match the AsBuiltAssessment schema exactly. "
+        "Do not add wrapper fields such as metadata."
+    )
+    return feedback[:MAX_MODEL_RETRY_FEEDBACK_CHARS]
+
+
+def _payload_json_with_retry_feedback(
+    payload: AsBuiltAssessorInput,
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> str:
+    """Return a payload JSON that includes validation feedback for retry attempts."""
+    existing_user_input = payload.user_input.strip()
+    feedback = _retry_feedback_text(
+        error=error,
+        validation_errors=validation_errors,
+    )
+    user_input = (
+        f"{existing_user_input}\n\n{feedback}" if existing_user_input else feedback
+    )
+    return payload.model_copy(update={"user_input": user_input}).model_dump_json(
+        by_alias=True
+    )
+
+
+def _validate_model_output(raw_text: str) -> AsBuiltAssessment:
+    """Parse and validate one model response as an AsBuiltAssessment."""
+    parsed = parse_json_payload(raw_text)
+    if parsed is None:
+        msg = "As-Built assessor returned invalid JSON."
+        raise ValueError(msg)
+    return AsBuiltAssessment.model_validate(parsed)
+
+
+def _validation_errors_from_exception(exc: BaseException) -> object | None:
+    """Return structured validation errors when an exception provides them."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    try:
+        return errors()
+    except TypeError:
+        return None
+
+
+def _model_output_error_message(exc: BaseException) -> str:
+    """Return stable, user-facing text for model output validation failures."""
+    if isinstance(exc, ValidationError):
+        return "As-Built assessor returned schema-invalid JSON."
+    return str(exc)
+
+
+def _emit_model_call_failed(
+    payload: AsBuiltAssessorInput,
+    *,
+    model_call_started: float,
+    error: str,
+    attempt_index: int,
+) -> None:
+    """Emit a failed model call progress event."""
+    _emit_progress(
+        "as_built.model_call_failed",
+        project_id=payload.project_id,
+        assessment_id=payload.assessment_id,
+        elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+        error=error,
+        attempt_index=attempt_index,
+        max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
+    )
+
+
+def _emit_model_call_retrying(
+    payload: AsBuiltAssessorInput,
+    *,
+    model_call_started: float,
+    error: str,
+    attempt_index: int,
+) -> None:
+    """Emit a retry progress event for a model call."""
+    _emit_progress(
+        "as_built.model_call_retrying",
+        project_id=payload.project_id,
+        assessment_id=payload.assessment_id,
+        elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+        error=error,
+        attempt_index=attempt_index,
+        next_attempt_index=attempt_index + 1,
+        max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
+    )
+
+
 _SKIP_FILE_NAMES: frozenset[str] = frozenset(
     {"uv.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
 )
@@ -746,8 +865,23 @@ class AsBuiltAssessmentRunner:
                 evidence_pack_fingerprint=batch_pack.evidence_pack_fingerprint,
                 timeout_seconds=_progress_timeout_seconds(),
             )
+            progress_token = _PROGRESS_CONTEXT.set(
+                {
+                    "batch_index": index,
+                    "batch_count": batch_count,
+                    "batch_size": batch_size,
+                    "batch_target_count": len(batch_pack.authority_targets),
+                    "completed_batches": len(batch_assessments),
+                    "batch_evidence_pack_fingerprint": (
+                        batch_pack.evidence_pack_fingerprint
+                    ),
+                }
+            )
             try:
-                batch_assessment = self._invoke_agent(batch_input)
+                try:
+                    batch_assessment = self._invoke_agent(batch_input)
+                finally:
+                    _PROGRESS_CONTEXT.reset(progress_token)
             except (RuntimeError, ValidationError, ValueError) as exc:
                 _emit_progress(
                     "as_built.batch_failed",
@@ -843,14 +977,14 @@ async def _invoke_agent_payload_async(
     timeout_seconds = get_as_built_assessor_timeout_seconds()
     model_call_started = time.monotonic()
     payload_json = payload.model_dump_json(by_alias=True)
-    raw_text: str | None = None
+    attempt_payload_json = payload_json
     for attempt_index in range(1, MAX_TRANSIENT_MODEL_ATTEMPTS + 1):
         _emit_progress(
             "as_built.model_call_started",
             project_id=payload.project_id,
             assessment_id=payload.assessment_id,
             model=get_agent_model_info(agent),
-            payload_chars=len(payload_json),
+            payload_chars=len(attempt_payload_json),
             timeout_seconds=timeout_seconds,
             attempt_index=attempt_index,
             max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
@@ -860,80 +994,80 @@ async def _invoke_agent_payload_async(
                 raw_text = await invoke_agent_to_text(
                     agent=agent,
                     runner_identity=AS_BUILT_RUNNER_IDENTITY,
-                    payload_json=payload_json,
+                    payload_json=attempt_payload_json,
                     no_text_error="As-Built assessor returned no text response",
                 )
-            break
+            assessment = _validate_model_output(raw_text)
         except TimeoutError as exc:
-            _emit_progress(
-                "as_built.model_call_failed",
-                project_id=payload.project_id,
-                assessment_id=payload.assessment_id,
-                elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-                error=f"As-Built assessor timed out after {timeout_seconds:g} seconds.",
+            error = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
+            _emit_model_call_failed(
+                payload,
+                model_call_started=model_call_started,
+                error=error,
                 attempt_index=attempt_index,
-                max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
             )
-            msg = f"As-Built assessor timed out after {timeout_seconds:g} seconds."
-            raise RuntimeError(msg) from exc
+            raise RuntimeError(error) from exc
         except AgentInvocationError as exc:
+            is_schema_validation = _is_schema_validation_invocation_error(exc)
             if (
                 attempt_index >= MAX_TRANSIENT_MODEL_ATTEMPTS
-                or not _is_transient_model_error(exc)
+                or not (_is_transient_model_error(exc) or is_schema_validation)
             ):
-                _emit_progress(
-                    "as_built.model_call_failed",
-                    project_id=payload.project_id,
-                    assessment_id=payload.assessment_id,
-                    elapsed_seconds=round(time.monotonic() - model_call_started, 3),
+                _emit_model_call_failed(
+                    payload,
+                    model_call_started=model_call_started,
                     error=str(exc),
                     attempt_index=attempt_index,
-                    max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
                 )
                 raise
+            if is_schema_validation:
+                attempt_payload_json = _payload_json_with_retry_feedback(
+                    payload,
+                    error=str(exc),
+                    validation_errors=exc.validation_errors,
+                )
+            _emit_model_call_retrying(
+                payload,
+                model_call_started=model_call_started,
+                error=str(exc),
+                attempt_index=attempt_index,
+            )
+            continue
+        except (ValueError, ValidationError) as exc:
+            error = _model_output_error_message(exc)
+            if attempt_index >= MAX_TRANSIENT_MODEL_ATTEMPTS:
+                _emit_model_call_failed(
+                    payload,
+                    model_call_started=model_call_started,
+                    error=error,
+                    attempt_index=attempt_index,
+                )
+                raise
+            attempt_payload_json = _payload_json_with_retry_feedback(
+                payload,
+                error=error,
+                validation_errors=_validation_errors_from_exception(exc),
+            )
+            _emit_model_call_retrying(
+                payload,
+                model_call_started=model_call_started,
+                error=error,
+                attempt_index=attempt_index,
+            )
+            continue
+        else:
             _emit_progress(
-                "as_built.model_call_retrying",
+                "as_built.model_call_completed",
                 project_id=payload.project_id,
                 assessment_id=payload.assessment_id,
                 elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-                error=str(exc),
+                capability_count=len(assessment.capability_assessments),
                 attempt_index=attempt_index,
-                next_attempt_index=attempt_index + 1,
                 max_attempts=MAX_TRANSIENT_MODEL_ATTEMPTS,
             )
-    if raw_text is None:
-        msg = "As-Built assessor returned no text response"
-        raise ValueError(msg)
-    parsed = parse_json_payload(raw_text)
-    if parsed is None:
-        _emit_progress(
-            "as_built.model_call_failed",
-            project_id=payload.project_id,
-            assessment_id=payload.assessment_id,
-            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-            error="As-Built assessor returned invalid JSON.",
-        )
-        msg = "As-Built assessor returned invalid JSON."
-        raise ValueError(msg)
-    try:
-        assessment = AsBuiltAssessment.model_validate(parsed)
-    except ValidationError:
-        _emit_progress(
-            "as_built.model_call_failed",
-            project_id=payload.project_id,
-            assessment_id=payload.assessment_id,
-            elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-            error="As-Built assessor returned schema-invalid JSON.",
-        )
-        raise
-    _emit_progress(
-        "as_built.model_call_completed",
-        project_id=payload.project_id,
-        assessment_id=payload.assessment_id,
-        elapsed_seconds=round(time.monotonic() - model_call_started, 3),
-        capability_count=len(assessment.capability_assessments),
-    )
-    return assessment
+            return assessment
+    msg = "As-Built assessor exhausted model retry attempts."
+    raise RuntimeError(msg)
 
 
 def _assessment_id(
