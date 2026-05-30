@@ -155,6 +155,15 @@ class _BacklogPhaseRunner(Protocol):
         """Generate or refine a Backlog draft."""
         ...
 
+    def preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a non-persisted Backlog preview."""
+        ...
+
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Return Backlog attempt history."""
         ...
@@ -912,6 +921,18 @@ class AgentWorkbenchApplication:
     ) -> dict[str, Any]:
         """Generate or refine a Backlog draft."""
         return self._get_backlog_runner().generate(
+            project_id=project_id,
+            user_input=user_input,
+        )
+
+    def backlog_preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a non-persisted Backlog preview."""
+        return self._get_backlog_runner().preview(
             project_id=project_id,
             user_input=user_input,
         )

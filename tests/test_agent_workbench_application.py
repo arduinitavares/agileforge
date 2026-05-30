@@ -698,6 +698,26 @@ class _FakeBacklogRunner:
             "errors": [],
         }
 
+    def preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Backlog preview."""
+        self.calls.append(
+            (
+                "preview",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "persisted": False},
+            "warnings": [],
+            "errors": [],
+        }
+
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Record Backlog history lookup."""
         self.calls.append(("history", {"project_id": project_id}))
@@ -1575,6 +1595,13 @@ def test_application_routes_backlog_commands_to_runner() -> None:
         )["data"]["is_complete"]
         is False
     )
+    assert (
+        app.backlog_preview(
+            project_id=PROJECT_ID,
+            user_input="brownfield smoke",
+        )["data"]["persisted"]
+        is False
+    )
     assert app.backlog_history(project_id=PROJECT_ID)["data"]["items"] == []
     assert (
         app.backlog_save(
@@ -1595,6 +1622,7 @@ def test_application_routes_backlog_commands_to_runner() -> None:
     )
     assert runner.calls == [
         ("generate", {"project_id": PROJECT_ID, "user_input": "tighten themes"}),
+        ("preview", {"project_id": PROJECT_ID, "user_input": "brownfield smoke"}),
         ("history", {"project_id": PROJECT_ID}),
         (
             "save",

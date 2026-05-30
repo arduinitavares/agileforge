@@ -172,6 +172,48 @@ async def generate_backlog_draft(
     }
 
 
+async def preview_backlog_draft(
+    *,
+    project_id: int,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    run_backlog_agent: Callable[..., Awaitable[dict[str, Any]]],
+    user_input: str | None,
+) -> dict[str, Any]:
+    """Generate a Backlog preview without recording attempts or changing state."""
+    state = await load_state()
+    fsm_state = _normalize_fsm_state(state.get("fsm_state"))
+    if fsm_state == OrchestratorState.SETUP_REQUIRED.value:
+        raise BacklogPhaseError("Setup required before backlog")
+
+    normalized_user_input = (user_input or "").strip()
+    backlog_result = await run_backlog_agent(
+        state,
+        project_id=project_id,
+        user_input=normalized_user_input,
+    )
+    output_artifact = dict(backlog_result.get("output_artifact") or {})
+    is_complete = _effective_backlog_completion(backlog_result, output_artifact)
+    output_artifact["is_complete"] = is_complete
+    artifact_fingerprint = _backlog_artifact_fingerprint(output_artifact)
+
+    return {
+        "fsm_state": fsm_state,
+        "is_complete": is_complete,
+        "backlog_run_success": bool(backlog_result.get("success")),
+        "error": backlog_result.get("error"),
+        "trigger": "preview",
+        "input_context": backlog_result.get("input_context"),
+        "output_artifact": output_artifact,
+        "attempt_count": None,
+        "attempt_id": None,
+        "artifact_fingerprint": artifact_fingerprint,
+        "persisted": False,
+        **workflow_state.failure_meta(
+            backlog_result, fallback_summary=backlog_result.get("error")
+        ),
+    }
+
+
 async def get_backlog_history(
     *,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
@@ -380,6 +422,7 @@ __all__ = [
     "ensure_backlog_attempts",
     "generate_backlog_draft",
     "get_backlog_history",
+    "preview_backlog_draft",
     "record_backlog_attempt",
     "save_backlog_draft",
     "set_backlog_fsm_state",

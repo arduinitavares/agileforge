@@ -414,6 +414,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
     capabilities = _capability_by_name()
     backlog_command_names = {
         "agileforge backlog generate",
+        "agileforge backlog preview",
         "agileforge backlog history",
         "agileforge backlog save",
         "agileforge backlog reconcile",
@@ -428,6 +429,7 @@ def test_backlog_commands_are_registered_and_available() -> None:
         assert capabilities[command_name]["installed"] is True
 
     generate = command_schema_payload("agileforge backlog generate")
+    preview = command_schema_payload("agileforge backlog preview")
     history = command_schema_payload("agileforge backlog history")
     save = command_schema_payload("agileforge backlog save")
     reconcile = command_schema_payload("agileforge backlog reconcile")
@@ -438,6 +440,10 @@ def test_backlog_commands_are_registered_and_available() -> None:
     assert generate["input"]["required"] == ["project_id"]
     assert generate["input"]["optional"] == ["input"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
+    assert preview["mutates"] is False
+    assert preview["input"]["required"] == ["project_id"]
+    assert preview["input"]["optional"] == ["input"]
+    assert ErrorCode.MUTATION_FAILED.value in preview["errors"]
     assert history["mutates"] is False
     assert history["input"]["required"] == ["project_id"]
     assert save["mutates"] is True

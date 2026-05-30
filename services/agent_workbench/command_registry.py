@@ -377,6 +377,20 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge backlog preview",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        input_optional=("input",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge backlog history",
         mutates=False,
         phase="phase_2d",

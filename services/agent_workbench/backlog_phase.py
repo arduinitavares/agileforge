@@ -20,6 +20,7 @@ from services.phases.backlog_service import (
     BacklogPhaseError,
     generate_backlog_draft,
     get_backlog_history,
+    preview_backlog_draft,
     save_backlog_draft,
 )
 from services.workflow import WorkflowService
@@ -68,6 +69,15 @@ class BacklogPhaseRunner:
     ) -> dict[str, Any]:
         """Generate or refine a Backlog draft."""
         return anyio.run(self._generate, project_id, user_input)
+
+    def preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate a non-persisted Backlog preview."""
+        return anyio.run(self._preview, project_id, user_input)
 
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Return Backlog draft attempt history."""
@@ -141,6 +151,32 @@ class BacklogPhaseRunner:
                     str(project_id), state
                 ),
                 now_iso=_now_iso,
+                run_backlog_agent=run_backlog_agent_from_state,
+                user_input=user_input,
+            )
+        except BacklogPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        if data.get("backlog_run_success") is False:
+            return _backlog_runtime_error(project_id=project_id, data=data)
+        return _data_envelope(data)
+
+    async def _preview(
+        self,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            data = await preview_backlog_draft(
+                project_id=project_id,
+                load_state=lambda: self._load_backlog_state(
+                    str(project_id), project_id
+                ),
                 run_backlog_agent=run_backlog_agent_from_state,
                 user_input=user_input,
             )

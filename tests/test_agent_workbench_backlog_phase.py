@@ -223,6 +223,78 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
     )
 
 
+def test_backlog_preview_runs_from_sprint_complete_without_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog preview should be safe for brownfield quality checks post-sprint."""
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        state.update(_as_built_state(_as_built_assessment_payload()))
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_backlog_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        captured["state"] = dict(state)
+        captured["project_id"] = project_id
+        captured["user_input"] = user_input
+        input_context = build_backlog_input_context(state, user_input=user_input)
+        return {
+            "success": True,
+            "input_context": input_context,
+            "output_artifact": {
+                "backlog_items": [{"title": "Verify live squad evidence"}],
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.run_backlog_agent_from_state",
+        fake_run_backlog_agent_from_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "backlog_attempts": [{"attempt_id": "old-attempt"}],
+        }
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.preview(project_id=2)
+
+    assert result["ok"] is True
+    assert result["data"]["persisted"] is False
+    assert result["data"]["attempt_id"] is None
+    assert result["data"]["fsm_state"] == "SPRINT_COMPLETE"
+    assert result["data"]["input_context"]["as_built_assessment"].startswith("{")
+    assert "product_backlog_assessment" not in workflow.state
+    assert workflow.state["backlog_attempts"] == [{"attempt_id": "old-attempt"}]
+
+
 def test_build_backlog_input_context_uses_no_evidence_when_cache_missing() -> None:
     """Backlog input context should use NO_EVIDENCE without cached evidence."""
     context = build_backlog_input_context(

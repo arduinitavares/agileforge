@@ -232,6 +232,26 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def backlog_preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a backlog preview payload."""
+        self.calls.append(
+            (
+                "backlog_preview",
+                {"project_id": project_id, "user_input": user_input},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "persisted": False},
+            "warnings": [],
+            "errors": [],
+        }
+
     def backlog_history(self, *, project_id: int) -> JsonObject:
         """Return a backlog history payload."""
         self.calls.append(("backlog_history", {"project_id": project_id}))
@@ -1815,6 +1835,21 @@ def test_cli_routes_vision_commands(
                 {"project_id": PROJECT_ID, "user_input": "split MVP and future bets"},
             ),
             "agileforge backlog generate",
+        ),
+        (
+            [
+                "backlog",
+                "preview",
+                "--project-id",
+                str(PROJECT_ID),
+                "--input",
+                "brownfield preview",
+            ],
+            (
+                "backlog_preview",
+                {"project_id": PROJECT_ID, "user_input": "brownfield preview"},
+            ),
+            "agileforge backlog preview",
         ),
         (
             ["backlog", "history", "--project-id", str(PROJECT_ID)],

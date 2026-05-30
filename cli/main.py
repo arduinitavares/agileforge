@@ -256,6 +256,15 @@ class _Application(Protocol):
         """Generate or refine a Backlog draft."""
         ...
 
+    def backlog_preview(
+        self,
+        *,
+        project_id: int,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Generate a non-persisted Backlog preview."""
+        ...
+
     def backlog_history(self, *, project_id: int) -> JsonObject:
         """Return Backlog attempt history."""
         ...
@@ -1076,6 +1085,13 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     backlog_generate.add_argument("--project-id", type=int, required=True)
     backlog_generate.add_argument("--input", dest="user_input")
     backlog_generate.set_defaults(command_handler=_backlog_generate)
+    backlog_preview = backlog_sub.add_parser(
+        "preview",
+        help="Generate a non-persisted Backlog preview.",
+    )
+    backlog_preview.add_argument("--project-id", type=int, required=True)
+    backlog_preview.add_argument("--input", dest="user_input")
+    backlog_preview.set_defaults(command_handler=_backlog_preview)
     backlog_history = backlog_sub.add_parser(
         "history",
         help="Show Backlog attempt history.",
@@ -2355,6 +2371,17 @@ def _backlog_generate(
 ) -> CommandResult:
     """Route Backlog generate to the application facade."""
     return "agileforge backlog generate", application.backlog_generate(
+        project_id=args.project_id,
+        user_input=args.user_input,
+    )
+
+
+def _backlog_preview(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog preview to the application facade."""
+    return "agileforge backlog preview", application.backlog_preview(
         project_id=args.project_id,
         user_input=args.user_input,
     )
