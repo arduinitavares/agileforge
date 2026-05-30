@@ -70,6 +70,38 @@ class TestBacklogPrimerSchemas:
         parsed = OutputSchema.model_validate_json(json.dumps(payload))
         assert len(parsed.backlog_items) == 2  # noqa: PLR2004
 
+    def test_output_schema_accepts_brownfield_metadata(self) -> None:
+        """Backlog items may carry optional As-Built trace metadata."""
+        payload: dict[str, Any] = {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Validate Captain-Aware Optimizer Contract",
+                    "capability_name": "Captain-Aware Squad Optimizer",
+                    "authority_ref": "REQ.captain-aware-optimization",
+                    "as_built_status": "observed_with_missing_evidence",
+                    "recommended_backlog_treatment": "create_verification_item",
+                    "value_driver": "Strategic",
+                    "justification": (
+                        "As-Built evidence indicates the optimizer exists."
+                    ),
+                    "estimated_effort": "M",
+                    "technical_note": "Validate existing captain multiplier behavior.",
+                }
+            ],
+            "is_complete": False,
+            "clarifying_questions": [],
+        }
+
+        parsed = OutputSchema.model_validate_json(json.dumps(payload))
+
+        item = parsed.backlog_items[0]
+        assert item.requirement == "Validate Captain-Aware Optimizer Contract"
+        assert item.capability_name == "Captain-Aware Squad Optimizer"
+        assert item.authority_ref == "REQ.captain-aware-optimization"
+        assert item.as_built_status == "observed_with_missing_evidence"
+        assert item.recommended_backlog_treatment == "create_verification_item"
+
     def test_backlog_item_rejects_invalid_effort(self) -> None:
         """Verify backlog item rejects invalid effort."""
         with pytest.raises(ValidationError):
