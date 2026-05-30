@@ -209,6 +209,19 @@ normalized `capability_name` / `capability_title`, the item must include:
 - `as_built_status`;
 - `recommended_backlog_treatment`.
 
+The item-side match candidates are exactly:
+
+- `BacklogItem.authority_ref`;
+- `BacklogItem.capability_name`;
+- `BacklogItem.requirement`.
+
+A backlog item maps to an assessed capability when any item-side match candidate
+matches an As-Built `authority_ref` or `capability_title` after normalization.
+This means a legacy-looking item such as
+`requirement: "Captain-Aware Squad Optimizer"` must be recognized as mapped to
+the As-Built capability titled `Captain-Aware Squad Optimizer`, even when the
+model omitted all brownfield metadata.
+
 The validator must reject omitted or mismatched As-Built metadata:
 
 - missing `as_built_status`;
@@ -378,6 +391,8 @@ exemptions, `spec_mode`, and legacy project handling.
   `as_built_status`.
 - Host validation rejects a matched As-Built capability item with mismatched
   `as_built_status` or `recommended_backlog_treatment`.
+- Host validation rejects an item that omits brownfield metadata when
+  `requirement` equals an As-Built `capability_title`.
 - Host validation rejects a noun-only or greenfield-looking title for an
   `observed` capability.
 - Brownfield validation failures use
