@@ -4,6 +4,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+    AssessmentStatus,
+    BacklogTreatment,
+)
+
 
 class BacklogItem(BaseModel):
     """A single high-level backlog requirement with priority and estimate."""
@@ -21,7 +26,43 @@ class BacklogItem(BaseModel):
         str,
         Field(
             min_length=3,
-            description="High-level requirement name or capability.",
+            description="Action-oriented backlog work item title.",
+        ),
+    ]
+    capability_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional As-Built capability name this backlog item relates to."
+            ),
+        ),
+    ]
+    authority_ref: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional authority target reference associated with this item."
+            ),
+        ),
+    ]
+    as_built_status: Annotated[
+        AssessmentStatus | None,
+        Field(
+            default=None,
+            description=(
+                "Optional As-Built assessment status for the related capability."
+            ),
+        ),
+    ]
+    recommended_backlog_treatment: Annotated[
+        BacklogTreatment | None,
+        Field(
+            default=None,
+            description=(
+                "Optional As-Built recommended backlog treatment for this item."
+            ),
         ),
     ]
     value_driver: Annotated[
