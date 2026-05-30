@@ -1,7 +1,7 @@
 # Brownfield Backlog Item Contract Design
 
 **Date:** 2026-05-30
-**Status:** Draft for review
+**Status:** Accepted
 **Spec mode:** proposed_change
 **Scope:** Backlog Primer output contract for brownfield-aware Product Backlog previews and saves
 
