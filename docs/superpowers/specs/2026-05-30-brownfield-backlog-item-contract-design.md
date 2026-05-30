@@ -100,6 +100,12 @@ as_built_status = status copied from AsBuiltAssessment
 recommended_backlog_treatment = treatment copied or derived from AsBuiltAssessment
 ```
 
+For As-Built-backed items, `authority_ref`, `as_built_status`, and
+`recommended_backlog_treatment` are not model-owned assertions. They must match
+the authoritative `capability_assessments[]` entry from the Backlog Primer input
+context. `capability_name` must match the As-Built `capability_title` after
+normalization, unless a later explicit alias contract is added.
+
 Example:
 
 ```json
@@ -173,27 +179,86 @@ coverage and PO-readiness rule.
 Prompt guidance alone is insufficient. Host-side validation must run after
 Backlog Primer output schema validation.
 
+The validator must receive both the parsed output and the input context:
+
+```python
+_validate_brownfield_contract(
+    *,
+    output_model: OutputSchema,
+    input_context: BacklogInputContext,
+) -> None
+```
+
+The validator must parse `input_context["as_built_assessment"]` when it is not
+`NO_AS_BUILT_ASSESSMENT`. It must inspect `capability_assessments[]` and build
+an authoritative lookup keyed by:
+
+- exact `authority_ref`;
+- normalized `authority_ref`;
+- normalized `capability_title`.
+
+Normalization is for comparison only. It should trim whitespace, collapse
+internal whitespace, lowercase, and remove non-semantic punctuation that does
+not distinguish AgileForge IDs or titles. It must not silently rewrite output.
+
+When a backlog item maps to an assessed capability by `authority_ref` or by
+normalized `capability_name` / `capability_title`, the item must include:
+
+- `capability_name`;
+- `authority_ref`;
+- `as_built_status`;
+- `recommended_backlog_treatment`.
+
+The validator must reject omitted or mismatched As-Built metadata:
+
+- missing `as_built_status`;
+- wrong `as_built_status`;
+- wrong `recommended_backlog_treatment`;
+- missing or wrong `authority_ref`;
+- missing `capability_name`;
+- `capability_name` that does not normalize to the matched As-Built
+  `capability_title`.
+
+This comparison is the core contract. Without it, the Backlog Primer can omit or
+invent brownfield metadata and still pass output-only validation.
+
+### Title Allowlist
+
 Validation accepts:
 
-- greenfield items with no `as_built_status`;
+- greenfield or unmatched items with no `as_built_status`;
 - `not_observed` items titled as build/add/implement work;
 - `observed_with_missing_evidence` items titled as verify/harden/validate/
   formalize/evidence work;
 - `unclear` items titled as discover/investigate/clarify work;
 - `contradicted` items titled as resolve/align/correct work.
 
+The title check must be a normalized allowlist per status, not only a denylist:
+
+| `as_built_status` | Required normalized title prefix |
+| --- | --- |
+| `observed` | `Verify`, `Document`, `Monitor`, or `Preserve` |
+| `observed_with_missing_evidence` | `Verify`, `Validate`, `Harden`, `Formalize`, or `Add Evidence For` |
+| `contradicted` | `Resolve`, `Align`, or `Correct` |
+| `unclear` | `Discover`, `Investigate`, or `Clarify` |
+| `not_observed` | `Build`, `Add`, `Implement`, or `Create` may be allowed |
+
 Validation rejects:
 
 - brownfield items where `requirement` equals `capability_name`;
-- `observed` or `observed_with_missing_evidence` items whose title starts with
-  `Build`, `Implement`, `Create`, or `Add` unless the allowed phrase is
-  `Add Evidence For`;
+- `observed` items whose title does not start with an allowed `observed`
+  prefix;
+- `observed_with_missing_evidence` items whose title does not start with an
+  allowed `observed_with_missing_evidence` prefix;
+- `contradicted` items whose title does not start with an allowed
+  `contradicted` prefix;
 - `unclear` items titled as implementation work;
 - missing `capability_name` when `as_built_status` is present;
 - unknown `as_built_status` values.
 
 Validation should return failure artifacts through the existing Backlog runtime
-failure path. It should not silently rewrite item titles.
+failure path with `failure_stage="brownfield_contract_validation"`. It should
+not silently rewrite item titles.
 
 ## Roadmap Compatibility
 
@@ -208,7 +273,9 @@ Preferred first-slice behavior:
   not yet consume brownfield metadata.
 
 Recommendation: add optional metadata to Roadmap Builder. It preserves context
-for future downstream agents without requiring database changes.
+inside roadmap artifacts without requiring database changes. It does not mean
+story, sprint, or task agents consume that metadata yet; downstream consumption
+remains a later slice.
 
 ## Save Behavior
 
@@ -233,6 +300,14 @@ As-Built assessment.
 That gate is deferred because it needs a stable `requires_as_built` or
 `spec_mode` source and migration behavior for legacy projects.
 
+Persisting brownfield metadata into the saved story description is acceptable as
+a human-visible annotation, but it does not fully transmit As-Built context to
+downstream agents in the current repo. Story generation currently builds input
+from roadmap and workflow state context, not from a saved backlog seed
+`story_description`. Downstream propagation of `capability_name`,
+`authority_ref`, `as_built_status`, and `recommended_backlog_treatment` into
+story refinement and sprint planning is a later slice.
+
 ## Data Flow
 
 ```mermaid
@@ -241,7 +316,8 @@ flowchart TD
     B --> C["Backlog Primer input: as_built_assessment JSON"]
     C --> D["Backlog Primer output"]
     D --> E["Host schema validation"]
-    E --> F["Brownfield title/status validator"]
+    C --> F["Brownfield contract validator reads authoritative As-Built"]
+    E --> F
     F --> G["Preview output or draft attempt"]
     G --> H["PO review"]
     H --> I["Backlog save"]
@@ -296,8 +372,20 @@ exemptions, `spec_mode`, and legacy project handling.
   `Validate Captain-Aware Optimizer Contract`.
 - Host validation rejects a brownfield item where `requirement` equals
   `capability_name`.
+- Host validation accepts a valid brownfield item matched to an As-Built
+  capability by `authority_ref`.
+- Host validation rejects a matched As-Built capability item with missing
+  `as_built_status`.
+- Host validation rejects a matched As-Built capability item with mismatched
+  `as_built_status` or `recommended_backlog_treatment`.
+- Host validation rejects a noun-only or greenfield-looking title for an
+  `observed` capability.
+- Brownfield validation failures use
+  `failure_stage="brownfield_contract_validation"`.
 - Roadmap generation remains compatible with backlog items containing the new
   optional metadata.
+- Roadmap Builder schema accepts enriched backlog items despite its nested
+  `BacklogItem` using `extra="forbid"`.
 - `agileforge backlog preview --project-id 2` remains non-mutating.
 - caRtola preview shows work-action titles for verification/hardening items.
 
@@ -325,4 +413,3 @@ exemptions, `spec_mode`, and legacy project handling.
   `as_built_status` into story metadata or task metadata?
 - What exact project-level field should indicate `requires_as_built` for
   save-time gating?
-
