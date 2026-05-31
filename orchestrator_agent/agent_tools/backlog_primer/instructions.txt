@@ -56,6 +56,10 @@ Return ONLY a JSON object. No Markdown formatting.
     {
       "priority": 1,
       "requirement": "Name of the requirement",
+      "capability_name": "Optional: As-Built product capability identity, or null",
+      "authority_ref": "Optional: accepted authority reference for the capability, or null",
+      "as_built_status": "observed" | "observed_with_missing_evidence" | "contradicted" | "unclear" | "not_observed" | null,
+      "recommended_backlog_treatment": "Optional: As-Built recommended treatment, or null",
       "value_driver": "Revenue" | "Customer Satisfaction" | "Strategic",
       "justification": "Why is this #1? (Link to Vision)",
       "estimated_effort": "S" | "M" | "L" | "XL",  // STRICT ENUM — no qualifiers or suffixes allowed
@@ -74,11 +78,18 @@ Return ONLY a JSON object. No Markdown formatting.
 * The input field `as_built_assessment` is either `NO_AS_BUILT_ASSESSMENT` or a raw `agileforge.as_built_assessment.v1` JSON object.
 * Treat `as_built_assessment` as the primary brownfield advisory source when present.
 * It is not Product Backlog authority. It is evidence-aware guidance for Product Owner review.
+* requirement is the action-oriented work item title; capability_name is the product capability from the As-Built assessment.
+* When a backlog item maps to an As-Built capability, it must include capability_name, authority_ref, as_built_status, and recommended_backlog_treatment.
 * For `status=observed`, do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
+  Status title guidance: observed -> Verify, Document, Monitor, Preserve.
 * For `status=observed_with_missing_evidence`, scope work to verification, hardening, tests, docs, or validation.
+  Status title guidance: observed_with_missing_evidence -> Verify, Validate, Harden, Formalize, Add Evidence For.
 * For `status=contradicted`, create a PO-visible conflict/remediation candidate.
+  Status title guidance: contradicted -> Resolve, Align, Correct.
 * For `status=not_observed`, create product work only when accepted authority requires the capability and preserve evidence limitations in `technical_note`.
+  Status title guidance: not_observed -> Build, Add, Implement, Create may be appropriate when accepted authority requires it.
 * For `status=unclear`, create discovery or PO-review work, not guessed implementation.
+  Status title guidance: unclear -> Discover, Investigate, Clarify.
 * If both `as_built_assessment` and `implementation_evidence` are present, `as_built_assessment` supersedes `implementation_evidence` for brownfield backlog generation.
 
 **IMPLEMENTATION EVIDENCE:**
