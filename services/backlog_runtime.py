@@ -72,6 +72,7 @@ class _CapabilityIndex:
     """Lookup tables for authoritative As-Built capabilities."""
 
     by_exact_authority_ref: dict[str, CapabilityAssessment]
+    ambiguous_authority_refs: set[str]
     by_normalized_key: dict[str, CapabilityAssessment]
     ambiguous_normalized_keys: set[str]
 
@@ -118,18 +119,34 @@ def _normalize_title_prefix(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+def _same_backlog_contract(
+    left: CapabilityAssessment,
+    right: CapabilityAssessment,
+) -> bool:
+    return (
+        left.authority_ref == right.authority_ref
+        and _normalize_brownfield_text(left.capability_title)
+        == _normalize_brownfield_text(right.capability_title)
+        and left.status == right.status
+        and left.recommended_backlog_treatment == right.recommended_backlog_treatment
+    )
+
+
 def _build_capability_index(
     assessment: AsBuiltAssessment,
 ) -> _CapabilityIndex:
     by_exact_authority_ref: dict[str, CapabilityAssessment] = {}
+    ambiguous_authority_refs: set[str] = set()
     by_normalized_key: dict[str, CapabilityAssessment] = {}
     ambiguous_normalized_keys: set[str] = set()
     for capability in assessment.capability_assessments:
         exact_existing = by_exact_authority_ref.get(capability.authority_ref)
         if exact_existing is not None and exact_existing is not capability:
-            message = "duplicate As-Built authority_ref"
-            raise ValueError(message)
-        by_exact_authority_ref[capability.authority_ref] = capability
+            if not _same_backlog_contract(exact_existing, capability):
+                ambiguous_authority_refs.add(capability.authority_ref)
+                by_exact_authority_ref.pop(capability.authority_ref, None)
+        elif capability.authority_ref not in ambiguous_authority_refs:
+            by_exact_authority_ref[capability.authority_ref] = capability
 
         for candidate in (capability.authority_ref, capability.capability_title):
             normalized = _normalize_brownfield_text(candidate)
@@ -139,12 +156,14 @@ def _build_capability_index(
                 continue
             existing = by_normalized_key.get(normalized)
             if existing is not None and existing is not capability:
-                ambiguous_normalized_keys.add(normalized)
-                by_normalized_key.pop(normalized, None)
+                if not _same_backlog_contract(existing, capability):
+                    ambiguous_normalized_keys.add(normalized)
+                    by_normalized_key.pop(normalized, None)
                 continue
             by_normalized_key[normalized] = capability
     return _CapabilityIndex(
         by_exact_authority_ref=by_exact_authority_ref,
+        ambiguous_authority_refs=ambiguous_authority_refs,
         by_normalized_key=by_normalized_key,
         ambiguous_normalized_keys=ambiguous_normalized_keys,
     )
@@ -155,6 +174,9 @@ def _mapped_capability(
     capability_index: _CapabilityIndex,
 ) -> CapabilityAssessment | None:
     if item.authority_ref is not None:
+        if item.authority_ref in capability_index.ambiguous_authority_refs:
+            message = "ambiguous As-Built authority_ref"
+            raise ValueError(message)
         capability = capability_index.by_exact_authority_ref.get(item.authority_ref)
         if capability is not None:
             return capability

@@ -644,6 +644,76 @@ def test_backlog_runtime_rejects_unbacked_brownfield_metadata(
     )
 
 
+def test_backlog_runtime_allows_homogeneous_duplicate_authority_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One requirement may have several invariant-level As-Built entries."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "REQ.live-squad-recommendation",
+            "invariant_refs": ["INV-second"],
+            "capability_title": "Live squad recommendation",
+            "status": "observed",
+            "confidence": "medium",
+            "evidence": [],
+            "limitations": ["Second invariant fixture."],
+            "recommended_backlog_treatment": "skip_new_implementation",
+            "reasoning": "Same backlog-level contract, different invariant.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is True
+
+
+def test_backlog_runtime_rejects_heterogeneous_duplicate_authority_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scalar backlog item cannot safely claim a mixed As-Built ref group."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "REQ.live-squad-recommendation",
+            "invariant_refs": ["INV-missing"],
+            "capability_title": "Live squad recommendation",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Heterogeneous fixture."],
+            "recommended_backlog_treatment": "create_discovery_item",
+            "reasoning": "Same ref, different assessment status.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "ambiguous As-Built authority_ref" in result["failure_summary"]
+
+
 def test_backlog_runtime_rejects_duplicate_as_built_capability_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
