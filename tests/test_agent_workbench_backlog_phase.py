@@ -164,8 +164,11 @@ def _backlog_output_json(
     )
 
 
-def _brownfield_backlog_state() -> dict[str, Any]:
+def _brownfield_backlog_state(
+    assessment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return workflow state with a fresh As-Built assessment cache."""
+    assessment_payload = assessment or _as_built_assessment_payload()
     return {
         "product_vision_assessment": {
             "product_vision_statement": "A clear saved vision.",
@@ -173,13 +176,15 @@ def _brownfield_backlog_state() -> dict[str, Any]:
         },
         "pending_spec_content": "SPEC CONTENT",
         "compiled_authority_cached": "AUTHORITY JSON",
-        **_as_built_state(_as_built_assessment_payload()),
+        **_as_built_state(assessment_payload),
     }
 
 
 def _run_brownfield_backlog_runtime(
     monkeypatch: pytest.MonkeyPatch,
     item: dict[str, Any],
+    *,
+    assessment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the backlog runtime against a single mocked backlog item."""
 
@@ -187,9 +192,22 @@ def _run_brownfield_backlog_runtime(
         del payload
         return _backlog_output_json(item)
 
+    def fake_write_failure_artifact(**kwargs: object) -> dict[str, Any]:
+        raw_output = kwargs.get("raw_output") or ""
+        raw_output_preview = raw_output[:500] if isinstance(raw_output, str) else ""
+        return {
+            "metadata": {
+                "failure_artifact_id": "backlog-failure-test",
+                "failure_stage": kwargs["failure_stage"],
+                "failure_summary": kwargs["failure_summary"],
+                "raw_output_preview": raw_output_preview,
+                "has_full_artifact": False,
+            }
+        }
+
     async def call_runtime() -> dict[str, Any]:
         return await run_backlog_agent_from_state(
-            _brownfield_backlog_state(),
+            _brownfield_backlog_state(assessment),
             project_id=2,
             user_input="draft backlog",
         )
@@ -197,6 +215,10 @@ def _run_brownfield_backlog_runtime(
     monkeypatch.setattr(
         "services.backlog_runtime._invoke_backlog_agent",
         fake_invoke_backlog_agent,
+    )
+    monkeypatch.setattr(
+        "services.backlog_runtime.write_failure_artifact",
+        fake_write_failure_artifact,
     )
 
     return anyio.run(call_runtime)
@@ -496,7 +518,10 @@ def test_backlog_runtime_rejects_capability_title_without_brownfield_metadata(
 
     assert result["success"] is False
     assert result["failure_stage"] == "brownfield_contract_validation"
-    assert "missing capability_name" in result["failure_summary"]
+    summary = result["failure_summary"]
+    assert "missing capability_name" in summary
+    assert "missing as_built_status" in summary
+    assert "missing recommended_backlog_treatment" in summary
 
 
 def test_backlog_runtime_rejects_mismatched_brownfield_metadata(
@@ -516,8 +541,50 @@ def test_backlog_runtime_rejects_mismatched_brownfield_metadata(
 
     assert result["success"] is False
     assert result["failure_stage"] == "brownfield_contract_validation"
-    assert "as_built_status" in result["failure_summary"]
-    assert "recommended_backlog_treatment" in result["failure_summary"]
+    summary = result["failure_summary"]
+    assert "as_built_status must equal 'observed'" in summary
+    assert (
+        "recommended_backlog_treatment must equal 'skip_new_implementation'"
+        in summary
+    )
+    assert "missing as_built_status" not in summary
+    assert "missing recommended_backlog_treatment" not in summary
+
+
+def test_backlog_runtime_rejects_duplicate_as_built_capability_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous normalized As-Built keys must fail brownfield validation."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "Live squad recommendation",
+            "invariant_refs": ["INV-duplicate"],
+            "capability_title": "Alternative squad planning",
+            "status": "not_observed",
+            "confidence": "medium",
+            "evidence": [],
+            "limitations": ["Duplicate key fixture."],
+            "recommended_backlog_treatment": "create_product_item",
+            "reasoning": "Fixture creates an authority/title normalized collision.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "duplicate ambiguous As-Built capability key" in result["failure_summary"]
 
 
 def test_backlog_runtime_rejects_observed_item_with_greenfield_title(

@@ -117,7 +117,11 @@ def _build_capability_index(
         for candidate in (capability.authority_ref, capability.capability_title):
             normalized = _normalize_brownfield_text(candidate)
             if normalized:
-                index.setdefault(normalized, capability)
+                existing = index.get(normalized)
+                if existing is not None and existing is not capability:
+                    message = "duplicate ambiguous As-Built capability key"
+                    raise ValueError(message)
+                index[normalized] = capability
     return index
 
 
@@ -143,6 +147,30 @@ def _title_has_allowed_prefix(*, requirement: str, status: str) -> bool:
         if normalized_requirement.startswith(f"{normalized_prefix} "):
             return True
     return False
+
+
+def _validate_mapped_brownfield_metadata(
+    *,
+    prefix: str,
+    item: BacklogItem,
+    capability: CapabilityAssessment,
+) -> list[str]:
+    errors: list[str] = []
+
+    if item.as_built_status is None:
+        errors.append(f"{prefix} missing as_built_status")
+    elif item.as_built_status != capability.status:
+        errors.append(f"{prefix} as_built_status must equal {capability.status!r}")
+
+    if item.recommended_backlog_treatment is None:
+        errors.append(f"{prefix} missing recommended_backlog_treatment")
+    elif item.recommended_backlog_treatment != capability.recommended_backlog_treatment:
+        errors.append(
+            f"{prefix} recommended_backlog_treatment must equal "
+            f"{capability.recommended_backlog_treatment!r}"
+        )
+
+    return errors
 
 
 def _validate_mapped_brownfield_item(
@@ -172,14 +200,13 @@ def _validate_mapped_brownfield_item(
             f"{prefix} authority_ref must match {capability.authority_ref!r}"
         )
 
-    if item.as_built_status != capability.status:
-        errors.append(f"{prefix} as_built_status must equal {capability.status!r}")
-
-    if item.recommended_backlog_treatment != capability.recommended_backlog_treatment:
-        errors.append(
-            f"{prefix} recommended_backlog_treatment must equal "
-            f"{capability.recommended_backlog_treatment!r}"
+    errors.extend(
+        _validate_mapped_brownfield_metadata(
+            prefix=prefix,
+            item=item,
+            capability=capability,
         )
+    )
 
     normalized_requirement = _normalize_brownfield_text(item.requirement)
     if normalized_requirement == _normalize_brownfield_text(
