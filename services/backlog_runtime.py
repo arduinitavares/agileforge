@@ -95,6 +95,12 @@ _BROWNFIELD_RETRY_MAPPING_GUIDE = (
     "multiple As-Built capabilities, split it into mapped single-capability items "
     "or rename/scope it as genuinely new work without those capability terms."
 )
+_BROWNFIELD_RETRY_METADATA_GUIDE = (
+    "Copy capability_name, authority_ref, as_built_status, and "
+    "recommended_backlog_treatment unchanged from the selected "
+    "capability_assessments[] entry; do not upgrade create_verification_item to "
+    "create_hardening_item."
+)
 _BROWNFIELD_TOKEN_STOPWORDS = frozenset({"only"})
 _MIN_BROWNFIELD_TOKEN_LENGTH = 3
 _PLURAL_TRIM_TOKEN_LENGTH = 4
@@ -310,6 +316,35 @@ def _matches_item_selectors(
     )
 
 
+def _matches_identity_selectors(
+    capability: CapabilityAssessment,
+    item: BacklogItem,
+) -> bool:
+    if item.capability_name is not None and _normalize_brownfield_text(
+        item.capability_name
+    ) != _normalize_brownfield_text(capability.capability_title):
+        return False
+    return not (
+        item.as_built_status is not None
+        and item.as_built_status != capability.status
+    )
+
+
+def _select_matching_contract(
+    matches: list[CapabilityAssessment],
+    *,
+    ambiguous_message: str,
+) -> CapabilityAssessment | None:
+    if not matches:
+        return None
+
+    selected = matches[0]
+    if all(_same_backlog_contract(selected, match) for match in matches):
+        return selected
+
+    raise ValueError(ambiguous_message)
+
+
 def _select_authority_ref_capability(
     *,
     item: BacklogItem,
@@ -323,15 +358,26 @@ def _select_authority_ref_capability(
         for capability in capabilities
         if _matches_item_selectors(capability, item)
     ]
-    if not matches:
-        message = "authority_ref metadata does not match As-Built capability"
-        raise ValueError(message)
-
-    selected = matches[0]
-    if all(_same_backlog_contract(selected, match) for match in matches):
+    selected = _select_matching_contract(
+        matches,
+        ambiguous_message="ambiguous As-Built authority_ref",
+    )
+    if selected is not None:
         return selected
 
-    message = "ambiguous As-Built authority_ref"
+    identity_matches = [
+        capability
+        for capability in capabilities
+        if _matches_identity_selectors(capability, item)
+    ]
+    selected = _select_matching_contract(
+        identity_matches,
+        ambiguous_message="ambiguous As-Built authority_ref",
+    )
+    if selected is not None:
+        return selected
+
+    message = "authority_ref metadata does not match As-Built capability"
     raise ValueError(message)
 
 
@@ -596,7 +642,7 @@ def _with_brownfield_retry_feedback(
         "AgileForge brownfield contract validation. Regenerate the entire JSON "
         "response. Keep the same scope and priorities, but fix these exact errors: "
         f"{validation_error}. {_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE} "
-        f"{_BROWNFIELD_RETRY_MAPPING_GUIDE}"
+        f"{_BROWNFIELD_RETRY_MAPPING_GUIDE} {_BROWNFIELD_RETRY_METADATA_GUIDE}"
     )
     retry_context["user_input"] = (
         f"{original_user_input}\n\n{feedback}" if original_user_input else feedback

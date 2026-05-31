@@ -806,6 +806,45 @@ def test_backlog_runtime_allows_status_to_select_duplicate_authority_ref_group(
     assert result["success"] is True
 
 
+def test_backlog_runtime_reports_treatment_mismatch_inside_duplicate_ref_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate authority refs should still report the exact wrong treatment."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "REQ.live-squad-recommendation",
+            "invariant_refs": ["INV-second"],
+            "capability_title": "Live squad recommendation",
+            "status": "observed",
+            "confidence": "medium",
+            "evidence": [],
+            "limitations": ["Second invariant fixture."],
+            "recommended_backlog_treatment": "skip_new_implementation",
+            "reasoning": "Same backlog-level contract, different invariant.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Harden Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "create_hardening_item",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "recommended_backlog_treatment must equal 'skip_new_implementation'" in (
+        result["failure_summary"]
+    )
+    assert "authority_ref metadata does not match" not in result["failure_summary"]
+
+
 def test_backlog_runtime_rejects_ambiguous_authority_ref_without_selector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1108,6 +1147,7 @@ def test_backlog_runtime_retry_feedback_includes_title_prefix_table(
     assert "create_product_item -> Build, Add, Implement, Create" in calls[1]
     assert "uses As-Built capability terms" in calls[1]
     assert "split it into mapped single-capability items" in calls[1]
+    assert "recommended_backlog_treatment unchanged" in calls[1]
 
 
 def test_backlog_runtime_failed_brownfield_retry_exposes_metadata(
