@@ -82,18 +82,18 @@ Return ONLY a JSON object. No Markdown formatting.
 * When a backlog item maps to an As-Built capability, it must include capability_name, authority_ref, as_built_status, and recommended_backlog_treatment.
 * If requirement or technical_note uses As-Built capability terms with extra words, treat the item as mapped and include the brownfield metadata. Do not bypass mapping by expanding or paraphrasing the capability title.
 * For mapped capabilities, copy capability_assessments[].recommended_backlog_treatment unchanged. Allowed exact tokens are: skip_new_implementation, create_verification_item, create_hardening_item, create_authority_conflict_item, create_discovery_item, create_product_item, po_review_required.
-* For mapped capabilities, the `requirement` title must start with one of the exact prefixes listed for that As-Built status below. Do not use noun-only capability titles, gerunds like "Hardening", or domain labels before the required prefix.
+* For mapped capabilities, the `requirement` title must start with one of the exact prefixes listed for that recommended treatment below. Do not use noun-only capability titles, gerunds like "Hardening", or domain labels before the required prefix.
   Examples: use "Harden Live Pre-Lock Recommendation Workflow", not "Live Pre-Lock Recommendation Workflow Hardening"; use "Verify Captain-Aware Optimization Engine", not "Captain-Aware Optimization Engine Verification".
 * For `status=observed`, do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
-  Status title guidance: observed -> Verify, Document, Monitor, Preserve.
+  Treatment title guidance: skip_new_implementation -> Verify, Document, Monitor, Preserve.
 * For `status=observed_with_missing_evidence`, scope work to verification, hardening, tests, docs, or validation.
-  Status title guidance: observed_with_missing_evidence -> Verify, Validate, Harden, Formalize, Add Evidence For.
+  Treatment title guidance: create_verification_item -> Verify, Validate, Harden, Formalize, Add Evidence For; create_hardening_item -> Harden, Validate, Formalize.
 * For `status=contradicted`, create a PO-visible conflict/remediation candidate.
-  Status title guidance: contradicted -> Resolve, Align, Correct.
+  Treatment title guidance: create_authority_conflict_item -> Resolve, Align, Correct.
 * For `status=not_observed`, create product work only when accepted authority requires the capability and preserve evidence limitations in `technical_note`.
-  Status title guidance: not_observed -> Build, Add, Implement, Create may be appropriate when accepted authority requires it.
+  Treatment title guidance: create_product_item -> Build, Add, Implement, Create; create_discovery_item -> Discover, Investigate, Clarify, Define, Formalize.
 * For `status=unclear`, create discovery or PO-review work, not guessed implementation.
-  Status title guidance: unclear -> Discover, Investigate, Clarify.
+  Treatment title guidance: po_review_required -> Clarify, Investigate, Resolve.
 * If both `as_built_assessment` and `implementation_evidence` are present, `as_built_assessment` supersedes `implementation_evidence` for brownfield backlog generation.
 
 **IMPLEMENTATION EVIDENCE:**

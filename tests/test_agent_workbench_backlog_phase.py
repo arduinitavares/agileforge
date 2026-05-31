@@ -928,6 +928,77 @@ def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
     assert "title prefix" in result["failure_summary"]
 
 
+def test_backlog_runtime_allows_discovery_treatment_formalize_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery recommendations should allow formalization/discovery titles."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"] = [
+        {
+            "authority_ref": "DATA.promotion-decision",
+            "invariant_refs": ["INV-promotion"],
+            "capability_title": "Promotion Decision",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Schema not observed."],
+            "recommended_backlog_treatment": "create_discovery_item",
+            "reasoning": "Needs discovery/formalization, not direct product build.",
+        }
+    ]
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Formalize Promotion Decision Artifact Schema",
+            "capability_name": "Promotion Decision",
+            "authority_ref": "DATA.promotion-decision",
+            "as_built_status": "not_observed",
+            "recommended_backlog_treatment": "create_discovery_item",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is True
+
+
+def test_backlog_runtime_rejects_product_treatment_verify_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Product-work recommendations should still require build-style titles."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"] = [
+        {
+            "authority_ref": "REQ.post-round-review",
+            "invariant_refs": ["INV-post-round"],
+            "capability_title": "Post Round Review",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Capability not observed."],
+            "recommended_backlog_treatment": "create_product_item",
+            "reasoning": "Accepted authority requires product work.",
+        }
+    ]
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Post-Round Review Artifact",
+            "capability_name": "Post Round Review",
+            "authority_ref": "REQ.post-round-review",
+            "as_built_status": "not_observed",
+            "recommended_backlog_treatment": "create_product_item",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "title prefix" in result["failure_summary"]
+    assert "Build, Add, Implement, Create" in result["failure_summary"]
+
+
 def test_backlog_runtime_retries_brownfield_contract_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1029,9 +1100,12 @@ def test_backlog_runtime_retry_feedback_includes_title_prefix_table(
     assert result["success"] is True
     expected_call_count = 2
     assert len(calls) == expected_call_count
-    assert "observed -> Verify, Document, Monitor, Preserve" in calls[1]
-    assert "observed_with_missing_evidence -> Verify, Validate, Harden" in calls[1]
-    assert "not_observed -> Build, Add, Implement, Create" in calls[1]
+    assert "skip_new_implementation -> Verify, Document, Monitor, Preserve" in (
+        calls[1]
+    )
+    assert "create_verification_item -> Verify, Validate, Harden" in calls[1]
+    assert "create_discovery_item -> Discover, Investigate, Clarify" in calls[1]
+    assert "create_product_item -> Build, Add, Implement, Create" in calls[1]
     assert "uses As-Built capability terms" in calls[1]
     assert "split it into mapped single-capability items" in calls[1]
 

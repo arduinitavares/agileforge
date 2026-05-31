@@ -66,4 +66,6 @@ def test_backlog_prompt_requires_exact_brownfield_title_prefixes() -> None:
     text = _instructions()
 
     assert "must start with one of the exact prefixes" in text
+    assert "recommended treatment" in text
     assert "Do not use noun-only capability titles" in text
+    assert "create_discovery_item -> Discover, Investigate, Clarify, Define" in text

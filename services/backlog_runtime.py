@@ -55,14 +55,38 @@ _ALLOWED_TITLE_PREFIXES_BY_STATUS: dict[str, tuple[str, ...]] = {
     "unclear": ("Discover", "Investigate", "Clarify"),
     "not_observed": ("Build", "Add", "Implement", "Create"),
 }
+_ALLOWED_TITLE_PREFIXES_BY_TREATMENT: dict[str, tuple[str, ...]] = {
+    "skip_new_implementation": ("Verify", "Document", "Monitor", "Preserve"),
+    "create_verification_item": (
+        "Verify",
+        "Validate",
+        "Harden",
+        "Formalize",
+        "Add Evidence For",
+    ),
+    "create_hardening_item": ("Harden", "Validate", "Formalize"),
+    "create_authority_conflict_item": ("Resolve", "Align", "Correct"),
+    "create_discovery_item": (
+        "Discover",
+        "Investigate",
+        "Clarify",
+        "Define",
+        "Formalize",
+    ),
+    "create_product_item": ("Build", "Add", "Implement", "Create"),
+    "po_review_required": ("Clarify", "Investigate", "Resolve"),
+}
 _BROWNFIELD_CONTRACT_RETRY_MARKER = "BROWNFIELD CONTRACT RETRY"
 _BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE = (
-    "Also re-check every mapped brownfield item title against these exact "
-    "status prefixes: observed -> Verify, Document, Monitor, Preserve; "
-    "observed_with_missing_evidence -> Verify, Validate, Harden, Formalize, "
-    "Add Evidence For; contradicted -> Resolve, Align, Correct; unclear -> "
-    "Discover, Investigate, Clarify; not_observed -> Build, Add, Implement, "
-    "Create. The required prefix must be the first words in requirement."
+    "Also re-check every mapped brownfield item title against the treatment "
+    "prefixes: skip_new_implementation -> Verify, Document, Monitor, Preserve; "
+    "create_verification_item -> Verify, Validate, Harden, Formalize, "
+    "Add Evidence For; create_hardening_item -> Harden, Validate, Formalize; "
+    "create_authority_conflict_item -> Resolve, Align, Correct; "
+    "create_discovery_item -> Discover, Investigate, Clarify, Define, "
+    "Formalize; create_product_item -> Build, Add, Implement, Create; "
+    "po_review_required -> Clarify, Investigate, Resolve. The required prefix "
+    "must be the first words in requirement."
 )
 _BROWNFIELD_RETRY_MAPPING_GUIDE = (
     "Also re-check null-metadata items: if requirement or technical_note uses "
@@ -371,9 +395,20 @@ def _possible_unmapped_capability_matches(
     ]
 
 
-def _title_has_allowed_prefix(*, requirement: str, status: str) -> bool:
+def _allowed_title_prefixes(capability: CapabilityAssessment) -> tuple[str, ...]:
+    return _ALLOWED_TITLE_PREFIXES_BY_TREATMENT.get(
+        capability.recommended_backlog_treatment,
+        _ALLOWED_TITLE_PREFIXES_BY_STATUS[capability.status],
+    )
+
+
+def _has_allowed_capability_title_prefix(
+    *,
+    requirement: str,
+    capability: CapabilityAssessment,
+) -> bool:
     normalized_requirement = _normalize_title_prefix(requirement)
-    for prefix in _ALLOWED_TITLE_PREFIXES_BY_STATUS.get(status, ()):
+    for prefix in _allowed_title_prefixes(capability):
         normalized_prefix = _normalize_title_prefix(prefix)
         if normalized_requirement == normalized_prefix:
             return True
@@ -450,13 +485,14 @@ def _validate_mapped_brownfield_item(
     ):
         errors.append(f"{prefix} requirement must not equal capability title/name")
 
-    if not _title_has_allowed_prefix(
+    if not _has_allowed_capability_title_prefix(
         requirement=item.requirement,
-        status=capability.status,
+        capability=capability,
     ):
-        allowed = ", ".join(_ALLOWED_TITLE_PREFIXES_BY_STATUS[capability.status])
+        allowed = ", ".join(_allowed_title_prefixes(capability))
         errors.append(
-            f"{prefix} title prefix must match status {capability.status!r}; "
+            f"{prefix} title prefix must match status {capability.status!r} "
+            f"and treatment {capability.recommended_backlog_treatment!r}; "
             f"allowed prefixes: {allowed}"
         )
 
