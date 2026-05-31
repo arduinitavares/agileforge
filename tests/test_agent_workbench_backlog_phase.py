@@ -383,6 +383,77 @@ def test_backlog_preview_runs_from_sprint_complete_without_persisting(
     assert workflow.state["backlog_attempts"] == [{"attempt_id": "old-attempt"}]
 
 
+def test_backlog_preview_surfaces_brownfield_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workbench preview envelope should expose brownfield validation failures."""
+
+    async def fake_run_backlog_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, user_input
+        return {
+            "success": False,
+            "error": "Backlog brownfield contract validation failed",
+            "failure_stage": "brownfield_contract_validation",
+            "failure_summary": "Backlog brownfield contract validation failed",
+            "failure_artifact_id": "backlog-failure-brownfield-1",
+            "has_full_artifact": True,
+            "input_context": {
+                "product_vision_statement": "A clear saved vision.",
+                "technical_spec": "SPEC CONTENT",
+                "compiled_authority": "AUTHORITY JSON",
+                "prior_backlog_state": "NO_HISTORY",
+                "as_built_assessment": "{}",
+                "implementation_evidence": "NO_EVIDENCE",
+                "user_input": "",
+            },
+            "output_artifact": {
+                "is_complete": False,
+                "error": "BACKLOG_GENERATION_FAILED",
+                "failure_summary": "Backlog brownfield contract validation failed",
+            },
+            "is_complete": False,
+        }
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        return {"success": True, "project_id": product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.run_backlog_agent_from_state",
+        fake_run_backlog_agent_from_state,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.preview(project_id=2)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert (
+        result["errors"][0]["details"]["failure_stage"]
+        == "brownfield_contract_validation"
+    )
+
+
 def test_build_backlog_input_context_uses_no_evidence_when_cache_missing() -> None:
     """Backlog input context should use NO_EVIDENCE without cached evidence."""
     context = build_backlog_input_context(
