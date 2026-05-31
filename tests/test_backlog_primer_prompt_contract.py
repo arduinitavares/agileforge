@@ -38,3 +38,23 @@ def test_backlog_prompt_requires_as_built_metadata_when_capability_maps() -> Non
         "must include capability_name, authority_ref, as_built_status, "
         "and recommended_backlog_treatment"
     ) in text
+
+
+def test_backlog_prompt_names_treatment_tokens_and_nullable_metadata() -> None:
+    """Prompt must handle strict treatment tokens and nullable metadata."""
+    text = _instructions()
+
+    assert (
+        "copy capability_assessments[].recommended_backlog_treatment unchanged"
+    ) in text
+    assert "skip_new_implementation" in text
+    assert "create_verification_item" in text
+    assert "create_hardening_item" in text
+    assert "create_authority_conflict_item" in text
+    assert "create_discovery_item" in text
+    assert "create_product_item" in text
+    assert "po_review_required" in text
+    assert "required fields must be filled" in text
+    assert (
+        "optional brownfield metadata fields must be present as null when unmapped"
+    ) in text

@@ -59,7 +59,7 @@ Return ONLY a JSON object. No Markdown formatting.
       "capability_name": "Optional: As-Built product capability identity, or null",
       "authority_ref": "Optional: accepted authority reference for the capability, or null",
       "as_built_status": "observed" | "observed_with_missing_evidence" | "contradicted" | "unclear" | "not_observed" | null,
-      "recommended_backlog_treatment": "Optional: As-Built recommended treatment, or null",
+      "recommended_backlog_treatment": "copy capability_assessments[].recommended_backlog_treatment unchanged: skip_new_implementation | create_verification_item | create_hardening_item | create_authority_conflict_item | create_discovery_item | create_product_item | po_review_required, or null when unmapped",
       "value_driver": "Revenue" | "Customer Satisfaction" | "Strategic",
       "justification": "Why is this #1? (Link to Vision)",
       "estimated_effort": "S" | "M" | "L" | "XL",  // STRICT ENUM — no qualifiers or suffixes allowed
@@ -71,7 +71,7 @@ Return ONLY a JSON object. No Markdown formatting.
 }
 
 **COMPLETENESS CHECK:**
-* Set `is_complete: true` ONLY if you have 10+ items, all fields are filled, and priorities are unique.
+* Set `is_complete: true` ONLY if you have 10+ items, required fields must be filled, optional brownfield metadata fields must be present as null when unmapped, and priorities are unique.
 * If `technical_spec` or `compiled_authority` is missing but needed for estimation, set `is_complete: false` and ask for it.
 
 **AS-BUILT ASSESSMENT:**
@@ -80,6 +80,7 @@ Return ONLY a JSON object. No Markdown formatting.
 * It is not Product Backlog authority. It is evidence-aware guidance for Product Owner review.
 * requirement is the action-oriented work item title; capability_name is the product capability from the As-Built assessment.
 * When a backlog item maps to an As-Built capability, it must include capability_name, authority_ref, as_built_status, and recommended_backlog_treatment.
+* For mapped capabilities, copy capability_assessments[].recommended_backlog_treatment unchanged. Allowed exact tokens are: skip_new_implementation, create_verification_item, create_hardening_item, create_authority_conflict_item, create_discovery_item, create_product_item, po_review_required.
 * For `status=observed`, do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
   Status title guidance: observed -> Verify, Document, Monitor, Preserve.
 * For `status=observed_with_missing_evidence`, scope work to verification, hardening, tests, docs, or validation.
