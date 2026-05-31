@@ -947,10 +947,10 @@ def test_backlog_runtime_allows_exact_authority_ref_for_duplicate_titles(
     assert result["success"] is True
 
 
-def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
+def test_backlog_runtime_normalizes_observed_item_greenfield_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Observed capabilities should not be emitted with greenfield work titles."""
+    """Mapped observed capabilities should get brownfield-safe title prefixes."""
     result = _run_brownfield_backlog_runtime(
         monkeypatch,
         {
@@ -962,9 +962,9 @@ def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
         },
     )
 
-    assert result["success"] is False
-    assert result["failure_stage"] == "brownfield_contract_validation"
-    assert "title prefix" in result["failure_summary"]
+    assert result["success"] is True
+    output_item = result["output_artifact"]["backlog_items"][0]
+    assert output_item["requirement"] == "Verify Live Squad Recommendation"
 
 
 def test_backlog_runtime_allows_discovery_treatment_formalize_title(
@@ -1001,10 +1001,10 @@ def test_backlog_runtime_allows_discovery_treatment_formalize_title(
     assert result["success"] is True
 
 
-def test_backlog_runtime_rejects_product_treatment_verify_title(
+def test_backlog_runtime_normalizes_product_treatment_verify_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Product-work recommendations should still require build-style titles."""
+    """Mapped product-work recommendations should get product title prefixes."""
     assessment = _as_built_assessment_payload()
     assessment["capability_assessments"] = [
         {
@@ -1032,10 +1032,9 @@ def test_backlog_runtime_rejects_product_treatment_verify_title(
         assessment=assessment,
     )
 
-    assert result["success"] is False
-    assert result["failure_stage"] == "brownfield_contract_validation"
-    assert "title prefix" in result["failure_summary"]
-    assert "Build, Add, Implement, Create" in result["failure_summary"]
+    assert result["success"] is True
+    output_item = result["output_artifact"]["backlog_items"][0]
+    assert output_item["requirement"] == "Build Post-Round Review Artifact"
 
 
 def test_backlog_runtime_retries_brownfield_contract_failure(
@@ -1052,8 +1051,8 @@ def test_backlog_runtime_retries_brownfield_contract_failure(
         if len(calls) == 1:
             return _backlog_output_json(
                 {
-                    "requirement": "Live Squad Recommendation Verification",
-                    "capability_name": "Live squad recommendation",
+                    "requirement": "Verify Live Squad Recommendation",
+                    "capability_name": "Wrong live squad name",
                     "authority_ref": "REQ.live-squad-recommendation",
                     "as_built_status": "observed",
                     "recommended_backlog_treatment": "skip_new_implementation",
@@ -1088,7 +1087,7 @@ def test_backlog_runtime_retries_brownfield_contract_failure(
     assert len(calls) == expected_call_count
     assert calls[0] == "draft backlog"
     assert "BROWNFIELD CONTRACT RETRY" in calls[1]
-    assert "title prefix must match" in calls[1]
+    assert "capability_name must match" in calls[1]
 
 
 def test_backlog_runtime_retry_feedback_includes_title_prefix_table(
@@ -1163,8 +1162,8 @@ def test_backlog_runtime_failed_brownfield_retry_exposes_metadata(
         calls.append(user_input)
         return _backlog_output_json(
             {
-                "requirement": "Live Squad Recommendation Verification",
-                "capability_name": "Live squad recommendation",
+                "requirement": "Verify Live Squad Recommendation",
+                "capability_name": "Wrong live squad name",
                 "authority_ref": "REQ.live-squad-recommendation",
                 "as_built_status": "observed",
                 "recommended_backlog_treatment": "skip_new_implementation",

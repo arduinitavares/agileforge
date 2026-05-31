@@ -463,6 +463,55 @@ def _has_allowed_capability_title_prefix(
     return False
 
 
+def _title_prefix_length(prefix: str) -> int:
+    return len(prefix)
+
+
+def _all_title_prefixes() -> tuple[str, ...]:
+    prefixes: set[str] = set()
+    for values in _ALLOWED_TITLE_PREFIXES_BY_STATUS.values():
+        prefixes.update(values)
+    for values in _ALLOWED_TITLE_PREFIXES_BY_TREATMENT.values():
+        prefixes.update(values)
+    sorted_prefixes: list[str] = sorted(
+        prefixes,
+        key=_title_prefix_length,
+        reverse=True,
+    )
+    return tuple(sorted_prefixes)
+
+
+def _strip_known_title_prefix(requirement: str) -> str:
+    stripped = requirement.strip()
+    for prefix in _all_title_prefixes():
+        pattern = re.compile(
+            rf"^\s*{re.escape(prefix)}\b\s*[:\-]?\s*",
+            re.IGNORECASE,
+        )
+        candidate = pattern.sub("", stripped, count=1).strip()
+        if candidate != stripped:
+            return candidate
+    return stripped
+
+
+def _normalize_mapped_requirement_title(
+    *,
+    item: BacklogItem,
+    capability: CapabilityAssessment,
+) -> None:
+    if _has_allowed_capability_title_prefix(
+        requirement=item.requirement,
+        capability=capability,
+    ):
+        return
+
+    prefix = _allowed_title_prefixes(capability)[0]
+    title_body = _strip_known_title_prefix(item.requirement)
+    if not title_body:
+        title_body = capability.capability_title
+    item.requirement = f"{prefix} {title_body}".strip()
+
+
 def _validate_mapped_brownfield_metadata(
     *,
     prefix: str,
@@ -593,6 +642,7 @@ def _validate_brownfield_contract(
                     )
             continue
 
+        _normalize_mapped_requirement_title(item=item, capability=capability)
         errors.extend(
             _validate_mapped_brownfield_item(
                 index=index,
