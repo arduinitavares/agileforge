@@ -71,6 +71,7 @@ class _FailureDetails:
 class _CapabilityIndex:
     """Lookup tables for authoritative As-Built capabilities."""
 
+    by_authority_ref: dict[str, tuple[CapabilityAssessment, ...]]
     by_exact_authority_ref: dict[str, CapabilityAssessment]
     ambiguous_authority_refs: set[str]
     by_normalized_key: dict[str, CapabilityAssessment]
@@ -135,11 +136,16 @@ def _same_backlog_contract(
 def _build_capability_index(
     assessment: AsBuiltAssessment,
 ) -> _CapabilityIndex:
+    grouped_by_authority_ref: dict[str, list[CapabilityAssessment]] = {}
     by_exact_authority_ref: dict[str, CapabilityAssessment] = {}
     ambiguous_authority_refs: set[str] = set()
     by_normalized_key: dict[str, CapabilityAssessment] = {}
     ambiguous_normalized_keys: set[str] = set()
     for capability in assessment.capability_assessments:
+        grouped_by_authority_ref.setdefault(capability.authority_ref, []).append(
+            capability
+        )
+
         exact_existing = by_exact_authority_ref.get(capability.authority_ref)
         if exact_existing is not None and exact_existing is not capability:
             if not _same_backlog_contract(exact_existing, capability):
@@ -162,6 +168,10 @@ def _build_capability_index(
                 continue
             by_normalized_key[normalized] = capability
     return _CapabilityIndex(
+        by_authority_ref={
+            authority_ref: tuple(capabilities)
+            for authority_ref, capabilities in grouped_by_authority_ref.items()
+        },
         by_exact_authority_ref=by_exact_authority_ref,
         ambiguous_authority_refs=ambiguous_authority_refs,
         by_normalized_key=by_normalized_key,
@@ -169,14 +179,61 @@ def _build_capability_index(
     )
 
 
+def _matches_item_selectors(
+    capability: CapabilityAssessment,
+    item: BacklogItem,
+) -> bool:
+    if item.capability_name is not None and _normalize_brownfield_text(
+        item.capability_name
+    ) != _normalize_brownfield_text(capability.capability_title):
+        return False
+    if item.as_built_status is not None and item.as_built_status != capability.status:
+        return False
+    return not (
+        item.recommended_backlog_treatment is not None
+        and item.recommended_backlog_treatment
+        != capability.recommended_backlog_treatment
+    )
+
+
+def _select_authority_ref_capability(
+    *,
+    item: BacklogItem,
+    capabilities: tuple[CapabilityAssessment, ...],
+) -> CapabilityAssessment:
+    if len(capabilities) == 1:
+        return capabilities[0]
+
+    matches = [
+        capability
+        for capability in capabilities
+        if _matches_item_selectors(capability, item)
+    ]
+    if not matches:
+        message = "authority_ref metadata does not match As-Built capability"
+        raise ValueError(message)
+
+    selected = matches[0]
+    if all(_same_backlog_contract(selected, match) for match in matches):
+        return selected
+
+    message = "ambiguous As-Built authority_ref"
+    raise ValueError(message)
+
+
 def _mapped_capability(
     item: BacklogItem,
     capability_index: _CapabilityIndex,
 ) -> CapabilityAssessment | None:
     if item.authority_ref is not None:
-        if item.authority_ref in capability_index.ambiguous_authority_refs:
-            message = "ambiguous As-Built authority_ref"
-            raise ValueError(message)
+        authority_capabilities = capability_index.by_authority_ref.get(
+            item.authority_ref
+        )
+        if authority_capabilities is not None:
+            return _select_authority_ref_capability(
+                item=item,
+                capabilities=authority_capabilities,
+            )
         capability = capability_index.by_exact_authority_ref.get(item.authority_ref)
         if capability is not None:
             return capability

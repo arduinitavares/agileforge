@@ -678,10 +678,10 @@ def test_backlog_runtime_allows_homogeneous_duplicate_authority_refs(
     assert result["success"] is True
 
 
-def test_backlog_runtime_rejects_heterogeneous_duplicate_authority_refs(
+def test_backlog_runtime_allows_status_to_select_duplicate_authority_ref_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A scalar backlog item cannot safely claim a mixed As-Built ref group."""
+    """Status and treatment metadata can select one mixed authority-ref subgroup."""
     assessment = _as_built_assessment_payload()
     assessment["capability_assessments"].append(
         {
@@ -705,6 +705,37 @@ def test_backlog_runtime_rejects_heterogeneous_duplicate_authority_refs(
             "authority_ref": "REQ.live-squad-recommendation",
             "as_built_status": "observed",
             "recommended_backlog_treatment": "skip_new_implementation",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is True
+
+
+def test_backlog_runtime_rejects_ambiguous_authority_ref_without_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed authority-ref groups need enough emitted metadata to select a contract."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "REQ.live-squad-recommendation",
+            "invariant_refs": ["INV-missing"],
+            "capability_title": "Live squad recommendation",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Heterogeneous fixture."],
+            "recommended_backlog_treatment": "create_discovery_item",
+            "reasoning": "Same ref, different assessment status.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
         },
         assessment=assessment,
     )

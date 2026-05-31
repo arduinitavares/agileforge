@@ -58,3 +58,11 @@ def test_backlog_prompt_names_treatment_tokens_and_nullable_metadata() -> None:
     assert (
         "optional brownfield metadata fields must be present as null when unmapped"
     ) in text
+
+
+def test_backlog_prompt_requires_exact_brownfield_title_prefixes() -> None:
+    """Prompt must describe status title guidance as validator-enforced prefixes."""
+    text = _instructions()
+
+    assert "must start with one of the exact prefixes" in text
+    assert "Do not use noun-only capability titles" in text
