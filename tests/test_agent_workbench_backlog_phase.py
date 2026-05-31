@@ -834,6 +834,59 @@ def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
     assert "title prefix" in result["failure_summary"]
 
 
+def test_backlog_runtime_retries_brownfield_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime should give the agent one feedback pass for contract repairs."""
+    calls: list[str] = []
+
+    async def fake_invoke_backlog_agent(payload: object) -> str:
+        payload_model = cast("Any", payload)
+        user_input = payload_model.user_input
+        assert isinstance(user_input, str)
+        calls.append(user_input)
+        if len(calls) == 1:
+            return _backlog_output_json(
+                {
+                    "requirement": "Live Squad Recommendation Verification",
+                    "capability_name": "Live squad recommendation",
+                    "authority_ref": "REQ.live-squad-recommendation",
+                    "as_built_status": "observed",
+                    "recommended_backlog_treatment": "skip_new_implementation",
+                }
+            )
+        return _backlog_output_json(
+            {
+                "requirement": "Verify Live Squad Recommendation",
+                "capability_name": "Live squad recommendation",
+                "authority_ref": "REQ.live-squad-recommendation",
+                "as_built_status": "observed",
+                "recommended_backlog_treatment": "skip_new_implementation",
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.backlog_runtime._invoke_backlog_agent",
+        fake_invoke_backlog_agent,
+    )
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            _brownfield_backlog_state(),
+            project_id=2,
+            user_input="draft backlog",
+        )
+
+    result = anyio.run(call_runtime)
+
+    assert result["success"] is True
+    expected_call_count = 2
+    assert len(calls) == expected_call_count
+    assert calls[0] == "draft backlog"
+    assert "BROWNFIELD CONTRACT RETRY" in calls[1]
+    assert "title prefix must match" in calls[1]
+
+
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

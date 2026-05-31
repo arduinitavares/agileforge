@@ -55,6 +55,7 @@ _ALLOWED_TITLE_PREFIXES_BY_STATUS: dict[str, tuple[str, ...]] = {
     "unclear": ("Discover", "Investigate", "Clarify"),
     "not_observed": ("Build", "Add", "Implement", "Create"),
 }
+_BROWNFIELD_CONTRACT_RETRY_MARKER = "BROWNFIELD CONTRACT RETRY"
 
 
 @dataclass(frozen=True)
@@ -419,6 +420,25 @@ def build_backlog_input_context(
     }
 
 
+def _with_brownfield_retry_feedback(
+    input_context: BacklogInputContext,
+    *,
+    validation_error: str,
+) -> BacklogInputContext:
+    retry_context = dict(input_context)
+    original_user_input = _as_text(retry_context.get("user_input")).strip()
+    feedback = (
+        f"{_BROWNFIELD_CONTRACT_RETRY_MARKER}: Your previous backlog JSON failed "
+        "AgileForge brownfield contract validation. Regenerate the entire JSON "
+        "response. Keep the same scope and priorities, but fix these exact errors: "
+        f"{validation_error}"
+    )
+    retry_context["user_input"] = (
+        f"{original_user_input}\n\n{feedback}" if original_user_input else feedback
+    )
+    return retry_context
+
+
 async def _invoke_backlog_agent(payload: InputSchema) -> str:
     return await invoke_agent_to_text(
         agent=backlog_agent,
@@ -426,6 +446,69 @@ async def _invoke_backlog_agent(payload: InputSchema) -> str:
         payload_json=payload.model_dump_json(),
         no_text_error="Backlog agent returned no text response",
     )
+
+
+async def _invoke_and_validate_output(
+    *,
+    payload: InputSchema,
+    input_context: BacklogInputContext,
+) -> tuple[str, OutputSchema] | dict[str, _FailureDetails]:
+    try:
+        raw_text: str = await _invoke_backlog_agent(payload)
+    except (AgentInvocationError, ValueError) as exc:
+        raw_output = (
+            exc.partial_output if isinstance(exc, AgentInvocationError) else None
+        )
+        return {
+            "invocation_exception": _FailureDetails(
+                message=f"Backlog runtime failed: {exc}",
+                raw_text=raw_output,
+                exception=exc,
+            )
+        }
+
+    parsed: dict[str, Any] | None = parse_json_payload(raw_text)
+    if parsed is None:
+        return {
+            "invalid_json": _FailureDetails(
+                message="Backlog response is not valid JSON",
+                raw_text=raw_text,
+            )
+        }
+
+    try:
+        output_model: OutputSchema = OutputSchema.model_validate(parsed)
+    except ValidationError as exc:
+        return {
+            "output_validation": _FailureDetails(
+                message=f"Backlog output validation failed: {exc}",
+                raw_text=raw_text,
+                validation_errors=_normalize_validation_errors(exc.errors()),
+                exception=exc,
+            )
+        }
+
+    try:
+        _validate_brownfield_contract(
+            output_model=output_model,
+            input_context=input_context,
+        )
+    except (TypeError, ValidationError, ValueError) as exc:
+        validation_errors = (
+            _normalize_validation_errors(exc.errors())
+            if isinstance(exc, ValidationError)
+            else None
+        )
+        return {
+            "brownfield_contract_validation": _FailureDetails(
+                message=f"Backlog brownfield contract validation failed: {exc}",
+                raw_text=raw_text,
+                validation_errors=validation_errors,
+                exception=exc,
+            )
+        }
+
+    return raw_text, output_model
 
 
 def _failure(
@@ -515,72 +598,45 @@ async def run_backlog_agent_from_state(
             ),
         )
 
-    try:
-        raw_text: str = await _invoke_backlog_agent(payload)
-    except (AgentInvocationError, ValueError) as exc:
-        raw_output = (
-            exc.partial_output if isinstance(exc, AgentInvocationError) else None
-        )
-        return _failure(
-            project_id=project_id,
-            input_context=input_context,
-            failure_stage="invocation_exception",
-            details=_FailureDetails(
-                message=f"Backlog runtime failed: {exc}",
-                raw_text=raw_output,
-                exception=exc,
-            ),
-        )
-
-    parsed: dict[str, Any] | None = parse_json_payload(raw_text)
-    if parsed is None:
-        return _failure(
-            project_id=project_id,
-            input_context=input_context,
-            failure_stage="invalid_json",
-            details=_FailureDetails(
-                message="Backlog response is not valid JSON",
-                raw_text=raw_text,
-            ),
-        )
-
-    try:
-        output_model: OutputSchema = OutputSchema.model_validate(parsed)
-    except ValidationError as exc:
-        return _failure(
-            project_id=project_id,
-            input_context=input_context,
-            failure_stage="output_validation",
-            details=_FailureDetails(
-                message=f"Backlog output validation failed: {exc}",
-                raw_text=raw_text,
-                validation_errors=_normalize_validation_errors(exc.errors()),
-                exception=exc,
-            ),
-        )
-
-    try:
-        _validate_brownfield_contract(
-            output_model=output_model,
-            input_context=input_context,
-        )
-    except (TypeError, ValidationError, ValueError) as exc:
-        validation_errors = (
-            _normalize_validation_errors(exc.errors())
-            if isinstance(exc, ValidationError)
-            else None
-        )
-        return _failure(
-            project_id=project_id,
-            input_context=input_context,
-            failure_stage="brownfield_contract_validation",
-            details=_FailureDetails(
-                message=f"Backlog brownfield contract validation failed: {exc}",
-                raw_text=raw_text,
-                validation_errors=validation_errors,
-                exception=exc,
-            ),
-        )
+    validated = await _invoke_and_validate_output(
+        payload=payload,
+        input_context=input_context,
+    )
+    if isinstance(validated, dict):
+        failure_stage, failure_details = next(iter(validated.items()))
+        if (
+            failure_stage == "brownfield_contract_validation"
+            and isinstance(failure_details.exception, ValueError)
+        ):
+            retry_input_context = _with_brownfield_retry_feedback(
+                input_context,
+                validation_error=str(failure_details.exception),
+            )
+            retry_payload = InputSchema.model_validate(retry_input_context)
+            retry_validated = await _invoke_and_validate_output(
+                payload=retry_payload,
+                input_context=retry_input_context,
+            )
+            if not isinstance(retry_validated, dict):
+                input_context = retry_input_context
+                _raw_text, output_model = retry_validated
+            else:
+                failure_stage, failure_details = next(iter(retry_validated.items()))
+                return _failure(
+                    project_id=project_id,
+                    input_context=retry_input_context,
+                    failure_stage=failure_stage,
+                    details=failure_details,
+                )
+        else:
+            return _failure(
+                project_id=project_id,
+                input_context=input_context,
+                failure_stage=failure_stage,
+                details=failure_details,
+            )
+    else:
+        _raw_text, output_model = validated
 
     output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
     if _has_clarifying_questions(output_artifact):
