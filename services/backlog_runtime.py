@@ -64,6 +64,13 @@ _BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE = (
     "Discover, Investigate, Clarify; not_observed -> Build, Add, Implement, "
     "Create. The required prefix must be the first words in requirement."
 )
+_BROWNFIELD_RETRY_MAPPING_GUIDE = (
+    "Also re-check null-metadata items: if requirement or technical_note uses "
+    "As-Built capability terms, include capability_name, authority_ref, "
+    "as_built_status, and recommended_backlog_treatment. If one item spans "
+    "multiple As-Built capabilities, split it into mapped single-capability items "
+    "or rename/scope it as genuinely new work without those capability terms."
+)
 _BROWNFIELD_TOKEN_STOPWORDS = frozenset({"only"})
 _MIN_BROWNFIELD_TOKEN_LENGTH = 3
 _PLURAL_TRIM_TOKEN_LENGTH = 4
@@ -497,8 +504,10 @@ def _validate_brownfield_contract(
                     )
                     errors.append(
                         f"backlog_items[{index}] appears to map to As-Built "
-                        "capability; include brownfield metadata or rename/scope "
-                        f"as genuinely new work: {formatted_matches}"
+                        "capability; include brownfield metadata, split "
+                        "multi-capability work into mapped single-capability "
+                        "items, or rename/scope as genuinely new work: "
+                        f"{formatted_matches}"
                     )
             continue
 
@@ -550,7 +559,8 @@ def _with_brownfield_retry_feedback(
         f"{_BROWNFIELD_CONTRACT_RETRY_MARKER}: Your previous backlog JSON failed "
         "AgileForge brownfield contract validation. Regenerate the entire JSON "
         "response. Keep the same scope and priorities, but fix these exact errors: "
-        f"{validation_error}. {_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE}"
+        f"{validation_error}. {_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE} "
+        f"{_BROWNFIELD_RETRY_MAPPING_GUIDE}"
     )
     retry_context["user_input"] = (
         f"{original_user_input}\n\n{feedback}" if original_user_input else feedback

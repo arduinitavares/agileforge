@@ -1032,6 +1032,8 @@ def test_backlog_runtime_retry_feedback_includes_title_prefix_table(
     assert "observed -> Verify, Document, Monitor, Preserve" in calls[1]
     assert "observed_with_missing_evidence -> Verify, Validate, Harden" in calls[1]
     assert "not_observed -> Build, Add, Implement, Create" in calls[1]
+    assert "uses As-Built capability terms" in calls[1]
+    assert "split it into mapped single-capability items" in calls[1]
 
 
 def test_backlog_runtime_failed_brownfield_retry_exposes_metadata(
