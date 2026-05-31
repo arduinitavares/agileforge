@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
+import anyio
 from sqlmodel import select
 
 from models.core import Product, UserStory
@@ -14,7 +15,10 @@ from models.enums import StoryStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
-from services.backlog_runtime import build_backlog_input_context
+from services.backlog_runtime import (
+    build_backlog_input_context,
+    run_backlog_agent_from_state,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -134,6 +138,68 @@ def _as_built_state(
         "as_built_assessment_cached": canonical,
         "as_built_assessment_cache_meta": meta,
     }
+
+
+def _backlog_output_json(
+    item: dict[str, Any],
+    *,
+    is_complete: bool = True,
+    clarifying_questions: list[str] | None = None,
+) -> str:
+    """Return a schema-shaped Backlog Primer response with one item."""
+    backlog_item = {
+        "priority": 1,
+        "requirement": "Verify Live Squad Recommendation",
+        "value_driver": "Strategic",
+        "justification": "Aligns the backlog with observed repository behavior.",
+        "estimated_effort": "S",
+    }
+    backlog_item.update(item)
+    return json.dumps(
+        {
+            "backlog_items": [backlog_item],
+            "is_complete": is_complete,
+            "clarifying_questions": clarifying_questions or [],
+        }
+    )
+
+
+def _brownfield_backlog_state() -> dict[str, Any]:
+    """Return workflow state with a fresh As-Built assessment cache."""
+    return {
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        },
+        "pending_spec_content": "SPEC CONTENT",
+        "compiled_authority_cached": "AUTHORITY JSON",
+        **_as_built_state(_as_built_assessment_payload()),
+    }
+
+
+def _run_brownfield_backlog_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the backlog runtime against a single mocked backlog item."""
+
+    async def fake_invoke_backlog_agent(payload: object) -> str:
+        del payload
+        return _backlog_output_json(item)
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            _brownfield_backlog_state(),
+            project_id=2,
+            user_input="draft backlog",
+        )
+
+    monkeypatch.setattr(
+        "services.backlog_runtime._invoke_backlog_agent",
+        fake_invoke_backlog_agent,
+    )
+
+    return anyio.run(call_runtime)
 
 
 def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
@@ -397,6 +463,81 @@ def test_build_backlog_input_context_rejects_stale_builder_version() -> None:
     )
 
     assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
+
+
+def test_backlog_runtime_accepts_valid_brownfield_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime validation should accept exact As-Built metadata for mapped items."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+    )
+
+    assert result["success"] is True
+    output_item = result["output_artifact"]["backlog_items"][0]
+    assert output_item["capability_name"] == "Live squad recommendation"
+
+
+def test_backlog_runtime_rejects_capability_title_without_brownfield_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A noun-only capability title must not pass without brownfield metadata."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {"requirement": "Live squad recommendation"},
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "missing capability_name" in result["failure_summary"]
+
+
+def test_backlog_runtime_rejects_mismatched_brownfield_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mapped items must copy status and treatment from the As-Built assessment."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "not_observed",
+            "recommended_backlog_treatment": "create_product_item",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "as_built_status" in result["failure_summary"]
+    assert "recommended_backlog_treatment" in result["failure_summary"]
+
+
+def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observed capabilities should not be emitted with greenfield work titles."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Build Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "title prefix" in result["failure_summary"]
 
 
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(

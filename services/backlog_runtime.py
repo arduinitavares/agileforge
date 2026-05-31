@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
 
+from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
+    AsBuiltAssessment,
+    CapabilityAssessment,
+)
 from orchestrator_agent.agent_tools.backlog_primer.agent import (
     root_agent as backlog_agent,
 )
 from orchestrator_agent.agent_tools.backlog_primer.schemes import (
+    BacklogItem,
     InputSchema,
     OutputSchema,
 )
@@ -35,6 +41,20 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 
 type BacklogInputContext = dict[str, object]
 type ValidationErrors = list[dict[str, object]]
+
+_ALLOWED_TITLE_PREFIXES_BY_STATUS: dict[str, tuple[str, ...]] = {
+    "observed": ("Verify", "Document", "Monitor", "Preserve"),
+    "observed_with_missing_evidence": (
+        "Verify",
+        "Validate",
+        "Harden",
+        "Formalize",
+        "Add Evidence For",
+    ),
+    "contradicted": ("Resolve", "Align", "Correct"),
+    "unclear": ("Discover", "Investigate", "Clarify"),
+    "not_observed": ("Build", "Add", "Implement", "Create"),
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +99,139 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
             continue
         normalized.append({str(key): value for key, value in error.items()})
     return normalized
+
+
+def _normalize_brownfield_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+
+def _normalize_title_prefix(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _build_capability_index(
+    assessment: AsBuiltAssessment,
+) -> dict[str, CapabilityAssessment]:
+    index: dict[str, CapabilityAssessment] = {}
+    for capability in assessment.capability_assessments:
+        for candidate in (capability.authority_ref, capability.capability_title):
+            normalized = _normalize_brownfield_text(candidate)
+            if normalized:
+                index.setdefault(normalized, capability)
+    return index
+
+
+def _mapped_capability(
+    item: BacklogItem,
+    capabilities_by_key: dict[str, CapabilityAssessment],
+) -> CapabilityAssessment | None:
+    for candidate in (item.authority_ref, item.capability_name, item.requirement):
+        if candidate is None:
+            continue
+        capability = capabilities_by_key.get(_normalize_brownfield_text(candidate))
+        if capability is not None:
+            return capability
+    return None
+
+
+def _title_has_allowed_prefix(*, requirement: str, status: str) -> bool:
+    normalized_requirement = _normalize_title_prefix(requirement)
+    for prefix in _ALLOWED_TITLE_PREFIXES_BY_STATUS.get(status, ()):
+        normalized_prefix = _normalize_title_prefix(prefix)
+        if normalized_requirement == normalized_prefix:
+            return True
+        if normalized_requirement.startswith(f"{normalized_prefix} "):
+            return True
+    return False
+
+
+def _validate_mapped_brownfield_item(
+    *,
+    index: int,
+    item: BacklogItem,
+    capability: CapabilityAssessment,
+) -> list[str]:
+    prefix = f"backlog_items[{index}]"
+    errors: list[str] = []
+
+    if item.capability_name is None:
+        errors.append(f"{prefix} missing capability_name")
+    elif _normalize_brownfield_text(item.capability_name) != (
+        _normalize_brownfield_text(capability.capability_title)
+    ):
+        errors.append(
+            f"{prefix} capability_name must match {capability.capability_title!r}"
+        )
+
+    if item.authority_ref is None:
+        errors.append(f"{prefix} missing authority_ref")
+    elif _normalize_brownfield_text(item.authority_ref) != (
+        _normalize_brownfield_text(capability.authority_ref)
+    ):
+        errors.append(
+            f"{prefix} authority_ref must match {capability.authority_ref!r}"
+        )
+
+    if item.as_built_status != capability.status:
+        errors.append(f"{prefix} as_built_status must equal {capability.status!r}")
+
+    if item.recommended_backlog_treatment != capability.recommended_backlog_treatment:
+        errors.append(
+            f"{prefix} recommended_backlog_treatment must equal "
+            f"{capability.recommended_backlog_treatment!r}"
+        )
+
+    normalized_requirement = _normalize_brownfield_text(item.requirement)
+    if normalized_requirement == _normalize_brownfield_text(
+        capability.capability_title
+    ) or (
+        item.capability_name is not None
+        and normalized_requirement == _normalize_brownfield_text(item.capability_name)
+    ):
+        errors.append(f"{prefix} requirement must not equal capability title/name")
+
+    if not _title_has_allowed_prefix(
+        requirement=item.requirement,
+        status=capability.status,
+    ):
+        allowed = ", ".join(_ALLOWED_TITLE_PREFIXES_BY_STATUS[capability.status])
+        errors.append(
+            f"{prefix} title prefix must match status {capability.status!r}; "
+            f"allowed prefixes: {allowed}"
+        )
+
+    return errors
+
+
+def _validate_brownfield_contract(
+    *,
+    output_model: OutputSchema,
+    input_context: BacklogInputContext,
+) -> None:
+    """Validate brownfield backlog metadata against authoritative As-Built input."""
+    raw_assessment = input_context["as_built_assessment"]
+    if raw_assessment == "NO_AS_BUILT_ASSESSMENT":
+        return
+
+    assessment = AsBuiltAssessment.model_validate_json(raw_assessment)
+    capabilities_by_key = _build_capability_index(assessment)
+    errors: list[str] = []
+
+    for index, item in enumerate(output_model.backlog_items, start=1):
+        capability = _mapped_capability(item, capabilities_by_key)
+        if capability is None:
+            continue
+
+        errors.extend(
+            _validate_mapped_brownfield_item(
+                index=index,
+                item=item,
+                capability=capability,
+            )
+        )
+
+    if errors:
+        raise ValueError("; ".join(errors))
 
 
 def build_backlog_input_context(
@@ -204,24 +357,17 @@ async def run_backlog_agent_from_state(
 
     try:
         raw_text: str = await _invoke_backlog_agent(payload)
-    except AgentInvocationError as exc:
-        return _failure(
-            project_id=project_id,
-            input_context=input_context,
-            failure_stage="invocation_exception",
-            details=_FailureDetails(
-                message=f"Backlog runtime failed: {exc}",
-                raw_text=exc.partial_output,
-                exception=exc,
-            ),
+    except (AgentInvocationError, ValueError) as exc:
+        raw_output = (
+            exc.partial_output if isinstance(exc, AgentInvocationError) else None
         )
-    except ValueError as exc:
         return _failure(
             project_id=project_id,
             input_context=input_context,
             failure_stage="invocation_exception",
             details=_FailureDetails(
                 message=f"Backlog runtime failed: {exc}",
+                raw_text=raw_output,
                 exception=exc,
             ),
         )
@@ -249,6 +395,29 @@ async def run_backlog_agent_from_state(
                 message=f"Backlog output validation failed: {exc}",
                 raw_text=raw_text,
                 validation_errors=_normalize_validation_errors(exc.errors()),
+                exception=exc,
+            ),
+        )
+
+    try:
+        _validate_brownfield_contract(
+            output_model=output_model,
+            input_context=input_context,
+        )
+    except (ValidationError, ValueError) as exc:
+        validation_errors = (
+            _normalize_validation_errors(exc.errors())
+            if isinstance(exc, ValidationError)
+            else None
+        )
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="brownfield_contract_validation",
+            details=_FailureDetails(
+                message=f"Backlog brownfield contract validation failed: {exc}",
+                raw_text=raw_text,
+                validation_errors=validation_errors,
                 exception=exc,
             ),
         )
