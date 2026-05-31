@@ -236,9 +236,12 @@ def _validate_brownfield_contract(
     input_context: BacklogInputContext,
 ) -> None:
     """Validate brownfield backlog metadata against authoritative As-Built input."""
-    raw_assessment = input_context["as_built_assessment"]
+    raw_assessment = input_context.get("as_built_assessment")
     if raw_assessment == "NO_AS_BUILT_ASSESSMENT":
         return
+    if not isinstance(raw_assessment, str):
+        msg = "as_built_assessment must be a serialized As-Built JSON string"
+        raise TypeError(msg)
 
     assessment = AsBuiltAssessment.model_validate_json(raw_assessment)
     capabilities_by_key = _build_capability_index(assessment)
@@ -431,7 +434,7 @@ async def run_backlog_agent_from_state(
             output_model=output_model,
             input_context=input_context,
         )
-    except (ValidationError, ValueError) as exc:
+    except (TypeError, ValidationError, ValueError) as exc:
         validation_errors = (
             _normalize_validation_errors(exc.errors())
             if isinstance(exc, ValidationError)

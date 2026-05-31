@@ -122,6 +122,10 @@ class TestBacklogPrimerSchemas:
             BacklogItem(
                 priority=0,
                 requirement="Security baseline",
+                capability_name=None,
+                authority_ref=None,
+                as_built_status=None,
+                recommended_backlog_treatment=None,
                 value_driver="Strategic",
                 justification="Reduces compliance risk",
                 estimated_effort="M",
