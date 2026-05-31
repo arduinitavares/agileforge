@@ -454,6 +454,84 @@ def test_backlog_preview_surfaces_brownfield_contract_failure(
     )
 
 
+def test_backlog_preview_surfaces_brownfield_retry_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed previews should expose bounded retry diagnostics in the envelope."""
+
+    async def fake_run_backlog_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, user_input
+        return {
+            "success": False,
+            "error": "Backlog brownfield contract validation failed",
+            "failure_stage": "brownfield_contract_validation",
+            "failure_summary": "Backlog brownfield contract validation failed",
+            "failure_artifact_id": "backlog-failure-brownfield-retry",
+            "has_full_artifact": True,
+            "brownfield_retry_attempted": True,
+            "brownfield_retry_count": 1,
+            "brownfield_retry_marker": "BROWNFIELD CONTRACT RETRY",
+            "brownfield_retry_failed_stage": "brownfield_contract_validation",
+            "input_context": {
+                "product_vision_statement": "A clear saved vision.",
+                "technical_spec": "SPEC CONTENT",
+                "compiled_authority": "AUTHORITY JSON",
+                "prior_backlog_state": "NO_HISTORY",
+                "as_built_assessment": "{}",
+                "implementation_evidence": "NO_EVIDENCE",
+                "user_input": (
+                    "BROWNFIELD CONTRACT RETRY: fix exact contract errors"
+                ),
+            },
+            "output_artifact": {
+                "is_complete": False,
+                "error": "BACKLOG_GENERATION_FAILED",
+                "failure_summary": "Backlog brownfield contract validation failed",
+            },
+            "is_complete": False,
+        }
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        return {"success": True, "project_id": product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.run_backlog_agent_from_state",
+        fake_run_backlog_agent_from_state,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.preview(project_id=2)
+
+    details = result["errors"][0]["details"]
+    assert details["brownfield_retry_attempted"] is True
+    assert details["brownfield_retry_count"] == 1
+    assert details["brownfield_retry_marker"] == "BROWNFIELD CONTRACT RETRY"
+    assert details["brownfield_retry_failed_stage"] == (
+        "brownfield_contract_validation"
+    )
+
+
 def test_build_backlog_input_context_uses_no_evidence_when_cache_missing() -> None:
     """Backlog input context should use NO_EVIDENCE without cached evidence."""
     context = build_backlog_input_context(
@@ -885,6 +963,55 @@ def test_backlog_runtime_retries_brownfield_contract_failure(
     assert calls[0] == "draft backlog"
     assert "BROWNFIELD CONTRACT RETRY" in calls[1]
     assert "title prefix must match" in calls[1]
+
+
+def test_backlog_runtime_failed_brownfield_retry_exposes_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime failures after retry should expose bounded retry diagnostics."""
+    calls: list[str] = []
+
+    async def fake_invoke_backlog_agent(payload: object) -> str:
+        payload_model = cast("Any", payload)
+        user_input = payload_model.user_input
+        assert isinstance(user_input, str)
+        calls.append(user_input)
+        return _backlog_output_json(
+            {
+                "requirement": "Live Squad Recommendation Verification",
+                "capability_name": "Live squad recommendation",
+                "authority_ref": "REQ.live-squad-recommendation",
+                "as_built_status": "observed",
+                "recommended_backlog_treatment": "skip_new_implementation",
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.backlog_runtime._invoke_backlog_agent",
+        fake_invoke_backlog_agent,
+    )
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            _brownfield_backlog_state(),
+            project_id=2,
+            user_input="draft backlog",
+        )
+
+    result = anyio.run(call_runtime)
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert result["brownfield_retry_attempted"] is True
+    assert result["brownfield_retry_count"] == 1
+    assert result["brownfield_retry_marker"] == "BROWNFIELD CONTRACT RETRY"
+    assert result["brownfield_retry_failed_stage"] == (
+        "brownfield_contract_validation"
+    )
+    expected_call_count = 2
+    assert len(calls) == expected_call_count
+    assert result["input_context"]["user_input"] == calls[1]
+    assert "BROWNFIELD CONTRACT RETRY" in result["input_context"]["user_input"]
 
 
 def test_backlog_generate_returns_failure_envelope_for_runtime_failure(

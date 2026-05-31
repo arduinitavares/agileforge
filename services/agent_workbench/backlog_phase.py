@@ -388,6 +388,12 @@ def _backlog_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str
         "failure_artifact_id": data.get("failure_artifact_id"),
         "attempt_count": data.get("attempt_count"),
         "fsm_state": data.get("fsm_state"),
+        "brownfield_retry_attempted": data.get("brownfield_retry_attempted"),
+        "brownfield_retry_count": data.get("brownfield_retry_count"),
+        "brownfield_retry_marker": data.get("brownfield_retry_marker"),
+        "brownfield_retry_failed_stage": data.get(
+            "brownfield_retry_failed_stage"
+        ),
     }
     return _error_envelope(
         ErrorCode.MUTATION_FAILED,

@@ -19,6 +19,12 @@ VALID_BACKLOG_GENERATION_STATES = {
     OrchestratorState.ROADMAP_INTERVIEW.value,
 }
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
+BACKLOG_RUNTIME_DIAGNOSTIC_KEYS = (
+    "brownfield_retry_attempted",
+    "brownfield_retry_count",
+    "brownfield_retry_marker",
+    "brownfield_retry_failed_stage",
+)
 
 
 class BacklogPhaseError(Exception):
@@ -78,6 +84,15 @@ def record_backlog_attempt(
         mirrored_state_key="backlog_items",
         mirrored_output_types=(list,),
     )
+
+
+def _backlog_runtime_diagnostics(source: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded runtime diagnostics that should survive phase wrapping."""
+    return {
+        key: source[key]
+        for key in BACKLOG_RUNTIME_DIAGNOSTIC_KEYS
+        if source.get(key) is not None
+    }
 
 
 def set_backlog_fsm_state(
@@ -169,6 +184,7 @@ async def generate_backlog_draft(
         **workflow_state.failure_meta(
             backlog_result, fallback_summary=backlog_result.get("error")
         ),
+        **_backlog_runtime_diagnostics(backlog_result),
     }
 
 
@@ -211,6 +227,7 @@ async def preview_backlog_draft(
         **workflow_state.failure_meta(
             backlog_result, fallback_summary=backlog_result.get("error")
         ),
+        **_backlog_runtime_diagnostics(backlog_result),
     }
 
 

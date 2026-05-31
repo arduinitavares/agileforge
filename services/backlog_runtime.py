@@ -374,7 +374,11 @@ def _validate_brownfield_contract(
     errors: list[str] = []
 
     for index, item in enumerate(output_model.backlog_items, start=1):
-        capability = _mapped_capability(item, capability_index)
+        try:
+            capability = _mapped_capability(item, capability_index)
+        except ValueError as exc:
+            errors.append(f"backlog_items[{index}] {exc}")
+            continue
         if capability is None:
             if _has_brownfield_metadata(item):
                 errors.append(
@@ -437,6 +441,21 @@ def _with_brownfield_retry_feedback(
         f"{original_user_input}\n\n{feedback}" if original_user_input else feedback
     )
     return retry_context
+
+
+def _brownfield_retry_metadata(
+    *,
+    failed_stage: str | None = None,
+) -> dict[str, object]:
+    """Return bounded diagnostics for brownfield contract repair attempts."""
+    metadata: dict[str, object] = {
+        "brownfield_retry_attempted": True,
+        "brownfield_retry_count": 1,
+        "brownfield_retry_marker": _BROWNFIELD_CONTRACT_RETRY_MARKER,
+    }
+    if failed_stage is not None:
+        metadata["brownfield_retry_failed_stage"] = failed_stage
+    return metadata
 
 
 async def _invoke_backlog_agent(payload: InputSchema) -> str:
@@ -517,6 +536,7 @@ def _failure(
     input_context: BacklogInputContext,
     failure_stage: str,
     details: _FailureDetails,
+    extra: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     message: str = details.message
     artifact_result: FailureArtifactResult = write_failure_artifact(
@@ -533,6 +553,7 @@ def _failure(
         },
         validation_errors=details.validation_errors,
         exception=details.exception,
+        extra=extra,
     )
     metadata: FailureMetadataDict = artifact_result["metadata"]
     if details.exception is not None:
@@ -562,7 +583,7 @@ def _failure(
         "has_full_artifact": metadata["has_full_artifact"],
     }
 
-    return {
+    result: dict[str, Any] = {
         "success": False,
         "input_context": input_context,
         "output_artifact": artifact,
@@ -570,6 +591,9 @@ def _failure(
         "error": message,
         **metadata,
     }
+    if extra:
+        result.update(extra)
+    return result
 
 
 async def run_backlog_agent_from_state(
@@ -602,6 +626,7 @@ async def run_backlog_agent_from_state(
         payload=payload,
         input_context=input_context,
     )
+    runtime_metadata: dict[str, object] = {}
     if isinstance(validated, dict):
         failure_stage, failure_details = next(iter(validated.items()))
         if (
@@ -620,13 +645,18 @@ async def run_backlog_agent_from_state(
             if not isinstance(retry_validated, dict):
                 input_context = retry_input_context
                 _raw_text, output_model = retry_validated
+                runtime_metadata = _brownfield_retry_metadata()
             else:
                 failure_stage, failure_details = next(iter(retry_validated.items()))
+                runtime_metadata = _brownfield_retry_metadata(
+                    failed_stage=failure_stage,
+                )
                 return _failure(
                     project_id=project_id,
                     input_context=retry_input_context,
                     failure_stage=failure_stage,
                     details=failure_details,
+                    extra=runtime_metadata,
                 )
         else:
             return _failure(
@@ -652,6 +682,7 @@ async def run_backlog_agent_from_state(
         "failure_summary": None,
         "raw_output_preview": None,
         "has_full_artifact": False,
+        **runtime_metadata,
     }
 
 
