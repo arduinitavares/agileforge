@@ -56,6 +56,14 @@ _ALLOWED_TITLE_PREFIXES_BY_STATUS: dict[str, tuple[str, ...]] = {
     "not_observed": ("Build", "Add", "Implement", "Create"),
 }
 _BROWNFIELD_CONTRACT_RETRY_MARKER = "BROWNFIELD CONTRACT RETRY"
+_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE = (
+    "Also re-check every mapped brownfield item title against these exact "
+    "status prefixes: observed -> Verify, Document, Monitor, Preserve; "
+    "observed_with_missing_evidence -> Verify, Validate, Harden, Formalize, "
+    "Add Evidence For; contradicted -> Resolve, Align, Correct; unclear -> "
+    "Discover, Investigate, Clarify; not_observed -> Build, Add, Implement, "
+    "Create. The required prefix must be the first words in requirement."
+)
 
 
 @dataclass(frozen=True)
@@ -435,7 +443,7 @@ def _with_brownfield_retry_feedback(
         f"{_BROWNFIELD_CONTRACT_RETRY_MARKER}: Your previous backlog JSON failed "
         "AgileForge brownfield contract validation. Regenerate the entire JSON "
         "response. Keep the same scope and priorities, but fix these exact errors: "
-        f"{validation_error}"
+        f"{validation_error}. {_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE}"
     )
     retry_context["user_input"] = (
         f"{original_user_input}\n\n{feedback}" if original_user_input else feedback

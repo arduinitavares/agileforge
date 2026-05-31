@@ -965,6 +965,59 @@ def test_backlog_runtime_retries_brownfield_contract_failure(
     assert "title prefix must match" in calls[1]
 
 
+def test_backlog_runtime_retry_feedback_includes_title_prefix_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry feedback should prevent newly mapped brownfield title failures."""
+    calls: list[str] = []
+
+    async def fake_invoke_backlog_agent(payload: object) -> str:
+        payload_model = cast("Any", payload)
+        user_input = payload_model.user_input
+        assert isinstance(user_input, str)
+        calls.append(user_input)
+        if len(calls) == 1:
+            return _backlog_output_json(
+                {
+                    "requirement": "Verify Live Squad Recommendation",
+                    "capability_name": "Wrong live squad name",
+                    "authority_ref": "REQ.live-squad-recommendation",
+                    "as_built_status": "observed",
+                    "recommended_backlog_treatment": "skip_new_implementation",
+                }
+            )
+        return _backlog_output_json(
+            {
+                "requirement": "Verify Live Squad Recommendation",
+                "capability_name": "Live squad recommendation",
+                "authority_ref": "REQ.live-squad-recommendation",
+                "as_built_status": "observed",
+                "recommended_backlog_treatment": "skip_new_implementation",
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.backlog_runtime._invoke_backlog_agent",
+        fake_invoke_backlog_agent,
+    )
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            _brownfield_backlog_state(),
+            project_id=2,
+            user_input="draft backlog",
+        )
+
+    result = anyio.run(call_runtime)
+
+    assert result["success"] is True
+    expected_call_count = 2
+    assert len(calls) == expected_call_count
+    assert "observed -> Verify, Document, Monitor, Preserve" in calls[1]
+    assert "observed_with_missing_evidence -> Verify, Validate, Harden" in calls[1]
+    assert "not_observed -> Build, Add, Implement, Create" in calls[1]
+
+
 def test_backlog_runtime_failed_brownfield_retry_exposes_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
