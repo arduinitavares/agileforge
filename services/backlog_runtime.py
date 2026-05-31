@@ -64,6 +64,11 @@ _BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE = (
     "Discover, Investigate, Clarify; not_observed -> Build, Add, Implement, "
     "Create. The required prefix must be the first words in requirement."
 )
+_BROWNFIELD_TOKEN_STOPWORDS = frozenset({"only"})
+_MIN_BROWNFIELD_TOKEN_LENGTH = 3
+_PLURAL_TRIM_TOKEN_LENGTH = 4
+_COMPACT_MATCH_TOKEN_LENGTH = 5
+_PREFIX_MATCH_TOKEN_LENGTH = 4
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,7 @@ class _FailureDetails:
 class _CapabilityIndex:
     """Lookup tables for authoritative As-Built capabilities."""
 
+    capabilities: tuple[CapabilityAssessment, ...]
     by_authority_ref: dict[str, tuple[CapabilityAssessment, ...]]
     by_exact_authority_ref: dict[str, CapabilityAssessment]
     ambiguous_authority_refs: set[str]
@@ -129,6 +135,63 @@ def _normalize_title_prefix(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+def _brownfield_tokens(value: object) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for raw_token in re.findall(r"[a-z0-9]+", str(value).casefold()):
+        if (
+            len(raw_token) < _MIN_BROWNFIELD_TOKEN_LENGTH
+            or raw_token in _BROWNFIELD_TOKEN_STOPWORDS
+        ):
+            continue
+        token = raw_token
+        if token.endswith("s") and len(token) > _PLURAL_TRIM_TOKEN_LENGTH:
+            token = raw_token[:-1]
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _brownfield_token_matches(
+    token: str,
+    *,
+    item_tokens: tuple[str, ...],
+    item_compact: str,
+) -> bool:
+    if len(token) >= _COMPACT_MATCH_TOKEN_LENGTH and token in item_compact:
+        return True
+    return any(
+        token == item_token
+        or (
+            len(token) >= _PREFIX_MATCH_TOKEN_LENGTH
+            and len(item_token) >= _PREFIX_MATCH_TOKEN_LENGTH
+            and (token.startswith(item_token) or item_token.startswith(token))
+        )
+        for item_token in item_tokens
+    )
+
+
+def _matches_capability_title_terms(
+    *,
+    capability: CapabilityAssessment,
+    item: BacklogItem,
+) -> bool:
+    capability_tokens = _brownfield_tokens(capability.capability_title)
+    minimum_title_tokens = 2
+    if len(capability_tokens) < minimum_title_tokens:
+        return False
+
+    item_text = f"{item.requirement} {item.technical_note or ''}"
+    item_tokens = _brownfield_tokens(item_text)
+    item_compact = _normalize_brownfield_text(item_text)
+    return all(
+        _brownfield_token_matches(
+            token,
+            item_tokens=item_tokens,
+            item_compact=item_compact,
+        )
+        for token in capability_tokens
+    )
+
+
 def _same_backlog_contract(
     left: CapabilityAssessment,
     right: CapabilityAssessment,
@@ -146,11 +209,21 @@ def _build_capability_index(
     assessment: AsBuiltAssessment,
 ) -> _CapabilityIndex:
     grouped_by_authority_ref: dict[str, list[CapabilityAssessment]] = {}
+    unique_capabilities: dict[tuple[str, str, str, str], CapabilityAssessment] = {}
     by_exact_authority_ref: dict[str, CapabilityAssessment] = {}
     ambiguous_authority_refs: set[str] = set()
     by_normalized_key: dict[str, CapabilityAssessment] = {}
     ambiguous_normalized_keys: set[str] = set()
     for capability in assessment.capability_assessments:
+        unique_capabilities.setdefault(
+            (
+                capability.authority_ref,
+                _normalize_brownfield_text(capability.capability_title),
+                capability.status,
+                capability.recommended_backlog_treatment,
+            ),
+            capability,
+        )
         grouped_by_authority_ref.setdefault(capability.authority_ref, []).append(
             capability
         )
@@ -177,6 +250,7 @@ def _build_capability_index(
                 continue
             by_normalized_key[normalized] = capability
     return _CapabilityIndex(
+        capabilities=tuple(unique_capabilities.values()),
         by_authority_ref={
             authority_ref: tuple(capabilities)
             for authority_ref, capabilities in grouped_by_authority_ref.items()
@@ -270,6 +344,24 @@ def _has_brownfield_metadata(item: BacklogItem) -> bool:
             item.recommended_backlog_treatment,
         )
     )
+
+
+def _format_capability_match(capability: CapabilityAssessment) -> str:
+    return (
+        f"{capability.authority_ref} "
+        f"({capability.capability_title}, status={capability.status})"
+    )
+
+
+def _possible_unmapped_capability_matches(
+    item: BacklogItem,
+    capability_index: _CapabilityIndex,
+) -> list[CapabilityAssessment]:
+    return [
+        capability
+        for capability in capability_index.capabilities
+        if _matches_capability_title_terms(capability=capability, item=item)
+    ]
 
 
 def _title_has_allowed_prefix(*, requirement: str, status: str) -> bool:
@@ -393,6 +485,21 @@ def _validate_brownfield_contract(
                     f"backlog_items[{index}] brownfield metadata does not match "
                     "As-Built capability"
                 )
+            else:
+                possible_matches = _possible_unmapped_capability_matches(
+                    item,
+                    capability_index,
+                )
+                if possible_matches:
+                    formatted_matches = ", ".join(
+                        _format_capability_match(capability)
+                        for capability in possible_matches[:3]
+                    )
+                    errors.append(
+                        f"backlog_items[{index}] appears to map to As-Built "
+                        "capability; include brownfield metadata or rename/scope "
+                        f"as genuinely new work: {formatted_matches}"
+                    )
             continue
 
         errors.extend(

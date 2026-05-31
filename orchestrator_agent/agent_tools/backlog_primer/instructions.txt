@@ -80,6 +80,7 @@ Return ONLY a JSON object. No Markdown formatting.
 * It is not Product Backlog authority. It is evidence-aware guidance for Product Owner review.
 * requirement is the action-oriented work item title; capability_name is the product capability from the As-Built assessment.
 * When a backlog item maps to an As-Built capability, it must include capability_name, authority_ref, as_built_status, and recommended_backlog_treatment.
+* If requirement or technical_note uses As-Built capability terms with extra words, treat the item as mapped and include the brownfield metadata. Do not bypass mapping by expanding or paraphrasing the capability title.
 * For mapped capabilities, copy capability_assessments[].recommended_backlog_treatment unchanged. Allowed exact tokens are: skip_new_implementation, create_verification_item, create_hardening_item, create_authority_conflict_item, create_discovery_item, create_product_item, po_review_required.
 * For mapped capabilities, the `requirement` title must start with one of the exact prefixes listed for that As-Built status below. Do not use noun-only capability titles, gerunds like "Hardening", or domain labels before the required prefix.
   Examples: use "Harden Live Pre-Lock Recommendation Workflow", not "Live Pre-Lock Recommendation Workflow Hardening"; use "Verify Captain-Aware Optimization Engine", not "Captain-Aware Optimization Engine Verification".

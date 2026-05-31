@@ -673,6 +673,22 @@ def test_backlog_runtime_rejects_capability_title_without_brownfield_metadata(
     assert "missing recommended_backlog_treatment" in summary
 
 
+def test_backlog_runtime_rejects_expanded_capability_title_without_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding extra title words must not bypass brownfield metadata rules."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {"requirement": "Live Squad Recommendation With Risk Guard"},
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    summary = result["failure_summary"]
+    assert "appears to map to As-Built capability" in summary
+    assert "REQ.live-squad-recommendation" in summary
+
+
 def test_backlog_runtime_rejects_mismatched_brownfield_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

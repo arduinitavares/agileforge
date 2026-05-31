@@ -34,6 +34,7 @@ def test_backlog_prompt_requires_as_built_metadata_when_capability_maps() -> Non
     text = _instructions()
 
     assert "When a backlog item maps to an As-Built capability" in text
+    assert "If requirement or technical_note uses As-Built capability terms" in text
     assert (
         "must include capability_name, authority_ref, as_built_status, "
         "and recommended_backlog_treatment"
