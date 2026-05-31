@@ -67,6 +67,15 @@ class _FailureDetails:
     exception: BaseException | None = None
 
 
+@dataclass(frozen=True)
+class _CapabilityIndex:
+    """Lookup tables for authoritative As-Built capabilities."""
+
+    by_exact_authority_ref: dict[str, CapabilityAssessment]
+    by_normalized_key: dict[str, CapabilityAssessment]
+    ambiguous_normalized_keys: set[str]
+
+
 def _as_text(value: object) -> str:
     if value is None:
         return ""
@@ -111,31 +120,68 @@ def _normalize_title_prefix(value: str) -> str:
 
 def _build_capability_index(
     assessment: AsBuiltAssessment,
-) -> dict[str, CapabilityAssessment]:
-    index: dict[str, CapabilityAssessment] = {}
+) -> _CapabilityIndex:
+    by_exact_authority_ref: dict[str, CapabilityAssessment] = {}
+    by_normalized_key: dict[str, CapabilityAssessment] = {}
+    ambiguous_normalized_keys: set[str] = set()
     for capability in assessment.capability_assessments:
+        exact_existing = by_exact_authority_ref.get(capability.authority_ref)
+        if exact_existing is not None and exact_existing is not capability:
+            message = "duplicate As-Built authority_ref"
+            raise ValueError(message)
+        by_exact_authority_ref[capability.authority_ref] = capability
+
         for candidate in (capability.authority_ref, capability.capability_title):
             normalized = _normalize_brownfield_text(candidate)
-            if normalized:
-                existing = index.get(normalized)
-                if existing is not None and existing is not capability:
-                    message = "duplicate ambiguous As-Built capability key"
-                    raise ValueError(message)
-                index[normalized] = capability
-    return index
+            if not normalized:
+                continue
+            if normalized in ambiguous_normalized_keys:
+                continue
+            existing = by_normalized_key.get(normalized)
+            if existing is not None and existing is not capability:
+                ambiguous_normalized_keys.add(normalized)
+                by_normalized_key.pop(normalized, None)
+                continue
+            by_normalized_key[normalized] = capability
+    return _CapabilityIndex(
+        by_exact_authority_ref=by_exact_authority_ref,
+        by_normalized_key=by_normalized_key,
+        ambiguous_normalized_keys=ambiguous_normalized_keys,
+    )
 
 
 def _mapped_capability(
     item: BacklogItem,
-    capabilities_by_key: dict[str, CapabilityAssessment],
+    capability_index: _CapabilityIndex,
 ) -> CapabilityAssessment | None:
+    if item.authority_ref is not None:
+        capability = capability_index.by_exact_authority_ref.get(item.authority_ref)
+        if capability is not None:
+            return capability
+
     for candidate in (item.authority_ref, item.capability_name, item.requirement):
         if candidate is None:
             continue
-        capability = capabilities_by_key.get(_normalize_brownfield_text(candidate))
+        normalized = _normalize_brownfield_text(candidate)
+        if normalized in capability_index.ambiguous_normalized_keys:
+            message = "duplicate ambiguous As-Built capability key"
+            raise ValueError(message)
+        capability = capability_index.by_normalized_key.get(normalized)
         if capability is not None:
             return capability
     return None
+
+
+def _has_brownfield_metadata(item: BacklogItem) -> bool:
+    return any(
+        value is not None
+        for value in (
+            item.capability_name,
+            item.authority_ref,
+            item.as_built_status,
+            item.recommended_backlog_treatment,
+        )
+    )
 
 
 def _title_has_allowed_prefix(*, requirement: str, status: str) -> bool:
@@ -244,12 +290,17 @@ def _validate_brownfield_contract(
         raise TypeError(msg)
 
     assessment = AsBuiltAssessment.model_validate_json(raw_assessment)
-    capabilities_by_key = _build_capability_index(assessment)
+    capability_index = _build_capability_index(assessment)
     errors: list[str] = []
 
     for index, item in enumerate(output_model.backlog_items, start=1):
-        capability = _mapped_capability(item, capabilities_by_key)
+        capability = _mapped_capability(item, capability_index)
         if capability is None:
+            if _has_brownfield_metadata(item):
+                errors.append(
+                    f"backlog_items[{index}] brownfield metadata does not match "
+                    "As-Built capability"
+                )
             continue
 
         errors.extend(

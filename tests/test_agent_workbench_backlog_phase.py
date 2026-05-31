@@ -622,6 +622,28 @@ def test_backlog_runtime_rejects_mismatched_brownfield_metadata(
     assert "missing recommended_backlog_treatment" not in summary
 
 
+def test_backlog_runtime_rejects_unbacked_brownfield_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brownfield metadata must be backed by an As-Built capability."""
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify imaginary billing adapter",
+            "capability_name": "Imaginary billing adapter",
+            "authority_ref": "REQ.imaginary-billing-adapter",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "brownfield_contract_validation"
+    assert "brownfield metadata does not match As-Built capability" in (
+        result["failure_summary"]
+    )
+
+
 def test_backlog_runtime_rejects_duplicate_as_built_capability_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,7 +668,6 @@ def test_backlog_runtime_rejects_duplicate_as_built_capability_keys(
         {
             "requirement": "Verify Live Squad Recommendation",
             "capability_name": "Live squad recommendation",
-            "authority_ref": "REQ.live-squad-recommendation",
             "as_built_status": "observed",
             "recommended_backlog_treatment": "skip_new_implementation",
         },
@@ -656,6 +677,40 @@ def test_backlog_runtime_rejects_duplicate_as_built_capability_keys(
     assert result["success"] is False
     assert result["failure_stage"] == "brownfield_contract_validation"
     assert "duplicate ambiguous As-Built capability key" in result["failure_summary"]
+
+
+def test_backlog_runtime_allows_exact_authority_ref_for_duplicate_titles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact authority_ref should disambiguate duplicate capability titles."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"].append(
+        {
+            "authority_ref": "REQ.live-squad-docs",
+            "invariant_refs": ["INV-docs"],
+            "capability_title": "Live squad recommendation",
+            "status": "observed",
+            "confidence": "medium",
+            "evidence": [],
+            "limitations": ["Duplicate title fixture."],
+            "recommended_backlog_treatment": "skip_new_implementation",
+            "reasoning": "Fixture creates a title collision.",
+        }
+    )
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Live Squad Recommendation",
+            "capability_name": "Live squad recommendation",
+            "authority_ref": "REQ.live-squad-recommendation",
+            "as_built_status": "observed",
+            "recommended_backlog_treatment": "skip_new_implementation",
+        },
+        assessment=assessment,
+    )
+
+    assert result["success"] is True
 
 
 def test_backlog_runtime_rejects_observed_item_with_greenfield_title(
