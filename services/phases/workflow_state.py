@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Collection
 from typing import Any
 
@@ -69,12 +70,13 @@ def record_phase_attempt(
     mirrored_output_types: tuple[type, ...] | None = None,
 ) -> int:
     attempts = ensure_phase_attempts(state, attempts_key=attempts_key)
-    normalized_output_artifact = dict(output_artifact)
+    normalized_output_artifact = copy.deepcopy(output_artifact)
+    normalized_input_context = copy.deepcopy(input_context)
     attempts.append(
         {
             "created_at": created_at,
             "trigger": trigger,
-            "input_context": input_context,
+            "input_context": normalized_input_context,
             "output_artifact": normalized_output_artifact,
             "is_complete": is_complete,
             **failure_meta(
@@ -84,16 +86,16 @@ def record_phase_attempt(
         }
     )
     state[attempts_key] = attempts
-    state[last_input_context_key] = input_context
-    state[assessment_key] = normalized_output_artifact
+    state[last_input_context_key] = copy.deepcopy(normalized_input_context)
+    state[assessment_key] = copy.deepcopy(normalized_output_artifact)
 
     if mirrored_output_field and mirrored_state_key:
         mirrored_value = normalized_output_artifact.get(mirrored_output_field)
         if mirrored_output_types is None:
             if mirrored_value is not None:
-                state[mirrored_state_key] = mirrored_value
+                state[mirrored_state_key] = copy.deepcopy(mirrored_value)
         elif isinstance(mirrored_value, mirrored_output_types):
-            state[mirrored_state_key] = mirrored_value
+            state[mirrored_state_key] = copy.deepcopy(mirrored_value)
 
     return len(attempts)
 

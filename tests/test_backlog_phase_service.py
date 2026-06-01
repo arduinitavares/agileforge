@@ -8,6 +8,7 @@ import pytest
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
 from services.phases.backlog_service import (
     BacklogPhaseError,
+    _backlog_artifact_fingerprint,
     backlog_state_from_complete,
     ensure_backlog_attempts,
     generate_backlog_draft,
@@ -18,6 +19,27 @@ from services.phases.backlog_service import (
 )
 
 JsonDict = dict[str, Any]
+
+
+def _review_state_for_artifact(output_artifact: JsonDict) -> JsonDict:
+    """Return a BACKLOG_REVIEW state guarded by the artifact fingerprint."""
+    artifact_fingerprint = _backlog_artifact_fingerprint(output_artifact)
+    guarded_artifact = {
+        **output_artifact,
+        "attempt_id": "backlog-attempt-1",
+        "artifact_fingerprint": artifact_fingerprint,
+    }
+    return {
+        "fsm_state": "BACKLOG_REVIEW",
+        "product_backlog_assessment": guarded_artifact,
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "artifact_fingerprint": artifact_fingerprint,
+                "output_artifact": guarded_artifact,
+            }
+        ],
+    }
 
 
 def test_backlog_state_from_complete_maps_to_review_and_interview() -> None:
@@ -352,21 +374,14 @@ async def test_get_backlog_history_returns_count_and_items() -> None:
 @pytest.mark.asyncio
 async def test_save_backlog_draft_requires_complete_assessment() -> None:
     """Verify save backlog draft requires complete assessment."""
-    state: JsonDict = {
-        "fsm_state": "BACKLOG_REVIEW",
-        "product_backlog_assessment": {
+    state = _review_state_for_artifact(
+        {
             "backlog_items": [{"title": "Seed backlog item"}],
             "is_complete": False,
-            "artifact_fingerprint": "sha256:test",
-            "attempt_id": "backlog-attempt-1",
-        },
-    }
-    state["backlog_attempts"] = [
-        {
-            "attempt_id": "backlog-attempt-1",
-            "artifact_fingerprint": "sha256:test",
-            "output_artifact": state["product_backlog_assessment"],
         }
+    )
+    expected_fingerprint = state["product_backlog_assessment"][
+        "artifact_fingerprint"
     ]
 
     async def hydrate_context() -> object:
@@ -377,7 +392,7 @@ async def test_save_backlog_draft_requires_complete_assessment() -> None:
             project_id=7,
             project_name="Backlog Project",
             attempt_id="backlog-attempt-1",
-            expected_artifact_fingerprint="sha256:test",
+            expected_artifact_fingerprint=expected_fingerprint,
             expected_state="BACKLOG_REVIEW",
             idempotency_key="save-backlog-1",
             save_state=lambda _state: None,
@@ -394,21 +409,14 @@ async def test_save_backlog_draft_requires_complete_assessment() -> None:
 @pytest.mark.asyncio
 async def test_save_backlog_draft_rejects_empty_items() -> None:
     """Verify save backlog draft rejects empty items."""
-    state: JsonDict = {
-        "fsm_state": "BACKLOG_REVIEW",
-        "product_backlog_assessment": {
+    state = _review_state_for_artifact(
+        {
             "backlog_items": [],
             "is_complete": True,
-            "artifact_fingerprint": "sha256:test",
-            "attempt_id": "backlog-attempt-1",
-        },
-    }
-    state["backlog_attempts"] = [
-        {
-            "attempt_id": "backlog-attempt-1",
-            "artifact_fingerprint": "sha256:test",
-            "output_artifact": state["product_backlog_assessment"],
         }
+    )
+    expected_fingerprint = state["product_backlog_assessment"][
+        "artifact_fingerprint"
     ]
 
     async def hydrate_context() -> object:
@@ -419,7 +427,7 @@ async def test_save_backlog_draft_rejects_empty_items() -> None:
             project_id=7,
             project_name="Backlog Project",
             attempt_id="backlog-attempt-1",
-            expected_artifact_fingerprint="sha256:test",
+            expected_artifact_fingerprint=expected_fingerprint,
             expected_state="BACKLOG_REVIEW",
             idempotency_key="save-backlog-1",
             save_state=lambda _state: None,
@@ -436,26 +444,16 @@ async def test_save_backlog_draft_rejects_empty_items() -> None:
 @pytest.mark.asyncio
 async def test_save_backlog_draft_persists_persistence_state() -> None:
     """Verify save backlog draft persists persistence state."""
-    state = {
-        "fsm_state": "BACKLOG_REVIEW",
-        "product_backlog_assessment": {
+    state = _review_state_for_artifact(
+        {
             "backlog_items": [{"title": "Seed backlog item"}],
             "is_complete": True,
-            "artifact_fingerprint": "sha256:test",
-            "attempt_id": "backlog-attempt-1",
-        },
-        "backlog_attempts": [
-            {
-                "attempt_id": "backlog-attempt-1",
-                "artifact_fingerprint": "sha256:test",
-                "output_artifact": {
-                    "backlog_items": [{"title": "Seed backlog item"}],
-                    "is_complete": True,
-                },
-            }
-        ],
-        "setup_status": "failed",
-    }
+        }
+    )
+    state["setup_status"] = "failed"
+    expected_fingerprint = state["product_backlog_assessment"][
+        "artifact_fingerprint"
+    ]
     saved: JsonDict = {}
     captured: JsonDict = {}
 
@@ -481,7 +479,7 @@ async def test_save_backlog_draft_persists_persistence_state() -> None:
         project_id=7,
         project_name="Backlog Project",
         attempt_id="backlog-attempt-1",
-        expected_artifact_fingerprint="sha256:test",
+        expected_artifact_fingerprint=expected_fingerprint,
         expected_state="BACKLOG_REVIEW",
         idempotency_key="save-backlog-1",
         save_state=save_state,
@@ -544,6 +542,154 @@ async def test_save_backlog_draft_rejects_stale_attempt_guard() -> None:
         )
 
     assert "Backlog save guard mismatch" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_blocks_unmatched_authority_ref_warning() -> None:
+    """Save gate blocks only the closed list of brownfield blocker warnings."""
+    artifact: JsonDict = {
+        "backlog_items": [{"title": "Seed backlog item"}],
+        "is_complete": True,
+        "clarifying_questions": [],
+        "brownfield_warnings": [
+            {
+                "code": "asserted_authority_ref_unmatched",
+                "item_index": 0,
+                "severity": "block_on_save",
+                "match_tier": "none",
+                "authority_ref": None,
+                "invariant_refs": [],
+                "message": "Unmatched authority ref.",
+                "details": {},
+            }
+        ],
+    }
+    state = _review_state_for_artifact(artifact)
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await save_backlog_draft(
+            project_id=7,
+            project_name="Backlog Project",
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=state["product_backlog_assessment"][
+                "artifact_fingerprint"
+            ],
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-backlog-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_backlog_tool=_fake_save_backlog_tool,
+        )
+
+    assert "asserted_authority_ref_unmatched" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_allows_nonblocking_brownfield_warnings() -> None:
+    """Fuzzy/conflict/disagreement warnings are PO review inputs, not save blocks."""
+    artifact: JsonDict = {
+        "backlog_items": [{"title": "Seed backlog item"}],
+        "is_complete": True,
+        "clarifying_questions": [],
+        "brownfield_warnings": [
+            {
+                "code": "possible_mapping",
+                "item_index": 0,
+                "severity": "review",
+                "match_tier": "fuzzy",
+                "authority_ref": None,
+                "invariant_refs": [],
+                "message": "Possible As-Built mapping.",
+                "details": {},
+            }
+        ],
+    }
+    state = _review_state_for_artifact(artifact)
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        del tool_context
+        return {
+            "success": True,
+            "product_id": backlog_input.product_id,
+            "saved_count": len(backlog_input.backlog_items),
+        }
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=state["product_backlog_assessment"][
+            "artifact_fingerprint"
+        ],
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-backlog-1",
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    assert payload["save_result"]["success"] is True
+    assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_recomputes_artifact_fingerprint() -> None:
+    """Save must reject tampered annotated artifacts, not only copied guards."""
+    artifact: JsonDict = {
+        "backlog_items": [{"title": "Seed backlog item"}],
+        "is_complete": True,
+        "clarifying_questions": [],
+        "brownfield_warnings": [],
+    }
+    state = _review_state_for_artifact(artifact)
+    state["product_backlog_assessment"]["brownfield_warnings"].append(
+        {
+            "code": "possible_mapping",
+            "item_index": 0,
+            "severity": "review",
+            "match_tier": "fuzzy",
+            "authority_ref": None,
+            "invariant_refs": [],
+            "message": "Tampered after fingerprint.",
+            "details": {},
+        }
+    )
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await save_backlog_draft(
+            project_id=7,
+            project_name="Backlog Project",
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=state["product_backlog_assessment"][
+                "artifact_fingerprint"
+            ],
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-backlog-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_backlog_tool=_fake_save_backlog_tool,
+        )
+
+    assert "artifact fingerprint" in exc_info.value.detail
 
 
 async def _async_value[T](value: T) -> T:

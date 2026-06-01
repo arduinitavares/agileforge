@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -19,12 +20,7 @@ VALID_BACKLOG_GENERATION_STATES = {
     OrchestratorState.ROADMAP_INTERVIEW.value,
 }
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
-BACKLOG_RUNTIME_DIAGNOSTIC_KEYS = (
-    "brownfield_retry_attempted",
-    "brownfield_retry_count",
-    "brownfield_retry_marker",
-    "brownfield_retry_failed_stage",
-)
+BACKLOG_RUNTIME_DIAGNOSTIC_KEYS: tuple[str, ...] = ()
 
 
 class BacklogPhaseError(Exception):
@@ -276,6 +272,7 @@ async def save_backlog_draft(
         attempt_id=attempt_id,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
+    _assert_brownfield_save_gate(assessment)
 
     if not bool(assessment.get("is_complete", False)):
         raise BacklogPhaseError("Backlog cannot be saved until is_complete is true")
@@ -341,7 +338,12 @@ def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
 
 
 def _backlog_artifact_fingerprint(output_artifact: dict[str, Any]) -> str:
-    return canonical_hash({"phase": "backlog", "output_artifact": output_artifact})
+    normalized_artifact = copy.deepcopy(output_artifact)
+    normalized_artifact.pop("attempt_id", None)
+    normalized_artifact.pop("artifact_fingerprint", None)
+    return canonical_hash(
+        {"phase": "backlog", "output_artifact": normalized_artifact}
+    )
 
 
 def _attach_attempt_guards(
@@ -410,16 +412,40 @@ def _assert_save_guards(
     current_attempt_id = assessment.get("attempt_id")
     current_fingerprint = assessment.get("artifact_fingerprint")
     selected_attempt = _find_backlog_attempt(state, attempt_id)
+    selected_artifact = (
+        selected_attempt.get("output_artifact")
+        if isinstance(selected_attempt, dict)
+        else None
+    )
     if (
         current_attempt_id != attempt_id
         or current_fingerprint != expected_artifact_fingerprint
         or selected_attempt is None
         or selected_attempt.get("artifact_fingerprint") != expected_artifact_fingerprint
+        or not isinstance(selected_artifact, dict)
+        or _backlog_artifact_fingerprint(assessment)
+        != expected_artifact_fingerprint
+        or _backlog_artifact_fingerprint(selected_artifact)
+        != expected_artifact_fingerprint
     ):
         raise BacklogPhaseError(
             "Backlog save guard mismatch: draft attempt or artifact fingerprint "
             "does not match the reviewed Backlog draft.",
         )
+
+
+def _assert_brownfield_save_gate(assessment: dict[str, Any]) -> None:
+    warnings = assessment.get("brownfield_warnings")
+    if not isinstance(warnings, list):
+        return
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            continue
+        if warning.get("code") == "asserted_authority_ref_unmatched":
+            raise BacklogPhaseError(
+                "Backlog save blocked by brownfield warning: "
+                "asserted_authority_ref_unmatched",
+            )
 
 
 def _find_backlog_attempt(

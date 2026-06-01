@@ -29,6 +29,16 @@ from utils.adk_runner import (
     invoke_agent_to_text,
     parse_json_payload,
 )
+from utils.brownfield_annotations import (
+    BrownfieldAnnotation,
+    BrownfieldDisagreement,
+    BrownfieldMatchTier,
+    BrownfieldModelAssertion,
+    BrownfieldSelectedCapability,
+    BrownfieldWarning,
+    BrownfieldWarningCode,
+    BrownfieldWarningSeverity,
+)
 from utils.failure_artifacts import (
     AgentInvocationError,
     FailureArtifactResult,
@@ -41,66 +51,8 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 
 type BacklogInputContext = dict[str, object]
 type ValidationErrors = list[dict[str, object]]
+type ModelAssertionsByIndex = dict[int, BrownfieldModelAssertion]
 
-_ALLOWED_TITLE_PREFIXES_BY_STATUS: dict[str, tuple[str, ...]] = {
-    "observed": ("Verify", "Document", "Monitor", "Preserve"),
-    "observed_with_missing_evidence": (
-        "Verify",
-        "Validate",
-        "Harden",
-        "Formalize",
-        "Add Evidence For",
-    ),
-    "contradicted": ("Resolve", "Align", "Correct"),
-    "unclear": ("Discover", "Investigate", "Clarify"),
-    "not_observed": ("Build", "Add", "Implement", "Create"),
-}
-_ALLOWED_TITLE_PREFIXES_BY_TREATMENT: dict[str, tuple[str, ...]] = {
-    "skip_new_implementation": ("Verify", "Document", "Monitor", "Preserve"),
-    "create_verification_item": (
-        "Verify",
-        "Validate",
-        "Harden",
-        "Formalize",
-        "Add Evidence For",
-    ),
-    "create_hardening_item": ("Harden", "Validate", "Formalize"),
-    "create_authority_conflict_item": ("Resolve", "Align", "Correct"),
-    "create_discovery_item": (
-        "Discover",
-        "Investigate",
-        "Clarify",
-        "Define",
-        "Formalize",
-    ),
-    "create_product_item": ("Build", "Add", "Implement", "Create"),
-    "po_review_required": ("Clarify", "Investigate", "Resolve"),
-}
-_BROWNFIELD_CONTRACT_RETRY_MARKER = "BROWNFIELD CONTRACT RETRY"
-_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE = (
-    "Also re-check every mapped brownfield item title against the treatment "
-    "prefixes: skip_new_implementation -> Verify, Document, Monitor, Preserve; "
-    "create_verification_item -> Verify, Validate, Harden, Formalize, "
-    "Add Evidence For; create_hardening_item -> Harden, Validate, Formalize; "
-    "create_authority_conflict_item -> Resolve, Align, Correct; "
-    "create_discovery_item -> Discover, Investigate, Clarify, Define, "
-    "Formalize; create_product_item -> Build, Add, Implement, Create; "
-    "po_review_required -> Clarify, Investigate, Resolve. The required prefix "
-    "must be the first words in requirement."
-)
-_BROWNFIELD_RETRY_MAPPING_GUIDE = (
-    "Also re-check null-metadata items: if requirement or technical_note uses "
-    "As-Built capability terms, include capability_name, authority_ref, "
-    "as_built_status, and recommended_backlog_treatment. If one item spans "
-    "multiple As-Built capabilities, split it into mapped single-capability items "
-    "or rename/scope it as genuinely new work without those capability terms."
-)
-_BROWNFIELD_RETRY_METADATA_GUIDE = (
-    "Copy capability_name, authority_ref, as_built_status, and "
-    "recommended_backlog_treatment unchanged from the selected "
-    "capability_assessments[] entry; do not upgrade create_verification_item to "
-    "create_hardening_item."
-)
 _BROWNFIELD_TOKEN_STOPWORDS = frozenset({"only"})
 _MIN_BROWNFIELD_TOKEN_LENGTH = 3
 _PLURAL_TRIM_TOKEN_LENGTH = 4
@@ -130,6 +82,14 @@ class _CapabilityIndex:
     ambiguous_invariant_refs: set[str]
     by_normalized_key: dict[str, CapabilityAssessment]
     ambiguous_normalized_keys: set[str]
+
+
+@dataclass(frozen=True)
+class _BrownfieldAnnotationResult:
+    """Host-derived annotations and warnings for one backlog output."""
+
+    annotations_by_index: dict[int, BrownfieldAnnotation]
+    warnings: list[BrownfieldWarning]
 
 
 def _as_text(value: object) -> str:
@@ -168,10 +128,6 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
 
 def _normalize_brownfield_text(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
-
-
-def _normalize_title_prefix(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def _brownfield_tokens(value: object) -> tuple[str, ...]:
@@ -218,7 +174,9 @@ def _matches_capability_title_terms(
     if len(capability_tokens) < minimum_title_tokens:
         return False
 
-    item_text = f"{item.requirement} {item.technical_note or ''}"
+    item_text = (
+        f"{item.requirement} {item.capability_hint or ''} {item.technical_note or ''}"
+    )
     item_tokens = _brownfield_tokens(item_text)
     item_compact = _normalize_brownfield_text(item_text)
     return all(
@@ -326,142 +284,344 @@ def _build_capability_index(
     )
 
 
-def _matches_item_selectors(
+def _selected_capability(
     capability: CapabilityAssessment,
-    item: BacklogItem,
-) -> bool:
-    if item.capability_name is not None and _normalize_brownfield_text(
-        item.capability_name
-    ) != _normalize_brownfield_text(capability.capability_title):
-        return False
-    if item.as_built_status is not None and item.as_built_status != capability.status:
-        return False
-    return not (
-        item.recommended_backlog_treatment is not None
-        and item.recommended_backlog_treatment
-        != capability.recommended_backlog_treatment
+) -> BrownfieldSelectedCapability:
+    return BrownfieldSelectedCapability(
+        authority_ref=capability.authority_ref,
+        capability_title=capability.capability_title,
+        invariant_refs=list(capability.invariant_refs),
+        as_built_status=capability.status,
+        recommended_backlog_treatment=capability.recommended_backlog_treatment,
+        confidence=capability.confidence,
     )
 
 
-def _matches_identity_selectors(
-    capability: CapabilityAssessment,
+def _model_assertion(
     item: BacklogItem,
-) -> bool:
-    if item.capability_name is not None and _normalize_brownfield_text(
-        item.capability_name
-    ) != _normalize_brownfield_text(capability.capability_title):
-        return False
-    return not (
-        item.as_built_status is not None
-        and item.as_built_status != capability.status
-    )
-
-
-def _select_matching_contract(
-    matches: list[CapabilityAssessment],
-    *,
-    ambiguous_message: str,
-) -> CapabilityAssessment | None:
-    if not matches:
-        return None
-
-    selected = matches[0]
-    if all(_same_backlog_contract(selected, match) for match in matches):
-        return selected
-
-    raise ValueError(ambiguous_message)
-
-
-def _select_authority_ref_capability(
-    *,
-    item: BacklogItem,
-    capabilities: tuple[CapabilityAssessment, ...],
-) -> CapabilityAssessment:
-    if len(capabilities) == 1:
-        return capabilities[0]
-
-    matches = [
-        capability
-        for capability in capabilities
-        if _matches_item_selectors(capability, item)
-    ]
-    selected = _select_matching_contract(
-        matches,
-        ambiguous_message="ambiguous As-Built authority_ref",
-    )
-    if selected is not None:
-        return selected
-
-    identity_matches = [
-        capability
-        for capability in capabilities
-        if _matches_identity_selectors(capability, item)
-    ]
-    selected = _select_matching_contract(
-        identity_matches,
-        ambiguous_message="ambiguous As-Built authority_ref",
-    )
-    if selected is not None:
-        return selected
-
-    message = "authority_ref metadata does not match As-Built capability"
-    raise ValueError(message)
-
-
-def _mapped_capability(
-    item: BacklogItem,
-    capability_index: _CapabilityIndex,
-) -> CapabilityAssessment | None:
-    if item.authority_ref is not None:
-        authority_capabilities = capability_index.by_authority_ref.get(
-            item.authority_ref
+    assertion: BrownfieldModelAssertion | None = None,
+) -> BrownfieldModelAssertion:
+    if assertion is not None:
+        return BrownfieldModelAssertion(
+            authority_ref=assertion.authority_ref or item.authority_ref,
+            capability_hint=assertion.capability_hint or item.capability_hint,
+            as_built_status=assertion.as_built_status,
+            recommended_backlog_treatment=assertion.recommended_backlog_treatment,
         )
-        if authority_capabilities is not None:
-            return _select_authority_ref_capability(
-                item=item,
-                capabilities=authority_capabilities,
+    return BrownfieldModelAssertion(
+        authority_ref=item.authority_ref,
+        capability_hint=item.capability_hint,
+    )
+
+
+def _sanitize_backlog_output_payload(
+    parsed: dict[str, Any],
+) -> tuple[dict[str, Any], ModelAssertionsByIndex]:
+    """Strip host-owned/legacy fields before validating model output."""
+    sanitized = dict(parsed)
+    assertions: ModelAssertionsByIndex = {}
+    items = sanitized.get("backlog_items")
+    if not isinstance(items, list):
+        return sanitized, assertions
+
+    sanitized_items: list[object] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            sanitized_items.append(item)
+            continue
+        sanitized_item = dict(item)
+        legacy_capability_name = sanitized_item.pop("capability_name", None)
+        legacy_status = sanitized_item.pop("as_built_status", None)
+        legacy_treatment = sanitized_item.pop("recommended_backlog_treatment", None)
+        sanitized_item.pop("as_built_annotation", None)
+
+        if sanitized_item.get("capability_hint") is None and isinstance(
+            legacy_capability_name,
+            str,
+        ):
+            sanitized_item["capability_hint"] = legacy_capability_name
+
+        if any(
+            value is not None
+            for value in (legacy_capability_name, legacy_status, legacy_treatment)
+        ):
+            assertions[index] = BrownfieldModelAssertion.model_validate(
+                {
+                    "authority_ref": sanitized_item.get("authority_ref"),
+                    "capability_hint": sanitized_item.get("capability_hint")
+                    or legacy_capability_name,
+                    "as_built_status": legacy_status,
+                    "recommended_backlog_treatment": legacy_treatment,
+                }
             )
-        capability = capability_index.by_exact_authority_ref.get(item.authority_ref)
-        if capability is not None:
-            return capability
+        sanitized_items.append(sanitized_item)
+
+    sanitized["backlog_items"] = sanitized_items
+    return sanitized, assertions
+
+
+def _unique_contract_candidates(
+    capabilities: tuple[CapabilityAssessment, ...],
+) -> list[CapabilityAssessment]:
+    unique: list[CapabilityAssessment] = []
+    for capability in capabilities:
+        if not any(_same_backlog_contract(capability, existing) for existing in unique):
+            unique.append(capability)
+    return unique
+
+
+def _capability_text_overlaps_item(
+    *,
+    capability: CapabilityAssessment,
+    item: BacklogItem,
+) -> bool:
+    capability_tokens = _brownfield_tokens(capability.capability_title)
+    if not capability_tokens:
+        return True
+    item_text = f"{item.requirement} {item.capability_hint or ''}"
+    item_tokens = _brownfield_tokens(item_text)
+    item_compact = _normalize_brownfield_text(item_text)
+    return any(
+        _brownfield_token_matches(
+            token,
+            item_tokens=item_tokens,
+            item_compact=item_compact,
+        )
+        for token in capability_tokens
+    )
+
+
+def _make_warning(  # noqa: PLR0913
+    *,
+    code: BrownfieldWarningCode,
+    item_index: int,
+    match_tier: BrownfieldMatchTier,
+    message: str,
+    severity: BrownfieldWarningSeverity = "review",
+    capability: CapabilityAssessment | None = None,
+    details: dict[str, object] | None = None,
+) -> BrownfieldWarning:
+    return BrownfieldWarning(
+        code=code,
+        item_index=item_index,
+        severity=severity,
+        match_tier=match_tier,
+        authority_ref=capability.authority_ref if capability is not None else None,
+        invariant_refs=list(capability.invariant_refs)
+        if capability is not None
+        else [],
+        message=message,
+        details=details or {},
+    )
+
+
+def _limited_item_warnings(
+    warnings: list[BrownfieldWarning],
+    *,
+    max_warnings: int = 3,
+) -> list[BrownfieldWarning]:
+    """Cap per-item warnings without dropping save-blocking diagnostics."""
+    blocking = [
+        warning for warning in warnings if warning.severity == "block_on_save"
+    ]
+    non_blocking = [
+        warning for warning in warnings if warning.severity != "block_on_save"
+    ]
+    if len(blocking) >= max_warnings:
+        return blocking
+    return [*blocking, *non_blocking[: max_warnings - len(blocking)]]
+
+
+def _exact_authority_annotation(  # noqa: C901, PLR0912
+    *,
+    item: BacklogItem,
+    item_index: int,
+    capability_index: _CapabilityIndex,
+    model_assertion: BrownfieldModelAssertion | None,
+) -> tuple[BrownfieldAnnotation | None, list[BrownfieldWarning]]:
+    if item.authority_ref is None:
+        return None, []
+
+    warnings: list[BrownfieldWarning] = []
+    candidates: list[CapabilityAssessment] = []
+    selected: CapabilityAssessment | None = None
+    match_basis = "authority_ref"
+    conflict = False
+
+    authority_capabilities = capability_index.by_authority_ref.get(item.authority_ref)
+    if authority_capabilities is not None:
+        candidates = _unique_contract_candidates(authority_capabilities)
+        if len(candidates) == 1:
+            selected = candidates[0]
+        else:
+            conflict = True
+    else:
         normalized_ref = _normalize_brownfield_text(item.authority_ref)
-        if normalized_ref in capability_index.ambiguous_invariant_refs:
-            message = "duplicate ambiguous As-Built invariant_ref"
-            raise ValueError(message)
         capability = capability_index.by_invariant_ref.get(normalized_ref)
         if capability is not None:
-            return capability
+            selected = capability
+            candidates = [capability]
+            match_basis = "invariant_ref"
+        elif normalized_ref in capability_index.ambiguous_invariant_refs:
+            conflict = True
+            match_basis = "invariant_ref"
 
-    for candidate in (item.authority_ref, item.capability_name, item.requirement):
-        if candidate is None:
-            continue
-        normalized = _normalize_brownfield_text(candidate)
-        if normalized in capability_index.ambiguous_normalized_keys:
-            message = "duplicate ambiguous As-Built capability key"
-            raise ValueError(message)
-        capability = capability_index.by_normalized_key.get(normalized)
-        if capability is not None:
-            return capability
-    return None
+    if selected is None and not candidates and not conflict:
+        warning = _make_warning(
+            code="asserted_authority_ref_unmatched",
+            item_index=item_index,
+            match_tier="none",
+            severity="block_on_save",
+            message=(
+                "Model asserted an authority_ref that does not match the "
+                "cached As-Built assessment."
+            ),
+            details={"authority_ref": item.authority_ref},
+        )
+        annotation = BrownfieldAnnotation(
+            schema_version="agileforge.brownfield_annotation.v1",
+            match_tier="none",
+            match_basis=["authority_ref"],
+            selected=None,
+            candidates=[],
+            model_assertion=_model_assertion(item, model_assertion),
+            warning_codes=[warning.code],
+        )
+        return annotation, [warning]
 
+    if conflict:
+        warning = _make_warning(
+            code="conflicting_invariants",
+            item_index=item_index,
+            match_tier="exact",
+            message=(
+                "Exact authority_ref maps to multiple As-Built invariant "
+                "contracts with different status or treatment."
+            ),
+            details={"authority_ref": item.authority_ref},
+        )
+        annotation = BrownfieldAnnotation(
+            schema_version="agileforge.brownfield_annotation.v1",
+            match_tier="exact",
+            match_basis=[match_basis],
+            conflict=True,
+            selected=None,
+            candidates=[_selected_capability(capability) for capability in candidates],
+            model_assertion=_model_assertion(item, model_assertion),
+            warning_codes=[warning.code],
+        )
+        return annotation, [warning]
 
-def _has_brownfield_metadata(item: BacklogItem) -> bool:
-    return any(
-        value is not None
-        for value in (
-            item.capability_name,
-            item.authority_ref,
-            item.as_built_status,
-            item.recommended_backlog_treatment,
+    if selected is None:
+        msg = "expected exact As-Built capability selection"
+        raise RuntimeError(msg)
+    warnings.append(
+        _make_warning(
+            code="metadata_filled_by_host",
+            item_index=item_index,
+            match_tier="exact",
+            severity="info",
+            capability=selected,
+            message="Host filled brownfield annotation from exact As-Built match.",
         )
     )
+    assertion = _model_assertion(item, model_assertion)
+    disagreements: list[BrownfieldDisagreement] = []
+    if (
+        assertion.as_built_status is not None
+        and assertion.as_built_status != selected.status
+    ):
+        warnings.append(
+            _make_warning(
+                code="status_disagreement",
+                item_index=item_index,
+                match_tier="exact",
+                capability=selected,
+                message=(
+                    "Model asserted an As-Built status that differs from the "
+                    "host-selected capability."
+                ),
+                details={
+                    "model_value": assertion.as_built_status,
+                    "host_value": selected.status,
+                },
+            )
+        )
+        disagreements.append(
+            BrownfieldDisagreement(
+                field="as_built_status",
+                model_value=assertion.as_built_status,
+                host_value=selected.status,
+                code="status_disagreement",
+            )
+        )
+    if (
+        assertion.recommended_backlog_treatment is not None
+        and assertion.recommended_backlog_treatment
+        != selected.recommended_backlog_treatment
+    ):
+        warnings.append(
+            _make_warning(
+                code="treatment_disagreement",
+                item_index=item_index,
+                match_tier="exact",
+                capability=selected,
+                message=(
+                    "Model asserted a backlog treatment that differs from the "
+                    "host-selected capability."
+                ),
+                details={
+                    "model_value": assertion.recommended_backlog_treatment,
+                    "host_value": selected.recommended_backlog_treatment,
+                },
+            )
+        )
+        disagreements.append(
+            BrownfieldDisagreement(
+                field="recommended_backlog_treatment",
+                model_value=assertion.recommended_backlog_treatment,
+                host_value=selected.recommended_backlog_treatment,
+                code="treatment_disagreement",
+            )
+        )
+    if not _capability_text_overlaps_item(capability=selected, item=item):
+        warnings.append(
+            _make_warning(
+                code="capability_disagreement",
+                item_index=item_index,
+                match_tier="exact",
+                capability=selected,
+                message=(
+                    "Model authority_ref points at an As-Built capability whose "
+                    "title does not overlap the item title or capability_hint."
+                ),
+                details={
+                    "model_value": item.capability_hint or item.requirement,
+                    "host_value": selected.capability_title,
+                },
+            )
+        )
+        disagreements.append(
+            BrownfieldDisagreement(
+                field="capability_hint",
+                model_value=item.capability_hint or item.requirement,
+                host_value=selected.capability_title,
+                code="capability_disagreement",
+            )
+        )
 
-
-def _format_capability_match(capability: CapabilityAssessment) -> str:
-    return (
-        f"{capability.authority_ref} "
-        f"({capability.capability_title}, status={capability.status})"
+    warning_codes = [warning.code for warning in _limited_item_warnings(warnings)]
+    annotation = BrownfieldAnnotation(
+        schema_version="agileforge.brownfield_annotation.v1",
+        match_tier="exact",
+        match_basis=[match_basis],
+        selected=_selected_capability(selected),
+        candidates=[],
+        model_assertion=assertion,
+        disagreements=disagreements,
+        warning_codes=warning_codes,
     )
+    return annotation, _limited_item_warnings(warnings)
 
 
 def _possible_unmapped_capability_matches(
@@ -475,258 +635,78 @@ def _possible_unmapped_capability_matches(
     ]
 
 
-def _allowed_title_prefixes(capability: CapabilityAssessment) -> tuple[str, ...]:
-    return _ALLOWED_TITLE_PREFIXES_BY_TREATMENT.get(
-        capability.recommended_backlog_treatment,
-        _ALLOWED_TITLE_PREFIXES_BY_STATUS[capability.status],
-    )
-
-
-def _capability_reference_matches(
-    *,
-    value: str,
-    capability: CapabilityAssessment,
-) -> bool:
-    normalized_value = _normalize_brownfield_text(value)
-    allowed_refs = (capability.authority_ref, *capability.invariant_refs)
-    return any(
-        normalized_value == _normalize_brownfield_text(reference)
-        for reference in allowed_refs
-    )
-
-
-def _has_allowed_capability_title_prefix(
-    *,
-    requirement: str,
-    capability: CapabilityAssessment,
-) -> bool:
-    normalized_requirement = _normalize_title_prefix(requirement)
-    for prefix in _allowed_title_prefixes(capability):
-        normalized_prefix = _normalize_title_prefix(prefix)
-        if normalized_requirement == normalized_prefix:
-            return True
-        if normalized_requirement.startswith(f"{normalized_prefix} "):
-            return True
-    return False
-
-
-def _title_prefix_length(prefix: str) -> int:
-    return len(prefix)
-
-
-def _all_title_prefixes() -> tuple[str, ...]:
-    prefixes: set[str] = set()
-    for values in _ALLOWED_TITLE_PREFIXES_BY_STATUS.values():
-        prefixes.update(values)
-    for values in _ALLOWED_TITLE_PREFIXES_BY_TREATMENT.values():
-        prefixes.update(values)
-    sorted_prefixes: list[str] = sorted(
-        prefixes,
-        key=_title_prefix_length,
-        reverse=True,
-    )
-    return tuple(sorted_prefixes)
-
-
-def _strip_known_title_prefix(requirement: str) -> str:
-    stripped = requirement.strip()
-    for prefix in _all_title_prefixes():
-        pattern = re.compile(
-            rf"^\s*{re.escape(prefix)}\b\s*[:\-]?\s*",
-            re.IGNORECASE,
-        )
-        candidate = pattern.sub("", stripped, count=1).strip()
-        if candidate != stripped:
-            return candidate
-    return stripped
-
-
-def _normalize_mapped_requirement_title(
-    *,
-    item: BacklogItem,
-    capability: CapabilityAssessment,
-) -> None:
-    if _has_allowed_capability_title_prefix(
-        requirement=item.requirement,
-        capability=capability,
-    ):
-        return
-
-    prefix = _allowed_title_prefixes(capability)[0]
-    title_body = _strip_known_title_prefix(item.requirement)
-    if not title_body:
-        title_body = capability.capability_title
-    item.requirement = f"{prefix} {title_body}".strip()
-
-
-def _normalize_mapped_brownfield_treatment(
-    *,
-    item: BacklogItem,
-    capability: CapabilityAssessment,
-) -> None:
-    if (
-        item.recommended_backlog_treatment is None
-        or item.recommended_backlog_treatment
-        == capability.recommended_backlog_treatment
-        or item.capability_name is None
-        or item.authority_ref is None
-        or item.as_built_status != capability.status
-        or _normalize_brownfield_text(item.capability_name)
-        != _normalize_brownfield_text(capability.capability_title)
-        or not _capability_reference_matches(
-            value=item.authority_ref,
-            capability=capability,
-        )
-    ):
-        return
-
-    item.recommended_backlog_treatment = capability.recommended_backlog_treatment
-
-
-def _validate_mapped_brownfield_metadata(
-    *,
-    prefix: str,
-    item: BacklogItem,
-    capability: CapabilityAssessment,
-) -> list[str]:
-    errors: list[str] = []
-
-    if item.as_built_status is None:
-        errors.append(f"{prefix} missing as_built_status")
-    elif item.as_built_status != capability.status:
-        errors.append(f"{prefix} as_built_status must equal {capability.status!r}")
-
-    if item.recommended_backlog_treatment is None:
-        errors.append(f"{prefix} missing recommended_backlog_treatment")
-    elif item.recommended_backlog_treatment != capability.recommended_backlog_treatment:
-        errors.append(
-            f"{prefix} recommended_backlog_treatment must equal "
-            f"{capability.recommended_backlog_treatment!r}"
-        )
-
-    return errors
-
-
-def _validate_mapped_brownfield_item(
-    *,
-    index: int,
-    item: BacklogItem,
-    capability: CapabilityAssessment,
-) -> list[str]:
-    prefix = f"backlog_items[{index}]"
-    errors: list[str] = []
-
-    if item.capability_name is None:
-        errors.append(f"{prefix} missing capability_name")
-    elif _normalize_brownfield_text(item.capability_name) != (
-        _normalize_brownfield_text(capability.capability_title)
-    ):
-        errors.append(
-            f"{prefix} capability_name must match {capability.capability_title!r}"
-        )
-
-    if item.authority_ref is None:
-        errors.append(f"{prefix} missing authority_ref")
-    elif not _capability_reference_matches(
-        value=item.authority_ref,
-        capability=capability,
-    ):
-        errors.append(
-            f"{prefix} authority_ref must match {capability.authority_ref!r} "
-            "or one of its invariant_refs"
-        )
-
-    errors.extend(
-        _validate_mapped_brownfield_metadata(
-            prefix=prefix,
-            item=item,
-            capability=capability,
-        )
-    )
-
-    normalized_requirement = _normalize_brownfield_text(item.requirement)
-    if normalized_requirement == _normalize_brownfield_text(
-        capability.capability_title
-    ) or (
-        item.capability_name is not None
-        and normalized_requirement == _normalize_brownfield_text(item.capability_name)
-    ):
-        errors.append(f"{prefix} requirement must not equal capability title/name")
-
-    if not _has_allowed_capability_title_prefix(
-        requirement=item.requirement,
-        capability=capability,
-    ):
-        allowed = ", ".join(_allowed_title_prefixes(capability))
-        errors.append(
-            f"{prefix} title prefix must match status {capability.status!r} "
-            f"and treatment {capability.recommended_backlog_treatment!r}; "
-            f"allowed prefixes: {allowed}"
-        )
-
-    return errors
-
-
-def _validate_brownfield_contract(
+def derive_brownfield_annotations(
     *,
     output_model: OutputSchema,
     input_context: BacklogInputContext,
-) -> None:
-    """Validate brownfield backlog metadata against authoritative As-Built input."""
+    model_assertions: ModelAssertionsByIndex | None = None,
+) -> _BrownfieldAnnotationResult:
+    """Derive host-owned brownfield annotations from authoritative As-Built input."""
     raw_assessment = input_context.get("as_built_assessment")
     if raw_assessment == "NO_AS_BUILT_ASSESSMENT":
-        return
+        return _BrownfieldAnnotationResult(annotations_by_index={}, warnings=[])
     if not isinstance(raw_assessment, str):
         msg = "as_built_assessment must be a serialized As-Built JSON string"
         raise TypeError(msg)
 
     assessment = AsBuiltAssessment.model_validate_json(raw_assessment)
     capability_index = _build_capability_index(assessment)
-    errors: list[str] = []
+    annotations_by_index: dict[int, BrownfieldAnnotation] = {}
+    warnings: list[BrownfieldWarning] = []
 
-    for index, item in enumerate(output_model.backlog_items, start=1):
-        try:
-            capability = _mapped_capability(item, capability_index)
-        except ValueError as exc:
-            errors.append(f"backlog_items[{index}] {exc}")
-            continue
-        if capability is None:
-            if _has_brownfield_metadata(item):
-                errors.append(
-                    f"backlog_items[{index}] brownfield metadata does not match "
-                    "As-Built capability"
-                )
-            else:
-                possible_matches = _possible_unmapped_capability_matches(
-                    item,
-                    capability_index,
-                )
-                if possible_matches:
-                    formatted_matches = ", ".join(
-                        _format_capability_match(capability)
-                        for capability in possible_matches[:3]
-                    )
-                    errors.append(
-                        f"backlog_items[{index}] appears to map to As-Built "
-                        "capability; include brownfield metadata, split "
-                        "multi-capability work into mapped single-capability "
-                        "items, or rename/scope as genuinely new work: "
-                        f"{formatted_matches}"
-                    )
-            continue
-
-        _normalize_mapped_brownfield_treatment(item=item, capability=capability)
-        _normalize_mapped_requirement_title(item=item, capability=capability)
-        errors.extend(
-            _validate_mapped_brownfield_item(
-                index=index,
-                item=item,
-                capability=capability,
-            )
+    for index, item in enumerate(output_model.backlog_items):
+        annotation, item_warnings = _exact_authority_annotation(
+            item=item,
+            item_index=index,
+            capability_index=capability_index,
+            model_assertion=(model_assertions or {}).get(index),
         )
+        if annotation is not None:
+            annotations_by_index[index] = annotation
+            warnings.extend(item_warnings)
+            continue
 
-    if errors:
-        raise ValueError("; ".join(errors))
+        possible_matches = _possible_unmapped_capability_matches(
+            item,
+            capability_index,
+        )
+        if not possible_matches:
+            continue
+
+        item_warning = _make_warning(
+            code="possible_mapping",
+            item_index=index,
+            match_tier="fuzzy",
+            message=(
+                "Backlog item resembles As-Built capability text but has no "
+                "exact authority_ref or invariant_ref."
+            ),
+            details={
+                "candidate_authority_refs": [
+                    capability.authority_ref for capability in possible_matches[:3]
+                ]
+            },
+        )
+        annotations_by_index[index] = BrownfieldAnnotation(
+            schema_version="agileforge.brownfield_annotation.v1",
+            match_tier="fuzzy",
+            match_basis=["capability_title_terms"],
+            selected=None,
+            candidates=[
+                _selected_capability(capability) for capability in possible_matches[:3]
+            ],
+            model_assertion=_model_assertion(
+                item,
+                (model_assertions or {}).get(index),
+            ),
+            warning_codes=[item_warning.code],
+        )
+        warnings.append(item_warning)
+
+    return _BrownfieldAnnotationResult(
+        annotations_by_index=annotations_by_index,
+        warnings=warnings,
+    )
 
 
 def build_backlog_input_context(
@@ -754,41 +734,6 @@ def build_backlog_input_context(
     }
 
 
-def _with_brownfield_retry_feedback(
-    input_context: BacklogInputContext,
-    *,
-    validation_error: str,
-) -> BacklogInputContext:
-    retry_context = dict(input_context)
-    original_user_input = _as_text(retry_context.get("user_input")).strip()
-    feedback = (
-        f"{_BROWNFIELD_CONTRACT_RETRY_MARKER}: Your previous backlog JSON failed "
-        "AgileForge brownfield contract validation. Regenerate the entire JSON "
-        "response. Keep the same scope and priorities, but fix these exact errors: "
-        f"{validation_error}. {_BROWNFIELD_RETRY_TITLE_PREFIX_GUIDE} "
-        f"{_BROWNFIELD_RETRY_MAPPING_GUIDE} {_BROWNFIELD_RETRY_METADATA_GUIDE}"
-    )
-    retry_context["user_input"] = (
-        f"{original_user_input}\n\n{feedback}" if original_user_input else feedback
-    )
-    return retry_context
-
-
-def _brownfield_retry_metadata(
-    *,
-    failed_stage: str | None = None,
-) -> dict[str, object]:
-    """Return bounded diagnostics for brownfield contract repair attempts."""
-    metadata: dict[str, object] = {
-        "brownfield_retry_attempted": True,
-        "brownfield_retry_count": 1,
-        "brownfield_retry_marker": _BROWNFIELD_CONTRACT_RETRY_MARKER,
-    }
-    if failed_stage is not None:
-        metadata["brownfield_retry_failed_stage"] = failed_stage
-    return metadata
-
-
 async def _invoke_backlog_agent(payload: InputSchema) -> str:
     return await invoke_agent_to_text(
         agent=backlog_agent,
@@ -801,8 +746,7 @@ async def _invoke_backlog_agent(payload: InputSchema) -> str:
 async def _invoke_and_validate_output(
     *,
     payload: InputSchema,
-    input_context: BacklogInputContext,
-) -> tuple[str, OutputSchema] | dict[str, _FailureDetails]:
+) -> tuple[str, OutputSchema, ModelAssertionsByIndex] | dict[str, _FailureDetails]:
     try:
         raw_text: str = await _invoke_backlog_agent(payload)
     except (AgentInvocationError, ValueError) as exc:
@@ -827,7 +771,8 @@ async def _invoke_and_validate_output(
         }
 
     try:
-        output_model: OutputSchema = OutputSchema.model_validate(parsed)
+        sanitized, model_assertions = _sanitize_backlog_output_payload(parsed)
+        output_model: OutputSchema = OutputSchema.model_validate(sanitized)
     except ValidationError as exc:
         return {
             "output_validation": _FailureDetails(
@@ -838,27 +783,7 @@ async def _invoke_and_validate_output(
             )
         }
 
-    try:
-        _validate_brownfield_contract(
-            output_model=output_model,
-            input_context=input_context,
-        )
-    except (TypeError, ValidationError, ValueError) as exc:
-        validation_errors = (
-            _normalize_validation_errors(exc.errors())
-            if isinstance(exc, ValidationError)
-            else None
-        )
-        return {
-            "brownfield_contract_validation": _FailureDetails(
-                message=f"Backlog brownfield contract validation failed: {exc}",
-                raw_text=raw_text,
-                validation_errors=validation_errors,
-                exception=exc,
-            )
-        }
-
-    return raw_text, output_model
+    return raw_text, output_model, model_assertions
 
 
 def _failure(
@@ -953,53 +878,51 @@ async def run_backlog_agent_from_state(
             ),
         )
 
-    validated = await _invoke_and_validate_output(
-        payload=payload,
-        input_context=input_context,
-    )
-    runtime_metadata: dict[str, object] = {}
+    validated = await _invoke_and_validate_output(payload=payload)
     if isinstance(validated, dict):
         failure_stage, failure_details = next(iter(validated.items()))
-        if (
-            failure_stage == "brownfield_contract_validation"
-            and isinstance(failure_details.exception, ValueError)
-        ):
-            retry_input_context = _with_brownfield_retry_feedback(
-                input_context,
-                validation_error=str(failure_details.exception),
-            )
-            retry_payload = InputSchema.model_validate(retry_input_context)
-            retry_validated = await _invoke_and_validate_output(
-                payload=retry_payload,
-                input_context=retry_input_context,
-            )
-            if not isinstance(retry_validated, dict):
-                input_context = retry_input_context
-                _raw_text, output_model = retry_validated
-                runtime_metadata = _brownfield_retry_metadata()
-            else:
-                failure_stage, failure_details = next(iter(retry_validated.items()))
-                runtime_metadata = _brownfield_retry_metadata(
-                    failed_stage=failure_stage,
-                )
-                return _failure(
-                    project_id=project_id,
-                    input_context=retry_input_context,
-                    failure_stage=failure_stage,
-                    details=failure_details,
-                    extra=runtime_metadata,
-                )
-        else:
-            return _failure(
-                project_id=project_id,
-                input_context=input_context,
-                failure_stage=failure_stage,
-                details=failure_details,
-            )
-    else:
-        _raw_text, output_model = validated
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage=failure_stage,
+            details=failure_details,
+        )
+    _raw_text, output_model, model_assertions = validated
+
+    try:
+        annotation_result = derive_brownfield_annotations(
+            output_model=output_model,
+            input_context=input_context,
+            model_assertions=model_assertions,
+        )
+    except (TypeError, ValidationError, ValueError) as exc:
+        validation_errors = (
+            _normalize_validation_errors(exc.errors())
+            if isinstance(exc, ValidationError)
+            else None
+        )
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="brownfield_annotation",
+            details=_FailureDetails(
+                message=f"Backlog brownfield annotation failed: {exc}",
+                validation_errors=validation_errors,
+                exception=exc,
+            ),
+        )
 
     output_artifact: dict[str, Any] = output_model.model_dump(exclude_none=True)
+    for index, annotation in annotation_result.annotations_by_index.items():
+        try:
+            item = output_artifact["backlog_items"][index]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if isinstance(item, dict):
+            item["as_built_annotation"] = annotation.model_dump(exclude_none=False)
+    output_artifact["brownfield_warnings"] = [
+        warning.model_dump(exclude_none=False) for warning in annotation_result.warnings
+    ]
     if _has_clarifying_questions(output_artifact):
         output_artifact["is_complete"] = False
     return {
@@ -1013,7 +936,6 @@ async def run_backlog_agent_from_state(
         "failure_summary": None,
         "raw_output_preview": None,
         "has_full_artifact": False,
-        **runtime_metadata,
     }
 
 

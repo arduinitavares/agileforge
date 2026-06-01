@@ -56,10 +56,8 @@ Return ONLY a JSON object. No Markdown formatting.
     {
       "priority": 1,
       "requirement": "Name of the requirement",
-      "capability_name": "Optional: As-Built product capability identity, or null",
       "authority_ref": "Optional: accepted authority reference for the capability, or null",
-      "as_built_status": "observed" | "observed_with_missing_evidence" | "contradicted" | "unclear" | "not_observed" | null,
-      "recommended_backlog_treatment": "copy capability_assessments[].recommended_backlog_treatment unchanged: skip_new_implementation | create_verification_item | create_hardening_item | create_authority_conflict_item | create_discovery_item | create_product_item | po_review_required, or null when unmapped",
+      "capability_hint": "Optional: short As-Built capability title or hint used for host matching, or null",
       "value_driver": "Revenue" | "Customer Satisfaction" | "Strategic",
       "justification": "Why is this #1? (Link to Vision)",
       "estimated_effort": "S" | "M" | "L" | "XL",  // STRICT ENUM — no qualifiers or suffixes allowed
@@ -71,29 +69,24 @@ Return ONLY a JSON object. No Markdown formatting.
 }
 
 **COMPLETENESS CHECK:**
-* Set `is_complete: true` ONLY if you have 10+ items, required fields must be filled, optional brownfield metadata fields must be present as null when unmapped, and priorities are unique.
+* Set `is_complete: true` ONLY if you have 10+ items, required fields must be filled, optional model-owned brownfield helper fields must be present as null when unmapped, and priorities are unique.
 * If `technical_spec` or `compiled_authority` is missing but needed for estimation, set `is_complete: false` and ask for it.
 
 **AS-BUILT ASSESSMENT:**
 * The input field `as_built_assessment` is either `NO_AS_BUILT_ASSESSMENT` or a raw `agileforge.as_built_assessment.v1` JSON object.
 * Treat `as_built_assessment` as the primary brownfield advisory source when present.
 * It is not Product Backlog authority. It is evidence-aware guidance for Product Owner review.
-* requirement is the action-oriented work item title; capability_name is the product capability from the As-Built assessment.
-* When a backlog item maps to an As-Built capability, it must include capability_name, authority_ref, as_built_status, and recommended_backlog_treatment.
-* If requirement or technical_note uses As-Built capability terms with extra words, treat the item as mapped and include the brownfield metadata. Do not bypass mapping by expanding or paraphrasing the capability title.
-* For mapped capabilities, copy capability_assessments[].recommended_backlog_treatment unchanged. Allowed exact tokens are: skip_new_implementation, create_verification_item, create_hardening_item, create_authority_conflict_item, create_discovery_item, create_product_item, po_review_required.
-* For mapped capabilities, the `requirement` title must start with one of the exact prefixes listed for that recommended treatment below. Do not use noun-only capability titles, gerunds like "Hardening", or domain labels before the required prefix.
-  Examples: use "Harden Live Pre-Lock Recommendation Workflow", not "Live Pre-Lock Recommendation Workflow Hardening"; use "Verify Captain-Aware Optimization Engine", not "Captain-Aware Optimization Engine Verification".
-* For `status=observed`, do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
-  Treatment title guidance: skip_new_implementation -> Verify, Document, Monitor, Preserve.
-* For `status=observed_with_missing_evidence`, scope work to verification, hardening, tests, docs, or validation.
-  Treatment title guidance: create_verification_item -> Verify, Validate, Harden, Formalize, Add Evidence For; create_hardening_item -> Harden, Validate, Formalize.
-* For `status=contradicted`, create a PO-visible conflict/remediation candidate.
-  Treatment title guidance: create_authority_conflict_item -> Resolve, Align, Correct.
-* For `status=not_observed`, create product work only when accepted authority requires the capability and preserve evidence limitations in `technical_note`.
-  Treatment title guidance: create_product_item -> Build, Add, Implement, Create; create_discovery_item -> Discover, Investigate, Clarify, Define, Formalize.
-* For `status=unclear`, create discovery or PO-review work, not guessed implementation.
-  Treatment title guidance: po_review_required -> Clarify, Investigate, Resolve.
+* requirement is the action-oriented work item title.
+* Use `authority_ref` when a backlog item clearly maps to accepted authority.
+* Use `capability_hint` only as a short product capability title or hint to help the host match the item to As-Built context.
+* The host derives `as_built_annotation` and `brownfield_warnings`; the model must omit `as_built_annotation` from output.
+* Do not copy host-derived As-Built fields into the JSON output.
+* Use As-Built context to scope work:
+  * observed -> verify, document, monitor, or preserve existing behavior. Do not create duplicate implementation work unless user_input explicitly asks for replacement or redesign.
+  * observed_with_missing_evidence -> validate, harden, formalize, or add evidence through tests, docs, or verification work.
+  * contradicted -> resolve, align, or correct the conflict as a PO-visible remediation candidate.
+  * not_observed -> build, add, implement, create, or choose discovery when accepted authority requires the capability and evidence is limited.
+  * unclear -> clarify, investigate, or resolve through discovery or PO-review work, not guessed implementation.
 * If both `as_built_assessment` and `implementation_evidence` are present, `as_built_assessment` supersedes `implementation_evidence` for brownfield backlog generation.
 
 **IMPLEMENTATION EVIDENCE:**

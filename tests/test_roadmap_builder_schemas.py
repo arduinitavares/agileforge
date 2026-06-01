@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderInput
+from utils.brownfield_annotations import BrownfieldAnnotation
 
 
-def test_roadmap_input_accepts_enriched_backlog_items() -> None:
-    """Roadmap Builder must accept Backlog Primer brownfield metadata."""
+def test_roadmap_input_accepts_host_derived_brownfield_annotations() -> None:
+    """Roadmap Builder accepts host-derived brownfield annotations."""
+    annotation = BrownfieldAnnotation(
+        schema_version="agileforge.brownfield_annotation.v1",
+        match_tier="exact",
+        match_basis=["authority_ref"],
+    )
+
     parsed = RoadmapBuilderInput.model_validate(
         {
             "backlog_items": [
                 {
                     "priority": 1,
                     "requirement": "Validate Captain-Aware Optimizer Contract",
-                    "capability_name": "Captain-Aware Squad Optimizer",
                     "authority_ref": "REQ.captain-aware-optimization",
-                    "as_built_status": "observed_with_missing_evidence",
-                    "recommended_backlog_treatment": "create_verification_item",
+                    "capability_hint": "Captain-Aware Squad Optimizer",
+                    "as_built_annotation": annotation,
                     "value_driver": "Strategic",
                     "justification": "As-Built evidence indicates existing behavior.",
                     "estimated_effort": "M",
@@ -30,7 +36,10 @@ def test_roadmap_input_accepts_enriched_backlog_items() -> None:
     )
 
     item = parsed.backlog_items[0]
-    assert item.capability_name == "Captain-Aware Squad Optimizer"
     assert item.authority_ref == "REQ.captain-aware-optimization"
-    assert item.as_built_status == "observed_with_missing_evidence"
-    assert item.recommended_backlog_treatment == "create_verification_item"
+    assert item.capability_hint == "Captain-Aware Squad Optimizer"
+    assert item.as_built_annotation == annotation
+
+    assert "capability_name" not in item.model_fields_set
+    assert "as_built_status" not in item.model_fields_set
+    assert "recommended_backlog_treatment" not in item.model_fields_set

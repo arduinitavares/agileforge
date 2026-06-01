@@ -4,10 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
-    AssessmentStatus,
-    BacklogTreatment,
-)
+from utils.brownfield_annotations import BrownfieldAnnotation
 
 
 class BacklogItem(BaseModel):
@@ -29,15 +26,6 @@ class BacklogItem(BaseModel):
             description="Action-oriented backlog work item title.",
         ),
     ]
-    capability_name: Annotated[
-        str | None,
-        Field(
-            default=None,
-            description=(
-                "Optional As-Built capability name this backlog item relates to."
-            ),
-        ),
-    ]
     authority_ref: Annotated[
         str | None,
         Field(
@@ -47,21 +35,21 @@ class BacklogItem(BaseModel):
             ),
         ),
     ]
-    as_built_status: Annotated[
-        AssessmentStatus | None,
+    capability_hint: Annotated[
+        str | None,
         Field(
             default=None,
             description=(
-                "Optional As-Built assessment status for the related capability."
+                "Optional host-derived capability hint associated with this item."
             ),
         ),
     ]
-    recommended_backlog_treatment: Annotated[
-        BacklogTreatment | None,
+    as_built_annotation: Annotated[
+        BrownfieldAnnotation | None,
         Field(
             default=None,
             description=(
-                "Optional As-Built recommended backlog treatment for this item."
+                "Optional host-derived As-Built annotation for this item."
             ),
         ),
     ]

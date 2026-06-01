@@ -116,6 +116,41 @@ def test_record_phase_attempt_mirrors_output_and_updates_state() -> None:
     )
 
 
+def test_record_phase_attempt_deep_copies_output_and_mirrors() -> None:
+    """Attempt artifacts must not be mutated through mirrored state aliases."""
+    state: JsonDict = {}
+    output_artifact: JsonDict = {
+        "backlog_items": [{"requirement": "Verify current behavior"}],
+        "is_complete": True,
+    }
+
+    workflow_state.record_phase_attempt(
+        state,
+        attempts_key="backlog_attempts",
+        last_input_context_key="backlog_last_input_context",
+        assessment_key="product_backlog_assessment",
+        trigger="auto_transition",
+        input_context={"user_input": ""},
+        output_artifact=output_artifact,
+        is_complete=True,
+        created_at="2026-04-04T00:00:00Z",
+        mirrored_output_field="backlog_items",
+        mirrored_state_key="backlog_items",
+        mirrored_output_types=(list,),
+    )
+
+    state["backlog_items"][0]["requirement"] = "Mutated mirror"
+    output_artifact["backlog_items"][0]["requirement"] = "Mutated source"
+
+    attempt_artifact = state["backlog_attempts"][0]["output_artifact"]
+    assert attempt_artifact["backlog_items"][0]["requirement"] == (
+        "Verify current behavior"
+    )
+    assert state["product_backlog_assessment"]["backlog_items"][0]["requirement"] == (
+        "Verify current behavior"
+    )
+
+
 def test_sprint_attempt_helpers_delegate_to_shared_workflow_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

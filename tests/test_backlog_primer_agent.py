@@ -70,17 +70,15 @@ class TestBacklogPrimerSchemas:
         parsed = OutputSchema.model_validate_json(json.dumps(payload))
         assert len(parsed.backlog_items) == 2  # noqa: PLR2004
 
-    def test_output_schema_accepts_brownfield_metadata(self) -> None:
-        """Backlog items may carry optional As-Built trace metadata."""
+    def test_output_schema_accepts_model_owned_brownfield_hint(self) -> None:
+        """Backlog items may carry only model-owned brownfield helper fields."""
         payload: dict[str, Any] = {
             "backlog_items": [
                 {
                     "priority": 1,
                     "requirement": "Validate Captain-Aware Optimizer Contract",
-                    "capability_name": "Captain-Aware Squad Optimizer",
                     "authority_ref": "REQ.captain-aware-optimization",
-                    "as_built_status": "observed_with_missing_evidence",
-                    "recommended_backlog_treatment": "create_verification_item",
+                    "capability_hint": "Captain-Aware Squad Optimizer",
                     "value_driver": "Strategic",
                     "justification": (
                         "As-Built evidence indicates the optimizer exists."
@@ -97,10 +95,58 @@ class TestBacklogPrimerSchemas:
 
         item = parsed.backlog_items[0]
         assert item.requirement == "Validate Captain-Aware Optimizer Contract"
-        assert item.capability_name == "Captain-Aware Squad Optimizer"
         assert item.authority_ref == "REQ.captain-aware-optimization"
-        assert item.as_built_status == "observed_with_missing_evidence"
-        assert item.recommended_backlog_treatment == "create_verification_item"
+        assert item.capability_hint == "Captain-Aware Squad Optimizer"
+
+    def test_output_schema_rejects_model_owned_brownfield_metadata(self) -> None:
+        """The model must not own host-derived As-Built metadata fields."""
+        payload: dict[str, Any] = {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Validate Captain-Aware Optimizer Contract",
+                    "capability_name": "Captain-Aware Squad Optimizer",
+                    "authority_ref": "REQ.captain-aware-optimization",
+                    "as_built_status": "observed_with_missing_evidence",
+                    "recommended_backlog_treatment": "create_verification_item",
+                    "value_driver": "Strategic",
+                    "justification": "As-Built evidence indicates existing behavior.",
+                    "estimated_effort": "M",
+                }
+            ],
+            "is_complete": False,
+            "clarifying_questions": [],
+        }
+
+        with pytest.raises(ValidationError):
+            OutputSchema.model_validate(payload)
+
+    def test_output_schema_rejects_model_supplied_host_annotation(self) -> None:
+        """The model must not emit host-owned As-Built annotations."""
+        payload: dict[str, Any] = {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Validate Captain-Aware Optimizer Contract",
+                    "authority_ref": "REQ.captain-aware-optimization",
+                    "capability_hint": "Captain-Aware Squad Optimizer",
+                    "as_built_annotation": {
+                        "schema_version": "agileforge.brownfield_annotation.v1",
+                        "source": "host_derived",
+                        "match_tier": "exact",
+                        "match_basis": ["authority_ref"],
+                    },
+                    "value_driver": "Strategic",
+                    "justification": "As-Built evidence indicates existing behavior.",
+                    "estimated_effort": "M",
+                }
+            ],
+            "is_complete": False,
+            "clarifying_questions": [],
+        }
+
+        with pytest.raises(ValidationError):
+            OutputSchema.model_validate(payload)
 
     def test_backlog_item_rejects_invalid_effort(self) -> None:
         """Verify backlog item rejects invalid effort."""
@@ -122,10 +168,8 @@ class TestBacklogPrimerSchemas:
             BacklogItem(
                 priority=0,
                 requirement="Security baseline",
-                capability_name=None,
                 authority_ref=None,
-                as_built_status=None,
-                recommended_backlog_treatment=None,
+                capability_hint=None,
                 value_driver="Strategic",
                 justification="Reduces compliance risk",
                 estimated_effort="M",
