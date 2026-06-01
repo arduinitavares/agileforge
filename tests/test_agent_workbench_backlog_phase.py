@@ -806,10 +806,10 @@ def test_backlog_runtime_allows_status_to_select_duplicate_authority_ref_group(
     assert result["success"] is True
 
 
-def test_backlog_runtime_reports_treatment_mismatch_inside_duplicate_ref_group(
+def test_backlog_runtime_normalizes_treatment_inside_duplicate_ref_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Duplicate authority refs should still report the exact wrong treatment."""
+    """Duplicate authority refs can canonicalize treatment after status selection."""
     assessment = _as_built_assessment_payload()
     assessment["capability_assessments"].append(
         {
@@ -837,12 +837,58 @@ def test_backlog_runtime_reports_treatment_mismatch_inside_duplicate_ref_group(
         assessment=assessment,
     )
 
-    assert result["success"] is False
-    assert result["failure_stage"] == "brownfield_contract_validation"
-    assert "recommended_backlog_treatment must equal 'skip_new_implementation'" in (
-        result["failure_summary"]
+    assert result["success"] is True
+    output_item = result["output_artifact"]["backlog_items"][0]
+    assert output_item["recommended_backlog_treatment"] == "skip_new_implementation"
+    assert output_item["requirement"] == "Verify Live Squad Recommendation"
+
+
+def test_backlog_runtime_allows_invariant_ref_as_brownfield_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant refs should select the matching As-Built target when unique."""
+    assessment = _as_built_assessment_payload()
+    assessment["capability_assessments"] = [
+        {
+            "authority_ref": "REQ.post-round-review",
+            "invariant_refs": ["INV-product"],
+            "capability_title": "Post Round Review",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Product capability not observed."],
+            "recommended_backlog_treatment": "create_product_item",
+            "reasoning": "Accepted authority requires product work.",
+        },
+        {
+            "authority_ref": "REQ.post-round-review",
+            "invariant_refs": ["INV-discovery"],
+            "capability_title": "Post Round Review",
+            "status": "not_observed",
+            "confidence": "low",
+            "evidence": [],
+            "limitations": ["Artifact structure not observed."],
+            "recommended_backlog_treatment": "create_discovery_item",
+            "reasoning": "Specific invariant needs discovery.",
+        },
+    ]
+
+    result = _run_brownfield_backlog_runtime(
+        monkeypatch,
+        {
+            "requirement": "Verify Post-Round Review Artifact Structure",
+            "capability_name": "Post Round Review",
+            "authority_ref": "INV-discovery",
+            "as_built_status": "not_observed",
+            "recommended_backlog_treatment": "create_discovery_item",
+        },
+        assessment=assessment,
     )
-    assert "authority_ref metadata does not match" not in result["failure_summary"]
+
+    assert result["success"] is True
+    output_item = result["output_artifact"]["backlog_items"][0]
+    assert output_item["authority_ref"] == "INV-discovery"
+    assert output_item["recommended_backlog_treatment"] == "create_discovery_item"
 
 
 def test_backlog_runtime_rejects_ambiguous_authority_ref_without_selector(

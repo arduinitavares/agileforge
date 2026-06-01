@@ -126,6 +126,8 @@ class _CapabilityIndex:
     by_authority_ref: dict[str, tuple[CapabilityAssessment, ...]]
     by_exact_authority_ref: dict[str, CapabilityAssessment]
     ambiguous_authority_refs: set[str]
+    by_invariant_ref: dict[str, CapabilityAssessment]
+    ambiguous_invariant_refs: set[str]
     by_normalized_key: dict[str, CapabilityAssessment]
     ambiguous_normalized_keys: set[str]
 
@@ -242,6 +244,26 @@ def _same_backlog_contract(
     )
 
 
+def _store_unique_capability_reference(
+    *,
+    key: str,
+    capability: CapabilityAssessment,
+    by_key: dict[str, CapabilityAssessment],
+    ambiguous_keys: set[str],
+) -> None:
+    if not key or key in ambiguous_keys:
+        return
+
+    existing = by_key.get(key)
+    if existing is None or existing is capability:
+        by_key[key] = capability
+        return
+
+    if not _same_backlog_contract(existing, capability):
+        ambiguous_keys.add(key)
+        by_key.pop(key, None)
+
+
 def _build_capability_index(
     assessment: AsBuiltAssessment,
 ) -> _CapabilityIndex:
@@ -249,6 +271,8 @@ def _build_capability_index(
     unique_capabilities: dict[tuple[str, str, str, str], CapabilityAssessment] = {}
     by_exact_authority_ref: dict[str, CapabilityAssessment] = {}
     ambiguous_authority_refs: set[str] = set()
+    by_invariant_ref: dict[str, CapabilityAssessment] = {}
+    ambiguous_invariant_refs: set[str] = set()
     by_normalized_key: dict[str, CapabilityAssessment] = {}
     ambiguous_normalized_keys: set[str] = set()
     for capability in assessment.capability_assessments:
@@ -265,27 +289,28 @@ def _build_capability_index(
             capability
         )
 
-        exact_existing = by_exact_authority_ref.get(capability.authority_ref)
-        if exact_existing is not None and exact_existing is not capability:
-            if not _same_backlog_contract(exact_existing, capability):
-                ambiguous_authority_refs.add(capability.authority_ref)
-                by_exact_authority_ref.pop(capability.authority_ref, None)
-        elif capability.authority_ref not in ambiguous_authority_refs:
-            by_exact_authority_ref[capability.authority_ref] = capability
+        _store_unique_capability_reference(
+            key=capability.authority_ref,
+            capability=capability,
+            by_key=by_exact_authority_ref,
+            ambiguous_keys=ambiguous_authority_refs,
+        )
+
+        for invariant_ref in capability.invariant_refs:
+            _store_unique_capability_reference(
+                key=_normalize_brownfield_text(invariant_ref),
+                capability=capability,
+                by_key=by_invariant_ref,
+                ambiguous_keys=ambiguous_invariant_refs,
+            )
 
         for candidate in (capability.authority_ref, capability.capability_title):
-            normalized = _normalize_brownfield_text(candidate)
-            if not normalized:
-                continue
-            if normalized in ambiguous_normalized_keys:
-                continue
-            existing = by_normalized_key.get(normalized)
-            if existing is not None and existing is not capability:
-                if not _same_backlog_contract(existing, capability):
-                    ambiguous_normalized_keys.add(normalized)
-                    by_normalized_key.pop(normalized, None)
-                continue
-            by_normalized_key[normalized] = capability
+            _store_unique_capability_reference(
+                key=_normalize_brownfield_text(candidate),
+                capability=capability,
+                by_key=by_normalized_key,
+                ambiguous_keys=ambiguous_normalized_keys,
+            )
     return _CapabilityIndex(
         capabilities=tuple(unique_capabilities.values()),
         by_authority_ref={
@@ -294,6 +319,8 @@ def _build_capability_index(
         },
         by_exact_authority_ref=by_exact_authority_ref,
         ambiguous_authority_refs=ambiguous_authority_refs,
+        by_invariant_ref=by_invariant_ref,
+        ambiguous_invariant_refs=ambiguous_invariant_refs,
         by_normalized_key=by_normalized_key,
         ambiguous_normalized_keys=ambiguous_normalized_keys,
     )
@@ -397,6 +424,13 @@ def _mapped_capability(
         capability = capability_index.by_exact_authority_ref.get(item.authority_ref)
         if capability is not None:
             return capability
+        normalized_ref = _normalize_brownfield_text(item.authority_ref)
+        if normalized_ref in capability_index.ambiguous_invariant_refs:
+            message = "duplicate ambiguous As-Built invariant_ref"
+            raise ValueError(message)
+        capability = capability_index.by_invariant_ref.get(normalized_ref)
+        if capability is not None:
+            return capability
 
     for candidate in (item.authority_ref, item.capability_name, item.requirement):
         if candidate is None:
@@ -445,6 +479,19 @@ def _allowed_title_prefixes(capability: CapabilityAssessment) -> tuple[str, ...]
     return _ALLOWED_TITLE_PREFIXES_BY_TREATMENT.get(
         capability.recommended_backlog_treatment,
         _ALLOWED_TITLE_PREFIXES_BY_STATUS[capability.status],
+    )
+
+
+def _capability_reference_matches(
+    *,
+    value: str,
+    capability: CapabilityAssessment,
+) -> bool:
+    normalized_value = _normalize_brownfield_text(value)
+    allowed_refs = (capability.authority_ref, *capability.invariant_refs)
+    return any(
+        normalized_value == _normalize_brownfield_text(reference)
+        for reference in allowed_refs
     )
 
 
@@ -512,6 +559,30 @@ def _normalize_mapped_requirement_title(
     item.requirement = f"{prefix} {title_body}".strip()
 
 
+def _normalize_mapped_brownfield_treatment(
+    *,
+    item: BacklogItem,
+    capability: CapabilityAssessment,
+) -> None:
+    if (
+        item.recommended_backlog_treatment is None
+        or item.recommended_backlog_treatment
+        == capability.recommended_backlog_treatment
+        or item.capability_name is None
+        or item.authority_ref is None
+        or item.as_built_status != capability.status
+        or _normalize_brownfield_text(item.capability_name)
+        != _normalize_brownfield_text(capability.capability_title)
+        or not _capability_reference_matches(
+            value=item.authority_ref,
+            capability=capability,
+        )
+    ):
+        return
+
+    item.recommended_backlog_treatment = capability.recommended_backlog_treatment
+
+
 def _validate_mapped_brownfield_metadata(
     *,
     prefix: str,
@@ -556,11 +627,13 @@ def _validate_mapped_brownfield_item(
 
     if item.authority_ref is None:
         errors.append(f"{prefix} missing authority_ref")
-    elif _normalize_brownfield_text(item.authority_ref) != (
-        _normalize_brownfield_text(capability.authority_ref)
+    elif not _capability_reference_matches(
+        value=item.authority_ref,
+        capability=capability,
     ):
         errors.append(
-            f"{prefix} authority_ref must match {capability.authority_ref!r}"
+            f"{prefix} authority_ref must match {capability.authority_ref!r} "
+            "or one of its invariant_refs"
         )
 
     errors.extend(
@@ -642,6 +715,7 @@ def _validate_brownfield_contract(
                     )
             continue
 
+        _normalize_mapped_brownfield_treatment(item=item, capability=capability)
         _normalize_mapped_requirement_title(item=item, capability=capability)
         errors.extend(
             _validate_mapped_brownfield_item(
