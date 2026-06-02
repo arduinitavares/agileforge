@@ -3322,6 +3322,27 @@ def test_top_level_help_describes_agent_workbench_commands(
         '--reason "..."'
     ) in captured.out
     assert (
+        "agileforge backlog refine-preview --project-id 1 "
+        "--source-attempt-id <attempt_id> --operations-file refinement_ops.json"
+    ) in captured.out
+    assert (
+        "agileforge backlog refine-record --project-id 1 "
+        "--source-attempt-id <attempt_id> --operations-file refinement_ops.json "
+        "--expected-source-fingerprint <fingerprint> "
+        "--expected-state SPRINT_COMPLETE --idempotency-key refine-backlog-001"
+    ) in captured.out
+    assert (
+        "agileforge backlog approve --project-id 1 --attempt-id <attempt_id> "
+        "--approved-artifact-fingerprint <fingerprint> "
+        "--idempotency-key approve-refinement-001"
+    ) in captured.out
+    assert (
+        "agileforge backlog refine-import --project-id 1 "
+        "--source-artifact source.json --edited-file edited.json "
+        "--expected-source-fingerprint <fingerprint> "
+        "--idempotency-key refine-import-001"
+    ) in captured.out
+    assert (
         "agileforge context pack --project-id 1 --phase sprint-planning" in captured.out
     )
 

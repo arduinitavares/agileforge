@@ -11,17 +11,12 @@ import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import NoReturn, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, NoReturn, Protocol, TypedDict, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from models.enums import StoryResolution
-from services.agent_workbench.authority_decision import (
-    AuthorityAcceptRequest,
-    AuthorityRejectRequest,
-    IncompleteReviewOverride,
-)
 from services.agent_workbench.envelope import (
     WorkbenchError,
     WorkbenchWarning,
@@ -37,6 +32,13 @@ from utils.agileforge_spec_profile import (
     rendered_markdown_hash,
 )
 from utils.logging_config import configure_logging
+
+if TYPE_CHECKING:
+    from services.agent_workbench.authority_decision import (
+        AuthorityAcceptRequest,
+        AuthorityRejectRequest,
+        IncompleteReviewOverride,
+    )
 
 DEFAULT_CONTEXT_PHASE: str = "overview"
 INVALID_COMMAND_EXIT_CODE: int = 2
@@ -62,6 +64,18 @@ Examples:
     """--expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW """
     """--idempotency-key save-backlog-001
   agileforge backlog reconcile --project-id 1 --idempotency-key reconcile-backlog-001
+  agileforge backlog refine-preview --project-id 1 --source-attempt-id <attempt_id> """
+    """--operations-file refinement_ops.json
+  agileforge backlog refine-record --project-id 1 --source-attempt-id <attempt_id> """
+    """--operations-file refinement_ops.json --expected-source-fingerprint """
+    """<fingerprint> --expected-state SPRINT_COMPLETE --idempotency-key """
+    """refine-backlog-001
+  agileforge backlog approve --project-id 1 --attempt-id <attempt_id> """
+    """--approved-artifact-fingerprint <fingerprint> --idempotency-key """
+    """approve-refinement-001
+  agileforge backlog refine-import --project-id 1 --source-artifact source.json """
+    """--edited-file edited.json --expected-source-fingerprint <fingerprint> """
+    """--idempotency-key refine-import-001
   agileforge evidence collect --project-id 1 --repo-path /path/to/repo """
     """--idempotency-key evidence-001
   agileforge evidence collect --project-id 1 --from-file evidence_report.json """
@@ -2009,6 +2023,10 @@ def _parse_incomplete_review_overrides(
     raw_overrides: list[str],
 ) -> list[IncompleteReviewOverride]:
     """Parse repeated candidate-scoped incomplete review override flags."""
+    from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+        IncompleteReviewOverride,
+    )
+
     parsed: list[IncompleteReviewOverride] = []
     for raw in raw_overrides:
         parts = raw.split(":", 2)
@@ -2136,6 +2154,10 @@ def _authority_accept(  # noqa: PLR0911
     application: _Application,
 ) -> CommandResult:
     """Route authority accept to the application facade."""
+    from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+        AuthorityAcceptRequest,
+    )
+
     command = "agileforge authority accept"
     validation_error = _validate_incomplete_override(args)
     if validation_error is not None:
@@ -2203,6 +2225,10 @@ def _authority_reject(  # noqa: PLR0911
     application: _Application,
 ) -> CommandResult:
     """Route authority reject to the application facade."""
+    from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+        AuthorityRejectRequest,
+    )
+
     command = "agileforge authority reject"
     if args.review_token:
         if not _non_empty(args.reason):
@@ -2344,6 +2370,10 @@ def _interactive_authority_accept(
     application: _Application,
 ) -> CommandResult:
     """Review and confirm authority acceptance in a TTY session."""
+    from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+        AuthorityAcceptRequest,
+    )
+
     command = "agileforge authority accept"
     review = application.authority_review(
         project_id=args.project_id,
@@ -2396,6 +2426,10 @@ def _interactive_authority_reject(
     application: _Application,
 ) -> CommandResult:
     """Review and confirm authority rejection in a TTY session."""
+    from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+        AuthorityRejectRequest,
+    )
+
     command = "agileforge authority reject"
     review = application.authority_review(
         project_id=args.project_id,

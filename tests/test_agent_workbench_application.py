@@ -233,6 +233,25 @@ class _SprintCompleteReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjection):
+    """Fake completed Sprint state with a source Backlog attempt."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return sprint complete workflow state with Backlog refinement source."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"]["backlog_attempts"] = [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "artifact_fingerprint": "sha256:old-source",
+            },
+            {
+                "attempt_id": "backlog-attempt-2",
+                "artifact_fingerprint": "sha256:latest-source",
+            },
+        ]
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -2790,6 +2809,51 @@ def test_workflow_next_does_not_route_sprint_complete_to_empty_history() -> None
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
     assert result["data"]["status"] == "sprint_complete"
+
+
+def test_workflow_next_routes_sprint_complete_backlog_attempt_to_refinement() -> None:
+    """Expose review-safe Backlog refinement commands after Sprint close."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithBacklogAttemptsReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge backlog refine-preview --project-id 7 "
+            "--source-attempt-id backlog-attempt-2 "
+            "--operations-file <operations_file>"
+        ),
+        (
+            "agileforge backlog refine-record --project-id 7 "
+            "--source-attempt-id backlog-attempt-2 "
+            "--operations-file <operations_file> "
+            "--expected-source-fingerprint sha256:latest-source "
+            "--expected-state SPRINT_COMPLETE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge backlog refine-import --project-id 7 "
+            "--source-artifact <source_artifact> "
+            "--edited-file <edited_file> "
+            "--expected-source-fingerprint sha256:latest-source "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    all_commands = (
+        result["data"]["next_valid_commands"]
+        + result["data"]["blocked_commands"]
+        + result["data"]["blocked_future_commands"]
+    )
+    assert not any(
+        command.startswith("agileforge backlog save") for command in all_commands
+    )
+    assert result["data"]["status"] == "sprint_complete_backlog_refinement_available"
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

@@ -2386,12 +2386,25 @@ def _sprint_workflow_next(
     blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
     if fsm_state == "SPRINT_COMPLETE":
+        for command_name, command_text in _sprint_complete_backlog_refinement_commands(
+            project_id=project_id,
+            workflow=workflow,
+        ):
+            if command_is_available(command_name):
+                next_valid_commands.append(command_text)
+            else:
+                blocked_future_commands.append(command_text)
+        status = (
+            "sprint_complete_backlog_refinement_available"
+            if next_valid_commands
+            else "sprint_complete"
+        )
         data: dict[str, Any] = {
             "project_id": project_id,
             "next_valid_commands": next_valid_commands,
             "blocked_commands": blocked_commands,
             "blocked_future_commands": blocked_future_commands,
-            "status": "sprint_complete",
+            "status": status,
         }
         data["source_fingerprint"] = canonical_hash(
             {
@@ -2464,6 +2477,68 @@ def _sprint_workflow_next(
         ),
         "errors": [],
     }
+
+
+def _sprint_complete_backlog_refinement_commands(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return Backlog refinement command templates after Sprint close."""
+    source_attempt = _latest_backlog_attempt(workflow)
+    if source_attempt is None:
+        return []
+
+    source_attempt_id = str(source_attempt.get("attempt_id") or "").strip()
+    if not source_attempt_id:
+        return []
+    source_fingerprint = str(
+        source_attempt.get("artifact_fingerprint") or "<source_fingerprint>"
+    ).strip()
+    return [
+        (
+            "agileforge backlog refine-preview",
+            (
+                f"agileforge backlog refine-preview --project-id {project_id} "
+                f"--source-attempt-id {source_attempt_id} "
+                "--operations-file <operations_file>"
+            ),
+        ),
+        (
+            "agileforge backlog refine-record",
+            (
+                f"agileforge backlog refine-record --project-id {project_id} "
+                f"--source-attempt-id {source_attempt_id} "
+                "--operations-file <operations_file> "
+                f"--expected-source-fingerprint {source_fingerprint} "
+                "--expected-state SPRINT_COMPLETE "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge backlog refine-import",
+            (
+                f"agileforge backlog refine-import --project-id {project_id} "
+                "--source-artifact <source_artifact> "
+                "--edited-file <edited_file> "
+                f"--expected-source-fingerprint {source_fingerprint} "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+    ]
+
+
+def _latest_backlog_attempt(workflow: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the latest Backlog attempt from workflow state, if present."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    attempts = state_data.get("backlog_attempts")
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if isinstance(attempt, dict):
+            return attempt
+    return None
 
 
 def _sprint_save_blocker(workflow: dict[str, Any]) -> dict[str, Any] | None:
