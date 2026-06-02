@@ -2269,6 +2269,52 @@ def test_backlog_reset_active_routes_to_application(
     ]
 
 
+def test_backlog_reset_active_cli_routes_expected_arguments(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI forwards reset-active guarded arguments to application."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "backlog",
+            "reset-active",
+            "--project-id",
+            str(PROJECT_ID),
+            "--attempt-id",
+            "backlog-attempt-12",
+            "--expected-artifact-fingerprint",
+            "sha256:artifact",
+            "--expected-state",
+            "BACKLOG_REVIEW",
+            "--reset-reason",
+            "pre-brownfield backlog reset",
+            "--archive-all-active-stories",
+            "--idempotency-key",
+            "reset-active-cli-1",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge backlog reset-active"
+    assert app.calls == [
+        (
+            "backlog_reset_active",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "backlog-attempt-12",
+                "expected_artifact_fingerprint": "sha256:artifact",
+                "expected_state": "BACKLOG_REVIEW",
+                "reset_reason": "pre-brownfield backlog reset",
+                "archive_all_active_stories": True,
+                "idempotency_key": "reset-active-cli-1",
+            },
+        )
+    ]
+
+
 def test_cli_routes_as_built_assess_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

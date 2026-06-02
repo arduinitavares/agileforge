@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 from sqlmodel import select
 
-from models.core import Product, UserStory
-from models.enums import StoryStatus, WorkflowEventType
-from models.events import WorkflowEvent
+from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
+from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.backlog_runtime import (
@@ -2002,3 +2002,221 @@ def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
         ).all()
         == []
     )
+
+
+def test_reset_active_acceptance_archives_active_backlog_and_preserves_history(  # noqa: PLR0915
+    session: Session,
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner reset-active archives old rows and installs approved refinement."""
+    product = Product(name="Cartola")
+    team = Team(name="Delivery Team")
+    session.add(product)
+    session.add(team)
+    session.commit()
+    session.refresh(product)
+    session.refresh(team)
+    assert product.product_id is not None
+    assert team.team_id is not None
+    product_id = product.product_id
+
+    old_done = UserStory(
+        product_id=product_id,
+        title="Old delivered story",
+        status=StoryStatus.DONE,
+        story_origin="backlog_seed",
+        is_refined=True,
+        is_superseded=False,
+        acceptance_criteria="- Delivered",
+        completed_at=datetime(2026, 5, 28, 12, tzinfo=UTC),
+    )
+    old_todo = UserStory(
+        product_id=product_id,
+        title="Old residue story",
+        status=StoryStatus.TO_DO,
+        story_origin="backlog_seed",
+        is_refined=False,
+        is_superseded=False,
+    )
+    session.add(old_done)
+    session.add(old_todo)
+    session.commit()
+    session.refresh(old_done)
+    session.refresh(old_todo)
+    assert old_done.story_id is not None
+    old_done_id = old_done.story_id
+
+    sprint = Sprint(
+        product_id=product_id,
+        team_id=team.team_id,
+        goal="Complete active backlog history",
+        start_date=date(2026, 5, 25),
+        end_date=date(2026, 5, 29),
+        status=SprintStatus.COMPLETED,
+        close_snapshot_json='{"closed": true}',
+    )
+    session.add(sprint)
+    session.commit()
+    session.refresh(sprint)
+    assert sprint.sprint_id is not None
+    sprint_id = sprint.sprint_id
+    session.add(SprintStory(sprint_id=sprint_id, story_id=old_done_id))
+    task = Task(
+        story_id=old_done_id,
+        description="Implement delivered active story",
+        status=TaskStatus.DONE,
+    )
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    assert task.task_id is not None
+    task_id = task.task_id
+    session.add(
+        StoryCompletionLog(
+            story_id=old_done_id,
+            old_status=StoryStatus.IN_PROGRESS,
+            new_status=StoryStatus.DONE,
+            changed_by="po",
+        )
+    )
+    session.add(
+        TaskExecutionLog(
+            task_id=task_id,
+            sprint_id=sprint_id,
+            old_status=TaskStatus.IN_PROGRESS,
+            new_status=TaskStatus.DONE,
+            changed_by="agent",
+        )
+    )
+    session.commit()
+
+    output_artifact = {
+        "backlog_items": [
+            _refinement_source_item(
+                priority=1,
+                requirement="Validate captain-aware contract",
+                estimated_effort="S",
+            ),
+            _refinement_source_item(
+                priority=2,
+                requirement="Build post-round review artifact",
+                estimated_effort="XL",
+            ),
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    artifact_fingerprint = _backlog_artifact_fingerprint(output_artifact)
+    reviewed_artifact = {
+        **output_artifact,
+        "attempt_id": "backlog-attempt-12",
+        "artifact_fingerprint": artifact_fingerprint,
+        "refinement_approved": True,
+        "refinement_saveable": True,
+        "refinement_approval": {
+            "approval_id": "approval:reset-acceptance",
+            "approved_artifact_fingerprint": artifact_fingerprint,
+        },
+    }
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        **workflow.state,
+        "fsm_state": "BACKLOG_REVIEW",
+        "backlog_review_origin": "next_cycle_refinement",
+        "pending_spec_content": "SPEC CONTENT",
+        "compiled_authority_cached": "AUTHORITY JSON",
+        "product_backlog_assessment": reviewed_artifact,
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-12",
+                "attempt_kind": "import_refinement",
+                "artifact_fingerprint": artifact_fingerprint,
+                "output_artifact": dict(reviewed_artifact),
+                "refinement_approved": True,
+                "refinement_saveable": True,
+                "refinement_approval": {
+                    "approval_id": "approval:reset-acceptance",
+                    "approved_artifact_fingerprint": artifact_fingerprint,
+                },
+            }
+        ],
+    }
+
+    def fake_select_project(
+        selected_product_id: int,
+        tool_context: SimpleNamespace,
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        return {"success": True, "project_id": selected_product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+        engine=engine,
+    )
+
+    result = runner.reset_active(
+        project_id=product_id,
+        attempt_id="backlog-attempt-12",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        reset_reason="pre-brownfield backlog reset",
+        archive_all_active_stories=True,
+        idempotency_key="reset-active-acceptance-1",
+    )
+
+    assert result["ok"] is True, result
+    assert result["data"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert workflow.state["fsm_state"] == "BACKLOG_PERSISTENCE"
+    rows = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == product_id)
+        .order_by(cast("Any", UserStory.story_id))
+    ).all()
+    archived = [
+        row for row in rows if row.archived_reason == "active_backlog_reset"
+    ]
+    active = [row for row in rows if not row.is_superseded]
+    assert {row.title for row in archived} == {
+        "Old delivered story",
+        "Old residue story",
+    }
+    assert [row.status for row in archived if row.title == "Old delivered story"] == [
+        StoryStatus.DONE
+    ]
+    assert [row.title for row in active] == [
+        "Validate captain-aware contract",
+        "Build post-round review artifact",
+    ]
+    assert all(row.archived_reason is None for row in active)
+    assert all(
+        row.archive_reset_attempt_id == "backlog-attempt-12" for row in archived
+    )
+    assert session.exec(
+        select(SprintStory).where(SprintStory.story_id == old_done_id)
+    ).first()
+    assert session.exec(select(Sprint)).one().close_snapshot_json == '{"closed": true}'
+    assert session.exec(
+        select(StoryCompletionLog).where(StoryCompletionLog.story_id == old_done_id)
+    ).first()
+    assert session.exec(select(Task).where(Task.story_id == old_done_id)).first()
+    assert session.exec(
+        select(TaskExecutionLog).where(TaskExecutionLog.task_id == task_id)
+    ).first()
+    event = session.exec(select(WorkflowEvent)).one()
+    assert event.event_type == WorkflowEventType.BACKLOG_SAVED
+    metadata = json.loads(event.event_metadata or "{}")
+    assert metadata["action"] == "active_backlog_reset"
+    assert metadata["attempt_id"] == "backlog-attempt-12"
+    assert metadata["idempotency_key"] == "reset-active-acceptance-1"
