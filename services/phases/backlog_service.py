@@ -46,6 +46,17 @@ VALID_BACKLOG_GENERATION_STATES = {
     OrchestratorState.ROADMAP_INTERVIEW.value,
 }
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
+VALID_BACKLOG_REFINEMENT_RECORD_STATES = {
+    OrchestratorState.SPRINT_COMPLETE.value,
+    OrchestratorState.BACKLOG_REVIEW.value,
+}
+REFINED_ATTEMPT_KINDS = {"refinement", "import_refinement"}
+BACKLOG_ARTIFACT_FINGERPRINT_METADATA_KEYS = {
+    "attempt_id",
+    "artifact_fingerprint",
+    "refinement_saveable",
+    "refinement_approval",
+}
 BACKLOG_RUNTIME_DIAGNOSTIC_KEYS: tuple[str, ...] = ()
 AUTO_SOURCE_ITEM_FINGERPRINT = "AUTO_SOURCE_ITEM_FINGERPRINT"
 REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
@@ -606,7 +617,7 @@ def _assert_refinement_expected_state(
 ) -> None:
     normalized_expected_state = _normalize_fsm_state(expected_state)
     fsm_state = _normalize_fsm_state(cast("str | None", state.get("fsm_state")))
-    if normalized_expected_state == OrchestratorState.SETUP_REQUIRED.value:
+    if normalized_expected_state not in VALID_BACKLOG_REFINEMENT_RECORD_STATES:
         raise BacklogPhaseError("Backlog refinement expected_state is invalid")
     if fsm_state != normalized_expected_state:
         raise BacklogPhaseError(
@@ -1005,8 +1016,8 @@ def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
 
 def _backlog_artifact_fingerprint(output_artifact: dict[str, Any]) -> str:
     normalized_artifact = copy.deepcopy(output_artifact)
-    normalized_artifact.pop("attempt_id", None)
-    normalized_artifact.pop("artifact_fingerprint", None)
+    for metadata_key in BACKLOG_ARTIFACT_FINGERPRINT_METADATA_KEYS:
+        normalized_artifact.pop(metadata_key, None)
     return canonical_hash({"phase": "backlog", "output_artifact": normalized_artifact})
 
 
@@ -1186,7 +1197,10 @@ def _assert_refined_attempt_saveable(
     expected_artifact_fingerprint: str,
 ) -> None:
     selected_attempt = _find_backlog_attempt(state, attempt_id)
-    if selected_attempt is None or selected_attempt.get("attempt_kind") != "refinement":
+    if (
+        selected_attempt is None
+        or selected_attempt.get("attempt_kind") not in REFINED_ATTEMPT_KINDS
+    ):
         return
     approval = selected_attempt.get("refinement_approval")
     if selected_attempt.get("refinement_saveable") is not True or not isinstance(
@@ -1234,7 +1248,7 @@ def mark_backlog_refinement_approved(
     selected_attempt = _find_backlog_attempt(state, request.attempt_id)
     if selected_attempt is None:
         raise BacklogPhaseError("Backlog refinement approval attempt not found")
-    if selected_attempt.get("attempt_kind") != "refinement":
+    if selected_attempt.get("attempt_kind") not in REFINED_ATTEMPT_KINDS:
         raise BacklogPhaseError("Backlog refinement approval target is not refined")
     if selected_attempt.get("artifact_fingerprint") != (
         request.approved_artifact_fingerprint

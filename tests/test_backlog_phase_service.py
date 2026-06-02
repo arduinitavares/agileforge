@@ -7,6 +7,9 @@ from typing import Any, Never
 import pytest
 
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from services.agent_workbench.backlog_refinement_events import (
+    BacklogRefinementApprovalRequest,
+)
 from services.phases.backlog_service import (
     BacklogPhaseError,
     _backlog_artifact_fingerprint,
@@ -15,6 +18,7 @@ from services.phases.backlog_service import (
     generate_backlog_draft,
     get_backlog_history,
     import_backlog_refinement,
+    mark_backlog_refinement_approved,
     preview_backlog_refinement,
     record_backlog_attempt,
     record_backlog_refinement,
@@ -834,6 +838,35 @@ async def test_record_backlog_refinement_rejects_stale_guards() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_backlog_refinement_rejects_downstream_expected_state() -> None:
+    """Refine-record is limited to sprint-complete or backlog-review states."""
+    state = _refinement_source_state()
+    state["fsm_state"] = "ROADMAP_REVIEW"
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await record_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+            operations_payload=_refinement_operations_payload(state),
+            expected_source_fingerprint=state["backlog_attempts"][0][
+                "artifact_fingerprint"
+            ],
+            expected_state="ROADMAP_REVIEW",
+            idempotency_key="refine-record-downstream-state",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "expected_state is invalid" in exc_info.value.detail
+    assert saved == {}
+    assert state["fsm_state"] == "ROADMAP_REVIEW"
+
+
+@pytest.mark.asyncio
 async def test_record_backlog_refinement_rejects_authority_mismatch() -> None:
     """Record fails closed when operation authority fingerprint is stale."""
     state = _refinement_source_state()
@@ -1391,6 +1424,106 @@ async def test_save_backlog_draft_allows_host_approved_refined_attempt() -> None
         save_backlog_tool=fake_save_backlog_tool,
     )
 
+    assert payload["save_result"]["success"] is True
+    assert len(captured["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_blocks_unapproved_imported_refined_attempt() -> None:
+    """An imported refined attempt has the same approval gate as refinements."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    state["backlog_attempts"][0]["attempt_kind"] = "import_refinement"
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await save_backlog_draft(
+            project_id=7,
+            project_name="Backlog Project",
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=expected_fingerprint,
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-unapproved-import-refinement",
+            save_state=lambda _updated: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_backlog_tool=_fake_save_backlog_tool,
+        )
+
+    assert "approval" in exc_info.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_allows_approved_imported_refined_attempt() -> None:
+    """Host approval makes an imported refined attempt saveable."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    state["backlog_attempts"][0].update(
+        {
+            "attempt_kind": "import_refinement",
+            "operation_set_fingerprint": "sha256:ops",
+        }
+    )
+    approval_result = mark_backlog_refinement_approved(
+        state,
+        request=BacklogRefinementApprovalRequest(
+            project_id=7,
+            attempt_id="backlog-attempt-1",
+            operation_set_fingerprint="sha256:ops",
+            approved_artifact_fingerprint=expected_fingerprint,
+            approved_operation_ids=["op-import"],
+            idempotency_key="approve-import-refinement",
+        ),
+        approval={
+            "approval_id": "approval:import",
+            "request_fingerprint": "sha256:approval-request",
+        },
+    )
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        del tool_context
+        captured["items"] = backlog_input.backlog_items
+        return {"success": True, "saved_count": len(backlog_input.backlog_items)}
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-approved-import-refinement",
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    assert approval_result["marked_saveable"] is True
+    assert state["backlog_attempts"][0]["refinement_saveable"] is True
+    assert state["product_backlog_assessment"]["refinement_saveable"] is True
     assert payload["save_result"]["success"] is True
     assert len(captured["items"]) == 1
 
