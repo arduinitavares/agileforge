@@ -78,6 +78,9 @@ class BaseRefinementOperation(BaseModel):
         if len(self.source_item_fingerprints) != len(self.source_item_ids):
             message = "source_item_fingerprints must match source_item_ids"
             raise ValueError(message)
+        if len(set(self.result_item_ids)) != len(self.result_item_ids):
+            message = "result_item_ids must be unique"
+            raise ValueError(message)
         return self
 
 
@@ -89,8 +92,13 @@ def _validate_single_source_in_place(
     if len(operation.source_item_ids) != 1:
         message = f"{operation_name} requires exactly one source_item_id"
         raise ValueError(message)
-    if operation.result_item_ids:
-        message = f"{operation_name} cannot define result_item_ids"
+    if (
+        operation.result_item_ids
+        and operation.result_item_ids != operation.source_item_ids
+    ):
+        message = (
+            f"{operation_name} result_item_ids must be empty or match source_item_ids"
+        )
         raise ValueError(message)
 
 
@@ -125,6 +133,9 @@ class MergeOperation(BaseRefinementOperation):
         if len(self.source_item_ids) < MIN_MERGE_SOURCE_ITEMS:
             message = "merge requires at least two source_item_ids"
             raise ValueError(message)
+        if len(set(self.source_item_ids)) != len(self.source_item_ids):
+            message = "merge source_item_ids must be unique"
+            raise ValueError(message)
         if len(self.result_item_ids) != 1:
             message = "merge requires exactly one result_item_id"
             raise ValueError(message)
@@ -139,9 +150,7 @@ class RetitleOperation(BaseRefinementOperation):
 
     @model_validator(mode="after")
     def _valid_retitle(self) -> RetitleOperation:
-        if len(self.source_item_ids) != 1:
-            message = "retitle requires exactly one source_item_id"
-            raise ValueError(message)
+        _validate_single_source_in_place(self, operation_name="retitle")
         return self
 
 
@@ -153,9 +162,7 @@ class RewriteScopeOperation(BaseRefinementOperation):
 
     @model_validator(mode="after")
     def _valid_rewrite(self) -> RewriteScopeOperation:
-        if len(self.source_item_ids) != 1:
-            message = "rewrite_scope requires exactly one source_item_id"
-            raise ValueError(message)
+        _validate_single_source_in_place(self, operation_name="rewrite_scope")
         invalid = set(self.field_updates) - {
             "justification",
             "technical_note",
@@ -356,3 +363,316 @@ def normalize_refined_artifact(artifact: dict[str, object]) -> dict[str, object]
         not normalized.get("clarifying_questions")
     )
     return normalized
+
+
+def _items_by_id(artifact: dict[str, object]) -> dict[str, dict[str, object]]:
+    raw_items = artifact.get("backlog_items")
+    if not isinstance(raw_items, list):
+        return {}
+    return {
+        str(item["item_id"]): item
+        for item in raw_items
+        if isinstance(item, dict) and item.get("item_id")
+    }
+
+
+def _assert_unique_item_ids(items: list[dict[str, object]]) -> None:
+    seen_item_ids: set[str] = set()
+    duplicate_item_ids: set[str] = set()
+    for item in items:
+        item_id = item.get("item_id")
+        if not item_id:
+            continue
+        canonical_item_id = str(item_id)
+        if canonical_item_id in seen_item_ids:
+            duplicate_item_ids.add(canonical_item_id)
+        seen_item_ids.add(canonical_item_id)
+    if duplicate_item_ids:
+        message = f"duplicate source artifact item_ids: {sorted(duplicate_item_ids)}"
+        raise BacklogRefinementError(message)
+
+
+def _assert_source_matches(
+    items_by_id: dict[str, dict[str, object]],
+    operation: BaseRefinementOperation,
+) -> None:
+    for source_id, expected_fingerprint in zip(
+        operation.source_item_ids,
+        operation.source_item_fingerprints,
+        strict=True,
+    ):
+        item = items_by_id.get(source_id)
+        if item is None:
+            message = f"source item not found: {source_id}"
+            raise BacklogRefinementError(message)
+        if _item_fingerprint(item) != expected_fingerprint:
+            message = f"source item stale: {source_id}"
+            raise BacklogRefinementError(message)
+
+
+def _provenance(
+    operation: BaseRefinementOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> dict[str, object]:
+    return {
+        "operation_id": operation.operation_id,
+        "operation_type": operation.operation_type,
+        "source_item_ids": list(operation.source_item_ids),
+        "source_item_fingerprints": list(operation.source_item_fingerprints),
+        "source_artifact_fingerprint": operation_set.source_artifact_fingerprint,
+        "authority_fingerprint": operation_set.authority_fingerprint,
+        "as_built_cache_fingerprint": operation_set.as_built_cache_fingerprint,
+        "rationale": operation.rationale,
+        "warnings": copy.deepcopy(operation.warnings),
+    }
+
+
+def _mark_provenance(
+    item: dict[str, object],
+    operation: BaseRefinementOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> None:
+    item["refinement_provenance"] = _provenance(operation, operation_set)
+
+
+def _with_result_identity(
+    item: dict[str, object],
+    *,
+    result_item_id: str,
+    operation: BaseRefinementOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> dict[str, object]:
+    result = copy.deepcopy(item)
+    result["item_id"] = result_item_id
+    result["source_attempt_id"] = operation_set.source_attempt_id
+    result["source_artifact_fingerprint"] = operation_set.source_artifact_fingerprint
+    _mark_provenance(result, operation, operation_set)
+    return result
+
+
+def _assert_result_ids_do_not_reuse_current_item_ids(
+    items: list[dict[str, object]],
+    operation: BaseRefinementOperation,
+) -> None:
+    current_item_ids = {str(item["item_id"]) for item in items if item.get("item_id")}
+    collisions = set(operation.result_item_ids) & current_item_ids
+    if collisions:
+        message = f"result_item_ids collide with current item ids: {sorted(collisions)}"
+        raise BacklogRefinementError(message)
+
+
+def _apply_split(
+    items: list[dict[str, object]],
+    operation: SplitOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> list[dict[str, object]]:
+    source_id = operation.source_item_ids[0]
+    _assert_result_ids_do_not_reuse_current_item_ids(items, operation)
+    replacements = [
+        _with_result_identity(
+            result_item,
+            result_item_id=result_item_id,
+            operation=operation,
+            operation_set=operation_set,
+        )
+        for result_item_id, result_item in zip(
+            operation.result_item_ids,
+            operation.result_items,
+            strict=True,
+        )
+    ]
+
+    refined_items: list[dict[str, object]] = []
+    for item in items:
+        if item.get("item_id") == source_id:
+            refined_items.extend(replacements)
+        else:
+            refined_items.append(item)
+    return refined_items
+
+
+def _apply_merge(
+    items: list[dict[str, object]],
+    operation: MergeOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> list[dict[str, object]]:
+    source_ids = set(operation.source_item_ids)
+    _assert_result_ids_do_not_reuse_current_item_ids(items, operation)
+    replacement = _with_result_identity(
+        operation.result_item,
+        result_item_id=operation.result_item_ids[0],
+        operation=operation,
+        operation_set=operation_set,
+    )
+
+    inserted = False
+    refined_items: list[dict[str, object]] = []
+    for item in items:
+        if item.get("item_id") not in source_ids:
+            refined_items.append(item)
+            continue
+        if not inserted:
+            refined_items.append(replacement)
+            inserted = True
+    return refined_items
+
+
+def _apply_retitle(
+    items_by_id: dict[str, dict[str, object]],
+    operation: RetitleOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> None:
+    item = items_by_id[operation.source_item_ids[0]]
+    item["requirement"] = operation.new_requirement
+    _mark_provenance(item, operation, operation_set)
+
+
+def _apply_rewrite_scope(
+    items_by_id: dict[str, dict[str, object]],
+    operation: RewriteScopeOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> None:
+    item = items_by_id[operation.source_item_ids[0]]
+    item.update(copy.deepcopy(operation.field_updates))
+    _mark_provenance(item, operation, operation_set)
+
+
+def _apply_reorder(
+    items: list[dict[str, object]],
+    operation: ReorderOperation,
+) -> list[dict[str, object]]:
+    items_by_id = _items_by_id({"backlog_items": items})
+    current_item_ids = list(items_by_id)
+    ordered_item_ids = operation.ordered_item_ids
+    if len(ordered_item_ids) != len(current_item_ids) or set(ordered_item_ids) != set(
+        current_item_ids
+    ):
+        message = "ordered_item_ids must match current backlog item ids"
+        raise BacklogRefinementError(message)
+    return [items_by_id[item_id] for item_id in ordered_item_ids]
+
+
+def _apply_classify(
+    items_by_id: dict[str, dict[str, object]],
+    operation: ClassifyOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> None:
+    item = items_by_id[operation.source_item_ids[0]]
+    item["classification"] = operation.classification
+    _mark_provenance(item, operation, operation_set)
+
+
+def _apply_authority_ref_change(
+    items_by_id: dict[str, dict[str, object]],
+    operation: AuthorityRefChangeOperation,
+    operation_set: BacklogRefinementOperationSet,
+    supported_authority_refs: set[str] | None,
+) -> None:
+    item = items_by_id[operation.source_item_ids[0]]
+    if (
+        operation.old_authority_ref is not None
+        and item.get("authority_ref") != operation.old_authority_ref
+    ):
+        message = f"authority ref stale: {operation.source_item_ids[0]}"
+        raise BacklogRefinementError(message)
+    if (
+        supported_authority_refs is not None
+        and operation.new_authority_ref is not None
+        and operation.new_authority_ref not in supported_authority_refs
+    ):
+        message = f"unsupported authority ref: {operation.new_authority_ref}"
+        raise UnsupportedAuthorityRefError(message)
+    item["authority_ref"] = operation.new_authority_ref
+    _mark_provenance(item, operation, operation_set)
+
+
+def _apply_add_intake(
+    refined: dict[str, object],
+    operation: AddIntakeOperation,
+    operation_set: BacklogRefinementOperationSet,
+) -> None:
+    intake = _with_result_identity(
+        operation.result_item,
+        result_item_id=operation.result_item_ids[0],
+        operation=operation,
+        operation_set=operation_set,
+    )
+    intake["classification"] = "authority_gap_intake"
+    intake["intake_metadata"] = {
+        "authority_gap_ref": operation.authority_gap_ref,
+        "operation_id": operation.operation_id,
+    }
+
+    raw_intake_items = refined.get("backlog_intake_items")
+    if not isinstance(raw_intake_items, list):
+        raw_intake_items = []
+        refined["backlog_intake_items"] = raw_intake_items
+    raw_intake_items.append(intake)
+
+
+def _apply_refinement_operation(
+    refined: dict[str, object],
+    items: list[dict[str, object]],
+    operation: RefinementOperation,
+    operation_set: BacklogRefinementOperationSet,
+    supported_authority_refs: set[str] | None,
+) -> list[dict[str, object]]:
+    _assert_unique_item_ids(items)
+    items_by_id = _items_by_id({"backlog_items": items})
+    _assert_source_matches(items_by_id, operation)
+
+    if isinstance(operation, SplitOperation):
+        return _apply_split(items, operation, operation_set)
+    if isinstance(operation, MergeOperation):
+        return _apply_merge(items, operation, operation_set)
+    if isinstance(operation, RetitleOperation):
+        _apply_retitle(items_by_id, operation, operation_set)
+    elif isinstance(operation, RewriteScopeOperation):
+        _apply_rewrite_scope(items_by_id, operation, operation_set)
+    elif isinstance(operation, ReorderOperation):
+        return _apply_reorder(items, operation)
+    elif isinstance(operation, ClassifyOperation):
+        _apply_classify(items_by_id, operation, operation_set)
+    elif isinstance(operation, AuthorityRefChangeOperation):
+        _apply_authority_ref_change(
+            items_by_id,
+            operation,
+            operation_set,
+            supported_authority_refs,
+        )
+    elif isinstance(operation, DeleteOperation):
+        deleted_ids = set(operation.source_item_ids)
+        return [item for item in items if item.get("item_id") not in deleted_ids]
+    elif isinstance(operation, AddIntakeOperation):
+        _apply_add_intake(refined, operation, operation_set)
+    else:
+        message = f"unsupported refinement operation: {operation.operation_type}"
+        raise BacklogRefinementError(message)
+    return items
+
+
+def apply_refinement_operations(
+    source_artifact: dict[str, object],
+    operation_set: BacklogRefinementOperationSet,
+    *,
+    supported_authority_refs: set[str] | None = None,
+) -> dict[str, object]:
+    """Apply typed refinement operations and normalize the refined artifact."""
+    refined = copy.deepcopy(source_artifact)
+    raw_items = refined.get("backlog_items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    items = [copy.deepcopy(item) for item in raw_items if isinstance(item, dict)]
+    _assert_unique_item_ids(items)
+    for operation in operation_set.operations:
+        items = _apply_refinement_operation(
+            refined,
+            items,
+            operation,
+            operation_set,
+            supported_authority_refs,
+        )
+
+    refined["backlog_items"] = items
+    return normalize_refined_artifact(refined)
