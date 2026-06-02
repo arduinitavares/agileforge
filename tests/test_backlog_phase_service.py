@@ -52,7 +52,7 @@ def _refinement_source_item(**overrides: object) -> JsonDict:
         "requirement": "Verify current backlog workflow",
         "authority_ref": "REQ.backlog.refinement",
         "capability_hint": "Backlog",
-        "value_driver": "Operational confidence",
+        "value_driver": "Strategic",
         "justification": "Keeps backlog review evidence current.",
         "estimated_effort": "M",
         "technical_note": "Use existing phase service state.",
@@ -535,6 +535,8 @@ async def test_record_backlog_refinement_sets_active_draft_and_review_state() ->
     recorded_attempt = saved_state["backlog_attempts"][-1]
     assert recorded_attempt["trigger"] == "refine_record"
     assert recorded_attempt["attempt_kind"] == "refinement"
+    assert recorded_attempt["refinement_saveable"] is False
+    assert saved_state["product_backlog_assessment"]["refinement_saveable"] is False
     assert recorded_attempt["source_attempt_id"] == "backlog-attempt-1"
     assert (
         recorded_attempt["source_artifact_fingerprint"]
@@ -544,6 +546,49 @@ async def test_record_backlog_refinement_sets_active_draft_and_review_state() ->
         recorded_attempt["operation_set_fingerprint"]
         == (payload["operation_set_fingerprint"])
     )
+
+
+@pytest.mark.asyncio
+async def test_record_backlog_refinement_discards_stale_brownfield_metadata() -> None:
+    """Refinement records host-owned brownfield metadata from current state only."""
+    state = _refinement_source_state()
+    source_artifact = state["backlog_attempts"][0]["output_artifact"]
+    source_item = source_artifact["backlog_items"][0]
+    source_item["as_built_annotation"] = {
+        "schema_version": "agileforge.brownfield_annotation.v1",
+        "selected": {"authority_ref": "REQ.stale"},
+    }
+    source_artifact["brownfield_warnings"] = [
+        {
+            "code": "possible_mapping",
+            "item_index": 0,
+            "severity": "review",
+            "match_tier": "fuzzy",
+            "message": "stale warning",
+        }
+    ]
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    state["backlog_attempts"][0]["artifact_fingerprint"] = source_fingerprint
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    await record_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+        operations_payload=_refinement_operations_payload(state),
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-strip-brownfield",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+
+    refined_artifact = saved["state"]["product_backlog_assessment"]
+    refined_item = refined_artifact["backlog_items"][0]
+    assert "as_built_annotation" not in refined_item
+    assert refined_artifact["brownfield_warnings"] == []
 
 
 @pytest.mark.asyncio
@@ -1176,6 +1221,92 @@ async def test_save_backlog_draft_projects_refined_items_before_tool() -> None:
             "technical_note": "Use current phase service save flow.",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_blocks_unapproved_refined_attempt() -> None:
+    """A refined attempt is not saveable until host approval is bound."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    state["backlog_attempts"][0]["attempt_kind"] = "refinement"
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await save_backlog_draft(
+            project_id=7,
+            project_name="Backlog Project",
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=expected_fingerprint,
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-unapproved-refinement",
+            save_state=lambda _updated: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_backlog_tool=_fake_save_backlog_tool,
+        )
+
+    assert "approval" in exc_info.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_allows_host_approved_refined_attempt() -> None:
+    """A refined attempt can save after approval binds to the exact artifact."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    state["backlog_attempts"][0].update(
+        {
+            "attempt_kind": "refinement",
+            "refinement_saveable": True,
+            "refinement_approval": {
+                "approval_id": "approval:abc",
+                "approved_artifact_fingerprint": expected_fingerprint,
+            },
+        }
+    )
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        del tool_context
+        captured["items"] = backlog_input.backlog_items
+        return {"success": True, "saved_count": len(backlog_input.backlog_items)}
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-approved-refinement",
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    assert payload["save_result"]["success"] is True
+    assert len(captured["items"]) == 1
 
 
 @pytest.mark.asyncio

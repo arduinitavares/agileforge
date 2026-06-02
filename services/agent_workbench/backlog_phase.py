@@ -30,6 +30,7 @@ from services.phases.backlog_service import (
     generate_backlog_draft,
     get_backlog_history,
     import_backlog_refinement,
+    mark_backlog_refinement_approved,
     preview_backlog_draft,
     preview_backlog_refinement,
     record_backlog_refinement,
@@ -415,12 +416,23 @@ class BacklogPhaseRunner:
                     request=request,
                     now_iso=_now_iso,
                 )
+            if request.attempt_id is not None:
+                state = await self._load_backlog_state(str(project_id), project_id)
+                approval_result = mark_backlog_refinement_approved(
+                    state,
+                    request=request,
+                    approval=cast("dict[str, Any]", data),
+                )
+                self._save_session_state(str(project_id), state)
+                data.update(approval_result)
         except ValueError as exc:
             return _error_envelope(ErrorCode.INVALID_COMMAND, str(exc))
         except BacklogRefinementApprovalError as exc:
             if str(exc) == _APPROVAL_IDEMPOTENCY_REUSED_MESSAGE:
                 return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
             return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
+        except BacklogPhaseError as exc:
+            return _error_envelope(ErrorCode.MUTATION_FAILED, exc.detail)
         return _data_envelope(cast("dict[str, Any]", data))
 
     async def _refine_import(

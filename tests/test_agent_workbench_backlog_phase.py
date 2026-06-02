@@ -88,7 +88,7 @@ def _refinement_source_item(**overrides: object) -> dict[str, Any]:
         "requirement": "Verify current backlog workflow",
         "authority_ref": "REQ.backlog.refinement",
         "capability_hint": "Backlog",
-        "value_driver": "Operational confidence",
+        "value_driver": "Strategic",
         "justification": "Keeps backlog review evidence current.",
         "estimated_effort": "M",
         "technical_note": "Use existing phase service state.",
@@ -929,6 +929,64 @@ def test_backlog_approve_records_host_mediated_approval(
     assert metadata["approved_by"] == "po"
     assert metadata["approval_source"] == "cli"
     assert metadata["approved_operation_ids"] == ["op-retitle"]
+
+
+def test_backlog_approve_marks_recorded_refinement_attempt_saveable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Approval against an attempt binds to that artifact in workflow state."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    session.add(Product(product_id=2, name="Cartola"))
+    session.commit()
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    source_fingerprint = workflow.state["backlog_attempts"][0]["artifact_fingerprint"]
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+        engine=engine,
+    )
+    record_result = runner.refine_record(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-approve-1",
+    )
+
+    approve_result = runner.approve(
+        project_id=2,
+        attempt_id=record_result["data"]["attempt_id"],
+        approved_artifact_fingerprint=record_result["data"]["artifact_fingerprint"],
+        approved_operation_ids=["op-retitle"],
+        idempotency_key="approve-recorded-refinement-1",
+    )
+
+    refined_attempt = workflow.state["backlog_attempts"][-1]
+    active_draft = workflow.state["product_backlog_assessment"]
+    assert approve_result["ok"] is True
+    assert refined_attempt["refinement_saveable"] is True
+    assert refined_attempt["refinement_approval"]["approval_id"] == (
+        approve_result["data"]["approval_id"]
+    )
+    assert refined_attempt["refinement_approval"]["approved_artifact_fingerprint"] == (
+        record_result["data"]["artifact_fingerprint"]
+    )
+    assert active_draft["refinement_saveable"] is True
+    assert active_draft["refinement_approval"]["approval_id"] == (
+        approve_result["data"]["approval_id"]
+    )
 
 
 def test_backlog_approve_idempotency_conflict_returns_reused_code(

@@ -5,11 +5,21 @@ from __future__ import annotations
 import copy
 import inspect
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+from pydantic import ValidationError
+
+from orchestrator_agent.agent_tools.backlog_primer.schemes import (
+    BacklogItem,
+    OutputSchema,
+)
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
+from services.backlog_runtime import (
+    build_backlog_input_context,
+    derive_brownfield_annotations,
+)
 from services.phases import workflow_state
 from services.phases.backlog_refinement import (
     AmbiguousRefinementDiffError,
@@ -22,6 +32,11 @@ from services.phases.backlog_refinement import (
     operations_from_edited_artifact,
     project_savable_backlog_items,
 )
+
+if TYPE_CHECKING:
+    from services.agent_workbench.backlog_refinement_events import (
+        BacklogRefinementApprovalRequest,
+    )
 
 VALID_BACKLOG_GENERATION_STATES = {
     OrchestratorState.VISION_PERSISTENCE.value,
@@ -345,12 +360,16 @@ async def record_backlog_refinement(
     recorded_attempt.update(
         {
             "attempt_kind": "refinement",
+            "refinement_saveable": False,
             "source_attempt_id": prepared["source_attempt_id"],
             "source_artifact_fingerprint": prepared["source_artifact_fingerprint"],
             "operation_set_fingerprint": prepared["operation_set_fingerprint"],
             "operation_set": copy.deepcopy(prepared["operation_set_payload"]),
         }
     )
+    assessment = state.get("product_backlog_assessment")
+    if isinstance(assessment, dict):
+        assessment["refinement_saveable"] = False
 
     state["fsm_state"] = OrchestratorState.BACKLOG_REVIEW.value
     state["fsm_state_entered_at"] = now_iso()
@@ -518,6 +537,11 @@ async def save_backlog_draft(
     _assert_save_guards(
         state=context.state,
         assessment=assessment,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+    _assert_refined_attempt_saveable(
+        state=context.state,
         attempt_id=attempt_id,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
@@ -708,6 +732,10 @@ def _prepare_backlog_refinement(
         refined_artifact = normalize_refined_artifact(
             apply_refinement_operations(source_with_identity, operation_set)
         )
+        refined_artifact = _derive_refined_brownfield_metadata(
+            refined_artifact,
+            state=state,
+        )
     except BacklogRefinementError as exc:
         raise BacklogPhaseError(f"Backlog refinement failed: {exc}") from exc
 
@@ -721,6 +749,95 @@ def _prepare_backlog_refinement(
         "output_artifact": refined_artifact,
         "artifact_fingerprint": artifact_fingerprint,
     }
+
+
+def _strip_inbound_brownfield_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
+    sanitized = copy.deepcopy(artifact)
+    sanitized.pop("brownfield_warnings", None)
+    raw_items = sanitized.get("backlog_items")
+    if isinstance(raw_items, list):
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            raw_item.pop("as_built_annotation", None)
+            raw_item.pop("brownfield_warnings", None)
+            raw_item.pop("capability_name", None)
+            raw_item.pop("as_built_status", None)
+            raw_item.pop("recommended_backlog_treatment", None)
+    return sanitized
+
+
+def _output_model_for_brownfield_annotation(
+    artifact: dict[str, Any],
+) -> tuple[OutputSchema, dict[int, int]]:
+    raw_items = artifact.get("backlog_items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+    projected_items: list[dict[str, Any]] = []
+    original_index_by_projected_index: dict[int, int] = {}
+    for original_index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            continue
+        item = cast("dict[str, Any]", raw_item)
+        if item.get("classification") == "authority_gap_intake":
+            continue
+        item_payload = {
+            key: copy.deepcopy(value)
+            for key, value in item.items()
+            if key in BacklogItem.model_fields
+        }
+        projected_items.append(BacklogItem.model_validate(item_payload).model_dump())
+        original_index_by_projected_index[len(projected_items) - 1] = original_index
+    output_model = OutputSchema.model_validate(
+        {
+            "backlog_items": projected_items,
+            "is_complete": bool(artifact.get("is_complete")),
+            "clarifying_questions": artifact.get("clarifying_questions") or [],
+        }
+    )
+    return output_model, original_index_by_projected_index
+
+
+def _derive_refined_brownfield_metadata(
+    artifact: dict[str, Any],
+    *,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    refined = _strip_inbound_brownfield_metadata(artifact)
+    try:
+        output_model, original_index_by_projected_index = (
+            _output_model_for_brownfield_annotation(refined)
+        )
+        annotation_result = derive_brownfield_annotations(
+            output_model=output_model,
+            input_context=build_backlog_input_context(state, user_input=None),
+        )
+    except (TypeError, ValidationError, ValueError) as exc:
+        raise BacklogPhaseError(
+            f"Backlog refinement brownfield annotation failed: {exc}",
+        ) from exc
+
+    raw_items = refined.get("backlog_items")
+    if isinstance(raw_items, list):
+        for projected_index, annotation in (
+            annotation_result.annotations_by_index.items()
+        ):
+            original_index = original_index_by_projected_index.get(projected_index)
+            if original_index is None:
+                continue
+            try:
+                item = raw_items[original_index]
+            except IndexError:
+                continue
+            if isinstance(item, dict):
+                item["as_built_annotation"] = annotation.model_dump(
+                    exclude_none=False
+                )
+    refined["brownfield_warnings"] = [
+        warning.model_dump(exclude_none=False)
+        for warning in annotation_result.warnings
+    ]
+    return refined
 
 
 def _assert_refinement_source_fingerprint(
@@ -1051,6 +1168,35 @@ def _assert_save_guards(
         )
 
 
+def _assert_refined_attempt_saveable(
+    *,
+    state: dict[str, Any],
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+) -> None:
+    selected_attempt = _find_backlog_attempt(state, attempt_id)
+    if selected_attempt is None or selected_attempt.get("attempt_kind") != "refinement":
+        return
+    approval = selected_attempt.get("refinement_approval")
+    if selected_attempt.get("refinement_saveable") is not True or not isinstance(
+        approval,
+        dict,
+    ):
+        raise BacklogPhaseError(
+            "APPROVAL_REQUIRED: refined backlog attempt requires host-recorded "
+            "PO approval before save.",
+        )
+    if (
+        approval.get("approved_artifact_fingerprint")
+        != expected_artifact_fingerprint
+        or approval.get("approval_id") is None
+    ):
+        raise BacklogPhaseError(
+            "APPROVAL_FINGERPRINT_MISMATCH: refined backlog approval does not "
+            "match the reviewed artifact fingerprint.",
+        )
+
+
 def _assert_brownfield_save_gate(assessment: dict[str, Any]) -> None:
     warnings = assessment.get("brownfield_warnings")
     if not isinstance(warnings, list):
@@ -1063,6 +1209,62 @@ def _assert_brownfield_save_gate(assessment: dict[str, Any]) -> None:
                 "Backlog save blocked by brownfield warning: "
                 "asserted_authority_ref_unmatched",
             )
+
+
+def mark_backlog_refinement_approved(
+    state: dict[str, Any],
+    *,
+    request: BacklogRefinementApprovalRequest,
+    approval: dict[str, Any],
+) -> dict[str, Any]:
+    """Mark a recorded refined attempt as saveable after host approval."""
+    if request.attempt_id is None:
+        return {"marked_saveable": False}
+    selected_attempt = _find_backlog_attempt(state, request.attempt_id)
+    if selected_attempt is None:
+        raise BacklogPhaseError("Backlog refinement approval attempt not found")
+    if selected_attempt.get("attempt_kind") != "refinement":
+        raise BacklogPhaseError("Backlog refinement approval target is not refined")
+    if selected_attempt.get("artifact_fingerprint") != (
+        request.approved_artifact_fingerprint
+    ):
+        raise BacklogPhaseError("APPROVAL_FINGERPRINT_MISMATCH")
+    if (
+        request.operation_set_fingerprint is not None
+        and selected_attempt.get("operation_set_fingerprint")
+        != request.operation_set_fingerprint
+    ):
+        raise BacklogPhaseError("Backlog refinement approval operation mismatch")
+
+    approval_id = approval.get("approval_id")
+    request_fingerprint = approval.get("request_fingerprint")
+    if not isinstance(approval_id, str) or not isinstance(request_fingerprint, str):
+        raise BacklogPhaseError("Backlog refinement approval response is invalid")
+    approval_binding: dict[str, Any] = {
+        "approval_id": approval_id,
+        "request_fingerprint": request_fingerprint,
+        "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
+        "approved_operation_ids": list(request.approved_operation_ids),
+        "approved_by": request.approved_by,
+        "approval_source": request.approval_source,
+    }
+    selected_attempt["refinement_saveable"] = True
+    selected_attempt["refinement_approval"] = approval_binding
+
+    assessment = state.get("product_backlog_assessment")
+    if (
+        isinstance(assessment, dict)
+        and assessment.get("attempt_id") == request.attempt_id
+        and assessment.get("artifact_fingerprint")
+        == request.approved_artifact_fingerprint
+    ):
+        assessment["refinement_saveable"] = True
+        assessment["refinement_approval"] = copy.deepcopy(approval_binding)
+    return {
+        "marked_saveable": True,
+        "attempt_id": request.attempt_id,
+        "approval_id": approval_id,
+    }
 
 
 def _find_backlog_attempt(
@@ -1106,6 +1308,7 @@ __all__ = [
     "generate_backlog_draft",
     "get_backlog_history",
     "import_backlog_refinement",
+    "mark_backlog_refinement_approved",
     "preview_backlog_draft",
     "preview_backlog_refinement",
     "record_backlog_attempt",
