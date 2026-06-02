@@ -320,6 +320,26 @@ class UserStory(SQLModel, table=True):
         foreign_key="user_stories.story_id",
         description="Canonical replacement story when this row is superseded",
     )
+    archived_reason: str | None = Field(
+        default=None,
+        index=True,
+        description="Archive reason for reset-archived story rows.",
+    )
+    archived_at: datetime | None = Field(default=None)
+    archived_by: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Host-boundary actor that archived this story.",
+    )
+    archive_reset_attempt_id: str | None = Field(
+        default=None,
+        index=True,
+        description="Backlog attempt id that caused active backlog reset archive.",
+    )
+    archive_previous_status: str | None = Field(
+        default=None,
+        description="Story status snapshot at reset archive time.",
+    )
 
     persona: str | None = Field(
         default=None,

@@ -961,6 +961,34 @@ def migrate_user_story_refinement_linkage(engine: Engine) -> list[str]:
     return actions
 
 
+def migrate_user_story_archive_metadata(engine: Engine) -> list[str]:
+    """Ensure active-backlog reset archive metadata columns exist."""
+    actions: list[str] = []
+
+    if _ensure_column_exists(engine, "user_stories", "archived_reason", "VARCHAR"):
+        actions.append("added column: user_stories.archived_reason")
+    if _ensure_column_exists(engine, "user_stories", "archived_at", "DATETIME"):
+        actions.append("added column: user_stories.archived_at")
+    if _ensure_column_exists(engine, "user_stories", "archived_by", "VARCHAR"):
+        actions.append("added column: user_stories.archived_by")
+    if _ensure_column_exists(
+        engine,
+        "user_stories",
+        "archive_reset_attempt_id",
+        "VARCHAR",
+    ):
+        actions.append("added column: user_stories.archive_reset_attempt_id")
+    if _ensure_column_exists(
+        engine,
+        "user_stories",
+        "archive_previous_status",
+        "VARCHAR",
+    ):
+        actions.append("added column: user_stories.archive_previous_status")
+
+    return actions
+
+
 # =============================================================================
 # USER STORY DEPENDENCIES MIGRATION
 # =============================================================================
@@ -1287,6 +1315,7 @@ def ensure_schema_current(engine: Engine) -> None:
         actions = migrate_spec_authority_tables(engine)
         actions.extend(migrate_product_spec_cache(engine))
         actions.extend(migrate_user_story_refinement_linkage(engine))
+        actions.extend(migrate_user_story_archive_metadata(engine))
         actions.extend(migrate_user_story_dependencies(engine))
         actions.extend(migrate_sprint_lifecycle(engine))
         actions.extend(migrate_task_metadata(engine))
