@@ -18,6 +18,7 @@ from services.phases.backlog_refinement import (
     assign_item_identity,
     canonical_operations_fingerprint,
     normalize_refined_artifact,
+    project_savable_backlog_items,
 )
 
 VALID_BACKLOG_GENERATION_STATES = {
@@ -415,8 +416,8 @@ async def save_backlog_draft(
     if _has_clarifying_questions(assessment):
         raise BacklogPhaseError("Backlog cannot be saved while questions remain")
 
-    items = assessment.get("backlog_items")
-    if not isinstance(items, list) or len(items) == 0:
+    items = project_savable_backlog_items(assessment)
+    if len(items) == 0:
         raise BacklogPhaseError("Backlog items are empty")
 
     result = save_backlog_tool(

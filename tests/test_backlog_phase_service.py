@@ -60,6 +60,21 @@ def _refinement_source_item(**overrides: object) -> JsonDict:
     return item
 
 
+def _savable_backlog_item(**overrides: object) -> JsonDict:
+    item: JsonDict = {
+        "priority": 1,
+        "requirement": "Verify existing backlog persistence",
+        "authority_ref": "REQ.backlog.persistence",
+        "capability_hint": "Backlog",
+        "value_driver": "Strategic",
+        "justification": "Keeps reviewed backlog saves aligned.",
+        "estimated_effort": "M",
+        "technical_note": "Use current phase service save flow.",
+    }
+    item.update(overrides)
+    return item
+
+
 def _refinement_source_state() -> JsonDict:
     output_artifact: JsonDict = {
         "backlog_items": [_refinement_source_item()],
@@ -822,11 +837,100 @@ async def test_save_backlog_draft_rejects_empty_items() -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_backlog_draft_projects_refined_items_before_tool() -> None:
+    """Save projects refined artifacts to Product Backlog-compatible items."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Verify existing backlog persistence",
+                    "authority_ref": "REQ.backlog.persistence",
+                    "capability_hint": "Backlog",
+                    "value_driver": "Strategic",
+                    "justification": "Keeps reviewed backlog saves aligned.",
+                    "estimated_effort": "M",
+                    "technical_note": "Use current phase service save flow.",
+                    "item_id": "item-001",
+                    "item_fingerprint": "sha256:item",
+                    "as_built_annotation": {
+                        "schema_version": "agileforge.brownfield_annotation.v1"
+                    },
+                    "classification": "verification",
+                }
+            ],
+            "backlog_intake_items": [
+                {
+                    "priority": 2,
+                    "requirement": "Clarify unsupported authority gap",
+                    "authority_ref": "REQ.backlog.gap",
+                    "capability_hint": "Backlog",
+                    "value_driver": "Strategic",
+                    "justification": "Captures unsupported intake for review.",
+                    "estimated_effort": "S",
+                    "technical_note": None,
+                    "classification": "authority_gap_intake",
+                }
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    captured: JsonDict = {}
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        del tool_context
+        captured["backlog_items"] = backlog_input.backlog_items
+        return {
+            "success": True,
+            "product_id": backlog_input.product_id,
+            "saved_count": len(backlog_input.backlog_items),
+        }
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-backlog-projected",
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    assert payload["save_result"]["success"] is True
+    assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert captured["backlog_items"] == [
+        {
+            "priority": 1,
+            "requirement": "Verify existing backlog persistence",
+            "authority_ref": "REQ.backlog.persistence",
+            "capability_hint": "Backlog",
+            "value_driver": "Strategic",
+            "justification": "Keeps reviewed backlog saves aligned.",
+            "estimated_effort": "M",
+            "technical_note": "Use current phase service save flow.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_save_backlog_draft_persists_persistence_state() -> None:
     """Verify save backlog draft persists persistence state."""
     state = _review_state_for_artifact(
         {
-            "backlog_items": [{"title": "Seed backlog item"}],
+            "backlog_items": [_savable_backlog_item()],
             "is_complete": True,
         }
     )
@@ -926,7 +1030,7 @@ async def test_save_backlog_draft_rejects_stale_attempt_guard() -> None:
 async def test_save_backlog_draft_blocks_unmatched_authority_ref_warning() -> None:
     """Save gate blocks only the closed list of brownfield blocker warnings."""
     artifact: JsonDict = {
-        "backlog_items": [{"title": "Seed backlog item"}],
+        "backlog_items": [_savable_backlog_item()],
         "is_complete": True,
         "clarifying_questions": [],
         "brownfield_warnings": [
@@ -971,7 +1075,7 @@ async def test_save_backlog_draft_blocks_unmatched_authority_ref_warning() -> No
 async def test_save_backlog_draft_allows_nonblocking_brownfield_warnings() -> None:
     """Fuzzy/conflict/disagreement warnings are PO review inputs, not save blocks."""
     artifact: JsonDict = {
-        "backlog_items": [{"title": "Seed backlog item"}],
+        "backlog_items": [_savable_backlog_item()],
         "is_complete": True,
         "clarifying_questions": [],
         "brownfield_warnings": [
