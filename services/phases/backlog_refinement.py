@@ -49,6 +49,34 @@ HOST_ONLY_ITEM_KEYS: frozenset[str] = frozenset(
     }
 )
 BACKLOG_ITEM_KEYS: frozenset[str] = frozenset(BacklogItem.model_fields)
+REWRITE_SCOPE_FIELDS: frozenset[str] = frozenset(
+    {
+        "justification",
+        "technical_note",
+        "value_driver",
+        "estimated_effort",
+        "capability_hint",
+    }
+)
+VALID_BACKLOG_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {
+        "verification",
+        "discovery",
+        "product_new_work",
+        "unchanged",
+        "authority_gap_intake",
+    }
+)
+RESULT_ITEM_STRIP_KEYS: frozenset[str] = frozenset(
+    {
+        "source_item_id",
+        "source_item_ids",
+        "item_id",
+        "item_fingerprint",
+        "source_attempt_id",
+        "source_artifact_fingerprint",
+    }
+)
 
 
 class BacklogRefinementError(Exception):
@@ -390,54 +418,103 @@ def operations_from_edited_artifact(
     edited_items = _edited_items_for_diff(edited_artifact)
     source_attempt_id = _source_attempt_id_for_diff(source_items)
     source_artifact_fingerprint = _source_artifact_fingerprint_for_diff(source_items)
-    edited_by_source_id = _edited_items_by_source_id(edited_items, source_items)
-    _assert_no_order_or_priority_edit(source_items, edited_items)
+    edited_refs = _edited_item_refs_for_diff(edited_items, source_items)
+    single_groups = _single_source_groups_for_diff(edited_refs)
 
     operations: list[RefinementOperation] = []
     operation_index = 1
-    for source_id, source_item in source_items.items():
-        edited_item = edited_by_source_id.get(source_id)
-        if edited_item is None:
+
+    reorder_ids = _reorder_ids_for_diff(source_items, edited_refs, single_groups)
+    if reorder_ids is not None:
+        operations.append(
+            ReorderOperation(
+                operation_id=f"op-{operation_index:03d}-reorder",
+                source_item_ids=[],
+                source_item_fingerprints=[],
+                result_item_ids=[],
+                ordered_item_ids=reorder_ids,
+                rationale="Source-linked item order changed in edited artifact.",
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+
+    consumed_source_ids: set[str] = set()
+    emitted_split_source_ids: set[str] = set()
+    for edited_item, source_ids in edited_refs:
+        if len(source_ids) > 1:
             operations.append(
-                DeleteOperation(
-                    operation_id=f"op-{operation_index:03d}-delete-{source_id}",
-                    source_item_ids=[source_id],
+                MergeOperation(
+                    operation_id=f"op-{operation_index:03d}-merge",
+                    source_item_ids=source_ids,
                     source_item_fingerprints=[
-                        _source_item_fingerprint_for_diff(source_item)
+                        _source_item_fingerprint_for_diff(source_items[source_id])
+                        for source_id in source_ids
                     ],
-                    rationale="Source-linked item removed from edited artifact.",
+                    result_item_ids=[f"merge-{operation_index:03d}"],
+                    result_item=_result_item_for_diff(edited_item),
+                    rationale="Multiple source-linked items merged in edited artifact.",
                     requested_by="po",
                 )
             )
+            consumed_source_ids.update(source_ids)
             operation_index += 1
             continue
 
-        field_updates = _diff_backlog_item_fields(source_item, edited_item)
-        if not field_updates:
-            continue
-        if set(field_updates) == {"requirement"}:
+        source_id = source_ids[0]
+        grouped_items = single_groups[source_id]
+        if len(grouped_items) > 1:
+            if source_id in emitted_split_source_ids:
+                continue
             operations.append(
-                RetitleOperation(
-                    operation_id=f"op-{operation_index:03d}-retitle-{source_id}",
+                SplitOperation(
+                    operation_id=f"op-{operation_index:03d}-split-{source_id}",
                     source_item_ids=[source_id],
                     source_item_fingerprints=[
-                        _source_item_fingerprint_for_diff(source_item)
+                        _source_item_fingerprint_for_diff(source_items[source_id])
                     ],
-                    result_item_ids=[source_id],
-                    new_requirement=str(field_updates["requirement"]),
-                    rationale=(
-                        "Source-linked item requirement changed in edited artifact."
-                    ),
+                    result_item_ids=[
+                        f"{source_id}-split-{index:03d}"
+                        for index in range(1, len(grouped_items) + 1)
+                    ],
+                    result_items=[
+                        _result_item_for_diff(grouped_item)
+                        for grouped_item in grouped_items
+                    ],
+                    rationale="One source-linked item split in edited artifact.",
                     requested_by="po",
                 )
             )
+            consumed_source_ids.add(source_id)
+            emitted_split_source_ids.add(source_id)
             operation_index += 1
             continue
-        message = (
-            "ambiguous edited artifact diff for "
-            f"{source_id}: unsupported field changes {sorted(field_updates)}"
+
+        operation_index = _append_single_source_edit_operations(
+            operations,
+            operation_index=operation_index,
+            source_id=source_id,
+            source_item=source_items[source_id],
+            edited_item=edited_item,
         )
-        raise AmbiguousRefinementDiffError(message)
+        consumed_source_ids.add(source_id)
+
+    for source_id, source_item in source_items.items():
+        if source_id in consumed_source_ids:
+            continue
+        operations.append(
+            DeleteOperation(
+                operation_id=f"op-{operation_index:03d}-delete-{source_id}",
+                source_item_ids=[source_id],
+                source_item_fingerprints=[
+                    _source_item_fingerprint_for_diff(source_item)
+                ],
+                rationale="Source-linked item removed from edited artifact.",
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+
     if not operations:
         _raise_ambiguous_diff(
             "ambiguous edited artifact: no-op import has no deterministic changes",
@@ -529,52 +606,193 @@ def _source_artifact_fingerprint_for_diff(
     return next(iter(source_fingerprints))
 
 
-def _edited_items_by_source_id(
-    edited_items: list[JsonDict],
+def _edited_source_ids_for_diff(
+    edited_item: JsonDict,
     source_items: dict[str, JsonDict],
-) -> dict[str, JsonDict]:
-    edited_by_source_id: dict[str, JsonDict] = {}
-    for edited_item in edited_items:
-        source_item_id = edited_item.get("source_item_id")
-        if not isinstance(source_item_id, str) or not source_item_id.strip():
+) -> list[str]:
+    source_item_id = edited_item.get("source_item_id")
+    source_item_ids = edited_item.get("source_item_ids")
+    if isinstance(source_item_id, str) and source_item_id.strip():
+        canonical_source_ids = [source_item_id.strip()]
+    elif isinstance(source_item_ids, list):
+        canonical_source_ids = [
+            str(item_id).strip()
+            for item_id in source_item_ids
+            if isinstance(item_id, str) and item_id.strip()
+        ]
+        if len(canonical_source_ids) != len(source_item_ids):
             _raise_ambiguous_diff(
-                "ambiguous edited artifact: edited items must preserve source_item_id",
+                "ambiguous edited artifact: source_item_ids must be strings",
             )
-        if source_item_id not in source_items:
-            _raise_ambiguous_diff(
-                f"ambiguous edited artifact: unknown source_item_id {source_item_id}",
-            )
-        if source_item_id in edited_by_source_id:
-            _raise_ambiguous_diff(
-                f"ambiguous edited artifact: duplicate source_item_id {source_item_id}",
-            )
-        edited_by_source_id[source_item_id] = edited_item
-    return edited_by_source_id
-
-
-def _assert_no_order_or_priority_edit(
-    source_items: dict[str, JsonDict],
-    edited_items: list[JsonDict],
-) -> None:
-    source_order = list(source_items)
-    edited_order = [str(item["source_item_id"]) for item in edited_items]
-    source_positions = {
-        source_id: index for index, source_id in enumerate(source_order)
-    }
-    edited_positions = [source_positions[source_id] for source_id in edited_order]
-    if edited_positions != sorted(edited_positions):
+    else:
         _raise_ambiguous_diff(
-            "ambiguous edited artifact: reorder edits are not supported",
+            "ambiguous edited artifact: edited items must preserve source_item_id",
         )
-    if len(edited_order) != len(source_order):
-        return
-    for index, source_id in enumerate(edited_order, start=1):
-        edited_priority = edited_items[index - 1].get("priority")
-        source_priority = source_items[source_id].get("priority")
-        if edited_priority != source_priority:
+    if len(set(canonical_source_ids)) != len(canonical_source_ids):
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: duplicate source ids on edited item",
+        )
+    for canonical_source_id in canonical_source_ids:
+        if canonical_source_id not in source_items:
             _raise_ambiguous_diff(
-                "ambiguous edited artifact: priority edits are not supported",
+                f"ambiguous edited artifact: unknown source_item_id "
+                f"{canonical_source_id}",
             )
+    return canonical_source_ids
+
+
+def _edited_item_refs_for_diff(
+    edited_items: list[JsonDict],
+    source_items: dict[str, JsonDict],
+) -> list[tuple[JsonDict, list[str]]]:
+    return [
+        (edited_item, _edited_source_ids_for_diff(edited_item, source_items))
+        for edited_item in edited_items
+    ]
+
+
+def _single_source_groups_for_diff(
+    edited_refs: list[tuple[JsonDict, list[str]]],
+) -> dict[str, list[JsonDict]]:
+    single_groups: dict[str, list[JsonDict]] = {}
+    for edited_item, source_ids in edited_refs:
+        if len(source_ids) != 1:
+            continue
+        single_groups.setdefault(source_ids[0], []).append(edited_item)
+    return single_groups
+
+
+def _reorder_ids_for_diff(
+    source_items: dict[str, JsonDict],
+    edited_refs: list[tuple[JsonDict, list[str]]],
+    single_groups: dict[str, list[JsonDict]],
+) -> list[str] | None:
+    if any(len(source_ids) != 1 for _edited_item, source_ids in edited_refs):
+        return None
+    if any(len(grouped_items) != 1 for grouped_items in single_groups.values()):
+        return None
+    edited_order = [source_ids[0] for _edited_item, source_ids in edited_refs]
+    source_order = list(source_items)
+    if len(edited_order) != len(source_order) or set(edited_order) != set(source_order):
+        return None
+    if edited_order == source_order:
+        return None
+    return edited_order
+
+
+def _result_item_for_diff(edited_item: JsonDict) -> JsonDict:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in edited_item.items()
+        if key not in RESULT_ITEM_STRIP_KEYS
+    }
+
+
+def _append_single_source_edit_operations(
+    operations: list[RefinementOperation],
+    *,
+    operation_index: int,
+    source_id: str,
+    source_item: JsonDict,
+    edited_item: JsonDict,
+) -> int:
+    field_updates = _diff_backlog_item_fields(source_item, edited_item)
+    classification_update = _classification_update_for_diff(source_item, edited_item)
+    unsupported_fields = (
+        set(field_updates)
+        - {"requirement", "authority_ref"}
+        - REWRITE_SCOPE_FIELDS
+    )
+    if unsupported_fields:
+        message = (
+            "ambiguous edited artifact diff for "
+            f"{source_id}: unsupported field changes {sorted(unsupported_fields)}"
+        )
+        raise AmbiguousRefinementDiffError(message)
+    source_item_fingerprints = [
+        _source_item_fingerprint_for_diff(source_item)
+    ]
+    if "requirement" in field_updates:
+        operations.append(
+            RetitleOperation(
+                operation_id=f"op-{operation_index:03d}-retitle-{source_id}",
+                source_item_ids=[source_id],
+                source_item_fingerprints=source_item_fingerprints,
+                result_item_ids=[source_id],
+                new_requirement=str(field_updates["requirement"]),
+                rationale="Source-linked item requirement changed in edited artifact.",
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+    rewrite_updates = {
+        key: value
+        for key, value in field_updates.items()
+        if key in REWRITE_SCOPE_FIELDS
+    }
+    if rewrite_updates:
+        operations.append(
+            RewriteScopeOperation(
+                operation_id=f"op-{operation_index:03d}-rewrite-{source_id}",
+                source_item_ids=[source_id],
+                source_item_fingerprints=source_item_fingerprints,
+                result_item_ids=[],
+                field_updates=rewrite_updates,
+                rationale="Source-linked item scope changed in edited artifact.",
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+    if "authority_ref" in field_updates:
+        operations.append(
+            AuthorityRefChangeOperation(
+                operation_id=f"op-{operation_index:03d}-authority-{source_id}",
+                source_item_ids=[source_id],
+                source_item_fingerprints=source_item_fingerprints,
+                result_item_ids=[source_id],
+                old_authority_ref=cast("str | None", source_item.get("authority_ref")),
+                new_authority_ref=cast("str | None", field_updates["authority_ref"]),
+                rationale=(
+                    "Source-linked item authority_ref changed in edited artifact."
+                ),
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+    if classification_update is not None:
+        operations.append(
+            ClassifyOperation(
+                operation_id=f"op-{operation_index:03d}-classify-{source_id}",
+                source_item_ids=[source_id],
+                source_item_fingerprints=source_item_fingerprints,
+                result_item_ids=[],
+                classification=classification_update,
+                rationale=(
+                    "Source-linked item classification changed in edited artifact."
+                ),
+                requested_by="po",
+            )
+        )
+        operation_index += 1
+    return operation_index
+
+
+def _classification_update_for_diff(
+    source_item: JsonDict,
+    edited_item: JsonDict,
+) -> BacklogClassification | None:
+    if edited_item.get("classification") == source_item.get("classification"):
+        return None
+    classification = edited_item.get("classification")
+    if classification is None:
+        return None
+    if not isinstance(classification, str) or classification not in (
+        VALID_BACKLOG_CLASSIFICATIONS
+    ):
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: unsupported classification edit",
+        )
+    return cast("BacklogClassification", classification)
 
 
 def _source_item_fingerprint_for_diff(item: JsonDict) -> str:

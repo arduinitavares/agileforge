@@ -220,8 +220,8 @@ def test_operations_from_edited_artifact_detects_deleted_source_items() -> None:
     ]
 
 
-def test_operations_from_edited_artifact_rejects_reordered_priority_only_edit() -> None:
-    """Edited artifacts cannot silently reorder source-linked items in Task 7."""
+def test_operations_from_edited_artifact_detects_reorder_by_source_order() -> None:
+    """Edited artifacts translate changed source order to a reorder operation."""
     source = assign_item_identity(
         {
             "backlog_items": [
@@ -245,13 +245,184 @@ def test_operations_from_edited_artifact_rejects_reordered_priority_only_edit() 
         ]
     }
 
-    with pytest.raises(AmbiguousRefinementDiffError):
-        operations_from_edited_artifact(
-            source,
-            edited,
-            authority_fingerprint="sha256:authority",
-            as_built_cache_fingerprint="sha256:as-built",
-        )
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, ReorderOperation)
+    assert operation.ordered_item_ids == ["item-002", "item-001"]
+
+
+def test_operations_from_edited_artifact_detects_rewrite_scope() -> None:
+    """Edited text fields become rewrite_scope operations."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(
+                    1,
+                    "Validate existing flow",
+                    technical_note="Clarify host-owned verification scope.",
+                ),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, RewriteScopeOperation)
+    assert operation.source_item_ids == ["item-001"]
+    assert operation.field_updates == {
+        "technical_note": "Clarify host-owned verification scope."
+    }
+
+
+def test_operations_from_edited_artifact_detects_authority_ref_change() -> None:
+    """Edited authority references become authority_ref_change operations."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(
+                    1,
+                    "Validate existing flow",
+                    authority_ref="REQ.changed",
+                ),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, AuthorityRefChangeOperation)
+    assert operation.old_authority_ref == "REQ.example"
+    assert operation.new_authority_ref == "REQ.changed"
+
+
+def test_operations_from_edited_artifact_detects_classify() -> None:
+    """Edited host classification becomes a classify operation."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Validate existing flow", classification="verification"),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, ClassifyOperation)
+    assert operation.classification == "verification"
+
+
+def test_operations_from_edited_artifact_detects_split() -> None:
+    """Multiple edited rows for one source item become a split operation."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Mixed validation and discovery work")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Validate existing behavior"),
+                "source_item_id": "item-001",
+            },
+            {
+                **_item(2, "Discover missing behavior"),
+                "source_item_id": "item-001",
+            },
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, SplitOperation)
+    assert operation.source_item_ids == ["item-001"]
+    assert operation.result_item_ids == ["item-001-split-001", "item-001-split-002"]
+    assert [item["requirement"] for item in operation.result_items] == [
+        "Validate existing behavior",
+        "Discover missing behavior",
+    ]
+
+
+def test_operations_from_edited_artifact_detects_merge() -> None:
+    """An edited row with multiple source ids becomes a merge operation."""
+    source = assign_item_identity(
+        {
+            "backlog_items": [
+                _item(1, "Validate first behavior"),
+                _item(2, "Validate second behavior"),
+            ]
+        },
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Validate merged behavior"),
+                "source_item_ids": ["item-001", "item-002"],
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, MergeOperation)
+    assert operation.source_item_ids == ["item-001", "item-002"]
+    assert operation.result_item_ids == ["merge-001"]
+    assert operation.result_item["requirement"] == "Validate merged behavior"
 
 
 def test_operations_from_edited_artifact_rejects_no_op_import() -> None:
