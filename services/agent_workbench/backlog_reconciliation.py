@@ -249,7 +249,7 @@ def _latest_saved_count(
     )
     for event in events:
         metadata = _json_object(event.event_metadata)
-        if metadata.get("action") == "backlog_reconciled":
+        if metadata.get("action") != "backlog_saved":
             continue
         count = metadata.get("processed_count") or metadata.get("created_count")
         try:

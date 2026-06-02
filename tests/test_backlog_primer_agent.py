@@ -10,7 +10,8 @@ from sqlmodel import Session as SqlSession
 from sqlmodel import SQLModel, create_engine, select
 
 from agile_sqlmodel import Product, UserStory
-from models.enums import StoryStatus
+from models.enums import StoryStatus, WorkflowEventType
+from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.backlog_primer.schemes import (
     BacklogItem,
     InputSchema,
@@ -479,3 +480,55 @@ class TestSaveBacklogTool:
             ).all()
             assert len(rows) == 1
             assert rows[0].is_superseded is False
+
+    @pytest.mark.asyncio
+    async def test_backlog_save_idempotency_ignores_active_reset_events(
+        self,
+    ) -> None:
+        """Reset events share BACKLOG_SAVED type but must not replay save keys."""
+        mock_context = MagicMock()
+        mock_context.state = {}
+        test_engine = create_engine("sqlite://", echo=False)
+        SQLModel.metadata.create_all(test_engine)
+        with SqlSession(test_engine) as session:
+            session.add(Product(name="Test Product"))
+            session.commit()
+            session.add(
+                WorkflowEvent(
+                    event_type=WorkflowEventType.BACKLOG_SAVED,
+                    product_id=1,
+                    event_metadata=json.dumps(
+                        {
+                            "action": "active_backlog_reset",
+                            "idempotency_key": "same-key",
+                            "request_fingerprint": "sha256:reset",
+                            "created_count": 2,
+                        }
+                    ),
+                )
+            )
+            session.commit()
+
+        save_input = SaveBacklogInput(
+            product_id=1,
+            idempotency_key="same-key",
+            backlog_items=[
+                {
+                    "priority": 1,
+                    "requirement": "New baseline",
+                    "value_driver": "Strategic",
+                    "justification": "Use reviewed backlog.",
+                    "estimated_effort": "M",
+                },
+            ],
+        )
+
+        with patch(
+            "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+            return_value=test_engine,
+        ):
+            result = await save_backlog_tool(save_input, tool_context=mock_context)
+
+        assert result["success"] is True
+        assert result.get("idempotent_replay") is not True
+        assert result["saved_count"] == 1

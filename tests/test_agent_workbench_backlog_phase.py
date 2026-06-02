@@ -1789,6 +1789,81 @@ def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
     ]
 
 
+def test_backlog_reconcile_latest_saved_count_ignores_active_reset_events(
+    session: Session,
+) -> None:
+    """Reset event created_count must not corrupt canonical cohort selection."""
+    product = Product(name="Cartola")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    assert product.product_id is not None
+    product_id = product.product_id
+    base = datetime(2026, 6, 2, 12, tzinfo=UTC)
+    for offset, title, rank in [
+        (0, "Old import", "1"),
+        (1, "Old projection", "2"),
+        (10, "New import", "1"),
+        (11, "New projection", "2"),
+    ]:
+        session.add(
+            UserStory(
+                product_id=product_id,
+                title=title,
+                status=StoryStatus.TO_DO,
+                rank=rank,
+                story_origin="backlog_seed",
+                is_refined=False,
+                is_superseded=False,
+                created_at=base + timedelta(minutes=offset),
+                updated_at=base + timedelta(minutes=offset),
+            )
+        )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=product_id,
+            timestamp=base + timedelta(minutes=12),
+            event_metadata=json.dumps(
+                {
+                    "action": "backlog_saved",
+                    "processed_count": 2,
+                    "created_count": 2,
+                }
+            ),
+        )
+    )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=product_id,
+            timestamp=base + timedelta(minutes=20),
+            event_metadata=json.dumps(
+                {
+                    "action": "active_backlog_reset",
+                    "created_count": 13,
+                    "idempotency_key": "reset-active",
+                }
+            ),
+        )
+    )
+    session.commit()
+
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.reconcile(
+        project_id=product_id,
+        idempotency_key="reconcile-ignore-reset",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["strategy"] == "latest_backlog_saved_event"
+    assert result["data"]["active_after"] == 2  # noqa: PLR2004
+
+
 def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
     session: Session,
 ) -> None:

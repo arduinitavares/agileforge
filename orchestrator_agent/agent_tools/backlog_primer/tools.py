@@ -268,7 +268,7 @@ def _idempotent_backlog_save_replay(
     ).all()
     for event in events:
         metadata = _json_object(event.event_metadata)
-        if metadata.get("action") == "backlog_reconciled":
+        if metadata.get("action") != "backlog_saved":
             continue
         if metadata.get("idempotency_key") != idempotency_key:
             continue
