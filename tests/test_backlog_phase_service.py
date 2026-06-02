@@ -1124,6 +1124,7 @@ async def test_import_backlog_refinement_rejects_unsupported_authority_ref() -> 
         "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
     }
     _add_refinement_supported_authority_refs(state)
+    original_state = copy.deepcopy(state)
     source_artifact: JsonDict = {
         "backlog_items": [_refinement_source_item()],
         "is_complete": True,
@@ -1159,6 +1160,7 @@ async def test_import_backlog_refinement_rejects_unsupported_authority_ref() -> 
 
     assert "unsupported authority ref: REQ.unsupported" in exc_info.value.detail
     assert saved == {}
+    assert state == original_state
 
 
 @pytest.mark.asyncio

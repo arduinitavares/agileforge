@@ -469,10 +469,15 @@ async def import_backlog_refinement(
     if replay is not None:
         return replay
 
+    draft_state = copy.deepcopy(state)
+    source_attempt = _find_refine_import_source_attempt(
+        draft_state,
+        source_fingerprint,
+    )
     source_attempt_id = (
         str(source_attempt["attempt_id"])
         if source_attempt is not None
-        else f"backlog-attempt-{_next_backlog_attempt_count(state)}"
+        else f"backlog-attempt-{_next_backlog_attempt_count(draft_state)}"
     )
     canonical_source = assign_item_identity(
         copy.deepcopy(source_artifact),
@@ -491,7 +496,7 @@ async def import_backlog_refinement(
 
     if source_attempt is None:
         attempt_count = record_backlog_attempt(
-            state,
+            draft_state,
             trigger="refine_import_source",
             input_context={
                 "idempotency_key": idempotency_key,
@@ -504,11 +509,11 @@ async def import_backlog_refinement(
         )
         source_attempt_id = f"backlog-attempt-{attempt_count}"
         _attach_attempt_guards(
-            state,
+            draft_state,
             attempt_id=source_attempt_id,
             artifact_fingerprint=source_fingerprint,
         )
-        source_attempt = ensure_backlog_attempts(state)[-1]
+        source_attempt = ensure_backlog_attempts(draft_state)[-1]
         source_attempt["attempt_kind"] = "imported_preview_source"
     else:
         source_output_artifact = source_attempt.get("output_artifact")
@@ -517,7 +522,7 @@ async def import_backlog_refinement(
 
     payload = await record_backlog_refinement(
         project_id=project_id,
-        load_state=lambda: _loaded_state(state),
+        load_state=lambda: _loaded_state(draft_state),
         save_state=lambda _state: None,
         operations_payload=operation_set.model_dump(mode="json"),
         expected_source_fingerprint=source_fingerprint,
@@ -525,7 +530,7 @@ async def import_backlog_refinement(
         idempotency_key=idempotency_key,
         now_iso=now_iso,
     )
-    refined_attempt = _find_backlog_attempt(state, str(payload.get("attempt_id")))
+    refined_attempt = _find_backlog_attempt(draft_state, str(payload.get("attempt_id")))
     if isinstance(refined_attempt, dict):
         refined_attempt["trigger"] = "refine_import"
         refined_attempt["attempt_kind"] = "import_refinement"
@@ -533,12 +538,12 @@ async def import_backlog_refinement(
     payload["attempt_kind"] = "import_refinement"
     payload["request_fingerprint"] = request_fingerprint
     _record_backlog_refine_import_replay(
-        state,
+        draft_state,
         idempotency_key,
         request_fingerprint,
         payload,
     )
-    save_state(state)
+    save_state(draft_state)
     return payload
 
 
