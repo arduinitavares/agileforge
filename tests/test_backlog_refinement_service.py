@@ -353,6 +353,54 @@ def test_operations_from_edited_artifact_detects_classify() -> None:
     assert operation.classification == "verification"
 
 
+def test_imported_same_source_edit_sequence_applies_atomically() -> None:
+    """Generated same-source edit sequences validate against the source artifact."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Build Promotion Gate")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(
+                    1,
+                    "Formalize/Verify Frozen Promotion Gate Evidence",
+                    justification="Verify evidence instead of rebuilding the gate.",
+                    technical_note="Check risk metrics and frozen decision artifacts.",
+                    classification="verification",
+                ),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    refined = apply_refinement_operations(source, operation_set)
+
+    refined_item = refined["backlog_items"][0]
+    assert [operation.operation_type for operation in operation_set.operations] == [
+        "retitle",
+        "rewrite_scope",
+        "classify",
+    ]
+    assert refined_item["requirement"] == (
+        "Formalize/Verify Frozen Promotion Gate Evidence"
+    )
+    assert refined_item["justification"] == (
+        "Verify evidence instead of rebuilding the gate."
+    )
+    assert refined_item["technical_note"] == (
+        "Check risk metrics and frozen decision artifacts."
+    )
+    assert refined_item["classification"] == "verification"
+
+
 def test_operations_from_edited_artifact_detects_split() -> None:
     """Multiple edited rows for one source item become a split operation."""
     source = assign_item_identity(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,6 +30,16 @@ type OperationType = Literal[
     "delete",
     "add_intake",
 ]
+
+
+@dataclass(frozen=True)
+class _ApplyContext:
+    """Shared immutable context for applying one refinement operation set."""
+
+    source_items_by_id: dict[str, JsonDict]
+    operation_set: BacklogRefinementOperationSet
+    supported_authority_refs: set[str] | None
+
 
 MIN_SPLIT_RESULT_ITEMS = 2
 MIN_MERGE_SOURCE_ITEMS = 2
@@ -864,6 +875,16 @@ def _assert_source_matches(
             raise BacklogRefinementError(message)
 
 
+def _assert_current_source_items_exist(
+    items_by_id: dict[str, JsonDict],
+    operation: BaseRefinementOperation,
+) -> None:
+    for source_id in operation.source_item_ids:
+        if source_id not in items_by_id:
+            message = f"source item not found: {source_id}"
+            raise BacklogRefinementError(message)
+
+
 def _provenance(
     operation: BaseRefinementOperation,
     operation_set: BacklogRefinementOperationSet,
@@ -1068,37 +1089,37 @@ def _apply_refinement_operation(
     refined: JsonDict,
     items: list[JsonDict],
     operation: RefinementOperation,
-    operation_set: BacklogRefinementOperationSet,
-    supported_authority_refs: set[str] | None,
+    context: _ApplyContext,
 ) -> list[JsonDict]:
     _assert_unique_item_ids(items)
     items_by_id = _items_by_id({"backlog_items": items})
-    _assert_source_matches(items_by_id, operation)
+    _assert_source_matches(context.source_items_by_id, operation)
+    _assert_current_source_items_exist(items_by_id, operation)
 
     if isinstance(operation, SplitOperation):
-        return _apply_split(items, operation, operation_set)
+        return _apply_split(items, operation, context.operation_set)
     if isinstance(operation, MergeOperation):
-        return _apply_merge(items, operation, operation_set)
+        return _apply_merge(items, operation, context.operation_set)
     if isinstance(operation, RetitleOperation):
-        _apply_retitle(items_by_id, operation, operation_set)
+        _apply_retitle(items_by_id, operation, context.operation_set)
     elif isinstance(operation, RewriteScopeOperation):
-        _apply_rewrite_scope(items_by_id, operation, operation_set)
+        _apply_rewrite_scope(items_by_id, operation, context.operation_set)
     elif isinstance(operation, ReorderOperation):
         return _apply_reorder(items, operation)
     elif isinstance(operation, ClassifyOperation):
-        _apply_classify(items_by_id, operation, operation_set)
+        _apply_classify(items_by_id, operation, context.operation_set)
     elif isinstance(operation, AuthorityRefChangeOperation):
         _apply_authority_ref_change(
             items_by_id,
             operation,
-            operation_set,
-            supported_authority_refs,
+            context.operation_set,
+            context.supported_authority_refs,
         )
     elif isinstance(operation, DeleteOperation):
         deleted_ids = set(operation.source_item_ids)
         return [item for item in items if item.get("item_id") not in deleted_ids]
     elif isinstance(operation, AddIntakeOperation):
-        _apply_add_intake(refined, operation, operation_set)
+        _apply_add_intake(refined, operation, context.operation_set)
     else:
         message = f"unsupported refinement operation: {operation.operation_type}"
         raise BacklogRefinementError(message)
@@ -1123,13 +1144,17 @@ def apply_refinement_operations(
         if isinstance(item, dict)
     ]
     _assert_unique_item_ids(items)
+    context = _ApplyContext(
+        source_items_by_id=copy.deepcopy(_items_by_id({"backlog_items": items})),
+        operation_set=operation_set,
+        supported_authority_refs=supported_authority_refs,
+    )
     for operation in operation_set.operations:
         items = _apply_refinement_operation(
             refined,
             items,
             operation,
-            operation_set,
-            supported_authority_refs,
+            context,
         )
 
     refined["backlog_items"] = items
