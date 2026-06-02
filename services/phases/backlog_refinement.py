@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Never
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,8 +54,16 @@ class BacklogRefinementError(Exception):
     """Raised when a refinement operation cannot be applied safely."""
 
 
+class AmbiguousRefinementDiffError(BacklogRefinementError):
+    """Raised when edited artifacts cannot be mapped to deterministic operations."""
+
+
 class UnsupportedAuthorityRefError(BacklogRefinementError):
     """Raised when an operation introduces unsupported implementation scope."""
+
+
+def _raise_ambiguous_diff(message: str) -> Never:
+    raise AmbiguousRefinementDiffError(message)
 
 
 class BaseRefinementOperation(BaseModel):
@@ -363,6 +371,224 @@ def normalize_refined_artifact(artifact: dict[str, object]) -> dict[str, object]
         not normalized.get("clarifying_questions")
     )
     return normalized
+
+
+def operations_from_edited_artifact(
+    source_artifact: dict[str, object],
+    edited_artifact: dict[str, object],
+    *,
+    authority_fingerprint: str,
+    as_built_cache_fingerprint: str,
+) -> BacklogRefinementOperationSet:
+    """Derive deterministic refinement operations from source-linked edits."""
+    source_items = _source_items_for_diff(source_artifact)
+    edited_items = _edited_items_for_diff(edited_artifact)
+    source_attempt_id = _source_attempt_id_for_diff(source_items)
+    source_artifact_fingerprint = _source_artifact_fingerprint_for_diff(source_items)
+    edited_by_source_id = _edited_items_by_source_id(edited_items, source_items)
+    _assert_no_order_or_priority_edit(source_items, edited_items)
+
+    operations: list[RefinementOperation] = []
+    operation_index = 1
+    for source_id, source_item in source_items.items():
+        edited_item = edited_by_source_id.get(source_id)
+        if edited_item is None:
+            operations.append(
+                DeleteOperation(
+                    operation_id=f"op-{operation_index:03d}-delete-{source_id}",
+                    source_item_ids=[source_id],
+                    source_item_fingerprints=[
+                        _source_item_fingerprint_for_diff(source_item)
+                    ],
+                    rationale="Source-linked item removed from edited artifact.",
+                    requested_by="po",
+                )
+            )
+            operation_index += 1
+            continue
+
+        field_updates = _diff_backlog_item_fields(source_item, edited_item)
+        if not field_updates:
+            continue
+        if set(field_updates) == {"requirement"}:
+            operations.append(
+                RetitleOperation(
+                    operation_id=f"op-{operation_index:03d}-retitle-{source_id}",
+                    source_item_ids=[source_id],
+                    source_item_fingerprints=[
+                        _source_item_fingerprint_for_diff(source_item)
+                    ],
+                    result_item_ids=[source_id],
+                    new_requirement=str(field_updates["requirement"]),
+                    rationale=(
+                        "Source-linked item requirement changed in edited artifact."
+                    ),
+                    requested_by="po",
+                )
+            )
+            operation_index += 1
+            continue
+        message = (
+            "ambiguous edited artifact diff for "
+            f"{source_id}: unsupported field changes {sorted(field_updates)}"
+        )
+        raise AmbiguousRefinementDiffError(message)
+    if not operations:
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: no-op import has no deterministic changes",
+        )
+
+    return BacklogRefinementOperationSet(
+        source_attempt_id=source_attempt_id,
+        source_artifact_fingerprint=source_artifact_fingerprint,
+        authority_fingerprint=authority_fingerprint,
+        as_built_cache_fingerprint=as_built_cache_fingerprint,
+        operations=operations,
+    )
+
+
+def _source_items_for_diff(
+    source_artifact: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    raw_items = source_artifact.get("backlog_items")
+    if not isinstance(raw_items, list):
+        _raise_ambiguous_diff(
+            "ambiguous source artifact: backlog_items must be a list",
+        )
+    source_items: dict[str, dict[str, object]] = {}
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            _raise_ambiguous_diff(
+                "ambiguous source artifact: backlog_items must contain objects",
+            )
+        item_id = raw_item.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            _raise_ambiguous_diff(
+                "ambiguous source artifact: source items require item_id",
+            )
+        if item_id in source_items:
+            _raise_ambiguous_diff(
+                f"ambiguous source artifact: duplicate item_id {item_id}",
+            )
+        source_items[item_id] = raw_item
+    return source_items
+
+
+def _edited_items_for_diff(
+    edited_artifact: dict[str, object],
+) -> list[dict[str, object]]:
+    raw_items = edited_artifact.get("backlog_items")
+    if not isinstance(raw_items, list):
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: backlog_items must be a list",
+        )
+    edited_items: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            _raise_ambiguous_diff(
+                "ambiguous edited artifact: backlog_items must contain objects",
+            )
+        edited_items.append(raw_item)
+    return edited_items
+
+
+def _source_attempt_id_for_diff(source_items: dict[str, dict[str, object]]) -> str:
+    source_attempt_ids = {
+        str(item.get("source_attempt_id"))
+        for item in source_items.values()
+        if isinstance(item.get("source_attempt_id"), str)
+        and str(item.get("source_attempt_id")).strip()
+    }
+    if len(source_attempt_ids) != 1:
+        _raise_ambiguous_diff(
+            "ambiguous source artifact: source_attempt_id is missing or inconsistent",
+        )
+    return next(iter(source_attempt_ids))
+
+
+def _source_artifact_fingerprint_for_diff(
+    source_items: dict[str, dict[str, object]],
+) -> str:
+    source_fingerprints = {
+        str(item.get("source_artifact_fingerprint"))
+        for item in source_items.values()
+        if isinstance(item.get("source_artifact_fingerprint"), str)
+        and str(item.get("source_artifact_fingerprint")).strip()
+    }
+    if len(source_fingerprints) != 1:
+        _raise_ambiguous_diff(
+            "ambiguous source artifact: source_artifact_fingerprint is missing "
+            "or inconsistent",
+        )
+    return next(iter(source_fingerprints))
+
+
+def _edited_items_by_source_id(
+    edited_items: list[dict[str, object]],
+    source_items: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    edited_by_source_id: dict[str, dict[str, object]] = {}
+    for edited_item in edited_items:
+        source_item_id = edited_item.get("source_item_id")
+        if not isinstance(source_item_id, str) or not source_item_id.strip():
+            _raise_ambiguous_diff(
+                "ambiguous edited artifact: edited items must preserve source_item_id",
+            )
+        if source_item_id not in source_items:
+            _raise_ambiguous_diff(
+                f"ambiguous edited artifact: unknown source_item_id {source_item_id}",
+            )
+        if source_item_id in edited_by_source_id:
+            _raise_ambiguous_diff(
+                f"ambiguous edited artifact: duplicate source_item_id {source_item_id}",
+            )
+        edited_by_source_id[source_item_id] = edited_item
+    return edited_by_source_id
+
+
+def _assert_no_order_or_priority_edit(
+    source_items: dict[str, dict[str, object]],
+    edited_items: list[dict[str, object]],
+) -> None:
+    source_order = list(source_items)
+    edited_order = [str(item["source_item_id"]) for item in edited_items]
+    source_positions = {
+        source_id: index for index, source_id in enumerate(source_order)
+    }
+    edited_positions = [source_positions[source_id] for source_id in edited_order]
+    if edited_positions != sorted(edited_positions):
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: reorder edits are not supported",
+        )
+    if len(edited_order) != len(source_order):
+        return
+    for index, source_id in enumerate(edited_order, start=1):
+        edited_priority = edited_items[index - 1].get("priority")
+        source_priority = source_items[source_id].get("priority")
+        if edited_priority != source_priority:
+            _raise_ambiguous_diff(
+                "ambiguous edited artifact: priority edits are not supported",
+            )
+
+
+def _source_item_fingerprint_for_diff(item: dict[str, object]) -> str:
+    fingerprint = item.get("item_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint.strip():
+        return fingerprint
+    return _item_fingerprint(item)
+
+
+def _diff_backlog_item_fields(
+    source_item: dict[str, object],
+    edited_item: dict[str, object],
+) -> dict[str, object]:
+    field_updates: dict[str, object] = {}
+    for key in sorted(BACKLOG_ITEM_KEYS):
+        if key == "priority":
+            continue
+        if source_item.get(key) != edited_item.get(key):
+            field_updates[key] = copy.deepcopy(edited_item.get(key))
+    return field_updates
 
 
 def _items_by_id(artifact: dict[str, object]) -> dict[str, dict[str, object]]:

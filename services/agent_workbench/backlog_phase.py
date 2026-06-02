@@ -29,6 +29,7 @@ from services.phases.backlog_service import (
     BacklogPhaseError,
     generate_backlog_draft,
     get_backlog_history,
+    import_backlog_refinement,
     preview_backlog_draft,
     preview_backlog_refinement,
     record_backlog_refinement,
@@ -174,13 +175,14 @@ class BacklogPhaseRunner:
         expected_source_fingerprint: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Fail closed until deterministic Backlog refinement import exists."""
-        return self._refine_import(
-            project_id=project_id,
-            source_artifact=source_artifact,
-            edited_file=edited_file,
-            expected_source_fingerprint=expected_source_fingerprint,
-            idempotency_key=idempotency_key,
+        """Import deterministic Backlog refinements from edited artifacts."""
+        return anyio.run(
+            self._refine_import,
+            project_id,
+            source_artifact,
+            edited_file,
+            expected_source_fingerprint,
+            idempotency_key,
         )
 
     def history(self, *, project_id: int) -> dict[str, Any]:
@@ -421,30 +423,47 @@ class BacklogPhaseRunner:
             return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
         return _data_envelope(cast("dict[str, Any]", data))
 
-    def _refine_import(
+    async def _refine_import(
         self,
-        *,
         project_id: int,
         source_artifact: str,
         edited_file: str,
         expected_source_fingerprint: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        del source_artifact, edited_file, expected_source_fingerprint, idempotency_key
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
-        return _error_envelope(
-            ErrorCode.MUTATION_FAILED,
-            (
-                "backlog refine-import is not implemented until deterministic "
-                "Backlog refinement import is available."
-            ),
-            details={"project_id": project_id},
-            remediation=[
-                "Use agileforge backlog refine-preview/refine-record for now."
-            ],
-        )
+        try:
+            source_payload = _load_json_object_file(
+                path=source_artifact,
+                label="source_artifact",
+            )
+            edited_payload = _load_json_object_file(
+                path=edited_file,
+                label="edited_file",
+            )
+            data = await import_backlog_refinement(
+                project_id=project_id,
+                load_state=lambda: self._load_backlog_state(
+                    str(project_id), project_id
+                ),
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                source_artifact=source_payload,
+                edited_artifact=edited_payload,
+                expected_source_fingerprint=expected_source_fingerprint,
+                idempotency_key=idempotency_key,
+                now_iso=_now_iso,
+            )
+        except (TypeError, ValueError) as exc:
+            return _error_envelope(ErrorCode.INVALID_COMMAND, str(exc))
+        except BacklogPhaseError as exc:
+            return _refine_import_phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
 
     async def _history(self, project_id: int) -> dict[str, Any]:
         product = self._load_project(project_id)
@@ -584,6 +603,30 @@ def _load_operations_payload(
         message = "Backlog refinement source_attempt_id conflicts with operations_file"
         raise BacklogPhaseError(message)
     return payload
+
+
+def _load_json_object_file(*, path: str, label: str) -> dict[str, Any]:
+    """Load a JSON object from a command file argument."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        message = f"Backlog refinement {label} could not be read: {exc}"
+        raise ValueError(message) from exc
+    except json.JSONDecodeError as exc:
+        message = f"Backlog refinement {label} is invalid JSON: {exc}"
+        raise ValueError(message) from exc
+    if not isinstance(payload, dict):
+        message = f"Backlog refinement {label} must contain a JSON object"
+        raise TypeError(message)
+    return payload
+
+
+def _refine_import_phase_error(exc: BacklogPhaseError) -> dict[str, Any]:
+    if exc.detail == _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE:
+        return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, exc.detail)
+    if "ambiguous" in exc.detail:
+        return _error_envelope(ErrorCode.MUTATION_FAILED, exc.detail)
+    return _phase_error(exc)
 
 
 def _unsupported_refine_preview_arg_error(

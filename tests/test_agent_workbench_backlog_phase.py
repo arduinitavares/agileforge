@@ -684,10 +684,47 @@ def test_backlog_refine_record_idempotency_conflict_returns_reused_code(
     assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
-def test_backlog_refine_import_placeholder_fails_without_mutating() -> None:
-    """Task 6 import placeholder should be explicit and non-mutating."""
+def test_backlog_refine_import_returns_success_for_valid_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refine import loads files and persists source plus refined attempts."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
     workflow = _FakeWorkflowService()
-    original_state = dict(workflow.state)
+    workflow.state.update(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "compiled_authority_fingerprint": "sha256:authority",
+            "as_built_assessment_cache_meta": {
+                "assessment_fingerprint": "sha256:as-built"
+            },
+        }
+    )
+    source_artifact = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify imported backlog refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_file = tmp_path / "source.json"
+    edited_file = tmp_path / "edited.json"
+    source_file.write_text(json.dumps(source_artifact), encoding="utf-8")
+    edited_file.write_text(json.dumps(edited_artifact), encoding="utf-8")
     runner = BacklogPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=workflow,
@@ -695,16 +732,169 @@ def test_backlog_refine_import_placeholder_fails_without_mutating() -> None:
 
     result = runner.refine_import(
         project_id=2,
-        source_artifact="fixtures/source.json",
-        edited_file="fixtures/edited.json",
-        expected_source_fingerprint="sha256:source",
+        source_artifact=str(source_file),
+        edited_file=str(edited_file),
+        expected_source_fingerprint=source_fingerprint,
         idempotency_key="refine-import-1",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["trigger"] == "refine-import"
+    assert result["data"]["attempt_id"] == "backlog-attempt-2"
+    assert workflow.state["backlog_attempts"][0]["trigger"] == "refine_import_source"
+    assert workflow.state["backlog_attempts"][1]["attempt_kind"] == "refinement"
+    assert (
+        workflow.state["product_backlog_assessment"]["backlog_items"][0]["requirement"]
+        == "Verify imported backlog refinement workflow"
+    )
+
+
+def test_backlog_refine_import_rejects_invalid_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid JSON import files return a clear invalid-command envelope."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    source_file = tmp_path / "source.json"
+    edited_file = tmp_path / "edited.json"
+    source_file.write_text("{not-json", encoding="utf-8")
+    edited_file.write_text("{}", encoding="utf-8")
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.refine_import(
+        project_id=2,
+        source_artifact=str(source_file),
+        edited_file=str(edited_file),
+        expected_source_fingerprint="sha256:source",
+        idempotency_key="refine-import-invalid-json",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "invalid JSON" in result["errors"][0]["message"]
+
+
+def test_backlog_refine_import_rejects_non_object_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-object import files return a clear invalid-command envelope."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    source_file = tmp_path / "source.json"
+    edited_file = tmp_path / "edited.json"
+    source_file.write_text("[]", encoding="utf-8")
+    edited_file.write_text("{}", encoding="utf-8")
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.refine_import(
+        project_id=2,
+        source_artifact=str(source_file),
+        edited_file=str(edited_file),
+        expected_source_fingerprint="sha256:source",
+        idempotency_key="refine-import-non-object",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "must contain a JSON object" in result["errors"][0]["message"]
+
+
+def test_backlog_refine_import_rejects_unreadable_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable import files return a clear invalid-command envelope."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    missing_file = tmp_path / "missing.json"
+    edited_file = tmp_path / "edited.json"
+    edited_file.write_text("{}", encoding="utf-8")
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.refine_import(
+        project_id=2,
+        source_artifact=str(missing_file),
+        edited_file=str(edited_file),
+        expected_source_fingerprint="sha256:source",
+        idempotency_key="refine-import-unreadable",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "could not be read" in result["errors"][0]["message"]
+
+
+def test_backlog_refine_import_maps_ambiguous_diff_to_failure_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ambiguous valid JSON import files return a mutation failure envelope."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "compiled_authority_fingerprint": "sha256:authority",
+            "as_built_assessment_cache_meta": {
+                "assessment_fingerprint": "sha256:as-built"
+            },
+        }
+    )
+    source_artifact = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact = {
+        "backlog_items": [
+            _refinement_source_item(
+                requirement="Verify imported backlog refinement workflow"
+            )
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_file = tmp_path / "source.json"
+    edited_file = tmp_path / "edited.json"
+    source_file.write_text(json.dumps(source_artifact), encoding="utf-8")
+    edited_file.write_text(json.dumps(edited_artifact), encoding="utf-8")
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.refine_import(
+        project_id=2,
+        source_artifact=str(source_file),
+        edited_file=str(edited_file),
+        expected_source_fingerprint=source_fingerprint,
+        idempotency_key="refine-import-ambiguous",
     )
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
-    assert "not implemented" in result["errors"][0]["message"]
-    assert workflow.state == original_state
+    assert "import ambiguous" in result["errors"][0]["message"]
 
 
 def test_backlog_approve_records_host_mediated_approval(

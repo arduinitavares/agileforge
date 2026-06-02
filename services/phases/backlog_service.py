@@ -12,12 +12,14 @@ from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.phases import workflow_state
 from services.phases.backlog_refinement import (
+    AmbiguousRefinementDiffError,
     BacklogRefinementError,
     BacklogRefinementOperationSet,
     apply_refinement_operations,
     assign_item_identity,
     canonical_operations_fingerprint,
     normalize_refined_artifact,
+    operations_from_edited_artifact,
     project_savable_backlog_items,
 )
 
@@ -31,6 +33,9 @@ VALID_BACKLOG_GENERATION_STATES = {
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
 BACKLOG_RUNTIME_DIAGNOSTIC_KEYS: tuple[str, ...] = ()
 AUTO_SOURCE_ITEM_FINGERPRINT = "AUTO_SOURCE_ITEM_FINGERPRINT"
+REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
+    "Backlog refinement idempotency key reused with different request"
+)
 
 
 class BacklogPhaseError(Exception):
@@ -376,6 +381,113 @@ async def record_backlog_refinement(
     return payload
 
 
+async def import_backlog_refinement(
+    *,
+    project_id: int,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    source_artifact: dict[str, Any],
+    edited_artifact: dict[str, Any],
+    expected_source_fingerprint: str,
+    idempotency_key: str,
+    now_iso: Callable[[], str],
+) -> dict[str, Any]:
+    """Record a source artifact and refined attempt from deterministic edits."""
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    _assert_refinement_source_fingerprint(
+        expected_source_fingerprint=expected_source_fingerprint,
+        source_artifact_fingerprint=source_fingerprint,
+    )
+    state = await load_state()
+    source_attempt = _find_refine_import_source_attempt(state, source_fingerprint)
+    authority_fingerprint = str(state.get("compiled_authority_fingerprint") or "")
+    as_built_cache_fingerprint = _as_built_cache_fingerprint(state)
+    expected_state = _refine_import_expected_state(state, source_attempt)
+    request_fingerprint = _backlog_refine_import_request_fingerprint(
+        project_id=project_id,
+        source_artifact_fingerprint=source_fingerprint,
+        edited_artifact=edited_artifact,
+        expected_source_fingerprint=expected_source_fingerprint,
+        expected_state=expected_state,
+        authority_fingerprint=authority_fingerprint,
+        as_built_cache_fingerprint=as_built_cache_fingerprint,
+    )
+    replay = _backlog_refine_import_replay(
+        state,
+        idempotency_key,
+        request_fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    source_attempt_id = (
+        str(source_attempt["attempt_id"])
+        if source_attempt is not None
+        else f"backlog-attempt-{_next_backlog_attempt_count(state)}"
+    )
+    canonical_source = assign_item_identity(
+        copy.deepcopy(source_artifact),
+        source_attempt_id=source_attempt_id,
+        source_artifact_fingerprint=source_fingerprint,
+    )
+    try:
+        operation_set = operations_from_edited_artifact(
+            canonical_source,
+            cast("dict[str, object]", edited_artifact),
+            authority_fingerprint=authority_fingerprint,
+            as_built_cache_fingerprint=as_built_cache_fingerprint,
+        )
+    except AmbiguousRefinementDiffError as exc:
+        raise BacklogPhaseError(f"Backlog refinement import ambiguous: {exc}") from exc
+
+    if source_attempt is None:
+        attempt_count = record_backlog_attempt(
+            state,
+            trigger="refine_import_source",
+            input_context={
+                "idempotency_key": idempotency_key,
+                "expected_state": expected_state,
+                "source_artifact_fingerprint": source_fingerprint,
+            },
+            output_artifact=copy.deepcopy(source_artifact),
+            is_complete=bool(source_artifact.get("is_complete")),
+            created_at=now_iso(),
+        )
+        source_attempt_id = f"backlog-attempt-{attempt_count}"
+        _attach_attempt_guards(
+            state,
+            attempt_id=source_attempt_id,
+            artifact_fingerprint=source_fingerprint,
+        )
+        source_attempt = ensure_backlog_attempts(state)[-1]
+        source_attempt["attempt_kind"] = "refine_import_source"
+
+    payload = await record_backlog_refinement(
+        project_id=project_id,
+        load_state=lambda: _loaded_state(state),
+        save_state=lambda _state: None,
+        operations_payload=operation_set.model_dump(mode="json"),
+        expected_source_fingerprint=source_fingerprint,
+        expected_state=expected_state,
+        idempotency_key=idempotency_key,
+        now_iso=now_iso,
+    )
+    payload["trigger"] = "refine-import"
+    payload["request_fingerprint"] = request_fingerprint
+    _record_backlog_refine_import_replay(
+        state,
+        idempotency_key,
+        request_fingerprint,
+        payload,
+    )
+    save_state(state)
+    return payload
+
+
+async def _loaded_state(state: dict[str, Any]) -> dict[str, Any]:
+    return state
+
+
 async def save_backlog_draft(
     *,
     project_id: int,
@@ -498,6 +610,50 @@ def _backlog_refine_record_request_fingerprint(
             "as_built_cache_fingerprint": as_built_cache_fingerprint,
         }
     )
+
+
+def _backlog_refine_import_request_fingerprint(
+    *,
+    project_id: int,
+    source_artifact_fingerprint: str,
+    edited_artifact: dict[str, Any],
+    expected_source_fingerprint: str,
+    expected_state: str,
+    authority_fingerprint: str,
+    as_built_cache_fingerprint: str,
+) -> str:
+    return canonical_hash(
+        {
+            "command": "agileforge.backlog.refine_import",
+            "project_id": project_id,
+            "source_artifact_fingerprint": source_artifact_fingerprint,
+            "edited_artifact_fingerprint": canonical_hash(
+                {
+                    "phase": "backlog",
+                    "edited_artifact": edited_artifact,
+                }
+            ),
+            "expected_source_fingerprint": expected_source_fingerprint,
+            "expected_state": _normalize_fsm_state(expected_state),
+            "authority_fingerprint": authority_fingerprint,
+            "as_built_cache_fingerprint": as_built_cache_fingerprint,
+        }
+    )
+
+
+def _refine_import_expected_state(
+    state: dict[str, Any],
+    source_attempt: dict[str, Any] | None,
+) -> str:
+    if source_attempt is None:
+        return _normalize_fsm_state(cast("str | None", state.get("fsm_state")))
+    input_context = source_attempt.get("input_context")
+    if isinstance(input_context, dict) and isinstance(
+        input_context.get("expected_state"),
+        str,
+    ):
+        return str(input_context["expected_state"])
+    return _normalize_fsm_state(cast("str | None", state.get("fsm_state")))
 
 
 def _prepare_backlog_refinement(
@@ -660,6 +816,15 @@ def _validate_refinement_operation_set(
     return operation_set
 
 
+def _as_built_cache_fingerprint(state: dict[str, Any]) -> str:
+    as_built_meta = state.get("as_built_assessment_cache_meta")
+    if isinstance(as_built_meta, dict):
+        assessment_fingerprint = as_built_meta.get("assessment_fingerprint")
+        if isinstance(assessment_fingerprint, str):
+            return assessment_fingerprint
+    return ""
+
+
 def _backlog_refinement_payload(
     *,
     project_id: int,
@@ -760,13 +925,36 @@ def _backlog_refine_record_replay(
             "Backlog refinement idempotency key replay is invalid",
         )
     if record.get("request_fingerprint") != request_fingerprint:
-        raise BacklogPhaseError(
-            "Backlog refinement idempotency key reused with different request",
-        )
+        raise BacklogPhaseError(REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE)
     payload = record.get("payload")
     if not isinstance(payload, dict):
         raise BacklogPhaseError(
             "Backlog refinement idempotency key replay payload is invalid",
+        )
+    return copy.deepcopy(payload)
+
+
+def _backlog_refine_import_replay(
+    state: dict[str, Any],
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> dict[str, Any] | None:
+    records = state.get("backlog_refine_import_idempotency_keys")
+    if not isinstance(records, dict):
+        return None
+    record = records.get(idempotency_key)
+    if record is None:
+        return None
+    if not isinstance(record, dict):
+        raise BacklogPhaseError(
+            "Backlog refinement import idempotency key replay is invalid",
+        )
+    if record.get("request_fingerprint") != request_fingerprint:
+        raise BacklogPhaseError(REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE)
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        raise BacklogPhaseError(
+            "Backlog refinement import idempotency key replay payload is invalid",
         )
     return copy.deepcopy(payload)
 
@@ -797,6 +985,22 @@ def _record_backlog_refine_record_replay(
         "payload": copy.deepcopy(payload),
     }
     state["backlog_refine_record_idempotency_keys"] = records
+
+
+def _record_backlog_refine_import_replay(
+    state: dict[str, Any],
+    idempotency_key: str,
+    request_fingerprint: str,
+    payload: dict[str, Any],
+) -> None:
+    records = state.get("backlog_refine_import_idempotency_keys")
+    if not isinstance(records, dict):
+        records = {}
+    records[idempotency_key] = {
+        "request_fingerprint": request_fingerprint,
+        "payload": copy.deepcopy(payload),
+    }
+    state["backlog_refine_import_idempotency_keys"] = records
 
 
 def _assert_save_expected_state(state: dict[str, Any], expected_state: str) -> None:
@@ -867,12 +1071,36 @@ def _find_backlog_attempt(
     return None
 
 
+def _find_refine_import_source_attempt(
+    state: dict[str, Any],
+    source_artifact_fingerprint: str,
+) -> dict[str, Any] | None:
+    attempts = state.get("backlog_attempts")
+    if not isinstance(attempts, list):
+        return None
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        if (
+            attempt.get("attempt_kind") == "refine_import_source"
+            and attempt.get("artifact_fingerprint") == source_artifact_fingerprint
+        ):
+            return attempt
+    return None
+
+
+def _next_backlog_attempt_count(state: dict[str, Any]) -> int:
+    attempts = state.get("backlog_attempts")
+    return len(attempts) + 1 if isinstance(attempts, list) else 1
+
+
 __all__ = [
     "BacklogPhaseError",
     "backlog_state_from_complete",
     "ensure_backlog_attempts",
     "generate_backlog_draft",
     "get_backlog_history",
+    "import_backlog_refinement",
     "preview_backlog_draft",
     "preview_backlog_refinement",
     "record_backlog_attempt",

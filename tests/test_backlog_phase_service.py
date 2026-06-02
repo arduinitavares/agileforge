@@ -14,6 +14,7 @@ from services.phases.backlog_service import (
     ensure_backlog_attempts,
     generate_backlog_draft,
     get_backlog_history,
+    import_backlog_refinement,
     preview_backlog_refinement,
     record_backlog_attempt,
     record_backlog_refinement,
@@ -768,6 +769,258 @@ async def test_record_backlog_refinement_rejects_as_built_mismatch() -> None:
     assert "as-built cache fingerprint" in exc_info.value.detail
     assert len(state["backlog_attempts"]) == original_attempt_count
     assert state["fsm_state"] == "SPRINT_COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_records_source_then_refined_attempt() -> None:
+    """Import records the supplied source before recording refined operations."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+    }
+    saved: JsonDict = {}
+    save_calls: list[JsonDict] = []
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify imported backlog refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved_state = copy.deepcopy(updated)
+        save_calls.append(saved_state)
+        state.clear()
+        state.update(saved_state)
+        saved["state"] = saved_state
+
+    payload = await import_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        source_artifact=source_artifact,
+        edited_artifact=edited_artifact,
+        expected_source_fingerprint=source_fingerprint,
+        idempotency_key="refine-import-1",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+
+    attempts = saved["state"]["backlog_attempts"]
+    assert payload["trigger"] == "refine-import"
+    assert payload["attempt_id"] == "backlog-attempt-2"
+    assert len(save_calls) == 1
+    assert attempts[0]["trigger"] == "refine_import_source"
+    assert attempts[0]["attempt_kind"] == "refine_import_source"
+    assert attempts[0]["artifact_fingerprint"] == source_fingerprint
+    assert attempts[1]["trigger"] == "refine_record"
+    assert attempts[1]["attempt_kind"] == "refinement"
+    assert attempts[1]["source_attempt_id"] == "backlog-attempt-1"
+    assert (
+        saved["state"]["product_backlog_assessment"]["backlog_items"][0]["requirement"]
+        == "Verify imported backlog refinement workflow"
+    )
+    assert "refine-import-1" in saved["state"]["backlog_refine_import_idempotency_keys"]
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_rejects_stale_or_ambiguous_input() -> None:
+    """Import fails closed on source guard mismatch or ambiguous edited files."""
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify imported backlog refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    async def load_state() -> JsonDict:
+        return {
+            "fsm_state": "SPRINT_COMPLETE",
+            "compiled_authority_fingerprint": "sha256:authority",
+            "as_built_assessment_cache_meta": {
+                "assessment_fingerprint": "sha256:as-built"
+            },
+        }
+
+    with pytest.raises(BacklogPhaseError) as stale:
+        await import_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            source_artifact=source_artifact,
+            edited_artifact=edited_artifact,
+            expected_source_fingerprint="sha256:stale",
+            idempotency_key="refine-import-1",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    ambiguous_artifact = {"backlog_items": [_refinement_source_item()]}
+    with pytest.raises(BacklogPhaseError) as ambiguous:
+        await import_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            source_artifact=source_artifact,
+            edited_artifact=ambiguous_artifact,
+            expected_source_fingerprint=source_fingerprint,
+            idempotency_key="refine-import-1",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "source artifact fingerprint" in stale.value.detail
+    assert "ambiguous" in ambiguous.value.detail
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_ambiguous_input_does_not_mutate_state() -> (
+    None
+):
+    """Ambiguous import validates before appending source attempts."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+    }
+    original_state = copy.deepcopy(state)
+    save_calls: list[JsonDict] = []
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        save_calls.append(copy.deepcopy(updated))
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await import_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            source_artifact=source_artifact,
+            edited_artifact={"backlog_items": [_refinement_source_item()]},
+            expected_source_fingerprint=_backlog_artifact_fingerprint(source_artifact),
+            idempotency_key="refine-import-ambiguous-state",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "ambiguous" in exc_info.value.detail
+    assert save_calls == []
+    assert state == original_state
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_idempotency_conflict_does_not_mutate() -> None:
+    """Changed import request with same key is rejected before source append."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+    }
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        updated_snapshot = copy.deepcopy(updated)
+        state.clear()
+        state.update(updated_snapshot)
+
+    first_edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify imported backlog refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    second_edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify changed import refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    await import_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        source_artifact=source_artifact,
+        edited_artifact=first_edited_artifact,
+        expected_source_fingerprint=source_fingerprint,
+        idempotency_key="refine-import-conflict-1",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+    state_after_first = copy.deepcopy(state)
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await import_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            source_artifact={
+                **source_artifact,
+                "clarifying_questions": ["Changed source envelope."],
+            },
+            edited_artifact=second_edited_artifact,
+            expected_source_fingerprint=_backlog_artifact_fingerprint(
+                {
+                    **source_artifact,
+                    "clarifying_questions": ["Changed source envelope."],
+                }
+            ),
+            idempotency_key="refine-import-conflict-1",
+            now_iso=lambda: "2026-06-01T00:00:01Z",
+        )
+
+    assert "idempotency key" in exc_info.value.detail
+    assert state == state_after_first
 
 
 @pytest.mark.asyncio

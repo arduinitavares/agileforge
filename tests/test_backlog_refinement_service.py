@@ -26,6 +26,7 @@ from services.agent_workbench.mutation_ledger import (
 )
 from services.phases.backlog_refinement import (
     AddIntakeOperation,
+    AmbiguousRefinementDiffError,
     AuthorityRefChangeOperation,
     BacklogRefinementError,
     BacklogRefinementOperationSet,
@@ -41,6 +42,7 @@ from services.phases.backlog_refinement import (
     assign_item_identity,
     canonical_operations_fingerprint,
     normalize_refined_artifact,
+    operations_from_edited_artifact,
     project_savable_backlog_items,
 )
 
@@ -120,6 +122,156 @@ def test_assign_item_identity_adds_stable_ids_and_fingerprints() -> None:
     assert str(item["item_fingerprint"]).startswith("sha256:")
     assert item["source_attempt_id"] == "backlog-attempt-1"
     assert item["source_artifact_fingerprint"] == "sha256:source"
+
+
+def test_operations_from_edited_artifact_detects_retitle_by_source_item_id() -> None:
+    """Edited artifacts retitle source-linked items deterministically."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Validate canonical existing flow"),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    assert operation_set.source_attempt_id == "backlog-attempt-1"
+    assert operation_set.source_artifact_fingerprint == "sha256:source"
+    operation = operation_set.operations[0]
+    assert isinstance(operation, RetitleOperation)
+    assert operation.source_item_ids == ["item-001"]
+    assert operation.source_item_fingerprints == [
+        source["backlog_items"][0]["item_fingerprint"]
+    ]
+    assert operation.result_item_ids == ["item-001"]
+    assert operation.new_requirement == "Validate canonical existing flow"
+
+
+def test_operations_from_edited_artifact_rejects_unlinked_new_items() -> None:
+    """Edited implementation items without source identity fail closed."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {"backlog_items": [_item(1, "Build unrelated new work")]}
+
+    with pytest.raises(AmbiguousRefinementDiffError):
+        operations_from_edited_artifact(
+            source,
+            edited,
+            authority_fingerprint="sha256:authority",
+            as_built_cache_fingerprint="sha256:as-built",
+        )
+
+
+def test_operations_from_edited_artifact_detects_deleted_source_items() -> None:
+    """Missing source-linked items become deterministic delete operations."""
+    source = assign_item_identity(
+        {
+            "backlog_items": [
+                _item(1, "Keep existing flow"),
+                _item(2, "Remove obsolete flow"),
+            ]
+        },
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Keep existing flow"),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, DeleteOperation)
+    assert operation.source_item_ids == ["item-002"]
+    assert operation.source_item_fingerprints == [
+        source["backlog_items"][1]["item_fingerprint"]
+    ]
+
+
+def test_operations_from_edited_artifact_rejects_reordered_priority_only_edit() -> None:
+    """Edited artifacts cannot silently reorder source-linked items in Task 7."""
+    source = assign_item_identity(
+        {
+            "backlog_items": [
+                _item(1, "Keep first flow"),
+                _item(2, "Keep second flow"),
+            ]
+        },
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Keep second flow"),
+                "source_item_id": "item-002",
+            },
+            {
+                **_item(2, "Keep first flow"),
+                "source_item_id": "item-001",
+            },
+        ]
+    }
+
+    with pytest.raises(AmbiguousRefinementDiffError):
+        operations_from_edited_artifact(
+            source,
+            edited,
+            authority_fingerprint="sha256:authority",
+            as_built_cache_fingerprint="sha256:as-built",
+        )
+
+
+def test_operations_from_edited_artifact_rejects_no_op_import() -> None:
+    """Identical source-linked edits fail closed instead of producing zero ops."""
+    source = assign_item_identity(
+        {"backlog_items": [_item(1, "Validate existing flow")]},
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
+    )
+    edited = {
+        "backlog_items": [
+            {
+                **_item(1, "Validate existing flow"),
+                "source_item_id": "item-001",
+            }
+        ]
+    }
+
+    with pytest.raises(AmbiguousRefinementDiffError) as exc_info:
+        operations_from_edited_artifact(
+            source,
+            edited,
+            authority_fingerprint="sha256:authority",
+            as_built_cache_fingerprint="sha256:as-built",
+        )
+
+    assert "no-op" in str(exc_info.value)
 
 
 def test_operation_set_rejects_agent_authored_approval() -> None:
