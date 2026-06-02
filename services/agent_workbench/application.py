@@ -164,6 +164,58 @@ class _BacklogPhaseRunner(Protocol):
         """Generate a non-persisted Backlog preview."""
         ...
 
+    def refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview canonical Backlog refinement operations."""
+        ...
+
+    def refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record canonical Backlog refinement operations."""
+        ...
+
+    def approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record host-mediated Backlog refinement approval."""
+        ...
+
+    def refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Fail closed until deterministic Backlog refinement import exists."""
+        ...
+
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Return Backlog attempt history."""
         ...
@@ -935,6 +987,86 @@ class AgentWorkbenchApplication:
         return self._get_backlog_runner().preview(
             project_id=project_id,
             user_input=user_input,
+        )
+
+    def backlog_refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview canonical Backlog refinement operations."""
+        return self._get_backlog_runner().refine_preview(
+            project_id=project_id,
+            source_attempt_id=source_attempt_id,
+            operations_file=operations_file,
+            source_artifact=source_artifact,
+            user_input=user_input,
+        )
+
+    def backlog_refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record canonical Backlog refinement operations."""
+        return self._get_backlog_runner().refine_record(
+            project_id=project_id,
+            source_attempt_id=source_attempt_id,
+            operations_file=operations_file,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+            approval_id=approval_id,
+        )
+
+    def backlog_approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record host-mediated Backlog refinement approval."""
+        return self._get_backlog_runner().approve(
+            project_id=project_id,
+            source_attempt_id=source_attempt_id,
+            attempt_id=attempt_id,
+            operation_set_fingerprint=operation_set_fingerprint,
+            approved_artifact_fingerprint=approved_artifact_fingerprint,
+            approved_operation_ids=approved_operation_ids,
+            idempotency_key=idempotency_key,
+        )
+
+    def backlog_refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Fail closed until deterministic Backlog refinement import exists."""
+        return self._get_backlog_runner().refine_import(
+            project_id=project_id,
+            source_artifact=source_artifact,
+            edited_file=edited_file,
+            expected_source_fingerprint=expected_source_fingerprint,
+            idempotency_key=idempotency_key,
         )
 
     def backlog_history(self, *, project_id: int) -> dict[str, Any]:

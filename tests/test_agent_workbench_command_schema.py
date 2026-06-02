@@ -53,6 +53,11 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge vision history",
     "agileforge vision save",
     "agileforge backlog generate",
+    "agileforge backlog preview",
+    "agileforge backlog refine-preview",
+    "agileforge backlog refine-record",
+    "agileforge backlog approve",
+    "agileforge backlog refine-import",
     "agileforge backlog history",
     "agileforge backlog save",
     "agileforge backlog reconcile",
@@ -408,13 +413,17 @@ def test_vision_commands_are_registered_and_available() -> None:
     assert save["input"]["required"] == ["project_id"]
 
 
-def test_backlog_commands_are_registered_and_available() -> None:
+def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Backlog phase commands as installed CLI capabilities."""
     names = installed_command_names()
     capabilities = _capability_by_name()
     backlog_command_names = {
         "agileforge backlog generate",
         "agileforge backlog preview",
+        "agileforge backlog refine-preview",
+        "agileforge backlog refine-record",
+        "agileforge backlog approve",
+        "agileforge backlog refine-import",
         "agileforge backlog history",
         "agileforge backlog save",
         "agileforge backlog reconcile",
@@ -430,6 +439,10 @@ def test_backlog_commands_are_registered_and_available() -> None:
 
     generate = command_schema_payload("agileforge backlog generate")
     preview = command_schema_payload("agileforge backlog preview")
+    refine_preview = command_schema_payload("agileforge backlog refine-preview")
+    refine_record = command_schema_payload("agileforge backlog refine-record")
+    approve = command_schema_payload("agileforge backlog approve")
+    refine_import = command_schema_payload("agileforge backlog refine-import")
     history = command_schema_payload("agileforge backlog history")
     save = command_schema_payload("agileforge backlog save")
     reconcile = command_schema_payload("agileforge backlog reconcile")
@@ -444,6 +457,50 @@ def test_backlog_commands_are_registered_and_available() -> None:
     assert preview["input"]["required"] == ["project_id"]
     assert preview["input"]["optional"] == ["input"]
     assert ErrorCode.MUTATION_FAILED.value in preview["errors"]
+    assert refine_preview["mutates"] is False
+    assert refine_preview["input"]["required"] == ["project_id"]
+    assert refine_preview["input"]["optional"] == [
+        "source_attempt_id",
+        "operations_file",
+        "source_artifact",
+        "input",
+    ]
+    assert ErrorCode.INVALID_COMMAND.value in refine_preview["errors"]
+    assert refine_record["mutates"] is True
+    assert refine_record["idempotency_required"] is True
+    assert refine_record["input"]["required"] == [
+        "project_id",
+        "source_attempt_id",
+        "operations_file",
+        "expected_source_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert refine_record["input"]["optional"] == ["approval_id"]
+    assert ErrorCode.MUTATION_FAILED.value in refine_record["errors"]
+    assert approve["mutates"] is True
+    assert approve["idempotency_required"] is True
+    assert approve["input"]["required"] == [
+        "project_id",
+        "approved_artifact_fingerprint",
+        "idempotency_key",
+    ]
+    assert approve["input"]["optional"] == [
+        "source_attempt_id",
+        "attempt_id",
+        "operation_set_fingerprint",
+        "approved_operation_id",
+    ]
+    assert ErrorCode.MUTATION_FAILED.value in approve["errors"]
+    assert refine_import["mutates"] is True
+    assert refine_import["idempotency_required"] is True
+    assert refine_import["input"]["required"] == [
+        "project_id",
+        "source_artifact",
+        "edited_file",
+        "expected_source_fingerprint",
+        "idempotency_key",
+    ]
     assert history["mutates"] is False
     assert history["input"]["required"] == ["project_id"]
     assert save["mutates"] is True

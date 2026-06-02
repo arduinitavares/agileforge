@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
+from sqlmodel import Session
 
+from models.db import get_engine
 from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.backlog_reconciliation import (
     BacklogReconciliationError,
     reconcile_active_backlog,
+)
+from services.agent_workbench.backlog_refinement_events import (
+    BacklogRefinementApprovalError,
+    BacklogRefinementApprovalRequest,
+    record_backlog_refinement_approval,
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.backlog_runtime import run_backlog_agent_from_state
@@ -21,6 +30,8 @@ from services.phases.backlog_service import (
     generate_backlog_draft,
     get_backlog_history,
     preview_backlog_draft,
+    preview_backlog_refinement,
+    record_backlog_refinement,
     save_backlog_draft,
 )
 from services.workflow import WorkflowService
@@ -28,10 +39,18 @@ from tools.orchestrator_tools import select_project
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
+    from sqlalchemy.engine import Engine
 
     from models.core import Product
 else:
     ToolContext = Any
+
+_REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
+    "Backlog refinement idempotency key reused with different request"
+)
+_APPROVAL_IDEMPOTENCY_REUSED_MESSAGE = (
+    "Idempotency key reused with different approval inputs."
+)
 
 
 class _ProductRepositoryLike(Protocol):
@@ -56,10 +75,12 @@ class BacklogPhaseRunner:
         *,
         product_repo: ProductRepository | _ProductRepositoryLike | None = None,
         workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
+        engine: Engine | None = None,
     ) -> None:
         """Initialize repositories for CLI Backlog commands."""
         self._product_repo = product_repo or ProductRepository()
         self._workflow_service = workflow_service or WorkflowService()
+        self._engine = engine
 
     def generate(
         self,
@@ -78,6 +99,89 @@ class BacklogPhaseRunner:
     ) -> dict[str, Any]:
         """Generate a non-persisted Backlog preview."""
         return anyio.run(self._preview, project_id, user_input)
+
+    def refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview canonical Backlog refinement operations."""
+        return anyio.run(
+            self._refine_preview,
+            project_id,
+            source_attempt_id,
+            operations_file,
+            source_artifact,
+            user_input,
+        )
+
+    def refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record canonical Backlog refinement operations."""
+        return anyio.run(
+            self._refine_record,
+            project_id,
+            source_attempt_id,
+            operations_file,
+            expected_source_fingerprint,
+            expected_state,
+            idempotency_key,
+            approval_id,
+        )
+
+    def approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record host-mediated Backlog refinement approval."""
+        return anyio.run(
+            self._approve,
+            project_id,
+            source_attempt_id,
+            attempt_id,
+            operation_set_fingerprint,
+            approved_artifact_fingerprint,
+            approved_operation_ids,
+            idempotency_key,
+        )
+
+    def refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Fail closed until deterministic Backlog refinement import exists."""
+        return self._refine_import(
+            project_id=project_id,
+            source_artifact=source_artifact,
+            edited_file=edited_file,
+            expected_source_fingerprint=expected_source_fingerprint,
+            idempotency_key=idempotency_key,
+        )
 
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Return Backlog draft attempt history."""
@@ -188,6 +292,160 @@ class BacklogPhaseRunner:
             return _backlog_runtime_error(project_id=project_id, data=data)
         return _data_envelope(data)
 
+    async def _refine_preview(
+        self,
+        project_id: int,
+        source_attempt_id: str | None,
+        operations_file: str | None,
+        source_artifact: str | None,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        unsupported_error = _unsupported_refine_preview_arg_error(
+            source_artifact=source_artifact,
+            user_input=user_input,
+        )
+        if unsupported_error is not None:
+            return unsupported_error
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            operations_payload = _load_operations_payload(
+                operations_file=operations_file,
+                source_attempt_id=source_attempt_id,
+            )
+            data = await preview_backlog_refinement(
+                project_id=project_id,
+                load_state=lambda: self._load_backlog_state(
+                    str(project_id), project_id
+                ),
+                operations_payload=operations_payload,
+                now_iso=_now_iso,
+            )
+        except BacklogPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
+    async def _refine_record(  # noqa: PLR0913
+        self,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None,
+    ) -> dict[str, Any]:
+        if isinstance(approval_id, str) and approval_id.strip():
+            return _error_envelope(
+                ErrorCode.INVALID_COMMAND,
+                (
+                    "backlog refine-record --approval-id is not supported until "
+                    "approval binding is implemented."
+                ),
+            )
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            operations_payload = _load_operations_payload(
+                operations_file=operations_file,
+                source_attempt_id=source_attempt_id,
+            )
+            data = await record_backlog_refinement(
+                project_id=project_id,
+                load_state=lambda: self._load_backlog_state(
+                    str(project_id), project_id
+                ),
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                operations_payload=operations_payload,
+                expected_source_fingerprint=expected_source_fingerprint,
+                expected_state=expected_state,
+                idempotency_key=idempotency_key,
+                now_iso=_now_iso,
+            )
+        except BacklogPhaseError as exc:
+            if exc.detail == _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE:
+                return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, exc.detail)
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
+    async def _approve(  # noqa: PLR0913
+        self,
+        project_id: int,
+        source_attempt_id: str | None,
+        attempt_id: str | None,
+        operation_set_fingerprint: str | None,
+        approved_artifact_fingerprint: str,
+        approved_operation_ids: list[str] | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            request = BacklogRefinementApprovalRequest.model_validate(
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "attempt_id": attempt_id,
+                    "operation_set_fingerprint": operation_set_fingerprint,
+                    "approved_artifact_fingerprint": approved_artifact_fingerprint,
+                    "approved_operation_ids": approved_operation_ids or [],
+                    "approval_source": "cli",
+                    "idempotency_key": idempotency_key,
+                    "approved_by": "po",
+                }
+            )
+            engine = self._engine or get_engine()
+            with Session(engine) as session:
+                data = record_backlog_refinement_approval(
+                    session,
+                    request=request,
+                    now_iso=_now_iso,
+                )
+        except ValueError as exc:
+            return _error_envelope(ErrorCode.INVALID_COMMAND, str(exc))
+        except BacklogRefinementApprovalError as exc:
+            if str(exc) == _APPROVAL_IDEMPOTENCY_REUSED_MESSAGE:
+                return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
+            return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
+        return _data_envelope(cast("dict[str, Any]", data))
+
+    def _refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        del source_artifact, edited_file, expected_source_fingerprint, idempotency_key
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+        return _error_envelope(
+            ErrorCode.MUTATION_FAILED,
+            (
+                "backlog refine-import is not implemented until deterministic "
+                "Backlog refinement import is available."
+            ),
+            details={"project_id": project_id},
+            remediation=[
+                "Use agileforge backlog refine-preview/refine-record for now."
+            ],
+        )
+
     async def _history(self, project_id: int) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
@@ -294,6 +552,63 @@ def _now_iso() -> str:
 def _build_tool_context(context: object) -> ToolContext:
     """Return a lightweight ToolContext-compatible state holder."""
     return cast("ToolContext", context)
+
+
+def _load_operations_payload(
+    *,
+    operations_file: str | None,
+    source_attempt_id: str | None,
+) -> dict[str, Any]:
+    """Load and normalize a Backlog refinement operations JSON file."""
+    if operations_file is None or not operations_file.strip():
+        message = "Backlog refinement operations_file is required"
+        raise BacklogPhaseError(message)
+    try:
+        payload = json.loads(Path(operations_file).read_text(encoding="utf-8"))
+    except OSError as exc:
+        message = f"Backlog refinement operations_file could not be read: {exc}"
+        raise BacklogPhaseError(message) from exc
+    except json.JSONDecodeError as exc:
+        message = f"Backlog refinement operations_file is invalid JSON: {exc}"
+        raise BacklogPhaseError(message) from exc
+    if not isinstance(payload, dict):
+        message = "Backlog refinement operations_file must contain a JSON object"
+        raise BacklogPhaseError(message)
+    if source_attempt_id is None:
+        return payload
+
+    existing_attempt_id = payload.get("source_attempt_id")
+    if existing_attempt_id in (None, ""):
+        return {**payload, "source_attempt_id": source_attempt_id}
+    if existing_attempt_id != source_attempt_id:
+        message = "Backlog refinement source_attempt_id conflicts with operations_file"
+        raise BacklogPhaseError(message)
+    return payload
+
+
+def _unsupported_refine_preview_arg_error(
+    *,
+    source_artifact: str | None,
+    user_input: str | None,
+) -> dict[str, Any] | None:
+    """Return an error for Task 7/NLP inputs not supported by typed operations."""
+    if isinstance(source_artifact, str) and source_artifact.strip():
+        return _error_envelope(
+            ErrorCode.INVALID_COMMAND,
+            (
+                "backlog refine-preview --source-artifact is not supported until "
+                "deterministic import is implemented."
+            ),
+        )
+    if isinstance(user_input, str) and user_input.strip():
+        return _error_envelope(
+            ErrorCode.INVALID_COMMAND,
+            (
+                "backlog refine-preview --input is not supported for typed "
+                "refinement operations."
+            ),
+        )
+    return None
 
 
 def _hydrate_vision_assessment_from_active_project(state: dict[str, Any]) -> None:

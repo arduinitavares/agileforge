@@ -19,6 +19,7 @@ from services.backlog_runtime import (
     build_backlog_input_context,
     run_backlog_agent_from_state,
 )
+from services.phases.backlog_service import _backlog_artifact_fingerprint
 from utils.brownfield_annotations import (
     BrownfieldAnnotation,
     BrownfieldDisagreement,
@@ -27,7 +28,10 @@ from utils.brownfield_annotations import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
+    from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
 
@@ -75,6 +79,100 @@ class _FakeWorkflowService:
         """Persist state updates."""
         del session_id
         self.state.update(partial_update)
+
+
+def _refinement_source_item(**overrides: object) -> dict[str, Any]:
+    """Return a source backlog item suitable for canonical refinement."""
+    item: dict[str, Any] = {
+        "priority": 1,
+        "requirement": "Verify current backlog workflow",
+        "authority_ref": "REQ.backlog.refinement",
+        "capability_hint": "Backlog",
+        "value_driver": "Operational confidence",
+        "justification": "Keeps backlog review evidence current.",
+        "estimated_effort": "M",
+        "technical_note": "Use existing phase service state.",
+    }
+    item.update(overrides)
+    return item
+
+
+def _refinement_source_state() -> dict[str, Any]:
+    """Return a SPRINT_COMPLETE backlog state with one recorded source attempt."""
+    output_artifact: dict[str, Any] = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    artifact_fingerprint = _backlog_artifact_fingerprint(output_artifact)
+    return {
+        "fsm_state": "SPRINT_COMPLETE",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "attempt_kind": "generation",
+                "artifact_fingerprint": artifact_fingerprint,
+                "output_artifact": output_artifact,
+                "trigger": "auto_transition",
+            }
+        ],
+    }
+
+
+def _refinement_operations_payload(
+    state: dict[str, Any],
+    *,
+    source_attempt_id: str | None = "backlog-attempt-1",
+) -> dict[str, Any]:
+    """Return a canonical refinement operation set."""
+    source_attempt = state["backlog_attempts"][0]
+    payload: dict[str, Any] = {
+        "source_artifact_fingerprint": source_attempt["artifact_fingerprint"],
+        "authority_fingerprint": "sha256:authority",
+        "as_built_cache_fingerprint": "sha256:as-built",
+        "operations": [
+            {
+                "operation_id": "op-retitle",
+                "operation_type": "retitle",
+                "source_item_ids": ["item-001"],
+                "source_item_fingerprints": ["AUTO_SOURCE_ITEM_FINGERPRINT"],
+                "result_item_ids": ["item-001"],
+                "new_requirement": "Verify canonical backlog refinement workflow",
+                "rationale": "Retitle as a canonical refinement.",
+                "requested_by": "po",
+            }
+        ],
+    }
+    if source_attempt_id is not None:
+        payload["source_attempt_id"] = source_attempt_id
+    return payload
+
+
+def _write_operations_file(
+    tmp_path: Path,
+    payload: dict[str, Any],
+) -> str:
+    """Write a refinement operations file and return its path."""
+    operations_file = tmp_path / "operations.json"
+    operations_file.write_text(json.dumps(payload), encoding="utf-8")
+    return str(operations_file)
+
+
+def _hydrate_refinement_state(
+    product_id: int,
+    tool_context: SimpleNamespace,
+) -> dict[str, Any]:
+    """Hydrate required setup fields without changing refinement state."""
+    state = tool_context.state
+    state["pending_spec_content"] = "SPEC CONTENT"
+    state["compiled_authority_cached"] = "AUTHORITY JSON"
+    state["product_vision_assessment"] = {
+        "product_vision_statement": "A clear saved vision.",
+        "is_complete": True,
+    }
+    return {"success": True, "project_id": product_id}
 
 
 def _as_built_assessment_payload(
@@ -128,9 +226,7 @@ def _as_built_state(
     meta = {
         "schema_version": "agileforge.as_built_assessment.v1",
         "agent_version": assessment["agent_version"],
-        "evidence_pack_builder_version": assessment[
-            "evidence_pack_builder_version"
-        ],
+        "evidence_pack_builder_version": assessment["evidence_pack_builder_version"],
         "authority_fingerprint": assessment["authority_fingerprint"],
         "repo_git_commit": assessment["repo_snapshot"]["git_commit"],
         "repo_dirty": assessment["repo_snapshot"]["dirty"],
@@ -387,6 +483,297 @@ def test_backlog_preview_runs_from_sprint_complete_without_persisting(
     assert result["data"]["input_context"]["as_built_assessment"].startswith("{")
     assert "product_backlog_assessment" not in workflow.state
     assert workflow.state["backlog_attempts"] == [{"attempt_id": "old-attempt"}]
+
+
+def test_backlog_refine_preview_returns_success_without_persisting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refinement preview applies operations without mutating workflow state."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    original_state = json.loads(json.dumps(workflow.state))
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state, source_attempt_id=None),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.refine_preview(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["persisted"] is False
+    assert result["data"]["attempt_id"] is None
+    assert result["data"]["project_id"] == 2  # noqa: PLR2004
+    assert result["data"]["output_artifact"]["backlog_items"][0]["requirement"] == (
+        "Verify canonical backlog refinement workflow"
+    )
+    assert result["data"]["source_attempt_id"] == "backlog-attempt-1"
+    assert workflow.state == original_state
+
+
+def test_backlog_refine_record_returns_success_and_updates_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refinement record delegates to the service and persists review state."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    source_fingerprint = workflow.state["backlog_attempts"][0]["artifact_fingerprint"]
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.refine_record(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-1",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["attempt_id"] == "backlog-attempt-2"
+    assert result["data"]["idempotency_key"] == "refine-record-1"
+    assert workflow.state["fsm_state"] == "BACKLOG_REVIEW"
+    assert workflow.state["backlog_review_origin"] == "next_cycle_refinement"
+    assert workflow.state["downstream_backlog_stale"] is True
+    assert workflow.state["product_backlog_assessment"]["attempt_id"] == (
+        "backlog-attempt-2"
+    )
+
+
+def test_backlog_refine_preview_rejects_unsupported_optional_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refinement preview must fail closed for Task 7/import inputs."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    source_artifact_result = runner.refine_preview(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        source_artifact="fixtures/source.json",
+    )
+    input_result = runner.refine_preview(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        user_input="propose refinement",
+    )
+
+    assert source_artifact_result["ok"] is False
+    assert source_artifact_result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "--source-artifact" in source_artifact_result["errors"][0]["message"]
+    assert input_result["ok"] is False
+    assert input_result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "input" in input_result["errors"][0]["message"]
+
+
+def test_backlog_refine_record_rejects_unsupported_approval_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refinement record must not silently ignore approval_id."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    source_fingerprint = workflow.state["backlog_attempts"][0]["artifact_fingerprint"]
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.refine_record(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-approval-unsupported-1",
+        approval_id="approval:abc",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "--approval-id" in result["errors"][0]["message"]
+
+
+def test_backlog_refine_record_idempotency_conflict_returns_reused_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same refine-record key with different request maps to reused-key code."""
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        _hydrate_refinement_state,
+    )
+    workflow = _FakeWorkflowService()
+    workflow.state.update(_refinement_source_state())
+    source_fingerprint = workflow.state["backlog_attempts"][0]["artifact_fingerprint"]
+    operations_file = _write_operations_file(
+        tmp_path,
+        _refinement_operations_payload(workflow.state),
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    first = runner.refine_record(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-conflict-1",
+    )
+    second = runner.refine_record(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operations_file=operations_file,
+        expected_source_fingerprint=source_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="refine-record-conflict-1",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_backlog_refine_import_placeholder_fails_without_mutating() -> None:
+    """Task 6 import placeholder should be explicit and non-mutating."""
+    workflow = _FakeWorkflowService()
+    original_state = dict(workflow.state)
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.refine_import(
+        project_id=2,
+        source_artifact="fixtures/source.json",
+        edited_file="fixtures/edited.json",
+        expected_source_fingerprint="sha256:source",
+        idempotency_key="refine-import-1",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert "not implemented" in result["errors"][0]["message"]
+    assert workflow.state == original_state
+
+
+def test_backlog_approve_records_host_mediated_approval(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Approval records an append-only host-mediated approval envelope."""
+    session.add(Product(product_id=2, name="Cartola"))
+    session.commit()
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+        engine=engine,
+    )
+
+    result = runner.approve(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operation_set_fingerprint="sha256:operations",
+        approved_artifact_fingerprint="sha256:artifact",
+        approved_operation_ids=["op-retitle"],
+        idempotency_key="approve-refinement-1",
+    )
+
+    events = session.exec(select(WorkflowEvent)).all()
+    metadata = json.loads(events[0].event_metadata or "{}")
+    assert result["ok"] is True
+    assert result["data"]["approval_id"].startswith("approval:")
+    assert result["data"]["idempotent_replay"] is False
+    assert events[0].event_type == WorkflowEventType.BACKLOG_REFINEMENT_APPROVED
+    assert metadata["command"] == "agileforge backlog approve"
+    assert metadata["approved_by"] == "po"
+    assert metadata["approval_source"] == "cli"
+    assert metadata["approved_operation_ids"] == ["op-retitle"]
+
+
+def test_backlog_approve_idempotency_conflict_returns_reused_code(
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Same approval key with different request maps to reused-key code."""
+    session.add(Product(product_id=2, name="Cartola"))
+    session.commit()
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+        engine=engine,
+    )
+
+    first = runner.approve(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operation_set_fingerprint="sha256:operations",
+        approved_artifact_fingerprint="sha256:artifact",
+        approved_operation_ids=["op-retitle"],
+        idempotency_key="approve-conflict-1",
+    )
+    second = runner.approve(
+        project_id=2,
+        source_attempt_id="backlog-attempt-1",
+        operation_set_fingerprint="sha256:operations",
+        approved_artifact_fingerprint="sha256:different-artifact",
+        approved_operation_ids=["op-split"],
+        idempotency_key="approve-conflict-1",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
 def test_backlog_preview_returns_brownfield_warnings_without_failure(
@@ -867,9 +1254,7 @@ def test_annotation_warns_when_exact_ref_conflicts_with_item_hint(
     )
 
     assert result["success"] is True
-    annotation = result["output_artifact"]["backlog_items"][0][
-        "as_built_annotation"
-    ]
+    annotation = result["output_artifact"]["backlog_items"][0]["as_built_annotation"]
     assert annotation["match_tier"] == "exact"
     assert annotation["selected"]["authority_ref"] == "REQ.real-submit-disabled"
     assert "capability_disagreement" in annotation["warning_codes"]
@@ -893,9 +1278,7 @@ def test_annotation_warns_on_unmatched_asserted_authority_ref(
     )
 
     assert result["success"] is True
-    annotation = result["output_artifact"]["backlog_items"][0][
-        "as_built_annotation"
-    ]
+    annotation = result["output_artifact"]["backlog_items"][0]["as_built_annotation"]
     assert annotation["match_tier"] == "none"
     assert annotation["selected"] is None
     assert "asserted_authority_ref_unmatched" in annotation["warning_codes"]
@@ -936,9 +1319,7 @@ def test_annotation_warns_on_conflicting_invariant_rows(
     )
 
     assert result["success"] is True
-    annotation = result["output_artifact"]["backlog_items"][0][
-        "as_built_annotation"
-    ]
+    annotation = result["output_artifact"]["backlog_items"][0]["as_built_annotation"]
     assert annotation["match_tier"] == "exact"
     assert annotation["conflict"] is True
     assert annotation["selected"] is None

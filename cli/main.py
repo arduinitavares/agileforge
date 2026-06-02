@@ -265,6 +265,58 @@ class _Application(Protocol):
         """Generate a non-persisted Backlog preview."""
         ...
 
+    def backlog_refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Preview canonical Backlog refinement operations."""
+        ...
+
+    def backlog_refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> JsonObject:
+        """Record canonical Backlog refinement operations."""
+        ...
+
+    def backlog_approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> JsonObject:
+        """Record host-mediated Backlog refinement approval."""
+        ...
+
+    def backlog_refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Fail closed until deterministic Backlog refinement import exists."""
+        ...
+
     def backlog_history(self, *, project_id: int) -> JsonObject:
         """Return Backlog attempt history."""
         ...
@@ -1092,6 +1144,54 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     backlog_preview.add_argument("--project-id", type=int, required=True)
     backlog_preview.add_argument("--input", dest="user_input")
     backlog_preview.set_defaults(command_handler=_backlog_preview)
+    backlog_refine_preview = backlog_sub.add_parser(
+        "refine-preview",
+        help="Preview canonical Backlog refinement operations.",
+    )
+    backlog_refine_preview.add_argument("--project-id", type=int, required=True)
+    backlog_refine_preview.add_argument("--source-attempt-id")
+    backlog_refine_preview.add_argument("--operations-file")
+    backlog_refine_preview.add_argument("--source-artifact")
+    backlog_refine_preview.add_argument("--input", dest="user_input")
+    backlog_refine_preview.set_defaults(command_handler=_backlog_refine_preview)
+    backlog_refine_record = backlog_sub.add_parser(
+        "refine-record",
+        help="Record canonical Backlog refinement operations.",
+    )
+    backlog_refine_record.add_argument("--project-id", type=int, required=True)
+    backlog_refine_record.add_argument("--source-attempt-id", required=True)
+    backlog_refine_record.add_argument("--operations-file", required=True)
+    backlog_refine_record.add_argument("--expected-source-fingerprint", required=True)
+    backlog_refine_record.add_argument("--expected-state", required=True)
+    backlog_refine_record.add_argument("--idempotency-key", required=True)
+    backlog_refine_record.add_argument("--approval-id")
+    backlog_refine_record.set_defaults(command_handler=_backlog_refine_record)
+    backlog_approve = backlog_sub.add_parser(
+        "approve",
+        help="Record host-mediated Backlog refinement approval.",
+    )
+    backlog_approve.add_argument("--project-id", type=int, required=True)
+    backlog_approve.add_argument("--source-attempt-id")
+    backlog_approve.add_argument("--attempt-id")
+    backlog_approve.add_argument("--operation-set-fingerprint")
+    backlog_approve.add_argument("--approved-artifact-fingerprint", required=True)
+    backlog_approve.add_argument(
+        "--approved-operation-id",
+        action="append",
+        dest="approved_operation_ids",
+    )
+    backlog_approve.add_argument("--idempotency-key", required=True)
+    backlog_approve.set_defaults(command_handler=_backlog_approve)
+    backlog_refine_import = backlog_sub.add_parser(
+        "refine-import",
+        help="Import deterministic Backlog refinement edits.",
+    )
+    backlog_refine_import.add_argument("--project-id", type=int, required=True)
+    backlog_refine_import.add_argument("--source-artifact", required=True)
+    backlog_refine_import.add_argument("--edited-file", required=True)
+    backlog_refine_import.add_argument("--expected-source-fingerprint", required=True)
+    backlog_refine_import.add_argument("--idempotency-key", required=True)
+    backlog_refine_import.set_defaults(command_handler=_backlog_refine_import)
     backlog_history = backlog_sub.add_parser(
         "history",
         help="Show Backlog attempt history.",
@@ -2384,6 +2484,66 @@ def _backlog_preview(
     return "agileforge backlog preview", application.backlog_preview(
         project_id=args.project_id,
         user_input=args.user_input,
+    )
+
+
+def _backlog_refine_preview(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog refinement preview to the application facade."""
+    return "agileforge backlog refine-preview", application.backlog_refine_preview(
+        project_id=args.project_id,
+        source_attempt_id=args.source_attempt_id,
+        operations_file=args.operations_file,
+        source_artifact=args.source_artifact,
+        user_input=args.user_input,
+    )
+
+
+def _backlog_refine_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog refinement record to the application facade."""
+    return "agileforge backlog refine-record", application.backlog_refine_record(
+        project_id=args.project_id,
+        source_attempt_id=args.source_attempt_id,
+        operations_file=args.operations_file,
+        expected_source_fingerprint=args.expected_source_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+        approval_id=args.approval_id,
+    )
+
+
+def _backlog_approve(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog refinement approval to the application facade."""
+    return "agileforge backlog approve", application.backlog_approve(
+        project_id=args.project_id,
+        source_attempt_id=args.source_attempt_id,
+        attempt_id=args.attempt_id,
+        operation_set_fingerprint=args.operation_set_fingerprint,
+        approved_artifact_fingerprint=args.approved_artifact_fingerprint,
+        approved_operation_ids=args.approved_operation_ids,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _backlog_refine_import(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog refinement import to the application facade."""
+    return "agileforge backlog refine-import", application.backlog_refine_import(
+        project_id=args.project_id,
+        source_artifact=args.source_artifact,
+        edited_file=args.edited_file,
+        expected_source_fingerprint=args.expected_source_fingerprint,
+        idempotency_key=args.idempotency_key,
     )
 
 

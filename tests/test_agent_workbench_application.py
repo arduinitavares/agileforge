@@ -718,6 +718,130 @@ class _FakeBacklogRunner:
             "errors": [],
         }
 
+    def refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Backlog refinement preview."""
+        self.calls.append(
+            (
+                "refine_preview",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "operations_file": operations_file,
+                    "source_artifact": source_artifact,
+                    "user_input": user_input,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "persisted": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record Backlog refinement save."""
+        self.calls.append(
+            (
+                "refine_record",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "operations_file": operations_file,
+                    "expected_source_fingerprint": expected_source_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "approval_id": approval_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_REVIEW"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record Backlog refinement approval."""
+        self.calls.append(
+            (
+                "approve",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "attempt_id": attempt_id,
+                    "operation_set_fingerprint": operation_set_fingerprint,
+                    "approved_artifact_fingerprint": approved_artifact_fingerprint,
+                    "approved_operation_ids": approved_operation_ids,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "approval_id": "approval:1234"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Backlog refinement import request."""
+        self.calls.append(
+            (
+                "refine_import",
+                {
+                    "project_id": project_id,
+                    "source_artifact": source_artifact,
+                    "edited_file": edited_file,
+                    "expected_source_fingerprint": expected_source_fingerprint,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": False,
+            "data": None,
+            "warnings": [],
+            "errors": [{"code": "MUTATION_FAILED"}],
+        }
+
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Record Backlog history lookup."""
         self.calls.append(("history", {"project_id": project_id}))
@@ -1602,6 +1726,46 @@ def test_application_routes_backlog_commands_to_runner() -> None:
         )["data"]["persisted"]
         is False
     )
+    assert (
+        app.backlog_refine_preview(
+            project_id=PROJECT_ID,
+            source_attempt_id="backlog-attempt-1",
+            operations_file="fixtures/operations.json",
+        )["data"]["persisted"]
+        is False
+    )
+    assert (
+        app.backlog_refine_record(
+            project_id=PROJECT_ID,
+            source_attempt_id="backlog-attempt-1",
+            operations_file="fixtures/operations.json",
+            expected_source_fingerprint="sha256:" + "b" * 64,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="refine-record-1",
+        )["data"]["fsm_state"]
+        == "BACKLOG_REVIEW"
+    )
+    assert (
+        app.backlog_approve(
+            project_id=PROJECT_ID,
+            source_attempt_id="backlog-attempt-1",
+            operation_set_fingerprint="sha256:" + "c" * 64,
+            approved_artifact_fingerprint="sha256:" + "d" * 64,
+            approved_operation_ids=["op-1"],
+            idempotency_key="approve-refinement-1",
+        )["data"]["approval_id"]
+        == "approval:1234"
+    )
+    assert (
+        app.backlog_refine_import(
+            project_id=PROJECT_ID,
+            source_artifact="fixtures/source.json",
+            edited_file="fixtures/edited.json",
+            expected_source_fingerprint="sha256:" + "e" * 64,
+            idempotency_key="refine-import-1",
+        )["errors"][0]["code"]
+        == "MUTATION_FAILED"
+    )
     assert app.backlog_history(project_id=PROJECT_ID)["data"]["items"] == []
     assert (
         app.backlog_save(
@@ -1623,6 +1787,50 @@ def test_application_routes_backlog_commands_to_runner() -> None:
     assert runner.calls == [
         ("generate", {"project_id": PROJECT_ID, "user_input": "tighten themes"}),
         ("preview", {"project_id": PROJECT_ID, "user_input": "brownfield smoke"}),
+        (
+            "refine_preview",
+            {
+                "project_id": PROJECT_ID,
+                "source_attempt_id": "backlog-attempt-1",
+                "operations_file": "fixtures/operations.json",
+                "source_artifact": None,
+                "user_input": None,
+            },
+        ),
+        (
+            "refine_record",
+            {
+                "project_id": PROJECT_ID,
+                "source_attempt_id": "backlog-attempt-1",
+                "operations_file": "fixtures/operations.json",
+                "expected_source_fingerprint": "sha256:" + "b" * 64,
+                "expected_state": "SPRINT_COMPLETE",
+                "idempotency_key": "refine-record-1",
+                "approval_id": None,
+            },
+        ),
+        (
+            "approve",
+            {
+                "project_id": PROJECT_ID,
+                "source_attempt_id": "backlog-attempt-1",
+                "attempt_id": None,
+                "operation_set_fingerprint": "sha256:" + "c" * 64,
+                "approved_artifact_fingerprint": "sha256:" + "d" * 64,
+                "approved_operation_ids": ["op-1"],
+                "idempotency_key": "approve-refinement-1",
+            },
+        ),
+        (
+            "refine_import",
+            {
+                "project_id": PROJECT_ID,
+                "source_artifact": "fixtures/source.json",
+                "edited_file": "fixtures/edited.json",
+                "expected_source_fingerprint": "sha256:" + "e" * 64,
+                "idempotency_key": "refine-import-1",
+            },
+        ),
         ("history", {"project_id": PROJECT_ID}),
         (
             "save",
@@ -1845,32 +2053,41 @@ def test_application_routes_sprint_execution_commands_to_runner() -> None:
         )["data"]["task_id"]
         == TASK_ID
     )
-    assert app.sprint_story_readiness(
-        project_id=PROJECT_ID,
-        story_id=STORY_ID,
-    )["data"]["story_id"] == STORY_ID
-    assert app.sprint_story_close(
-        project_id=PROJECT_ID,
-        story_id=STORY_ID,
-        expected_status="To Do",
-        expected_story_fingerprint="sha256:story",
-        idempotency_key="close-story-12-001",
-        resolution="Completed",
-        completion_notes="Story complete.",
-        evidence_links=["scripts/run_live_round.py"],
-    )["data"]["story_id"] == STORY_ID
+    assert (
+        app.sprint_story_readiness(
+            project_id=PROJECT_ID,
+            story_id=STORY_ID,
+        )["data"]["story_id"]
+        == STORY_ID
+    )
+    assert (
+        app.sprint_story_close(
+            project_id=PROJECT_ID,
+            story_id=STORY_ID,
+            expected_status="To Do",
+            expected_story_fingerprint="sha256:story",
+            idempotency_key="close-story-12-001",
+            resolution="Completed",
+            completion_notes="Story complete.",
+            evidence_links=["scripts/run_live_round.py"],
+        )["data"]["story_id"]
+        == STORY_ID
+    )
     assert app.sprint_close_readiness(project_id=PROJECT_ID)["data"]["sprint_id"] == (
         SPRINT_ID
     )
-    assert app.sprint_close(
-        project_id=PROJECT_ID,
-        expected_state="SPRINT_VIEW",
-        expected_status="Active",
-        expected_sprint_fingerprint="sha256:sprint",
-        idempotency_key="close-sprint-7-001",
-        completion_notes="Sprint complete.",
-        follow_up_notes="Prepare the next sprint.",
-    )["data"]["sprint_id"] == SPRINT_ID
+    assert (
+        app.sprint_close(
+            project_id=PROJECT_ID,
+            expected_state="SPRINT_VIEW",
+            expected_status="Active",
+            expected_sprint_fingerprint="sha256:sprint",
+            idempotency_key="close-sprint-7-001",
+            completion_notes="Sprint complete.",
+            follow_up_notes="Prepare the next sprint.",
+        )["data"]["sprint_id"]
+        == SPRINT_ID
+    )
     assert runner.calls == [
         (
             "start",
@@ -2524,10 +2741,7 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
             "--expected-task-fingerprint <task_fingerprint> "
             "--idempotency-key <idempotency_key>"
         ),
-        (
-            "agileforge sprint story readiness --project-id 7 "
-            "--story-id <story_id>"
-        ),
+        ("agileforge sprint story readiness --project-id 7 --story-id <story_id>"),
         (
             "agileforge sprint story close --project-id 7 "
             "--story-id <story_id> --expected-status <expected_status> "

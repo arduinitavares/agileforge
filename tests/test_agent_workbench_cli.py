@@ -252,6 +252,130 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def backlog_refine_preview(
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str | None = None,
+        operations_file: str | None = None,
+        source_artifact: str | None = None,
+        user_input: str | None = None,
+    ) -> JsonObject:
+        """Return a backlog refinement preview payload."""
+        self.calls.append(
+            (
+                "backlog_refine_preview",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "operations_file": operations_file,
+                    "source_artifact": source_artifact,
+                    "user_input": user_input,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "persisted": False},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_refine_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_attempt_id: str,
+        operations_file: str,
+        expected_source_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> JsonObject:
+        """Return a recorded backlog refinement payload."""
+        self.calls.append(
+            (
+                "backlog_refine_record",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "operations_file": operations_file,
+                    "expected_source_fingerprint": expected_source_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "approval_id": approval_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_REVIEW"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        approved_artifact_fingerprint: str,
+        idempotency_key: str,
+        source_attempt_id: str | None = None,
+        attempt_id: str | None = None,
+        operation_set_fingerprint: str | None = None,
+        approved_operation_ids: list[str] | None = None,
+    ) -> JsonObject:
+        """Return a backlog refinement approval payload."""
+        self.calls.append(
+            (
+                "backlog_approve",
+                {
+                    "project_id": project_id,
+                    "source_attempt_id": source_attempt_id,
+                    "attempt_id": attempt_id,
+                    "operation_set_fingerprint": operation_set_fingerprint,
+                    "approved_artifact_fingerprint": approved_artifact_fingerprint,
+                    "approved_operation_ids": approved_operation_ids,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "approval_id": "approval:1234"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def backlog_refine_import(
+        self,
+        *,
+        project_id: int,
+        source_artifact: str,
+        edited_file: str,
+        expected_source_fingerprint: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a backlog refinement import payload."""
+        self.calls.append(
+            (
+                "backlog_refine_import",
+                {
+                    "project_id": project_id,
+                    "source_artifact": source_artifact,
+                    "edited_file": edited_file,
+                    "expected_source_fingerprint": expected_source_fingerprint,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "placeholder": True},
+            "warnings": [],
+            "errors": [],
+        }
+
     def backlog_history(self, *, project_id: int) -> JsonObject:
         """Return a backlog history payload."""
         self.calls.append(("backlog_history", {"project_id": project_id}))
@@ -1850,6 +1974,120 @@ def test_cli_routes_vision_commands(
                 {"project_id": PROJECT_ID, "user_input": "brownfield preview"},
             ),
             "agileforge backlog preview",
+        ),
+        (
+            [
+                "backlog",
+                "refine-preview",
+                "--project-id",
+                str(PROJECT_ID),
+                "--source-attempt-id",
+                "backlog-attempt-1",
+                "--operations-file",
+                "fixtures/operations.json",
+            ],
+            (
+                "backlog_refine_preview",
+                {
+                    "project_id": PROJECT_ID,
+                    "source_attempt_id": "backlog-attempt-1",
+                    "operations_file": "fixtures/operations.json",
+                    "source_artifact": None,
+                    "user_input": None,
+                },
+            ),
+            "agileforge backlog refine-preview",
+        ),
+        (
+            [
+                "backlog",
+                "refine-record",
+                "--project-id",
+                str(PROJECT_ID),
+                "--source-attempt-id",
+                "backlog-attempt-1",
+                "--operations-file",
+                "fixtures/operations.json",
+                "--expected-source-fingerprint",
+                "sha256:" + "b" * 64,
+                "--expected-state",
+                "SPRINT_COMPLETE",
+                "--idempotency-key",
+                "refine-record-1",
+            ],
+            (
+                "backlog_refine_record",
+                {
+                    "project_id": PROJECT_ID,
+                    "source_attempt_id": "backlog-attempt-1",
+                    "operations_file": "fixtures/operations.json",
+                    "expected_source_fingerprint": "sha256:" + "b" * 64,
+                    "expected_state": "SPRINT_COMPLETE",
+                    "idempotency_key": "refine-record-1",
+                    "approval_id": None,
+                },
+            ),
+            "agileforge backlog refine-record",
+        ),
+        (
+            [
+                "backlog",
+                "approve",
+                "--project-id",
+                str(PROJECT_ID),
+                "--source-attempt-id",
+                "backlog-attempt-1",
+                "--operation-set-fingerprint",
+                "sha256:" + "c" * 64,
+                "--approved-artifact-fingerprint",
+                "sha256:" + "d" * 64,
+                "--approved-operation-id",
+                "op-2",
+                "--approved-operation-id",
+                "op-1",
+                "--idempotency-key",
+                "approve-refinement-1",
+            ],
+            (
+                "backlog_approve",
+                {
+                    "project_id": PROJECT_ID,
+                    "source_attempt_id": "backlog-attempt-1",
+                    "attempt_id": None,
+                    "operation_set_fingerprint": "sha256:" + "c" * 64,
+                    "approved_artifact_fingerprint": "sha256:" + "d" * 64,
+                    "approved_operation_ids": ["op-2", "op-1"],
+                    "idempotency_key": "approve-refinement-1",
+                },
+            ),
+            "agileforge backlog approve",
+        ),
+        (
+            [
+                "backlog",
+                "refine-import",
+                "--project-id",
+                str(PROJECT_ID),
+                "--source-artifact",
+                "fixtures/source.json",
+                "--edited-file",
+                "fixtures/edited.json",
+                "--expected-source-fingerprint",
+                "sha256:" + "e" * 64,
+                "--idempotency-key",
+                "refine-import-1",
+            ],
+            (
+                "backlog_refine_import",
+                {
+                    "project_id": PROJECT_ID,
+                    "source_artifact": "fixtures/source.json",
+                    "edited_file": "fixtures/edited.json",
+                    "expected_source_fingerprint": "sha256:" + "e" * 64,
+                    "idempotency_key": "refine-import-1",
+                },
+            ),
+            "agileforge backlog refine-import",
         ),
         (
             ["backlog", "history", "--project-id", str(PROJECT_ID)],
