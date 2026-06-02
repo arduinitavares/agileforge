@@ -415,6 +415,39 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def backlog_reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a backlog reset-active payload."""
+        self.calls.append(
+            (
+                "backlog_reset_active",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "reset_reason": reset_reason,
+                    "archive_all_active_stories": archive_all_active_stories,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def backlog_reconcile(
         self,
         *,
@@ -2124,6 +2157,38 @@ def test_cli_routes_vision_commands(
         (
             [
                 "backlog",
+                "reset-active",
+                "--project-id",
+                str(PROJECT_ID),
+                "--attempt-id",
+                "backlog-attempt-1",
+                "--expected-artifact-fingerprint",
+                "sha256:" + "f" * 64,
+                "--expected-state",
+                "BACKLOG_REVIEW",
+                "--reset-reason",
+                "pre-brownfield reset",
+                "--archive-all-active-stories",
+                "--idempotency-key",
+                "reset-active-1",
+            ],
+            (
+                "backlog_reset_active",
+                {
+                    "project_id": PROJECT_ID,
+                    "attempt_id": "backlog-attempt-1",
+                    "expected_artifact_fingerprint": "sha256:" + "f" * 64,
+                    "expected_state": "BACKLOG_REVIEW",
+                    "reset_reason": "pre-brownfield reset",
+                    "archive_all_active_stories": True,
+                    "idempotency_key": "reset-active-1",
+                },
+            ),
+            "agileforge backlog reset-active",
+        ),
+        (
+            [
+                "backlog",
                 "reconcile",
                 "--project-id",
                 str(PROJECT_ID),
@@ -2156,6 +2221,52 @@ def test_cli_routes_backlog_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+def test_backlog_reset_active_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify reset-active routes guarded args to the application facade."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "backlog",
+            "reset-active",
+            "--project-id",
+            str(PROJECT_ID),
+            "--attempt-id",
+            "backlog-attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:" + "f" * 64,
+            "--expected-state",
+            "BACKLOG_REVIEW",
+            "--reset-reason",
+            "pre-brownfield reset",
+            "--archive-all-active-stories",
+            "--idempotency-key",
+            "reset-active-1",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge backlog reset-active"
+    assert app.calls == [
+        (
+            "backlog_reset_active",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "backlog-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "f" * 64,
+                "expected_state": "BACKLOG_REVIEW",
+                "reset_reason": "pre-brownfield reset",
+                "archive_all_active_stories": True,
+                "idempotency_key": "reset-active-1",
+            },
+        )
+    ]
 
 
 def test_cli_routes_as_built_assess_command(

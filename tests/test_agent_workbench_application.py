@@ -900,6 +900,39 @@ class _FakeBacklogRunner:
             "errors": [],
         }
 
+    def reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Backlog reset-active."""
+        self.calls.append(
+            (
+                "reset_active",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "reset_reason": reset_reason,
+                    "archive_all_active_stories": archive_all_active_stories,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "BACKLOG_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def reconcile(
         self,
         *,
@@ -1797,6 +1830,18 @@ def test_application_routes_backlog_commands_to_runner() -> None:
         == "BACKLOG_PERSISTENCE"
     )
     assert (
+        app.backlog_reset_active(
+            project_id=PROJECT_ID,
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint="sha256:" + "f" * 64,
+            expected_state="BACKLOG_REVIEW",
+            reset_reason="pre-brownfield reset",
+            archive_all_active_stories=True,
+            idempotency_key="reset-active-1",
+        )["data"]["fsm_state"]
+        == "BACKLOG_PERSISTENCE"
+    )
+    assert (
         app.backlog_reconcile(
             project_id=PROJECT_ID,
             idempotency_key="reconcile-backlog-1",
@@ -1862,12 +1907,56 @@ def test_application_routes_backlog_commands_to_runner() -> None:
             },
         ),
         (
+            "reset_active",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "backlog-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "f" * 64,
+                "expected_state": "BACKLOG_REVIEW",
+                "reset_reason": "pre-brownfield reset",
+                "archive_all_active_stories": True,
+                "idempotency_key": "reset-active-1",
+            },
+        ),
+        (
             "reconcile",
             {
                 "project_id": PROJECT_ID,
                 "idempotency_key": "reconcile-backlog-1",
             },
         ),
+    ]
+
+
+def test_backlog_reset_active_facade_routes_to_runner() -> None:
+    """Verify reset-active facade delegates guarded args to the runner."""
+    runner = _FakeBacklogRunner()
+    app = AgentWorkbenchApplication(backlog_runner=runner)
+
+    payload = app.backlog_reset_active(
+        project_id=PROJECT_ID,
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint="sha256:" + "f" * 64,
+        expected_state="BACKLOG_REVIEW",
+        reset_reason="pre-brownfield reset",
+        archive_all_active_stories=True,
+        idempotency_key="reset-active-1",
+    )
+
+    assert payload["data"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert runner.calls == [
+        (
+            "reset_active",
+            {
+                "project_id": PROJECT_ID,
+                "attempt_id": "backlog-attempt-1",
+                "expected_artifact_fingerprint": "sha256:" + "f" * 64,
+                "expected_state": "BACKLOG_REVIEW",
+                "reset_reason": "pre-brownfield reset",
+                "archive_all_active_stories": True,
+                "idempotency_key": "reset-active-1",
+            },
+        )
     ]
 
 

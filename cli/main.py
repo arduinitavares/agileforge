@@ -347,6 +347,20 @@ class _Application(Protocol):
         """Persist the current Backlog draft."""
         ...
 
+    def backlog_reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Install an approved refined attempt as the active backlog baseline."""
+        ...
+
     def backlog_reconcile(
         self,
         *,
@@ -1222,6 +1236,24 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     backlog_save.add_argument("--expected-state", required=True)
     backlog_save.add_argument("--idempotency-key", required=True)
     backlog_save.set_defaults(command_handler=_backlog_save)
+    backlog_reset_active = backlog_sub.add_parser(
+        "reset-active",
+        help="Soft-archive active backlog rows and install an approved refinement.",
+    )
+    backlog_reset_active.add_argument("--project-id", type=int, required=True)
+    backlog_reset_active.add_argument("--attempt-id", required=True)
+    backlog_reset_active.add_argument(
+        "--expected-artifact-fingerprint",
+        required=True,
+    )
+    backlog_reset_active.add_argument("--expected-state", required=True)
+    backlog_reset_active.add_argument("--reset-reason", required=True)
+    backlog_reset_active.add_argument(
+        "--archive-all-active-stories",
+        action="store_true",
+    )
+    backlog_reset_active.add_argument("--idempotency-key", required=True)
+    backlog_reset_active.set_defaults(command_handler=_backlog_reset_active)
     backlog_reconcile = backlog_sub.add_parser(
         "reconcile",
         help="Repair legacy duplicate active Backlog seed rows.",
@@ -2601,6 +2633,22 @@ def _backlog_save(
         attempt_id=args.attempt_id,
         expected_artifact_fingerprint=args.expected_artifact_fingerprint,
         expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _backlog_reset_active(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Backlog reset-active to the application facade."""
+    return "agileforge backlog reset-active", application.backlog_reset_active(
+        project_id=args.project_id,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        reset_reason=args.reset_reason,
+        archive_all_active_stories=args.archive_all_active_stories,
         idempotency_key=args.idempotency_key,
     )
 

@@ -60,6 +60,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge backlog refine-import",
     "agileforge backlog history",
     "agileforge backlog save",
+    "agileforge backlog reset-active",
     "agileforge backlog reconcile",
     "agileforge evidence collect",
     "agileforge as-built assess",
@@ -154,6 +155,26 @@ def test_capabilities_include_top_level_contract_metadata() -> None:
     assert payload["installed_command_count"] == sum(
         1 for command in commands if command["installed"] is True
     )
+
+
+def test_command_schema_payloads_are_available() -> None:
+    """Expose command schema payloads for all installed command names."""
+    expected_command_names = (
+        EXPECTED_PHASE_1_COMMAND_NAMES
+        | EXPECTED_PHASE_2A_COMMAND_NAMES
+        | EXPECTED_PHASE_2B_COMMAND_NAMES
+        | EXPECTED_PHASE_2C_COMMAND_NAMES
+        | EXPECTED_PHASE_2D_COMMAND_NAMES
+        | EXPECTED_PHASE_2E_COMMAND_NAMES
+    )
+
+    payload_names = {
+        command_schema_payload(command_name)["name"]
+        for command_name in sorted(expected_command_names)
+    }
+
+    assert "agileforge backlog reset-active" in payload_names
+    assert payload_names == expected_command_names
 
 
 def test_phase_1_command_schema_payloads_publish_real_inputs() -> None:
@@ -426,6 +447,7 @@ def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR09
         "agileforge backlog refine-import",
         "agileforge backlog history",
         "agileforge backlog save",
+        "agileforge backlog reset-active",
         "agileforge backlog reconcile",
         "agileforge evidence collect",
         "agileforge as-built assess",
@@ -445,6 +467,7 @@ def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR09
     refine_import = command_schema_payload("agileforge backlog refine-import")
     history = command_schema_payload("agileforge backlog history")
     save = command_schema_payload("agileforge backlog save")
+    reset_active = command_schema_payload("agileforge backlog reset-active")
     reconcile = command_schema_payload("agileforge backlog reconcile")
     evidence = command_schema_payload("agileforge evidence collect")
     as_built = command_schema_payload("agileforge as-built assess")
@@ -513,6 +536,24 @@ def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR09
     ]
     assert save["idempotency_required"] is True
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
+    assert reset_active["mutates"] is True
+    assert reset_active["destructive"] is False
+    assert reset_active["idempotency_required"] is True
+    assert reset_active["guard_policy"] == [
+        "expected_state",
+        "expected_artifact_fingerprint",
+    ]
+    assert reset_active["input"]["required"] == [
+        "project_id",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "reset_reason",
+        "archive_all_active_stories",
+        "idempotency_key",
+    ]
+    assert ErrorCode.INVALID_COMMAND.value in reset_active["errors"]
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in reset_active["errors"]
     assert reconcile["mutates"] is True
     assert reconcile["input"]["required"] == ["project_id", "idempotency_key"]
     assert reconcile["idempotency_required"] is True

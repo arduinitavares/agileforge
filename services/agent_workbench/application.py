@@ -232,6 +232,20 @@ class _BacklogPhaseRunner(Protocol):
         """Persist the current Backlog draft."""
         ...
 
+    def reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Install an approved refined attempt as the active backlog baseline."""
+        ...
+
     def reconcile(
         self,
         *,
@@ -1088,6 +1102,28 @@ class AgentWorkbenchApplication:
             attempt_id=attempt_id,
             expected_artifact_fingerprint=expected_artifact_fingerprint,
             expected_state=expected_state,
+            idempotency_key=idempotency_key,
+        )
+
+    def backlog_reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Install an approved refined attempt as the active backlog baseline."""
+        return self._get_backlog_runner().reset_active(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            reset_reason=reset_reason,
+            archive_all_active_stories=archive_all_active_stories,
             idempotency_key=idempotency_key,
         )
 

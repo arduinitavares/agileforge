@@ -6,6 +6,7 @@ import copy
 import inspect
 import json
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from orchestrator_agent.agent_tools.backlog_primer.schemes import (
 )
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
 from orchestrator_agent.fsm.states import OrchestratorState
+from services.agent_workbench.backlog_active_reset import ActiveBacklogResetRequest
 from services.agent_workbench.fingerprints import canonical_hash
 from services.backlog_runtime import (
     build_backlog_input_context,
@@ -634,6 +636,149 @@ async def save_backlog_draft(
     save_state(context.state)
 
     return payload
+
+
+async def reset_active_backlog(
+    *,
+    project_id: int,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+    expected_state: str,
+    reset_reason: str,
+    archive_all_active_stories: bool,
+    idempotency_key: str,
+    save_state: Callable[[dict[str, Any]], None],
+    now_iso: Callable[[], str],
+    hydrate_context: Callable[[], Awaitable[Any]],
+    reset_rows: Callable[[ActiveBacklogResetRequest], dict[str, Any]],
+    replacement_blocked: Callable[[int], bool],
+) -> dict[str, Any]:
+    """Reset the active backlog from an approved next-cycle refined attempt."""
+    context = await hydrate_context()
+    state = context.state
+    _assert_save_expected_state(state, expected_state)
+    _assert_reset_review_origin(state)
+    trimmed_reason, trimmed_idempotency_key = _normalize_reset_inputs(
+        reset_reason=reset_reason,
+        archive_all_active_stories=archive_all_active_stories,
+        idempotency_key=idempotency_key,
+    )
+
+    assessment = _reset_assessment(state)
+    _assert_save_guards(
+        state=state,
+        assessment=assessment,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+
+    selected_attempt = _assert_reset_refined_attempt(state, attempt_id)
+    _assert_refined_attempt_saveable(
+        state=state,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+
+    _assert_reset_attempt_complete(assessment)
+    if not replacement_blocked(project_id):
+        raise BacklogPhaseError("RESET_NOT_REQUIRED")
+
+    now = now_iso()
+    request = ActiveBacklogResetRequest(
+        project_id=project_id,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        expected_state=expected_state,
+        reset_reason=trimmed_reason,
+        archive_all_active_stories=archive_all_active_stories,
+        idempotency_key=trimmed_idempotency_key,
+        approved_artifact_fingerprint=_approved_reset_fingerprint(selected_attempt),
+        artifact=assessment,
+        now=_parse_iso(now),
+    )
+    reset_result = reset_rows(request)
+    if not reset_result.get("success"):
+        raise BacklogPhaseError(str(reset_result.get("error", "RESET_FAILED")))
+
+    state["fsm_state"] = OrchestratorState.BACKLOG_PERSISTENCE.value
+    state["fsm_state_entered_at"] = now
+    state["backlog_saved_at"] = now
+    state["downstream_backlog_stale"] = True
+    state["stale_backlog_reason"] = "active_backlog_reset"
+    state["stale_since_backlog_attempt_id"] = attempt_id
+    state["active_backlog_reset_at"] = now
+    state["active_backlog_reset_attempt_id"] = attempt_id
+    save_state(state)
+
+    return {
+        "fsm_state": OrchestratorState.BACKLOG_PERSISTENCE.value,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": expected_artifact_fingerprint,
+        "reset_result": reset_result,
+        "idempotency_key": trimmed_idempotency_key,
+    }
+
+
+def _assert_reset_review_origin(state: dict[str, Any]) -> None:
+    if state.get("backlog_review_origin") != "next_cycle_refinement":
+        raise BacklogPhaseError("RESET_WRONG_REVIEW_ORIGIN")
+
+
+def _normalize_reset_inputs(
+    *,
+    reset_reason: str,
+    archive_all_active_stories: bool,
+    idempotency_key: str,
+) -> tuple[str, str]:
+    trimmed_reason = reset_reason.strip()
+    trimmed_idempotency_key = idempotency_key.strip()
+    if not trimmed_reason:
+        raise BacklogPhaseError("RESET_REASON_REQUIRED")
+    if archive_all_active_stories is not True:
+        raise BacklogPhaseError("RESET_ARCHIVE_FLAG_REQUIRED")
+    if not trimmed_idempotency_key:
+        raise BacklogPhaseError("RESET_IDEMPOTENCY_KEY_REQUIRED")
+    return trimmed_reason, trimmed_idempotency_key
+
+
+def _reset_assessment(state: dict[str, Any]) -> dict[str, Any]:
+    assessment = state.get("product_backlog_assessment")
+    if not isinstance(assessment, dict):
+        raise BacklogPhaseError("RESET_ATTEMPT_NOT_FOUND")
+    return assessment
+
+
+def _assert_reset_refined_attempt(
+    state: dict[str, Any],
+    attempt_id: str,
+) -> dict[str, Any]:
+    selected_attempt = _find_backlog_attempt(state, attempt_id)
+    if (
+        selected_attempt is None
+        or selected_attempt.get("attempt_kind") not in REFINED_ATTEMPT_KINDS
+    ):
+        raise BacklogPhaseError("RESET_ATTEMPT_NOT_REFINED")
+    return selected_attempt
+
+
+def _assert_reset_attempt_complete(assessment: dict[str, Any]) -> None:
+    if not bool(assessment.get("is_complete", False)):
+        raise BacklogPhaseError("RESET_ATTEMPT_INCOMPLETE")
+    if _has_clarifying_questions(assessment):
+        raise BacklogPhaseError("RESET_ATTEMPT_INCOMPLETE")
+
+
+def _approved_reset_fingerprint(selected_attempt: dict[str, Any]) -> str:
+    approval = cast("dict[str, Any]", selected_attempt["refinement_approval"])
+    return str(approval.get("approved_artifact_fingerprint") or "")
+
+
+def _parse_iso(value: str) -> datetime:
+    """Parse an ISO timestamp into an aware UTC datetime."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _assert_refinement_expected_state(

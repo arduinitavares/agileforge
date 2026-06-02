@@ -9,11 +9,18 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from models.core import UserStory
 from models.db import get_engine
+from orchestrator_agent.agent_tools.backlog_primer import tools as backlog_primer_tools
 from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from repositories.product import ProductRepository
+from services.agent_workbench.backlog_active_reset import (
+    ActiveBacklogResetError,
+    ActiveBacklogResetReusedKeyError,
+    reset_active_backlog_rows,
+)
 from services.agent_workbench.backlog_reconciliation import (
     BacklogReconciliationError,
     reconcile_active_backlog,
@@ -34,6 +41,7 @@ from services.phases.backlog_service import (
     preview_backlog_draft,
     preview_backlog_refinement,
     record_backlog_refinement,
+    reset_active_backlog,
     save_backlog_draft,
 )
 from services.workflow import WorkflowService
@@ -206,6 +214,29 @@ class BacklogPhaseRunner:
             attempt_id,
             expected_artifact_fingerprint,
             expected_state,
+            idempotency_key,
+        )
+
+    def reset_active(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Soft-archive active backlog rows and install an approved refinement."""
+        return anyio.run(
+            self._reset_active,
+            project_id,
+            attempt_id,
+            expected_artifact_fingerprint,
+            expected_state,
+            reset_reason,
+            archive_all_active_stories,
             idempotency_key,
         )
 
@@ -528,6 +559,58 @@ class BacklogPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
+    async def _reset_active(  # noqa: PLR0913
+        self,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        reset_reason: str,
+        archive_all_active_stories: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        engine = self._engine or get_engine()
+        try:
+            data = await reset_active_backlog(
+                project_id=project_id,
+                attempt_id=attempt_id,
+                expected_artifact_fingerprint=expected_artifact_fingerprint,
+                expected_state=expected_state,
+                reset_reason=reset_reason,
+                archive_all_active_stories=archive_all_active_stories,
+                idempotency_key=idempotency_key,
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                now_iso=_now_iso,
+                hydrate_context=lambda: self._hydrate_context(
+                    str(project_id), project_id
+                ),
+                reset_rows=lambda request: reset_active_backlog_rows(
+                    engine,
+                    request,
+                ),
+                replacement_blocked=lambda blocked_project_id: (
+                    _active_backlog_replacement_blocked(
+                        engine,
+                        project_id=blocked_project_id,
+                    )
+                ),
+            )
+        except ActiveBacklogResetReusedKeyError as exc:
+            return _error_envelope(ErrorCode.IDEMPOTENCY_KEY_REUSED, str(exc))
+        except ActiveBacklogResetError as exc:
+            return _error_envelope(ErrorCode.MUTATION_FAILED, str(exc))
+        except BacklogPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
     def _load_project(self, project_id: int) -> Product | dict[str, Any]:
         product = self._product_repo.get_by_id(project_id)
         if product is not None:
@@ -583,6 +666,20 @@ def _now_iso() -> str:
 def _build_tool_context(context: object) -> ToolContext:
     """Return a lightweight ToolContext-compatible state holder."""
     return cast("ToolContext", context)
+
+
+def _active_backlog_replacement_blocked(engine: Engine, *, project_id: int) -> bool:
+    """Return whether current active backlog rows would block normal save."""
+    with Session(engine) as session:
+        active_stories = session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == project_id)
+            .where(UserStory.is_superseded == False)  # noqa: E712
+        ).all()
+        return any(
+            backlog_primer_tools._blocks_backlog_replacement(session, story)
+            for story in active_stories
+        )
 
 
 def _load_operations_payload(

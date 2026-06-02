@@ -22,6 +22,7 @@ from services.phases.backlog_service import (
     preview_backlog_refinement,
     record_backlog_attempt,
     record_backlog_refinement,
+    reset_active_backlog,
     save_backlog_draft,
     set_backlog_fsm_state,
 )
@@ -1998,6 +1999,126 @@ async def test_save_backlog_draft_rejects_stale_attempt_guard() -> None:
         )
 
     assert "Backlog save guard mismatch" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_reset_active_backlog_requires_next_cycle_origin() -> None:
+    """Reset-active is only valid for next-cycle refinement review."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    state["backlog_review_origin"] = "initial_backlog"
+    state["backlog_attempts"][0].update(
+        {
+            "attempt_kind": "import_refinement",
+            "refinement_saveable": True,
+            "refinement_approval": {
+                "approval_id": "approval:reset",
+                "approved_artifact_fingerprint": state["product_backlog_assessment"][
+                    "artifact_fingerprint"
+                ],
+            },
+        }
+    )
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await reset_active_backlog(
+            project_id=7,
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=state["product_backlog_assessment"][
+                "artifact_fingerprint"
+            ],
+            expected_state="BACKLOG_REVIEW",
+            reset_reason="pre-brownfield reset",
+            archive_all_active_stories=True,
+            idempotency_key="reset-active-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-06-02T12:00:00Z",
+            hydrate_context=hydrate_context,
+            reset_rows=lambda _request: {"success": True},
+            replacement_blocked=lambda _project_id: True,
+        )
+
+    assert "RESET_WRONG_REVIEW_ORIGIN" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_reset_active_backlog_updates_state_after_success() -> None:
+    """Reset-active persists active reset metadata after row reset succeeds."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    state["backlog_review_origin"] = "next_cycle_refinement"
+    expected_fingerprint = state["product_backlog_assessment"][
+        "artifact_fingerprint"
+    ]
+    state["backlog_attempts"][0].update(
+        {
+            "attempt_kind": "refinement",
+            "refinement_saveable": True,
+            "refinement_approval": {
+                "approval_id": "approval:reset",
+                "approved_artifact_fingerprint": expected_fingerprint,
+            },
+        }
+    )
+    saved: JsonDict = {}
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def reset_rows(request: object) -> JsonDict:
+        captured["request"] = request
+        return {"success": True, "archived_count": 2, "inserted_count": 1}
+
+    payload = await reset_active_backlog(
+        project_id=7,
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        reset_reason="pre-brownfield reset",
+        archive_all_active_stories=True,
+        idempotency_key="reset-active-1",
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-06-02T12:00:00Z",
+        hydrate_context=hydrate_context,
+        reset_rows=reset_rows,
+        replacement_blocked=lambda _project_id: True,
+    )
+
+    request = captured["request"]
+    assert request.project_id == 7  # noqa: PLR2004
+    assert request.attempt_id == "backlog-attempt-1"
+    assert request.expected_artifact_fingerprint == expected_fingerprint
+    assert request.reset_reason == "pre-brownfield reset"
+    assert request.archive_all_active_stories is True
+    assert request.idempotency_key == "reset-active-1"
+    assert payload["reset_result"]["success"] is True
+    assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert saved["state"]["backlog_saved_at"] == "2026-06-02T12:00:00Z"
+    assert saved["state"]["downstream_backlog_stale"] is True
+    assert saved["state"]["stale_backlog_reason"] == "active_backlog_reset"
+    assert (
+        saved["state"]["stale_since_backlog_attempt_id"]
+        == "backlog-attempt-1"
+    )
+    assert saved["state"]["active_backlog_reset_at"] == "2026-06-02T12:00:00Z"
+    assert (
+        saved["state"]["active_backlog_reset_attempt_id"]
+        == "backlog-attempt-1"
+    )
 
 
 @pytest.mark.asyncio
