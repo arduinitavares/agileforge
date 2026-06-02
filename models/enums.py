@@ -64,6 +64,7 @@ class WorkflowEventType(StrEnum):
     VISION_SAVED = "vision_saved"
     SPEC_COMPILED = "spec_compiled"
     BACKLOG_SAVED = "backlog_saved"
+    BACKLOG_REFINEMENT_APPROVED = "backlog_refinement_approved"
     EVIDENCE_COLLECTED = "evidence_collected"
     AS_BUILT_ASSESSED = "as_built_assessed"
     ROADMAP_SAVED = "roadmap_saved"
