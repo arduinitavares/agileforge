@@ -655,6 +655,9 @@ async def reset_active_backlog(
     hydrate_context: Callable[[], Awaitable[Any]],
     reset_rows: Callable[[ActiveBacklogResetRequest], dict[str, Any]],
     replacement_blocked: Callable[[int], bool],
+    reset_replay: (
+        Callable[[ActiveBacklogResetRequest], dict[str, Any] | None] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Reset the active backlog from an approved next-cycle refined attempt."""
     context = await hydrate_context()
@@ -708,23 +711,36 @@ async def reset_active_backlog(
 
     _assert_save_expected_state(state, expected_state)
     _assert_reset_review_origin(state)
+    if reset_replay is not None:
+        reset_result = reset_replay(request)
+        if reset_result is not None:
+            _assert_reset_rows_success(reset_result)
+            _record_active_reset_state(
+                state,
+                attempt_id=attempt_id,
+                now=now,
+                idempotency_key=trimmed_idempotency_key,
+                request=request,
+            )
+            save_state(state)
+            return _reset_active_payload(
+                attempt_id=attempt_id,
+                expected_artifact_fingerprint=expected_artifact_fingerprint,
+                reset_result=reset_result,
+                idempotency_key=trimmed_idempotency_key,
+            )
     if not replacement_blocked(project_id):
         raise BacklogPhaseError("RESET_NOT_REQUIRED")
 
     reset_result = reset_rows(request)
     _assert_reset_rows_success(reset_result)
 
-    state["fsm_state"] = OrchestratorState.BACKLOG_PERSISTENCE.value
-    state["fsm_state_entered_at"] = now
-    state["backlog_saved_at"] = now
-    state["downstream_backlog_stale"] = True
-    state["stale_backlog_reason"] = "active_backlog_reset"
-    state["stale_since_backlog_attempt_id"] = attempt_id
-    state["active_backlog_reset_at"] = now
-    state["active_backlog_reset_attempt_id"] = attempt_id
-    state["active_backlog_reset_idempotency_key"] = trimmed_idempotency_key
-    state["active_backlog_reset_request_fingerprint"] = reset_request_fingerprint(
-        request,
+    _record_active_reset_state(
+        state,
+        attempt_id=attempt_id,
+        now=now,
+        idempotency_key=trimmed_idempotency_key,
+        request=request,
     )
     save_state(state)
 
@@ -733,6 +749,28 @@ async def reset_active_backlog(
         expected_artifact_fingerprint=expected_artifact_fingerprint,
         reset_result=reset_result,
         idempotency_key=trimmed_idempotency_key,
+    )
+
+
+def _record_active_reset_state(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+    now: str,
+    idempotency_key: str,
+    request: ActiveBacklogResetRequest,
+) -> None:
+    state["fsm_state"] = OrchestratorState.BACKLOG_PERSISTENCE.value
+    state["fsm_state_entered_at"] = now
+    state["backlog_saved_at"] = now
+    state["downstream_backlog_stale"] = True
+    state["stale_backlog_reason"] = "active_backlog_reset"
+    state["stale_since_backlog_attempt_id"] = attempt_id
+    state["active_backlog_reset_at"] = now
+    state["active_backlog_reset_attempt_id"] = attempt_id
+    state["active_backlog_reset_idempotency_key"] = idempotency_key
+    state["active_backlog_reset_request_fingerprint"] = reset_request_fingerprint(
+        request,
     )
 
 

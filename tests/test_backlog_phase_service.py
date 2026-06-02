@@ -7,6 +7,10 @@ from typing import Any, Never
 import pytest
 
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from services.agent_workbench.backlog_active_reset import (
+    ActiveBacklogResetRequest,
+    reset_request_fingerprint,
+)
 from services.agent_workbench.backlog_refinement_events import (
     BacklogRefinementApprovalRequest,
 )
@@ -2201,6 +2205,52 @@ async def test_reset_active_backlog_replays_same_key_after_persistence_state() -
     assert len(reset_calls) == 2  # noqa: PLR2004
     assert replacement_checks == ["BACKLOG_REVIEW"]
     assert current_state["fsm_state"] == "BACKLOG_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_reset_active_backlog_recovers_state_from_committed_reset_event() -> None:
+    """Same reset request repairs state after DB reset but state save fails."""
+    state = _reset_ready_state()
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    saved: JsonDict = {}
+    replay_calls: list[ActiveBacklogResetRequest] = []
+    reset_calls: list[ActiveBacklogResetRequest] = []
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=copy.deepcopy(state), session_id="7")
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = copy.deepcopy(updated)
+
+    def reset_replay(request: ActiveBacklogResetRequest) -> JsonDict | None:
+        replay_calls.append(request)
+        return {"success": True, "idempotent_replay": True, "created_count": 1}
+
+    payload = await reset_active_backlog(
+        project_id=7,
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        reset_reason="pre-brownfield reset",
+        archive_all_active_stories=True,
+        idempotency_key="reset-active-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-02T12:00:01Z",
+        hydrate_context=hydrate_context,
+        reset_rows=lambda request: reset_calls.append(request) or {"success": True},
+        reset_replay=reset_replay,
+        replacement_blocked=lambda _project_id: False,
+    )
+
+    assert payload["reset_result"]["idempotent_replay"] is True
+    assert len(replay_calls) == 1
+    assert reset_calls == []
+    assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert saved["state"]["active_backlog_reset_attempt_id"] == "backlog-attempt-1"
+    assert (
+        saved["state"]["active_backlog_reset_request_fingerprint"]
+        == reset_request_fingerprint(replay_calls[0])
+    )
 
 
 @pytest.mark.asyncio

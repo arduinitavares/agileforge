@@ -19,6 +19,7 @@ from repositories.product import ProductRepository
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetError,
     ActiveBacklogResetReusedKeyError,
+    replay_active_backlog_reset,
     reset_active_backlog_rows,
 )
 from services.agent_workbench.backlog_reconciliation import (
@@ -591,6 +592,10 @@ class BacklogPhaseRunner:
                     str(project_id), project_id
                 ),
                 reset_rows=lambda request: reset_active_backlog_rows(
+                    engine,
+                    request,
+                ),
+                reset_replay=lambda request: replay_active_backlog_reset(
                     engine,
                     request,
                 ),

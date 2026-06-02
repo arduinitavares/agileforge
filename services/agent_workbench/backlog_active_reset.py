@@ -67,6 +67,21 @@ def reset_request_fingerprint(request: ActiveBacklogResetRequest) -> str:
     )
 
 
+def replay_active_backlog_reset(
+    engine: Engine,
+    request: ActiveBacklogResetRequest,
+) -> dict[str, Any] | None:
+    """Return a committed reset-active replay without mutating rows."""
+    request_fingerprint = reset_request_fingerprint(request)
+    with Session(engine) as session:
+        return _reset_replay(
+            session,
+            project_id=request.project_id,
+            idempotency_key=request.idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+
+
 def reset_active_backlog_rows(
     engine: Engine,
     request: ActiveBacklogResetRequest,
