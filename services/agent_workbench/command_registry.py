@@ -523,6 +523,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SCHEMA_NOT_READY.value,
             ErrorCode.INVALID_COMMAND.value,
             ErrorCode.MUTATION_FAILED.value,
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,

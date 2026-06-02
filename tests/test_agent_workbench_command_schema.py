@@ -553,6 +553,7 @@ def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR09
         "idempotency_key",
     ]
     assert ErrorCode.INVALID_COMMAND.value in reset_active["errors"]
+    assert ErrorCode.SCHEMA_NOT_READY.value in reset_active["errors"]
     assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in reset_active["errors"]
     assert reconcile["mutates"] is True
     assert reconcile["input"]["required"] == ["project_id", "idempotency_key"]
