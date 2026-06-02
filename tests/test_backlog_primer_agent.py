@@ -482,6 +482,62 @@ class TestSaveBacklogTool:
             assert rows[0].is_superseded is False
 
     @pytest.mark.asyncio
+    async def test_backlog_save_idempotency_replays_legacy_no_action_event(
+        self,
+    ) -> None:
+        """Legacy Backlog save events without action still replay save keys."""
+        mock_context = MagicMock()
+        mock_context.state = {}
+        test_engine = create_engine("sqlite://", echo=False)
+        SQLModel.metadata.create_all(test_engine)
+        with SqlSession(test_engine) as session:
+            session.add(Product(name="Test Product"))
+            session.commit()
+            session.add(
+                WorkflowEvent(
+                    event_type=WorkflowEventType.BACKLOG_SAVED,
+                    product_id=1,
+                    event_metadata=json.dumps(
+                        {
+                            "idempotency_key": "legacy-key",
+                            "processed_count": 1,
+                            "created_count": 1,
+                        }
+                    ),
+                )
+            )
+            session.commit()
+
+        save_input = SaveBacklogInput(
+            product_id=1,
+            idempotency_key="legacy-key",
+            backlog_items=[
+                {
+                    "priority": 1,
+                    "requirement": "Legacy backlog replay remains compatible",
+                    "value_driver": "Strategic",
+                    "justification": "Existing save event must remain replayable.",
+                    "estimated_effort": "S",
+                },
+            ],
+        )
+
+        with patch(
+            "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+            return_value=test_engine,
+        ):
+            result = await save_backlog_tool(save_input, tool_context=mock_context)
+
+        assert result["success"] is True
+        assert result["idempotent_replay"] is True
+        assert result["saved_count"] == 0
+        with SqlSession(test_engine) as session:
+            rows = session.exec(
+                select(UserStory).where(UserStory.product_id == 1)
+            ).all()
+            assert rows == []
+
+    @pytest.mark.asyncio
     async def test_backlog_save_idempotency_ignores_active_reset_events(
         self,
     ) -> None:

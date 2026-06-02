@@ -1864,6 +1864,89 @@ def test_backlog_reconcile_latest_saved_count_ignores_active_reset_events(
     assert result["data"]["active_after"] == 2  # noqa: PLR2004
 
 
+def test_backlog_reconcile_latest_saved_count_uses_legacy_no_action_events(
+    session: Session,
+) -> None:
+    """Legacy saved events without action still select canonical seed cohort."""
+    product = Product(name="Cartola")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    assert product.product_id is not None
+    product_id = product.product_id
+    base = datetime(2026, 6, 2, 13, tzinfo=UTC)
+    for offset, title, rank in [
+        (0, "Legacy import", "1"),
+        (1, "Legacy projection", "2"),
+        (10, "Current import", "3"),
+        (11, "Current projection", "4"),
+    ]:
+        session.add(
+            UserStory(
+                product_id=product_id,
+                title=title,
+                status=StoryStatus.TO_DO,
+                rank=rank,
+                story_origin="backlog_seed",
+                is_refined=False,
+                is_superseded=False,
+                created_at=base + timedelta(minutes=offset),
+                updated_at=base + timedelta(minutes=offset),
+            )
+        )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=product_id,
+            timestamp=base + timedelta(minutes=12),
+            event_metadata=json.dumps(
+                {
+                    "processed_count": 2,
+                    "created_count": 2,
+                }
+            ),
+        )
+    )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.BACKLOG_SAVED,
+            product_id=product_id,
+            timestamp=base + timedelta(minutes=20),
+            event_metadata=json.dumps(
+                {
+                    "action": "active_backlog_reset",
+                    "created_count": 13,
+                    "idempotency_key": "reset-active",
+                }
+            ),
+        )
+    )
+    session.commit()
+
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.reconcile(
+        project_id=product_id,
+        idempotency_key="reconcile-legacy-no-action",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["strategy"] == "latest_backlog_saved_event"
+    assert result["data"]["active_after"] == 2  # noqa: PLR2004
+    rows = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == product_id)
+        .order_by(cast("Any", UserStory.story_id))
+    ).all()
+    assert [row.title for row in rows if not row.is_superseded] == [
+        "Current import",
+        "Current projection",
+    ]
+
+
 def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
     session: Session,
 ) -> None:
