@@ -13,6 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
+from services.agent_workbench import backlog_active_reset as reset_mod
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetError,
     ActiveBacklogResetRequest,
@@ -348,6 +349,51 @@ def test_reset_active_rejects_invalid_projected_item_before_mutation() -> None:
                 }
             ),
         )
+
+    _assert_reset_left_story_untouched(engine)
+
+
+def test_reset_active_rolls_back_when_history_preservation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named postcondition failure rolls back archive fields and event writes."""
+    engine = _engine()
+    _seed_active_story(engine)
+    snapshots = [
+        {
+            "user_stories": 1,
+            "sprints": 0,
+            "sprint_stories": 0,
+            "tasks": 0,
+            "story_completion_logs": 0,
+            "task_execution_logs": 0,
+            "workflow_events": 0,
+        },
+        {
+            "user_stories": 0,
+            "sprints": 0,
+            "sprint_stories": 0,
+            "tasks": 0,
+            "story_completion_logs": 0,
+            "task_execution_logs": 0,
+            "workflow_events": 1,
+        },
+    ]
+
+    def fake_history_snapshot(_session: Session) -> dict[str, int]:
+        return snapshots.pop(0)
+
+    monkeypatch.setattr(
+        reset_mod,
+        "_reset_history_snapshot",
+        fake_history_snapshot,
+    )
+
+    with pytest.raises(
+        ActiveBacklogResetError,
+        match="RESET_HISTORY_PRESERVATION_FAILED",
+    ):
+        reset_active_backlog_rows(engine, _request())
 
     _assert_reset_left_story_untouched(engine)
 

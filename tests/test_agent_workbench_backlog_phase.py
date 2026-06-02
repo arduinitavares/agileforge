@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
-from sqlmodel import select
+from sqlalchemy import text
+from sqlmodel import create_engine, select
 
 from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
@@ -2002,6 +2003,57 @@ def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
         ).all()
         == []
     )
+
+
+def test_reset_active_returns_schema_not_ready_for_unmigrated_story_table() -> None:
+    """Reset-active fails before row mutation when archive columns are absent."""
+    engine = create_engine("sqlite://", echo=False)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE user_stories (
+                    story_id INTEGER PRIMARY KEY,
+                    product_id INTEGER,
+                    title TEXT,
+                    status TEXT,
+                    rank TEXT,
+                    story_origin TEXT,
+                    is_refined BOOLEAN,
+                    is_superseded BOOLEAN,
+                    superseded_by_story_id INTEGER
+                )
+                """
+            )
+        )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+        engine=engine,
+    )
+
+    result = runner.reset_active(
+        project_id=1,
+        attempt_id="backlog-attempt-12",
+        expected_artifact_fingerprint="sha256:artifact",
+        expected_state="BACKLOG_REVIEW",
+        reset_reason="pre-brownfield reset",
+        archive_all_active_stories=True,
+        idempotency_key="reset-active-1",
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "SCHEMA_NOT_READY"
+    assert error["details"]["missing"] == {
+        "user_stories": [
+            "archived_reason",
+            "archived_at",
+            "archived_by",
+            "archive_reset_attempt_id",
+            "archive_previous_status",
+        ]
+    }
 
 
 def test_reset_active_acceptance_archives_active_backlog_and_preserves_history(  # noqa: PLR0915

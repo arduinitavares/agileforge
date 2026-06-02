@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import anyio
 from sqlmodel import Session, select
@@ -32,6 +32,10 @@ from services.agent_workbench.backlog_refinement_events import (
     record_backlog_refinement_approval,
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.schema_readiness import (
+    SchemaRequirement,
+    check_schema_readiness,
+)
 from services.backlog_runtime import run_backlog_agent_from_state
 from services.phases.backlog_service import (
     BacklogPhaseError,
@@ -61,6 +65,27 @@ _REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
 )
 _APPROVAL_IDEMPOTENCY_REUSED_MESSAGE = (
     "Idempotency key reused with different approval inputs."
+)
+_RESET_ACTIVE_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
+    SchemaRequirement(
+        "user_stories",
+        (
+            "story_id",
+            "product_id",
+            "title",
+            "status",
+            "rank",
+            "story_origin",
+            "is_refined",
+            "is_superseded",
+            "superseded_by_story_id",
+            "archived_reason",
+            "archived_at",
+            "archived_by",
+            "archive_reset_attempt_id",
+            "archive_previous_status",
+        ),
+    ),
 )
 
 
@@ -560,7 +585,7 @@ class BacklogPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _reset_active(  # noqa: PLR0913
+    async def _reset_active(  # noqa: PLR0911, PLR0913
         self,
         project_id: int,
         attempt_id: str,
@@ -575,6 +600,9 @@ class BacklogPhaseRunner:
             return product
 
         engine = self._engine or get_engine()
+        schema_error = _reset_active_schema_error(engine)
+        if schema_error is not None:
+            return schema_error
         try:
             data = await reset_active_backlog(
                 project_id=project_id,
@@ -830,6 +858,19 @@ def _error_envelope(
             ).to_dict()
         ],
     }
+
+
+def _reset_active_schema_error(engine: Engine) -> dict[str, Any] | None:
+    """Return schema-not-ready when reset-active archive columns are absent."""
+    readiness = check_schema_readiness(engine, _RESET_ACTIVE_REQUIREMENTS)
+    if readiness.ok:
+        return None
+    return _error_envelope(
+        ErrorCode.SCHEMA_NOT_READY,
+        "Database schema is missing required tables or columns for reset-active.",
+        details={"missing": readiness.missing},
+        remediation=["Run the application startup or migration command first."],
+    )
 
 
 def _phase_error(exc: BacklogPhaseError) -> dict[str, Any]:

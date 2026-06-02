@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any, cast
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
-from models.core import UserStory
+from models.core import Sprint, SprintStory, Task, UserStory
 from models.enums import StoryStatus, WorkflowEventType
-from models.events import WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from orchestrator_agent.agent_tools.backlog_primer.schemes import BacklogItem
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.agent_workbench.fingerprints import canonical_hash
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 _RESET_NOT_REQUIRED = "RESET_NOT_REQUIRED"
 _RESET_IDEMPOTENCY_CONFLICT = "RESET_IDEMPOTENCY_CONFLICT"
 _RESET_BACKLOG_ITEMS_EMPTY = "RESET_BACKLOG_ITEMS_EMPTY"
+_RESET_HISTORY_PRESERVATION_FAILED = "RESET_HISTORY_PRESERVATION_FAILED"
 
 
 class ActiveBacklogResetError(RuntimeError):
@@ -105,6 +106,7 @@ def reset_active_backlog_rows(
             BacklogItem.model_validate(raw_item) for raw_item in projected_items
         ]
 
+        history_before = _reset_history_snapshot(session)
         active_stories = session.exec(
             select(UserStory)
             .where(UserStory.product_id == request.project_id)
@@ -114,50 +116,60 @@ def reset_active_backlog_rows(
         if not active_stories:
             raise ActiveBacklogResetError(_RESET_NOT_REQUIRED)
 
-        archived_story_ids: list[int] = []
-        for story in active_stories:
-            story.is_superseded = True
-            story.superseded_by_story_id = None
-            story.archived_reason = "active_backlog_reset"
-            story.archived_at = request.now
-            story.archived_by = request.archived_by
-            story.archive_reset_attempt_id = request.attempt_id
-            story.archive_previous_status = _story_status_value(story.status)
-            if story.story_id is not None:
-                archived_story_ids.append(story.story_id)
-            session.add(story)
+        try:
+            archived_story_ids: list[int] = []
+            for story in active_stories:
+                story.is_superseded = True
+                story.superseded_by_story_id = None
+                story.archived_reason = "active_backlog_reset"
+                story.archived_at = request.now
+                story.archived_by = request.archived_by
+                story.archive_reset_attempt_id = request.attempt_id
+                story.archive_previous_status = _story_status_value(story.status)
+                if story.story_id is not None:
+                    archived_story_ids.append(story.story_id)
+                session.add(story)
 
-        created_story_ids: list[int] = []
-        for item in validated_items:
-            story = _story_from_backlog_item(request.project_id, item)
-            session.add(story)
-            session.flush()
-            if story.story_id is not None:
-                created_story_ids.append(story.story_id)
+            created_story_ids: list[int] = []
+            for item in validated_items:
+                story = _story_from_backlog_item(request.project_id, item)
+                session.add(story)
+                session.flush()
+                if story.story_id is not None:
+                    created_story_ids.append(story.story_id)
 
-        metadata = {
-            "action": "active_backlog_reset",
-            "project_id": request.project_id,
-            "attempt_id": request.attempt_id,
-            "artifact_fingerprint": request.expected_artifact_fingerprint,
-            "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
-            "reset_reason": request.reset_reason,
-            "archived_story_ids": archived_story_ids,
-            "created_story_ids": created_story_ids,
-            "archived_count": len(archived_story_ids),
-            "created_count": len(created_story_ids),
-            "idempotency_key": request.idempotency_key,
-            "request_fingerprint": request_fingerprint,
-        }
-        session.add(
-            WorkflowEvent(
-                event_type=WorkflowEventType.BACKLOG_SAVED,
-                product_id=request.project_id,
-                timestamp=request.now,
-                event_metadata=json.dumps(metadata, sort_keys=True),
+            metadata = {
+                "action": "active_backlog_reset",
+                "project_id": request.project_id,
+                "attempt_id": request.attempt_id,
+                "artifact_fingerprint": request.expected_artifact_fingerprint,
+                "approved_artifact_fingerprint": request.approved_artifact_fingerprint,
+                "reset_reason": request.reset_reason,
+                "archived_story_ids": archived_story_ids,
+                "created_story_ids": created_story_ids,
+                "archived_count": len(archived_story_ids),
+                "created_count": len(created_story_ids),
+                "idempotency_key": request.idempotency_key,
+                "request_fingerprint": request_fingerprint,
+            }
+            session.add(
+                WorkflowEvent(
+                    event_type=WorkflowEventType.BACKLOG_SAVED,
+                    product_id=request.project_id,
+                    timestamp=request.now,
+                    event_metadata=json.dumps(metadata, sort_keys=True),
+                )
             )
-        )
-        session.commit()
+            session.flush()
+            _assert_reset_history_preserved(
+                before=history_before,
+                after=_reset_history_snapshot(session),
+                created_story_count=len(created_story_ids),
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
         return {"success": True, "idempotent_replay": False, **metadata}
 
 
@@ -233,6 +245,36 @@ def _json_object(value: str | None) -> dict[str, Any]:
     if isinstance(decoded, dict):
         return decoded
     return {}
+
+
+def _reset_history_snapshot(session: Session) -> dict[str, int]:
+    """Return table counts that reset-active must never reduce."""
+    return {
+        "user_stories": len(session.exec(select(UserStory.story_id)).all()),
+        "sprints": len(session.exec(select(Sprint.sprint_id)).all()),
+        "sprint_stories": len(session.exec(select(SprintStory.story_id)).all()),
+        "tasks": len(session.exec(select(Task.task_id)).all()),
+        "story_completion_logs": len(
+            session.exec(select(StoryCompletionLog.log_id)).all()
+        ),
+        "task_execution_logs": len(session.exec(select(TaskExecutionLog.log_id)).all()),
+        "workflow_events": len(session.exec(select(WorkflowEvent.event_id)).all()),
+    }
+
+
+def _assert_reset_history_preserved(
+    *,
+    before: dict[str, int],
+    after: dict[str, int],
+    created_story_count: int,
+) -> None:
+    """Fail closed when reset-active removed history rows before commit."""
+    expected_minimums = dict(before)
+    expected_minimums["user_stories"] = before["user_stories"] + created_story_count
+    expected_minimums["workflow_events"] = before["workflow_events"] + 1
+    for table, minimum_count in expected_minimums.items():
+        if after.get(table, -1) < minimum_count:
+            raise ActiveBacklogResetError(_RESET_HISTORY_PRESERVATION_FAILED)
 
 
 def _story_status_value(status: StoryStatus | str) -> str:
