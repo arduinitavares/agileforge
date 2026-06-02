@@ -2537,7 +2537,7 @@ def _latest_backlog_attempt(workflow: dict[str, Any]) -> dict[str, Any] | None:
         return None
     for attempt in reversed(attempts):
         if isinstance(attempt, dict):
-            return attempt
+            return cast("dict[str, Any]", attempt)
     return None
 
 

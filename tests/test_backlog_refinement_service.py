@@ -1,7 +1,8 @@
 """Tests for backlog refinement operation helpers."""
 
 import json
-from typing import Any
+from datetime import datetime
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from services.agent_workbench.backlog_refinement_events import (
     record_backlog_refinement_approval,
 )
 from services.agent_workbench.mutation_ledger import (
+    DEFAULT_LEASE_SECONDS,
     LedgerLoadResult,
     MutationLedgerRepository,
     MutationStatus,
@@ -33,6 +35,7 @@ from services.phases.backlog_refinement import (
     ClassifyOperation,
     DeleteOperation,
     MergeOperation,
+    RefinementOperation,
     ReorderOperation,
     RetitleOperation,
     RewriteScopeOperation,
@@ -46,8 +49,10 @@ from services.phases.backlog_refinement import (
     project_savable_backlog_items,
 )
 
+type OperationPayload = dict[str, object]
 
-def _item(priority: int, requirement: str, **extra: object) -> dict[str, object]:
+
+def _item(priority: int, requirement: str, **extra: object) -> OperationPayload:
     return {
         "priority": priority,
         "requirement": requirement,
@@ -61,7 +66,9 @@ def _item(priority: int, requirement: str, **extra: object) -> dict[str, object]
     }
 
 
-def _operation_set(operations: list[Any]) -> BacklogRefinementOperationSet:
+def _operation_set(
+    operations: list[RefinementOperation],
+) -> BacklogRefinementOperationSet:
     return BacklogRefinementOperationSet(
         source_attempt_id="backlog-attempt-1",
         source_artifact_fingerprint="sha256:source",
@@ -345,7 +352,9 @@ def test_record_backlog_refinement_approval_writes_append_only_event() -> None:
 
     metadata = json.loads(events[0].event_metadata or "{}")
     ledger_response = json.loads(ledgers[0].response_json or "{}")
-    assert result["approval_id"].startswith("approval:")
+    approval_id = result["approval_id"]
+    assert isinstance(approval_id, str)
+    assert approval_id.startswith("approval:")
     assert result["idempotent_replay"] is False
     assert result["approval_id"] == metadata["approval_id"]
     assert events[0].event_type == WorkflowEventType.BACKLOG_REFINEMENT_APPROVED
@@ -468,11 +477,33 @@ def test_record_approval_fails_closed_when_ledger_finalization_fails(
     request = _approval_request()
     original_create_or_load = MutationLedgerRepository.create_or_load
 
-    def create_then_steal_lease(
+    def create_then_steal_lease(  # noqa: PLR0913
         self: MutationLedgerRepository,
-        **kwargs: object,
+        *,
+        command: str,
+        idempotency_key: str,
+        request_hash: str,
+        project_id: int | None,
+        correlation_id: str,
+        changed_by: str,
+        lease_owner: str,
+        now: datetime,
+        recovers_mutation_event_id: int | None = None,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> LedgerLoadResult:
-        loaded = original_create_or_load(self, **kwargs)
+        loaded = original_create_or_load(
+            self,
+            command=command,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+            lease_owner=lease_owner,
+            now=now,
+            recovers_mutation_event_id=recovers_mutation_event_id,
+            lease_seconds=lease_seconds,
+        )
         event_id = loaded.ledger.mutation_event_id
         assert event_id is not None
         with Session(engine) as ledger_session:
@@ -626,67 +657,65 @@ def test_add_intake_requires_non_implementation_classification() -> None:
             authority_gap_ref="REQ.new-gap",
             rationale="Unsupported gap.",
             requested_by="agent",
-            classification="product_new_work",
+            classification=cast("Any", "product_new_work"),
         )
 
 
-@pytest.mark.parametrize(
-    ("operation_cls", "operation_kwargs"),
-    [
-        (
-            ClassifyOperation,
-            {"classification": "verification"},
-        ),
-        (
-            AuthorityRefChangeOperation,
-            {"old_authority_ref": "REQ.old", "new_authority_ref": "REQ.new"},
-        ),
-    ],
-)
-def test_single_item_operations_reject_multiple_sources(
-    operation_cls: type[ClassifyOperation | AuthorityRefChangeOperation],
-    operation_kwargs: dict[str, object],
-) -> None:
-    """Classify and authority-ref changes operate on exactly one source item."""
+def test_classify_operation_rejects_multiple_sources() -> None:
+    """Classify operations operate on exactly one source item."""
     with pytest.raises(ValidationError):
-        operation_cls(
+        ClassifyOperation(
             operation_id="op-single-source",
             source_item_ids=["item-001", "item-002"],
             source_item_fingerprints=["sha256:item-001", "sha256:item-002"],
             result_item_ids=[],
             rationale="Change one item.",
             requested_by="po",
-            **operation_kwargs,
+            classification="verification",
         )
 
 
-@pytest.mark.parametrize(
-    ("operation_cls", "operation_kwargs"),
-    [
-        (
-            ClassifyOperation,
-            {"classification": "verification"},
-        ),
-        (
-            AuthorityRefChangeOperation,
-            {"old_authority_ref": "REQ.old", "new_authority_ref": "REQ.new"},
-        ),
-    ],
-)
-def test_single_item_operations_reject_result_item_ids(
-    operation_cls: type[ClassifyOperation | AuthorityRefChangeOperation],
-    operation_kwargs: dict[str, object],
-) -> None:
-    """Classify and authority-ref changes reject bogus result item ids."""
+def test_authority_ref_operation_rejects_multiple_sources() -> None:
+    """Authority-ref changes operate on exactly one source item."""
     with pytest.raises(ValidationError):
-        operation_cls(
+        AuthorityRefChangeOperation(
+            operation_id="op-single-source",
+            source_item_ids=["item-001", "item-002"],
+            source_item_fingerprints=["sha256:item-001", "sha256:item-002"],
+            result_item_ids=[],
+            rationale="Change one item.",
+            requested_by="po",
+            old_authority_ref="REQ.old",
+            new_authority_ref="REQ.new",
+        )
+
+
+def test_classify_operation_rejects_result_item_ids() -> None:
+    """Classify operations reject bogus result item ids."""
+    with pytest.raises(ValidationError):
+        ClassifyOperation(
             operation_id="op-no-results",
             source_item_ids=["item-001"],
             source_item_fingerprints=["sha256:item-001"],
             result_item_ids=["item-001-updated"],
             rationale="Change one item in place.",
             requested_by="po",
-            **operation_kwargs,
+            classification="verification",
+        )
+
+
+def test_authority_ref_operation_rejects_result_item_ids() -> None:
+    """Authority-ref changes reject bogus result item ids."""
+    with pytest.raises(ValidationError):
+        AuthorityRefChangeOperation(
+            operation_id="op-no-results",
+            source_item_ids=["item-001"],
+            source_item_fingerprints=["sha256:item-001"],
+            result_item_ids=["item-001-updated"],
+            rationale="Change one item in place.",
+            requested_by="po",
+            old_authority_ref="REQ.old",
+            new_authority_ref="REQ.new",
         )
 
 

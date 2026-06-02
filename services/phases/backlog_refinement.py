@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Annotated, Literal, Never
+from typing import Annotated, Any, Literal, Never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -17,6 +17,7 @@ type BacklogClassification = Literal[
     "unchanged",
     "authority_gap_intake",
 ]
+type JsonDict = dict[str, Any]
 type OperationType = Literal[
     "split",
     "merge",
@@ -285,7 +286,7 @@ class BacklogRefinementOperationSet(BaseModel):
     operations: list[RefinementOperation]
 
 
-def _item_fingerprint(item: dict[str, object]) -> str:
+def _item_fingerprint(item: JsonDict) -> str:
     stable_item = copy.deepcopy(item)
     stable_item.pop("item_id", None)
     stable_item.pop("item_fingerprint", None)
@@ -293,11 +294,11 @@ def _item_fingerprint(item: dict[str, object]) -> str:
 
 
 def assign_item_identity(
-    artifact: dict[str, object],
+    artifact: JsonDict,
     *,
     source_attempt_id: str,
     source_artifact_fingerprint: str,
-) -> dict[str, object]:
+) -> JsonDict:
     """Return a copy of artifact with stable host item identity."""
     normalized = copy.deepcopy(artifact)
     items = normalized.get("backlog_items")
@@ -307,10 +308,12 @@ def assign_item_identity(
     for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        item.setdefault("item_id", f"item-{index:03d}")
-        item["source_attempt_id"] = source_attempt_id
-        item["source_artifact_fingerprint"] = source_artifact_fingerprint
-        item["item_fingerprint"] = _item_fingerprint(item)
+        item_data = cast("JsonDict", item)
+        if not item_data.get("item_id"):
+            item_data["item_id"] = f"item-{index:03d}"
+        item_data["source_attempt_id"] = source_attempt_id
+        item_data["source_artifact_fingerprint"] = source_artifact_fingerprint
+        item_data["item_fingerprint"] = _item_fingerprint(item_data)
     return normalized
 
 
@@ -327,28 +330,29 @@ def canonical_operations_fingerprint(
 
 
 def project_savable_backlog_items(
-    artifact: dict[str, object],
-) -> list[dict[str, object]]:
+    artifact: JsonDict,
+) -> list[JsonDict]:
     """Return BacklogItem-compatible implementation items from artifact."""
     raw_items = artifact.get("backlog_items")
     if not isinstance(raw_items, list):
         return []
-    projected: list[dict[str, object]] = []
+    projected: list[JsonDict] = []
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             continue
-        if raw_item.get("classification") == "authority_gap_intake":
+        item = cast("JsonDict", raw_item)
+        if item.get("classification") == "authority_gap_intake":
             continue
         item_payload = {
             key: copy.deepcopy(value)
-            for key, value in raw_item.items()
+            for key, value in item.items()
             if key in BACKLOG_ITEM_KEYS and key not in HOST_ONLY_ITEM_KEYS
         }
         projected.append(BacklogItem.model_validate(item_payload).model_dump())
     return projected
 
 
-def normalize_refined_artifact(artifact: dict[str, object]) -> dict[str, object]:
+def normalize_refined_artifact(artifact: JsonDict) -> JsonDict:
     """Normalize priorities and recompute item fingerprints for a refined draft."""
     normalized = copy.deepcopy(artifact)
     raw_items = normalized.get("backlog_items")
@@ -357,14 +361,15 @@ def normalize_refined_artifact(artifact: dict[str, object]) -> dict[str, object]
         normalized["is_complete"] = False
         return normalized
 
-    valid_items: list[dict[str, object]] = []
+    valid_items: list[JsonDict] = []
     for item in raw_items:
         if not isinstance(item, dict):
             continue
+        item_data = cast("JsonDict", item)
         priority = len(valid_items) + 1
-        item["priority"] = priority
-        item["item_fingerprint"] = _item_fingerprint(item)
-        valid_items.append(item)
+        item_data["priority"] = priority
+        item_data["item_fingerprint"] = _item_fingerprint(item_data)
+        valid_items.append(item_data)
 
     normalized["backlog_items"] = valid_items
     normalized["is_complete"] = len(valid_items) >= MIN_COMPLETE_BACKLOG_ITEMS and (
@@ -374,8 +379,8 @@ def normalize_refined_artifact(artifact: dict[str, object]) -> dict[str, object]
 
 
 def operations_from_edited_artifact(
-    source_artifact: dict[str, object],
-    edited_artifact: dict[str, object],
+    source_artifact: JsonDict,
+    edited_artifact: JsonDict,
     *,
     authority_fingerprint: str,
     as_built_cache_fingerprint: str,
@@ -448,20 +453,21 @@ def operations_from_edited_artifact(
 
 
 def _source_items_for_diff(
-    source_artifact: dict[str, object],
-) -> dict[str, dict[str, object]]:
+    source_artifact: JsonDict,
+) -> dict[str, JsonDict]:
     raw_items = source_artifact.get("backlog_items")
     if not isinstance(raw_items, list):
         _raise_ambiguous_diff(
             "ambiguous source artifact: backlog_items must be a list",
         )
-    source_items: dict[str, dict[str, object]] = {}
+    source_items: dict[str, JsonDict] = {}
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             _raise_ambiguous_diff(
                 "ambiguous source artifact: backlog_items must contain objects",
             )
-        item_id = raw_item.get("item_id")
+        item = cast("JsonDict", raw_item)
+        item_id = item.get("item_id")
         if not isinstance(item_id, str) or not item_id.strip():
             _raise_ambiguous_diff(
                 "ambiguous source artifact: source items require item_id",
@@ -470,29 +476,29 @@ def _source_items_for_diff(
             _raise_ambiguous_diff(
                 f"ambiguous source artifact: duplicate item_id {item_id}",
             )
-        source_items[item_id] = raw_item
+        source_items[item_id] = item
     return source_items
 
 
 def _edited_items_for_diff(
-    edited_artifact: dict[str, object],
-) -> list[dict[str, object]]:
+    edited_artifact: JsonDict,
+) -> list[JsonDict]:
     raw_items = edited_artifact.get("backlog_items")
     if not isinstance(raw_items, list):
         _raise_ambiguous_diff(
             "ambiguous edited artifact: backlog_items must be a list",
         )
-    edited_items: list[dict[str, object]] = []
+    edited_items: list[JsonDict] = []
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             _raise_ambiguous_diff(
                 "ambiguous edited artifact: backlog_items must contain objects",
             )
-        edited_items.append(raw_item)
+        edited_items.append(cast("JsonDict", raw_item))
     return edited_items
 
 
-def _source_attempt_id_for_diff(source_items: dict[str, dict[str, object]]) -> str:
+def _source_attempt_id_for_diff(source_items: dict[str, JsonDict]) -> str:
     source_attempt_ids = {
         str(item.get("source_attempt_id"))
         for item in source_items.values()
@@ -507,7 +513,7 @@ def _source_attempt_id_for_diff(source_items: dict[str, dict[str, object]]) -> s
 
 
 def _source_artifact_fingerprint_for_diff(
-    source_items: dict[str, dict[str, object]],
+    source_items: dict[str, JsonDict],
 ) -> str:
     source_fingerprints = {
         str(item.get("source_artifact_fingerprint"))
@@ -524,10 +530,10 @@ def _source_artifact_fingerprint_for_diff(
 
 
 def _edited_items_by_source_id(
-    edited_items: list[dict[str, object]],
-    source_items: dict[str, dict[str, object]],
-) -> dict[str, dict[str, object]]:
-    edited_by_source_id: dict[str, dict[str, object]] = {}
+    edited_items: list[JsonDict],
+    source_items: dict[str, JsonDict],
+) -> dict[str, JsonDict]:
+    edited_by_source_id: dict[str, JsonDict] = {}
     for edited_item in edited_items:
         source_item_id = edited_item.get("source_item_id")
         if not isinstance(source_item_id, str) or not source_item_id.strip():
@@ -547,8 +553,8 @@ def _edited_items_by_source_id(
 
 
 def _assert_no_order_or_priority_edit(
-    source_items: dict[str, dict[str, object]],
-    edited_items: list[dict[str, object]],
+    source_items: dict[str, JsonDict],
+    edited_items: list[JsonDict],
 ) -> None:
     source_order = list(source_items)
     edited_order = [str(item["source_item_id"]) for item in edited_items]
@@ -571,7 +577,7 @@ def _assert_no_order_or_priority_edit(
             )
 
 
-def _source_item_fingerprint_for_diff(item: dict[str, object]) -> str:
+def _source_item_fingerprint_for_diff(item: JsonDict) -> str:
     fingerprint = item.get("item_fingerprint")
     if isinstance(fingerprint, str) and fingerprint.strip():
         return fingerprint
@@ -579,10 +585,10 @@ def _source_item_fingerprint_for_diff(item: dict[str, object]) -> str:
 
 
 def _diff_backlog_item_fields(
-    source_item: dict[str, object],
-    edited_item: dict[str, object],
-) -> dict[str, object]:
-    field_updates: dict[str, object] = {}
+    source_item: JsonDict,
+    edited_item: JsonDict,
+) -> JsonDict:
+    field_updates: JsonDict = {}
     for key in sorted(BACKLOG_ITEM_KEYS):
         if key == "priority":
             continue
@@ -591,18 +597,22 @@ def _diff_backlog_item_fields(
     return field_updates
 
 
-def _items_by_id(artifact: dict[str, object]) -> dict[str, dict[str, object]]:
+def _items_by_id(artifact: JsonDict) -> dict[str, JsonDict]:
     raw_items = artifact.get("backlog_items")
     if not isinstance(raw_items, list):
         return {}
-    return {
-        str(item["item_id"]): item
-        for item in raw_items
-        if isinstance(item, dict) and item.get("item_id")
-    }
+    items_by_id: dict[str, JsonDict] = {}
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        item = cast("JsonDict", raw_item)
+        item_id = item.get("item_id")
+        if item_id:
+            items_by_id[str(item_id)] = item
+    return items_by_id
 
 
-def _assert_unique_item_ids(items: list[dict[str, object]]) -> None:
+def _assert_unique_item_ids(items: list[JsonDict]) -> None:
     seen_item_ids: set[str] = set()
     duplicate_item_ids: set[str] = set()
     for item in items:
@@ -619,7 +629,7 @@ def _assert_unique_item_ids(items: list[dict[str, object]]) -> None:
 
 
 def _assert_source_matches(
-    items_by_id: dict[str, dict[str, object]],
+    items_by_id: dict[str, JsonDict],
     operation: BaseRefinementOperation,
 ) -> None:
     for source_id, expected_fingerprint in zip(
@@ -654,7 +664,7 @@ def _provenance(
 
 
 def _mark_provenance(
-    item: dict[str, object],
+    item: JsonDict,
     operation: BaseRefinementOperation,
     operation_set: BacklogRefinementOperationSet,
 ) -> None:
@@ -667,8 +677,8 @@ def _with_result_identity(
     result_item_id: str,
     operation: BaseRefinementOperation,
     operation_set: BacklogRefinementOperationSet,
-) -> dict[str, object]:
-    result = copy.deepcopy(item)
+) -> JsonDict:
+    result = cast("JsonDict", copy.deepcopy(item))
     result["item_id"] = result_item_id
     result["source_attempt_id"] = operation_set.source_attempt_id
     result["source_artifact_fingerprint"] = operation_set.source_artifact_fingerprint
@@ -677,7 +687,7 @@ def _with_result_identity(
 
 
 def _assert_result_ids_do_not_reuse_current_item_ids(
-    items: list[dict[str, object]],
+    items: list[JsonDict],
     operation: BaseRefinementOperation,
 ) -> None:
     current_item_ids = {str(item["item_id"]) for item in items if item.get("item_id")}
@@ -688,10 +698,10 @@ def _assert_result_ids_do_not_reuse_current_item_ids(
 
 
 def _apply_split(
-    items: list[dict[str, object]],
+    items: list[JsonDict],
     operation: SplitOperation,
     operation_set: BacklogRefinementOperationSet,
-) -> list[dict[str, object]]:
+) -> list[JsonDict]:
     source_id = operation.source_item_ids[0]
     _assert_result_ids_do_not_reuse_current_item_ids(items, operation)
     replacements = [
@@ -708,7 +718,7 @@ def _apply_split(
         )
     ]
 
-    refined_items: list[dict[str, object]] = []
+    refined_items: list[JsonDict] = []
     for item in items:
         if item.get("item_id") == source_id:
             refined_items.extend(replacements)
@@ -718,10 +728,10 @@ def _apply_split(
 
 
 def _apply_merge(
-    items: list[dict[str, object]],
+    items: list[JsonDict],
     operation: MergeOperation,
     operation_set: BacklogRefinementOperationSet,
-) -> list[dict[str, object]]:
+) -> list[JsonDict]:
     source_ids = set(operation.source_item_ids)
     _assert_result_ids_do_not_reuse_current_item_ids(items, operation)
     replacement = _with_result_identity(
@@ -732,7 +742,7 @@ def _apply_merge(
     )
 
     inserted = False
-    refined_items: list[dict[str, object]] = []
+    refined_items: list[JsonDict] = []
     for item in items:
         if item.get("item_id") not in source_ids:
             refined_items.append(item)
@@ -744,7 +754,7 @@ def _apply_merge(
 
 
 def _apply_retitle(
-    items_by_id: dict[str, dict[str, object]],
+    items_by_id: dict[str, JsonDict],
     operation: RetitleOperation,
     operation_set: BacklogRefinementOperationSet,
 ) -> None:
@@ -754,7 +764,7 @@ def _apply_retitle(
 
 
 def _apply_rewrite_scope(
-    items_by_id: dict[str, dict[str, object]],
+    items_by_id: dict[str, JsonDict],
     operation: RewriteScopeOperation,
     operation_set: BacklogRefinementOperationSet,
 ) -> None:
@@ -764,9 +774,9 @@ def _apply_rewrite_scope(
 
 
 def _apply_reorder(
-    items: list[dict[str, object]],
+    items: list[JsonDict],
     operation: ReorderOperation,
-) -> list[dict[str, object]]:
+) -> list[JsonDict]:
     items_by_id = _items_by_id({"backlog_items": items})
     current_item_ids = list(items_by_id)
     ordered_item_ids = operation.ordered_item_ids
@@ -779,7 +789,7 @@ def _apply_reorder(
 
 
 def _apply_classify(
-    items_by_id: dict[str, dict[str, object]],
+    items_by_id: dict[str, JsonDict],
     operation: ClassifyOperation,
     operation_set: BacklogRefinementOperationSet,
 ) -> None:
@@ -789,7 +799,7 @@ def _apply_classify(
 
 
 def _apply_authority_ref_change(
-    items_by_id: dict[str, dict[str, object]],
+    items_by_id: dict[str, JsonDict],
     operation: AuthorityRefChangeOperation,
     operation_set: BacklogRefinementOperationSet,
     supported_authority_refs: set[str] | None,
@@ -813,7 +823,7 @@ def _apply_authority_ref_change(
 
 
 def _apply_add_intake(
-    refined: dict[str, object],
+    refined: JsonDict,
     operation: AddIntakeOperation,
     operation_set: BacklogRefinementOperationSet,
 ) -> None:
@@ -833,16 +843,16 @@ def _apply_add_intake(
     if not isinstance(raw_intake_items, list):
         raw_intake_items = []
         refined["backlog_intake_items"] = raw_intake_items
-    raw_intake_items.append(intake)
+    cast("list[JsonDict]", raw_intake_items).append(intake)
 
 
 def _apply_refinement_operation(
-    refined: dict[str, object],
-    items: list[dict[str, object]],
+    refined: JsonDict,
+    items: list[JsonDict],
     operation: RefinementOperation,
     operation_set: BacklogRefinementOperationSet,
     supported_authority_refs: set[str] | None,
-) -> list[dict[str, object]]:
+) -> list[JsonDict]:
     _assert_unique_item_ids(items)
     items_by_id = _items_by_id({"backlog_items": items})
     _assert_source_matches(items_by_id, operation)
@@ -878,18 +888,22 @@ def _apply_refinement_operation(
 
 
 def apply_refinement_operations(
-    source_artifact: dict[str, object],
+    source_artifact: JsonDict,
     operation_set: BacklogRefinementOperationSet,
     *,
     supported_authority_refs: set[str] | None = None,
-) -> dict[str, object]:
+) -> JsonDict:
     """Apply typed refinement operations and normalize the refined artifact."""
     refined = copy.deepcopy(source_artifact)
     raw_items = refined.get("backlog_items")
     if not isinstance(raw_items, list):
         raw_items = []
 
-    items = [copy.deepcopy(item) for item in raw_items if isinstance(item, dict)]
+    items: list[JsonDict] = [
+        cast("JsonDict", copy.deepcopy(item))
+        for item in raw_items
+        if isinstance(item, dict)
+    ]
     _assert_unique_item_ids(items)
     for operation in operation_set.operations:
         items = _apply_refinement_operation(

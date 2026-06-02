@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import update
@@ -166,20 +166,26 @@ def _finalize_approval_success(
     *,
     mutation_event_id: int,
     lease_owner: str,
-    payload: dict[str, dict[str, object]],
+    payload: dict[str, object],
     now: datetime,
 ) -> bool:
     db_now = _db_datetime(now)
+    mutation_event_id_col = cast("Any", CliMutationLedger.mutation_event_id)
+    status_col = cast("Any", CliMutationLedger.status)
+    lease_owner_col = cast("Any", CliMutationLedger.lease_owner)
+    lease_expires_at_col = cast("Any", CliMutationLedger.lease_expires_at)
+    after_payload = cast("dict[str, object]", payload["after"])
+    response_payload = cast("dict[str, object]", payload["response"])
     result = session.exec(
         update(CliMutationLedger)
-        .where(CliMutationLedger.mutation_event_id == mutation_event_id)
-        .where(CliMutationLedger.status == MutationStatus.PENDING.value)
-        .where(CliMutationLedger.lease_owner == lease_owner)
-        .where(CliMutationLedger.lease_expires_at > db_now)
+        .where(mutation_event_id_col == mutation_event_id)
+        .where(status_col == MutationStatus.PENDING.value)
+        .where(lease_owner_col == lease_owner)
+        .where(lease_expires_at_col > db_now)
         .values(
             status=MutationStatus.SUCCEEDED.value,
-            after_json=_json_dump(payload["after"]),
-            response_json=_json_dump(payload["response"]),
+            after_json=_json_dump(after_payload),
+            response_json=_json_dump(response_payload),
             recovery_action=RecoveryAction.NONE.value,
             recovery_safe_to_auto_resume=False,
             lease_owner=None,

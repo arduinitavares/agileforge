@@ -171,7 +171,15 @@ def _build_client(
                 "prior_backlog_state": "NO_HISTORY",
             },
             "output_artifact": {
-                "backlog_items": [{"title": "Seed backlog item"}],
+                "backlog_items": [
+                    {
+                        "priority": 1,
+                        "requirement": "Seed backlog item",
+                        "value_driver": "Strategic",
+                        "justification": "Seed backlog item is valuable.",
+                        "estimated_effort": "M",
+                    }
+                ],
                 "is_complete": is_complete,
                 "clarifying_questions": [] if is_complete else ["Need more detail"],
             },

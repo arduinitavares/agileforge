@@ -711,16 +711,14 @@ def _prepare_backlog_refinement(
     except BacklogRefinementError as exc:
         raise BacklogPhaseError(f"Backlog refinement failed: {exc}") from exc
 
-    artifact_fingerprint = _backlog_artifact_fingerprint(
-        cast("dict[str, Any]", refined_artifact)
-    )
+    artifact_fingerprint = _backlog_artifact_fingerprint(refined_artifact)
     return {
         "source_attempt_id": source_attempt_id,
         "source_artifact_fingerprint": source_artifact_fingerprint,
         "operation_set": operation_set,
         "operation_set_payload": operation_set.model_dump(mode="json"),
         "operation_set_fingerprint": operation_set_fingerprint,
-        "output_artifact": cast("dict[str, Any]", refined_artifact),
+        "output_artifact": refined_artifact,
         "artifact_fingerprint": artifact_fingerprint,
     }
 
@@ -736,21 +734,28 @@ def _assert_refinement_source_fingerprint(
         )
 
 
+def _item_fingerprints_by_id(source_artifact: dict[str, object]) -> dict[str, str]:
+    items = source_artifact.get("backlog_items")
+    if not isinstance(items, list):
+        return {}
+    item_fingerprints: dict[str, str] = {}
+    for raw_item in items:
+        if not isinstance(raw_item, dict):
+            continue
+        item = cast("dict[str, Any]", raw_item)
+        item_id = item.get("item_id")
+        item_fingerprint = item.get("item_fingerprint")
+        if item_id and item_fingerprint:
+            item_fingerprints[str(item_id)] = str(item_fingerprint)
+    return item_fingerprints
+
+
 def _resolve_auto_source_item_fingerprints(
     operations_payload: dict[str, Any],
     source_artifact: dict[str, object],
 ) -> dict[str, Any]:
     resolved_payload = copy.deepcopy(operations_payload)
-    items = source_artifact.get("backlog_items")
-    if not isinstance(items, list):
-        items = []
-    item_fingerprints = {
-        str(item["item_id"]): str(item["item_fingerprint"])
-        for item in items
-        if isinstance(item, dict)
-        and item.get("item_id")
-        and item.get("item_fingerprint")
-    }
+    item_fingerprints = _item_fingerprints_by_id(source_artifact)
     operations = resolved_payload.get("operations")
     if not isinstance(operations, list):
         return resolved_payload
