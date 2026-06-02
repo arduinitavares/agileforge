@@ -347,6 +347,25 @@ class _BacklogPersistenceActiveResetReadProjection(_BacklogPersistenceReadProjec
         return result
 
 
+class _BacklogPersistenceBlankActiveResetReadProjection(
+    _BacklogPersistenceReadProjection
+):
+    """Fake read projection for malformed blank-id active-reset stale marker."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog persistence workflow state with blank reset ids."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "downstream_backlog_stale": True,
+                "stale_backlog_reason": "active_backlog_reset",
+                "stale_since_backlog_attempt_id": "",
+                "active_backlog_reset_attempt_id": "",
+            }
+        )
+        return result
+
+
 class _RoadmapInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Roadmap interview state."""
 
@@ -2521,6 +2540,24 @@ def test_application_workflow_next_routes_active_reset_to_roadmap_only() -> None
             ),
         },
     ]
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_application_workflow_next_rejects_blank_active_reset_attempt_ids() -> None:
+    """Malformed reset markers should not get active-reset workflow routing."""
+    app = AgentWorkbenchApplication(
+        read_projection=_BacklogPersistenceBlankActiveResetReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge roadmap generate --project-id 7"
+    ]
+    assert result["data"]["status"] == "next_phase_available"
+    assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
 
 

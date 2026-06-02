@@ -32,13 +32,21 @@ def assert_downstream_backlog_not_stale(state: dict[str, Any]) -> None:
     )
 
 
+def _non_empty_string(value: object) -> str | None:
+    """Return stripped string values only when non-empty."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def assert_downstream_backlog_not_stale_for_roadmap(state: dict[str, Any]) -> None:
     """Block stale backlog except reset marker whose exit path is roadmap."""
     if state.get("downstream_backlog_stale") is not True:
         return
 
-    stale_attempt_id = state.get("stale_since_backlog_attempt_id")
-    reset_attempt_id = state.get("active_backlog_reset_attempt_id")
+    stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
+    reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
     if (
         state.get("fsm_state") == OrchestratorState.BACKLOG_PERSISTENCE.value
         and state.get("stale_backlog_reason") == "active_backlog_reset"

@@ -1729,6 +1729,14 @@ def _setup_status(envelope: dict[str, Any]) -> str | None:
     return str(setup_status).strip().lower() if setup_status is not None else None
 
 
+def _non_empty_string(value: object) -> str | None:
+    """Return stripped string values only when non-empty."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     """Return whether workflow state has the exact active-reset stale marker."""
     data = _envelope_data(envelope)
@@ -1736,8 +1744,8 @@ def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     if not isinstance(state, dict):
         return False
 
-    stale_attempt_id = state.get("stale_since_backlog_attempt_id")
-    reset_attempt_id = state.get("active_backlog_reset_attempt_id")
+    stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
+    reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
     return (
         str(state.get("fsm_state")).strip().upper() == "BACKLOG_PERSISTENCE"
         and state.get("downstream_backlog_stale") is True

@@ -7,6 +7,7 @@ import pytest
 
 from orchestrator_agent.agent_tools.roadmap_builder.tools import SaveRoadmapToolInput
 from services.agent_workbench.fingerprints import canonical_hash
+from services.phases import workflow_state
 from services.phases.roadmap_service import (
     RoadmapPhaseError,
     ensure_roadmap_attempts,
@@ -263,6 +264,72 @@ async def test_generate_roadmap_allows_active_reset_stale_marker() -> None:
     assert saved["state"]["downstream_backlog_stale"] is True
     assert saved["state"]["stale_backlog_reason"] == "active_backlog_reset"
     assert saved["state"]["stale_since_backlog_attempt_id"] == "backlog-attempt-12"
+
+
+def test_roadmap_stale_helper_blocks_blank_active_reset_attempt_ids() -> None:
+    """Blank reset attempt ids are malformed and remain stale-blocked."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_PERSISTENCE",
+        "downstream_backlog_stale": True,
+        "stale_backlog_reason": "active_backlog_reset",
+        "stale_since_backlog_attempt_id": "",
+        "active_backlog_reset_attempt_id": "",
+    }
+
+    with pytest.raises(workflow_state.DownstreamBacklogStaleError) as exc_info:
+        workflow_state.assert_downstream_backlog_not_stale_for_roadmap(state)
+
+    assert "active_backlog_reset" in str(exc_info.value)
+    assert "unknown" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_generate_roadmap_blocks_blank_active_reset_attempt_ids() -> None:
+    """Roadmap generation rejects malformed active-reset stale markers."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_PERSISTENCE",
+        "downstream_backlog_stale": True,
+        "stale_backlog_reason": "active_backlog_reset",
+        "stale_since_backlog_attempt_id": "",
+        "active_backlog_reset_attempt_id": "",
+    }
+    saved: JsonDict = {}
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_roadmap_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id, user_input
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": _complete_roadmap_artifact(is_complete=True),
+            "is_complete": True,
+            "error": None,
+        }
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await generate_roadmap_draft(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            now_iso=lambda: "2026-06-02T12:00:00Z",
+            run_roadmap_agent=fake_run_roadmap_agent_from_state,
+            user_input=None,
+        )
+
+    assert "downstream backlog is stale" in exc_info.value.detail
+    assert "active_backlog_reset" in exc_info.value.detail
+    assert "unknown" in exc_info.value.detail
+    assert captured["agent_calls"] == 0
+    assert "state" not in saved
 
 
 @pytest.mark.asyncio
