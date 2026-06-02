@@ -950,6 +950,45 @@ async def test_record_backlog_refinement_rejects_authority_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_backlog_refinement_uses_as_built_authority_fallback() -> None:
+    """Record validates stale authority against As-Built authority metadata."""
+    state = _refinement_source_state()
+    state.pop("compiled_authority_fingerprint")
+    state["as_built_assessment_cache_meta"] = {
+        "assessment_fingerprint": "sha256:as-built",
+        "authority_fingerprint": "sha256:authority",
+    }
+    original_attempt_count = len(state["backlog_attempts"])
+    operations_payload = _refinement_operations_payload(state)
+    operations_payload["authority_fingerprint"] = "sha256:stale-authority"
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(_updated: JsonDict) -> None:
+        msg = "save_state should not be called"
+        raise AssertionError(msg)
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await record_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            operations_payload=operations_payload,
+            expected_source_fingerprint=state["backlog_attempts"][0][
+                "artifact_fingerprint"
+            ],
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="refine-record-authority-fallback-mismatch",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "authority fingerprint" in exc_info.value.detail
+    assert len(state["backlog_attempts"]) == original_attempt_count
+    assert state["fsm_state"] == "SPRINT_COMPLETE"
+
+
+@pytest.mark.asyncio
 async def test_record_backlog_refinement_rejects_as_built_mismatch() -> None:
     """Record fails closed when operation as-built cache fingerprint is stale."""
     state = _refinement_source_state()
@@ -1113,6 +1152,67 @@ async def test_import_backlog_refinement_records_source_then_refined_attempt() -
         == "Verify imported backlog refinement workflow"
     )
     assert "refine-import-1" in saved["state"]["backlog_refine_import_idempotency_keys"]
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_uses_as_built_authority_fallback() -> None:
+    """Import works when real state keeps authority fingerprint in As-Built meta."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "as_built_assessment_cache_meta": {
+            "assessment_fingerprint": "sha256:as-built",
+            "authority_fingerprint": "sha256:authority",
+        },
+    }
+    saved: JsonDict = {}
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    requirement="Verify imported backlog refinement workflow"
+                ),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved_state = copy.deepcopy(updated)
+        state.clear()
+        state.update(saved_state)
+        saved["state"] = saved_state
+
+    payload = await import_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        source_artifact=source_artifact,
+        edited_artifact=edited_artifact,
+        expected_source_fingerprint=source_fingerprint,
+        idempotency_key="refine-import-authority-fallback",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+
+    refined_attempt = saved["state"]["backlog_attempts"][1]
+    assert payload["attempt_id"] == "backlog-attempt-2"
+    assert refined_attempt["operation_set"]["authority_fingerprint"] == (
+        "sha256:authority"
+    )
+    assert (
+        saved["state"]["product_backlog_assessment"]["backlog_items"][0]["requirement"]
+        == "Verify imported backlog refinement workflow"
+    )
 
 
 @pytest.mark.asyncio

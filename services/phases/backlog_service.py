@@ -449,7 +449,7 @@ async def import_backlog_refinement(
     )
     state = await load_state()
     source_attempt = _find_refine_import_source_attempt(state, source_fingerprint)
-    authority_fingerprint = str(state.get("compiled_authority_fingerprint") or "")
+    authority_fingerprint = _refinement_authority_fingerprint(state)
     as_built_cache_fingerprint = _as_built_cache_fingerprint(state)
     expected_state = _refine_import_expected_state(state, source_attempt)
     request_fingerprint = _backlog_refine_import_request_fingerprint(
@@ -674,7 +674,7 @@ def _backlog_refine_record_request_fingerprint(
             "operation_set_fingerprint": prepared["operation_set_fingerprint"],
             "expected_source_fingerprint": expected_source_fingerprint,
             "expected_state": _normalize_fsm_state(expected_state),
-            "authority_fingerprint": state.get("compiled_authority_fingerprint"),
+            "authority_fingerprint": _refinement_authority_fingerprint(state),
             "as_built_cache_fingerprint": as_built_cache_fingerprint,
         }
     )
@@ -972,9 +972,9 @@ def _validate_refinement_operation_set(
             f"Backlog refinement operation set invalid: {exc}"
         ) from exc
 
-    authority_fingerprint = state.get("compiled_authority_fingerprint")
+    authority_fingerprint = _refinement_authority_fingerprint(state)
     if (
-        isinstance(authority_fingerprint, str)
+        authority_fingerprint
         and operation_set.authority_fingerprint != authority_fingerprint
     ):
         raise BacklogPhaseError("Backlog refinement authority fingerprint mismatch")
@@ -1089,6 +1089,22 @@ def _as_built_cache_fingerprint(state: dict[str, Any]) -> str:
         assessment_fingerprint = as_built_meta.get("assessment_fingerprint")
         if isinstance(assessment_fingerprint, str):
             return assessment_fingerprint
+    return ""
+
+
+def _refinement_authority_fingerprint(state: dict[str, Any]) -> str:
+    authority_fingerprint = state.get("compiled_authority_fingerprint")
+    if isinstance(authority_fingerprint, str) and authority_fingerprint.strip():
+        return authority_fingerprint.strip()
+
+    as_built_meta = state.get("as_built_assessment_cache_meta")
+    if isinstance(as_built_meta, dict):
+        as_built_authority_fingerprint = as_built_meta.get("authority_fingerprint")
+        if (
+            isinstance(as_built_authority_fingerprint, str)
+            and as_built_authority_fingerprint.strip()
+        ):
+            return as_built_authority_fingerprint.strip()
     return ""
 
 
