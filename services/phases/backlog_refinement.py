@@ -29,6 +29,7 @@ type OperationType = Literal[
     "authority_ref_change",
     "delete",
     "add_intake",
+    "resolve_clarifying_questions",
 ]
 
 
@@ -37,6 +38,7 @@ class _ApplyContext:
     """Shared immutable context for applying one refinement operation set."""
 
     source_items_by_id: dict[str, JsonDict]
+    source_questions_by_fingerprint: dict[str, str]
     operation_set: BacklogRefinementOperationSet
     supported_authority_refs: set[str] | None
 
@@ -299,6 +301,42 @@ class AddIntakeOperation(BaseRefinementOperation):
         return self
 
 
+class ResolvedClarifyingQuestion(BaseModel):
+    """One source clarifying question resolved by a PO refinement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_fingerprint: Annotated[str, Field(min_length=1)]
+    question_text: Annotated[str, Field(min_length=1)]
+    po_answer: Annotated[str, Field(min_length=1)]
+
+
+class ResolveClarifyingQuestionsOperation(BaseRefinementOperation):
+    """Resolve top-level backlog clarifying questions."""
+
+    operation_type: Literal["resolve_clarifying_questions"] = (
+        "resolve_clarifying_questions"
+    )
+    resolved_questions: list[ResolvedClarifyingQuestion]
+    remaining_questions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _valid_resolve_questions(self) -> ResolveClarifyingQuestionsOperation:
+        if self.source_item_ids or self.source_item_fingerprints:
+            message = "resolve_clarifying_questions must not define source items"
+            raise ValueError(message)
+        if self.result_item_ids:
+            message = "resolve_clarifying_questions must not define result item ids"
+            raise ValueError(message)
+        if not self.resolved_questions:
+            message = "resolve_clarifying_questions requires resolved questions"
+            raise ValueError(message)
+        if any(not question.strip() for question in self.remaining_questions):
+            message = "remaining_questions cannot contain blank questions"
+            raise ValueError(message)
+        return self
+
+
 type RefinementOperation = Annotated[
     SplitOperation
     | MergeOperation
@@ -308,7 +346,8 @@ type RefinementOperation = Annotated[
     | ClassifyOperation
     | AuthorityRefChangeOperation
     | DeleteOperation
-    | AddIntakeOperation,
+    | AddIntakeOperation
+    | ResolveClarifyingQuestionsOperation,
     Field(discriminator="operation_type"),
 ]
 
@@ -391,6 +430,52 @@ def project_savable_backlog_items(
     return projected
 
 
+def _question_fingerprint(question: str) -> str:
+    return canonical_hash({"clarifying_question": question})
+
+
+def _has_clarifying_questions(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(isinstance(question, str) and question.strip() for question in value)
+
+
+def _clarifying_questions_for_diff(
+    artifact: JsonDict,
+    *,
+    artifact_name: str,
+) -> list[str]:
+    raw_questions = artifact.get("clarifying_questions")
+    if raw_questions is None:
+        return []
+    if not isinstance(raw_questions, list):
+        _raise_ambiguous_diff(
+            f"ambiguous {artifact_name} artifact: clarifying_questions must be a list",
+        )
+
+    questions: list[str] = []
+    for raw_question in raw_questions:
+        if not isinstance(raw_question, str) or not raw_question.strip():
+            _raise_ambiguous_diff(
+                f"ambiguous {artifact_name} artifact: clarifying_questions "
+                "must contain non-blank strings",
+            )
+        questions.append(raw_question.strip())
+    return questions
+
+
+def _question_map(questions: list[str]) -> dict[str, str]:
+    question_map: dict[str, str] = {}
+    for question in questions:
+        fingerprint = _question_fingerprint(question)
+        if fingerprint in question_map:
+            _raise_ambiguous_diff(
+                "ambiguous clarifying_questions: duplicate question fingerprint",
+            )
+        question_map[fingerprint] = question
+    return question_map
+
+
 def normalize_refined_artifact(artifact: JsonDict) -> JsonDict:
     """Normalize priorities and recompute item fingerprints for a refined draft."""
     normalized = copy.deepcopy(artifact)
@@ -412,9 +497,68 @@ def normalize_refined_artifact(artifact: JsonDict) -> JsonDict:
 
     normalized["backlog_items"] = valid_items
     normalized["is_complete"] = len(valid_items) >= MIN_COMPLETE_BACKLOG_ITEMS and (
-        not normalized.get("clarifying_questions")
+        not _has_clarifying_questions(normalized.get("clarifying_questions"))
     )
     return normalized
+
+
+def _resolve_questions_operation_for_diff(
+    source_artifact: JsonDict,
+    edited_artifact: JsonDict,
+    *,
+    operation_index: int,
+) -> ResolveClarifyingQuestionsOperation | None:
+    if "clarifying_questions" not in edited_artifact:
+        return None
+
+    source_questions = _clarifying_questions_for_diff(
+        source_artifact,
+        artifact_name="source",
+    )
+    edited_questions = _clarifying_questions_for_diff(
+        edited_artifact,
+        artifact_name="edited",
+    )
+    if edited_questions == source_questions:
+        return None
+
+    source_question_map = _question_map(source_questions)
+    edited_question_map = _question_map(edited_questions)
+    unknown_edited_questions = set(edited_question_map) - set(source_question_map)
+    if unknown_edited_questions:
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: clarifying_questions cannot add or "
+            "rewrite questions",
+        )
+
+    resolved_fingerprints = [
+        fingerprint
+        for fingerprint in source_question_map
+        if fingerprint not in edited_question_map
+    ]
+    if not resolved_fingerprints:
+        _raise_ambiguous_diff(
+            "ambiguous edited artifact: clarifying_questions cannot be reordered "
+            "without resolving questions",
+        )
+
+    return ResolveClarifyingQuestionsOperation(
+        operation_id=f"op-{operation_index:03d}-resolve-clarifying-questions",
+        source_item_ids=[],
+        source_item_fingerprints=[],
+        result_item_ids=[],
+        resolved_questions=[
+            ResolvedClarifyingQuestion(
+                question_fingerprint=fingerprint,
+                question_text=source_question_map[fingerprint],
+                po_answer="Resolved by Product Owner refinement artifact.",
+            )
+            for fingerprint in resolved_fingerprints
+        ],
+        remaining_questions=edited_questions,
+        rationale="Product Owner resolved backlog clarifying questions.",
+        requested_by="po",
+    )
 
 
 def operations_from_edited_artifact(
@@ -434,6 +578,15 @@ def operations_from_edited_artifact(
 
     operations: list[RefinementOperation] = []
     operation_index = 1
+
+    question_operation = _resolve_questions_operation_for_diff(
+        source_artifact,
+        edited_artifact,
+        operation_index=operation_index,
+    )
+    if question_operation is not None:
+        operations.append(question_operation)
+        operation_index += 1
 
     reorder_ids = _reorder_ids_for_diff(source_items, edited_refs, single_groups)
     if reorder_ids is not None:
@@ -885,6 +1038,30 @@ def _assert_current_source_items_exist(
             raise BacklogRefinementError(message)
 
 
+def _assert_clarifying_questions_match(
+    source_questions_by_fingerprint: dict[str, str],
+    operation: ResolveClarifyingQuestionsOperation,
+) -> None:
+    remaining_fingerprints = {
+        _question_fingerprint(question) for question in operation.remaining_questions
+    }
+    for resolved_question in operation.resolved_questions:
+        fingerprint = resolved_question.question_fingerprint
+        if (
+            source_questions_by_fingerprint.get(fingerprint)
+            != resolved_question.question_text
+            or _question_fingerprint(resolved_question.question_text) != fingerprint
+            or fingerprint in remaining_fingerprints
+        ):
+            message = "clarifying question stale"
+            raise BacklogRefinementError(message)
+
+    unknown_remaining = remaining_fingerprints - set(source_questions_by_fingerprint)
+    if unknown_remaining:
+        message = "clarifying question stale"
+        raise BacklogRefinementError(message)
+
+
 def _provenance(
     operation: BaseRefinementOperation,
     operation_set: BacklogRefinementOperationSet,
@@ -1085,6 +1262,32 @@ def _apply_add_intake(
     cast("list[JsonDict]", raw_intake_items).append(intake)
 
 
+def _apply_resolve_clarifying_questions(
+    refined: JsonDict,
+    operation: ResolveClarifyingQuestionsOperation,
+    context: _ApplyContext,
+) -> None:
+    _assert_clarifying_questions_match(
+        context.source_questions_by_fingerprint,
+        operation,
+    )
+    refined["clarifying_questions"] = list(operation.remaining_questions)
+
+
+def _apply_artifact_only_operation(
+    refined: JsonDict,
+    operation: RefinementOperation,
+    context: _ApplyContext,
+) -> bool:
+    if isinstance(operation, AddIntakeOperation):
+        _apply_add_intake(refined, operation, context.operation_set)
+        return True
+    if isinstance(operation, ResolveClarifyingQuestionsOperation):
+        _apply_resolve_clarifying_questions(refined, operation, context)
+        return True
+    return False
+
+
 def _apply_refinement_operation(
     refined: JsonDict,
     items: list[JsonDict],
@@ -1096,6 +1299,8 @@ def _apply_refinement_operation(
     _assert_source_matches(context.source_items_by_id, operation)
     _assert_current_source_items_exist(items_by_id, operation)
 
+    if _apply_artifact_only_operation(refined, operation, context):
+        return items
     if isinstance(operation, SplitOperation):
         return _apply_split(items, operation, context.operation_set)
     if isinstance(operation, MergeOperation):
@@ -1118,8 +1323,6 @@ def _apply_refinement_operation(
     elif isinstance(operation, DeleteOperation):
         deleted_ids = set(operation.source_item_ids)
         return [item for item in items if item.get("item_id") not in deleted_ids]
-    elif isinstance(operation, AddIntakeOperation):
-        _apply_add_intake(refined, operation, context.operation_set)
     else:
         message = f"unsupported refinement operation: {operation.operation_type}"
         raise BacklogRefinementError(message)
@@ -1146,6 +1349,12 @@ def apply_refinement_operations(
     _assert_unique_item_ids(items)
     context = _ApplyContext(
         source_items_by_id=copy.deepcopy(_items_by_id({"backlog_items": items})),
+        source_questions_by_fingerprint=_question_map(
+            _clarifying_questions_for_diff(
+                source_artifact,
+                artifact_name="source",
+            )
+        ),
         operation_set=operation_set,
         supported_authority_refs=supported_authority_refs,
     )

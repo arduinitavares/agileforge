@@ -1216,6 +1216,71 @@ async def test_import_backlog_refinement_uses_as_built_authority_fallback() -> N
 
 
 @pytest.mark.asyncio
+async def test_import_backlog_refinement_resolves_clarifying_questions() -> None:
+    """Import can record PO question answers and complete a refined artifact."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_REVIEW",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+    }
+    saved: JsonDict = {}
+    source_artifact: JsonDict = {
+        "backlog_items": [
+            _refinement_source_item(
+                priority=index,
+                requirement=f"Refined backlog item {index}",
+            )
+            for index in range(1, 11)
+        ],
+        "is_complete": False,
+        "clarifying_questions": [
+            "Which risk tolerance should gate promotion?",
+            "Should strict fixture fail-closed mode be in this slice?",
+        ],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(
+                    priority=index,
+                    requirement=f"Refined backlog item {index}",
+                ),
+                "source_item_id": f"item-{index:03d}",
+            }
+            for index in range(1, 11)
+        ],
+        "is_complete": False,
+        "clarifying_questions": [],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved_state = copy.deepcopy(updated)
+        state.clear()
+        state.update(saved_state)
+        saved["state"] = saved_state
+
+    payload = await import_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        source_artifact=source_artifact,
+        edited_artifact=edited_artifact,
+        expected_source_fingerprint=source_fingerprint,
+        idempotency_key="refine-import-resolve-questions",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+
+    assessment = saved["state"]["product_backlog_assessment"]
+    assert payload["attempt_id"] == "backlog-attempt-2"
+    assert assessment["clarifying_questions"] == []
+    assert assessment["is_complete"] is True
+
+
+@pytest.mark.asyncio
 async def test_import_backlog_refinement_rejects_unsupported_authority_ref() -> None:
     """Edited artifacts cannot import unsupported authority_ref changes."""
     state: JsonDict = {
@@ -1787,6 +1852,51 @@ async def test_save_backlog_draft_allows_approved_imported_refined_attempt() -> 
     assert state["product_backlog_assessment"]["refinement_saveable"] is True
     assert payload["save_result"]["success"] is True
     assert len(captured["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_does_not_make_incomplete_refinement_saveable() -> None:
+    """Approval is recorded, but incomplete refined artifacts are not saveable."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": False,
+            "clarifying_questions": ["Which risk tolerance should gate promotion?"],
+        }
+    )
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    state["backlog_attempts"][0].update(
+        {
+            "attempt_kind": "import_refinement",
+            "operation_set_fingerprint": "sha256:ops",
+        }
+    )
+
+    approval_result = mark_backlog_refinement_approved(
+        state,
+        request=BacklogRefinementApprovalRequest(
+            project_id=7,
+            attempt_id="backlog-attempt-1",
+            operation_set_fingerprint="sha256:ops",
+            approved_artifact_fingerprint=expected_fingerprint,
+            approved_operation_ids=["op-import"],
+            idempotency_key="approve-incomplete-import-refinement",
+        ),
+        approval={
+            "approval_id": "approval:incomplete",
+            "request_fingerprint": "sha256:approval-request",
+        },
+    )
+
+    assert approval_result["marked_saveable"] is False
+    assert state["backlog_attempts"][0]["refinement_approved"] is True
+    assert state["backlog_attempts"][0]["refinement_saveable"] is False
+    assert (
+        state["backlog_attempts"][0]["refinement_approval"]["approval_id"]
+        == "approval:incomplete"
+    )
+    assert state["product_backlog_assessment"]["refinement_approved"] is True
+    assert state["product_backlog_assessment"]["refinement_saveable"] is False
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,7 @@ REFINED_ATTEMPT_KINDS = {"refinement", "import_refinement"}
 BACKLOG_ARTIFACT_FINGERPRINT_METADATA_KEYS = {
     "attempt_id",
     "artifact_fingerprint",
+    "refinement_approved",
     "refinement_saveable",
     "refinement_approval",
 }
@@ -1412,7 +1413,14 @@ def mark_backlog_refinement_approved(
         "approved_by": request.approved_by,
         "approval_source": request.approval_source,
     }
-    selected_attempt["refinement_saveable"] = True
+    selected_artifact = selected_attempt.get("output_artifact")
+    is_saveable = (
+        isinstance(selected_artifact, dict)
+        and selected_artifact.get("is_complete") is True
+        and not _has_clarifying_questions(selected_artifact)
+    )
+    selected_attempt["refinement_approved"] = True
+    selected_attempt["refinement_saveable"] = is_saveable
     selected_attempt["refinement_approval"] = approval_binding
 
     assessment = state.get("product_backlog_assessment")
@@ -1422,10 +1430,11 @@ def mark_backlog_refinement_approved(
         and assessment.get("artifact_fingerprint")
         == request.approved_artifact_fingerprint
     ):
-        assessment["refinement_saveable"] = True
+        assessment["refinement_approved"] = True
+        assessment["refinement_saveable"] = is_saveable
         assessment["refinement_approval"] = copy.deepcopy(approval_binding)
     return {
-        "marked_saveable": True,
+        "marked_saveable": is_saveable,
         "attempt_id": request.attempt_id,
         "approval_id": approval_id,
     }

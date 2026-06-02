@@ -121,6 +121,26 @@ def _refinement_source_state() -> dict[str, Any]:
     }
 
 
+def _complete_refinement_source_state() -> dict[str, Any]:
+    """Return a complete source attempt for saveability assertions."""
+    state = _refinement_source_state()
+    output_artifact: dict[str, Any] = {
+        "backlog_items": [
+            _refinement_source_item(
+                priority=index,
+                requirement=f"Verify current backlog workflow {index}",
+            )
+            for index in range(1, 11)
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    artifact_fingerprint = _backlog_artifact_fingerprint(output_artifact)
+    state["backlog_attempts"][0]["artifact_fingerprint"] = artifact_fingerprint
+    state["backlog_attempts"][0]["output_artifact"] = output_artifact
+    return state
+
+
 def _refinement_operations_payload(
     state: dict[str, Any],
     *,
@@ -952,7 +972,7 @@ def test_backlog_approve_marks_recorded_refinement_attempt_saveable(
     session.add(Product(product_id=2, name="Cartola"))
     session.commit()
     workflow = _FakeWorkflowService()
-    workflow.state.update(_refinement_source_state())
+    workflow.state.update(_complete_refinement_source_state())
     source_fingerprint = workflow.state["backlog_attempts"][0]["artifact_fingerprint"]
     operations_file = _write_operations_file(
         tmp_path,

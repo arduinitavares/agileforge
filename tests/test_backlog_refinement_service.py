@@ -37,6 +37,7 @@ from services.phases.backlog_refinement import (
     MergeOperation,
     RefinementOperation,
     ReorderOperation,
+    ResolveClarifyingQuestionsOperation,
     RetitleOperation,
     RewriteScopeOperation,
     SplitOperation,
@@ -75,6 +76,47 @@ def _operation_set(
         authority_fingerprint="sha256:authority",
         as_built_cache_fingerprint="sha256:as-built",
         operations=operations,
+    )
+
+
+def _linked_items_from_source(source: dict[str, object]) -> list[OperationPayload]:
+    raw_items = source.get("backlog_items")
+    assert isinstance(raw_items, list)
+    linked_items: list[OperationPayload] = []
+    for raw_item in raw_items:
+        assert isinstance(raw_item, dict)
+        item = cast("dict[str, object]", raw_item)
+        linked_items.append(
+            {
+                "priority": item["priority"],
+                "requirement": item["requirement"],
+                "authority_ref": item.get("authority_ref"),
+                "capability_hint": item.get("capability_hint"),
+                "value_driver": item["value_driver"],
+                "justification": item["justification"],
+                "estimated_effort": item["estimated_effort"],
+                "technical_note": item.get("technical_note"),
+                "source_item_id": item["item_id"],
+            }
+        )
+    return linked_items
+
+
+def _questioned_source_artifact() -> dict[str, object]:
+    return assign_item_identity(
+        {
+            "backlog_items": [
+                _item(index, f"Refined backlog item {index}")
+                for index in range(1, 11)
+            ],
+            "clarifying_questions": [
+                "Which risk tolerance should gate promotion?",
+                "Should strict fixture fail-closed mode be in this slice?",
+            ],
+            "is_complete": False,
+        },
+        source_attempt_id="backlog-attempt-1",
+        source_artifact_fingerprint="sha256:source",
     )
 
 
@@ -351,6 +393,92 @@ def test_operations_from_edited_artifact_detects_classify() -> None:
     operation = operation_set.operations[0]
     assert isinstance(operation, ClassifyOperation)
     assert operation.classification == "verification"
+
+
+def test_operations_from_edited_artifact_detects_question_resolution() -> None:
+    """Edited artifacts can resolve top-level clarifying questions."""
+    source = _questioned_source_artifact()
+    edited = {
+        "backlog_items": _linked_items_from_source(source),
+        "clarifying_questions": [],
+    }
+
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    operation = operation_set.operations[0]
+    assert isinstance(operation, ResolveClarifyingQuestionsOperation)
+    assert operation.source_item_ids == []
+    assert operation.remaining_questions == []
+    assert len(operation.resolved_questions) == 2  # noqa: PLR2004
+
+
+def test_apply_question_resolution_completes_valid_refined_artifact() -> None:
+    """Resolving questions lets host recompute a complete refined artifact."""
+    source = _questioned_source_artifact()
+    edited = {
+        "backlog_items": _linked_items_from_source(source),
+        "clarifying_questions": [],
+    }
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+
+    refined = apply_refinement_operations(source, operation_set)
+
+    assert refined["clarifying_questions"] == []
+    assert refined["is_complete"] is True
+
+
+def test_operations_from_edited_artifact_rejects_new_questions() -> None:
+    """Refinement import cannot add new clarifying questions."""
+    source = _questioned_source_artifact()
+    edited = {
+        "backlog_items": _linked_items_from_source(source),
+        "clarifying_questions": [
+            "Which risk tolerance should gate promotion?",
+            "Should strict fixture fail-closed mode be in this slice?",
+            "Who owns a new unresolved question?",
+        ],
+    }
+
+    with pytest.raises(AmbiguousRefinementDiffError, match="clarifying_questions"):
+        operations_from_edited_artifact(
+            source,
+            edited,
+            authority_fingerprint="sha256:authority",
+            as_built_cache_fingerprint="sha256:as-built",
+        )
+
+
+def test_apply_question_resolution_rejects_stale_question_fingerprint() -> None:
+    """Question resolution validates source question text against fingerprints."""
+    source = _questioned_source_artifact()
+    edited = {
+        "backlog_items": _linked_items_from_source(source),
+        "clarifying_questions": [],
+    }
+    operation_set = operations_from_edited_artifact(
+        source,
+        edited,
+        authority_fingerprint="sha256:authority",
+        as_built_cache_fingerprint="sha256:as-built",
+    )
+    stale_payload = operation_set.model_dump(mode="json")
+    stale_payload["operations"][0]["resolved_questions"][0]["question_text"] = (
+        "Changed stale question text"
+    )
+    stale_operation_set = BacklogRefinementOperationSet.model_validate(stale_payload)
+
+    with pytest.raises(BacklogRefinementError, match="clarifying question stale"):
+        apply_refinement_operations(source, stale_operation_set)
 
 
 def test_imported_same_source_edit_sequence_applies_atomically() -> None:
