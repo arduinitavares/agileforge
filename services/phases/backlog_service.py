@@ -17,7 +17,10 @@ from orchestrator_agent.agent_tools.backlog_primer.schemes import (
 )
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
 from orchestrator_agent.fsm.states import OrchestratorState
-from services.agent_workbench.backlog_active_reset import ActiveBacklogResetRequest
+from services.agent_workbench.backlog_active_reset import (
+    ActiveBacklogResetRequest,
+    reset_request_fingerprint,
+)
 from services.agent_workbench.fingerprints import canonical_hash
 from services.backlog_runtime import (
     build_backlog_input_context,
@@ -656,32 +659,24 @@ async def reset_active_backlog(
     """Reset the active backlog from an approved next-cycle refined attempt."""
     context = await hydrate_context()
     state = context.state
-    _assert_save_expected_state(state, expected_state)
-    _assert_reset_review_origin(state)
     trimmed_reason, trimmed_idempotency_key = _normalize_reset_inputs(
         reset_reason=reset_reason,
         archive_all_active_stories=archive_all_active_stories,
         idempotency_key=idempotency_key,
     )
-
     assessment = _reset_assessment(state)
-    _assert_save_guards(
+    selected_attempt = _assert_reset_attempt_guards(
         state=state,
         assessment=assessment,
         attempt_id=attempt_id,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
-
-    selected_attempt = _assert_reset_refined_attempt(state, attempt_id)
-    _assert_refined_attempt_saveable(
-        state=state,
-        attempt_id=attempt_id,
+    _assert_reset_refinement_attempt(selected_attempt)
+    _assert_reset_attempt_approved(
+        selected_attempt,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
-
     _assert_reset_attempt_complete(assessment)
-    if not replacement_blocked(project_id):
-        raise BacklogPhaseError("RESET_NOT_REQUIRED")
 
     now = now_iso()
     request = ActiveBacklogResetRequest(
@@ -696,9 +691,28 @@ async def reset_active_backlog(
         artifact=assessment,
         now=_parse_iso(now),
     )
+    if _is_reset_replay_candidate(
+        state,
+        attempt_id=attempt_id,
+        expected_state=expected_state,
+        idempotency_key=trimmed_idempotency_key,
+    ):
+        reset_result = reset_rows(request)
+        _assert_reset_rows_success(reset_result)
+        return _reset_active_payload(
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            reset_result=reset_result,
+            idempotency_key=trimmed_idempotency_key,
+        )
+
+    _assert_save_expected_state(state, expected_state)
+    _assert_reset_review_origin(state)
+    if not replacement_blocked(project_id):
+        raise BacklogPhaseError("RESET_NOT_REQUIRED")
+
     reset_result = reset_rows(request)
-    if not reset_result.get("success"):
-        raise BacklogPhaseError(str(reset_result.get("error", "RESET_FAILED")))
+    _assert_reset_rows_success(reset_result)
 
     state["fsm_state"] = OrchestratorState.BACKLOG_PERSISTENCE.value
     state["fsm_state_entered_at"] = now
@@ -708,15 +722,18 @@ async def reset_active_backlog(
     state["stale_since_backlog_attempt_id"] = attempt_id
     state["active_backlog_reset_at"] = now
     state["active_backlog_reset_attempt_id"] = attempt_id
+    state["active_backlog_reset_idempotency_key"] = trimmed_idempotency_key
+    state["active_backlog_reset_request_fingerprint"] = reset_request_fingerprint(
+        request,
+    )
     save_state(state)
 
-    return {
-        "fsm_state": OrchestratorState.BACKLOG_PERSISTENCE.value,
-        "attempt_id": attempt_id,
-        "artifact_fingerprint": expected_artifact_fingerprint,
-        "reset_result": reset_result,
-        "idempotency_key": trimmed_idempotency_key,
-    }
+    return _reset_active_payload(
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        reset_result=reset_result,
+        idempotency_key=trimmed_idempotency_key,
+    )
 
 
 def _assert_reset_review_origin(state: dict[str, Any]) -> None:
@@ -748,17 +765,60 @@ def _reset_assessment(state: dict[str, Any]) -> dict[str, Any]:
     return assessment
 
 
-def _assert_reset_refined_attempt(
+def _assert_reset_attempt_guards(
+    *,
     state: dict[str, Any],
+    assessment: dict[str, Any],
     attempt_id: str,
+    expected_artifact_fingerprint: str,
 ) -> dict[str, Any]:
     selected_attempt = _find_backlog_attempt(state, attempt_id)
+    selected_artifact = (
+        selected_attempt.get("output_artifact")
+        if isinstance(selected_attempt, dict)
+        else None
+    )
     if (
         selected_attempt is None
-        or selected_attempt.get("attempt_kind") not in REFINED_ATTEMPT_KINDS
+        or assessment.get("attempt_id") != attempt_id
+        or not isinstance(selected_artifact, dict)
     ):
-        raise BacklogPhaseError("RESET_ATTEMPT_NOT_REFINED")
+        raise BacklogPhaseError("RESET_ATTEMPT_NOT_FOUND")
+    if (
+        assessment.get("artifact_fingerprint") != expected_artifact_fingerprint
+        or selected_attempt.get("artifact_fingerprint")
+        != expected_artifact_fingerprint
+        or _backlog_artifact_fingerprint(assessment)
+        != expected_artifact_fingerprint
+        or _backlog_artifact_fingerprint(selected_artifact)
+        != expected_artifact_fingerprint
+    ):
+        raise BacklogPhaseError("RESET_ARTIFACT_FINGERPRINT_MISMATCH")
     return selected_attempt
+
+
+def _assert_reset_refinement_attempt(selected_attempt: dict[str, Any]) -> None:
+    if selected_attempt.get("attempt_kind") not in REFINED_ATTEMPT_KINDS:
+        raise BacklogPhaseError("RESET_NOT_REFINEMENT_ATTEMPT")
+
+
+def _assert_reset_attempt_approved(
+    selected_attempt: dict[str, Any],
+    *,
+    expected_artifact_fingerprint: str,
+) -> None:
+    approval = selected_attempt.get("refinement_approval")
+    if selected_attempt.get("refinement_saveable") is not True or not isinstance(
+        approval,
+        dict,
+    ):
+        raise BacklogPhaseError("RESET_ATTEMPT_NOT_APPROVED")
+    if (
+        approval.get("approved_artifact_fingerprint")
+        != expected_artifact_fingerprint
+        or approval.get("approval_id") is None
+    ):
+        raise BacklogPhaseError("RESET_ATTEMPT_NOT_APPROVED")
 
 
 def _assert_reset_attempt_complete(assessment: dict[str, Any]) -> None:
@@ -766,6 +826,43 @@ def _assert_reset_attempt_complete(assessment: dict[str, Any]) -> None:
         raise BacklogPhaseError("RESET_ATTEMPT_INCOMPLETE")
     if _has_clarifying_questions(assessment):
         raise BacklogPhaseError("RESET_ATTEMPT_INCOMPLETE")
+
+
+def _is_reset_replay_candidate(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+    expected_state: str,
+    idempotency_key: str,
+) -> bool:
+    fsm_state = _normalize_fsm_state(cast("str | None", state.get("fsm_state")))
+    return (
+        expected_state == OrchestratorState.BACKLOG_REVIEW.value
+        and fsm_state == OrchestratorState.BACKLOG_PERSISTENCE.value
+        and state.get("active_backlog_reset_attempt_id") == attempt_id
+        and state.get("active_backlog_reset_idempotency_key") == idempotency_key
+    )
+
+
+def _assert_reset_rows_success(reset_result: dict[str, Any]) -> None:
+    if not reset_result.get("success"):
+        raise BacklogPhaseError(str(reset_result.get("error", "RESET_FAILED")))
+
+
+def _reset_active_payload(
+    *,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+    reset_result: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    return {
+        "fsm_state": OrchestratorState.BACKLOG_PERSISTENCE.value,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": expected_artifact_fingerprint,
+        "reset_result": reset_result,
+        "idempotency_key": idempotency_key,
+    }
 
 
 def _approved_reset_fingerprint(selected_attempt: dict[str, Any]) -> str:
