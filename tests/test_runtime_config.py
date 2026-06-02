@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import utils.runtime_config as runtime_config_module
 from utils.runtime_config import (
     RuntimeConfigError,
     clear_runtime_config_cache,
@@ -91,6 +92,45 @@ def test_sqlite_targets_are_normalized_to_absolute_paths(
     assert session.sqlite_path.is_absolute()
     assert business.sqlite_url.endswith("db/spec_authority_dev.db")
     assert session.sqlite_url.endswith("db/spec_authority_session_dev.db")
+
+
+def test_config_root_resolves_relative_sqlite_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Relative DB URLs resolve against AGILEFORGE_CONFIG_ROOT when set."""
+    config_root = tmp_path / "agileforge-root"
+    config_root.mkdir()
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    monkeypatch.setenv("AGILEFORGE_DB_URL", "sqlite:///./db/spec_authority_dev.db")
+
+    target = get_business_db_target()
+
+    assert target.sqlite_path == (
+        config_root / "db" / "spec_authority_dev.db"
+    ).resolve()
+
+
+def test_runtime_env_loads_from_config_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime env can be loaded from AGILEFORGE_CONFIG_ROOT/.env."""
+    config_root = tmp_path / "agileforge-root"
+    config_root.mkdir()
+    env_path = config_root / ".env"
+    env_path.write_text(
+        "AGILEFORGE_DB_URL=sqlite:///./db/from-config-root.db\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    monkeypatch.delenv("AGILEFORGE_DB_URL", raising=False)
+
+    runtime_config_module.load_runtime_env()
+
+    assert runtime_config_module.get_optional_env("AGILEFORGE_DB_URL") == (
+        "sqlite:///./db/from-config-root.db"
+    )
 
 
 def test_session_db_must_be_distinct_from_business_db(

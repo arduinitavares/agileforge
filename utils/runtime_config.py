@@ -10,11 +10,23 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_ENV_PATH = _REPO_ROOT / ".env"
+_CONFIG_ROOT_ENV = "AGILEFORGE_CONFIG_ROOT"
 _LEGACY_DB_FILENAMES = frozenset({"agile_simple.db", "agile_sqlmodel.db"})
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _DEFAULT_API_HOST = "127.0.0.1"
 _AS_BUILT_ASSESSOR_BATCH_SIZE_MAX = 50
+
+
+def get_config_root() -> Path:
+    """Return the root for local environment and stateful runtime files."""
+    configured_root = os.environ.get(_CONFIG_ROOT_ENV, "").strip()
+    if configured_root:
+        return Path(configured_root).resolve()
+    return _REPO_ROOT
+
+
+def _env_path() -> Path:
+    return get_config_root() / ".env"
 
 
 class RuntimeConfigError(RuntimeError):
@@ -25,7 +37,7 @@ class RuntimeConfigError(RuntimeError):
         """Build an error for a missing required environment variable."""
         return cls(
             f"Missing required environment variable: {name}. "
-            f"Add it to {_ENV_PATH.name} or export it before running the app."
+            f"Add it to {_env_path().name} or export it before running the app."
         )
 
     @classmethod
@@ -129,8 +141,9 @@ SPEC_VALIDATOR_IDENTITY = RunnerIdentity(
 
 def load_runtime_env() -> None:
     """Load the repository .env file once for all runtime consumers."""
-    if _ENV_PATH.exists():
-        load_dotenv(_ENV_PATH, override=False)
+    env_path = _env_path()
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
 
 
 load_runtime_env()
@@ -195,7 +208,11 @@ def _normalize_sqlite_target(raw_value: str, *, source: str) -> DatabaseTarget:
         raw_path = value
 
     path = Path(raw_path)
-    path = (_REPO_ROOT / path).resolve() if not path.is_absolute() else path.resolve()
+    path = (
+        (get_config_root() / path).resolve()
+        if not path.is_absolute()
+        else path.resolve()
+    )
 
     _reject_legacy_db_name(path, source)
     return DatabaseTarget(

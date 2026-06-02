@@ -117,35 +117,41 @@ agileforge project create --dry-run \
 
 Before a feature branch is merged, the installed `agileforge` shim still points
 at the central root checkout. To smoke-test a worktree branch, invoke that
-worktree directly and provide the same environment the shim normally loads from
-the central repo.
+worktree directly while pointing stateful runtime configuration at the central
+repo with `AGILEFORGE_CONFIG_ROOT`.
 
 ```sh
 cd /path/to/caller-project
-set -a
-. /Users/aaat/projects/agileforge/.env
-set +a
 
-uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+AGILEFORGE_CONFIG_ROOT=/Users/aaat/projects/agileforge \
+  uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
   python -m cli.main command schema "agileforge evidence collect"
 ```
 
+When `AGILEFORGE_CONFIG_ROOT` is set, the branch runtime loads
+`$AGILEFORGE_CONFIG_ROOT/.env` and resolves relative SQLite database URLs
+against that directory. This keeps a worktree branch on its own code while
+using the same local business/session databases as the central checkout.
+
 If the root `.env` is not available, export absolute database URLs before
-running the worktree CLI:
+running the worktree CLI instead:
 
 ```sh
 export AGILEFORGE_DB_URL="sqlite:////absolute/path/to/agileforge.db"
 export AGILEFORGE_SESSION_DB_URL="sqlite:////absolute/path/to/agileforge_session.db"
 ```
 
-Do not copy `.env` into temporary worktrees just to test a branch. Keeping the
-environment explicit makes it harder to validate the wrong checkout or database.
+Do not copy `.env` into temporary worktrees or source relative SQLite URLs from
+the root `.env` without `AGILEFORGE_CONFIG_ROOT`. Both patterns can validate the
+wrong checkout or database.
 
 ## Environment Expectations
 
 The CLI reads AgileForge configuration from the central repo runtime. The usual
 environment variables are:
 
+- `AGILEFORGE_CONFIG_ROOT` (optional; points worktree smoke tests at the central
+  `.env` and stateful SQLite files)
 - `OPEN_ROUTER_API_KEY`
 - `AGILEFORGE_DB_URL`
 - `AGILEFORGE_SESSION_DB_URL`
