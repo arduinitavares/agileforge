@@ -7,12 +7,14 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from pydantic import ValidationError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from services.agent_workbench.backlog_active_reset import (
+    ActiveBacklogResetError,
     ActiveBacklogResetRequest,
     ActiveBacklogResetReusedKeyError,
     reset_active_backlog_rows,
@@ -88,6 +90,34 @@ def _request(**overrides: object) -> ActiveBacklogResetRequest:
     }
     payload.update(overrides)
     return ActiveBacklogResetRequest.model_validate(payload)
+
+
+def _seed_active_story(engine: Engine) -> None:
+    with Session(engine) as session:
+        session.add(Product(name="Cartola"))
+        session.commit()
+        session.add(
+            UserStory(
+                product_id=1,
+                title="Old story",
+                status=StoryStatus.TO_DO,
+                story_origin="backlog_seed",
+                is_superseded=False,
+            )
+        )
+        session.commit()
+
+
+def _assert_reset_left_story_untouched(engine: Engine) -> None:
+    with Session(engine) as session:
+        story = session.exec(select(UserStory)).one()
+        assert story.is_superseded is False
+        assert story.archived_reason is None
+        assert story.archived_at is None
+        assert story.archived_by is None
+        assert story.archive_reset_attempt_id is None
+        assert story.archive_previous_status is None
+        assert session.exec(select(WorkflowEvent)).all() == []
 
 
 def test_reset_active_archives_all_active_rows_and_preserves_history() -> None:  # noqa: PLR0915
@@ -277,6 +307,49 @@ def test_reset_active_creates_seed_rows_from_host_stripped_artifact() -> None:
             select(UserStory).where(UserStory.archived_reason == "active_backlog_reset")
         ).one()
         assert archived.archived_by == "system-po"
+
+
+def test_reset_active_rejects_empty_projected_backlog_before_mutation() -> None:
+    """Empty savable projections fail before archive fields or events are written."""
+    engine = _engine()
+    _seed_active_story(engine)
+
+    with pytest.raises(ActiveBacklogResetError, match="RESET_BACKLOG_ITEMS_EMPTY"):
+        reset_active_backlog_rows(
+            engine,
+            _request(
+                artifact={
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                    "backlog_items": [],
+                }
+            ),
+        )
+
+    _assert_reset_left_story_untouched(engine)
+
+
+def test_reset_active_rejects_invalid_projected_item_before_mutation() -> None:
+    """Invalid BacklogItem projection fails before archive fields are written."""
+    engine = _engine()
+    _seed_active_story(engine)
+
+    invalid_item = _approved_item(1, "Invalid projected item")
+    invalid_item["estimated_effort"] = "banana"
+
+    with pytest.raises(ValidationError):
+        reset_active_backlog_rows(
+            engine,
+            _request(
+                artifact={
+                    "is_complete": True,
+                    "clarifying_questions": [],
+                    "backlog_items": [invalid_item],
+                }
+            ),
+        )
+
+    _assert_reset_left_story_untouched(engine)
 
 
 def test_reset_active_idempotency_replays_same_request() -> None:

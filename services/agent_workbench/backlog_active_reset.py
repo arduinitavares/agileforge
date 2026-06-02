@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 _RESET_NOT_REQUIRED = "RESET_NOT_REQUIRED"
 _RESET_IDEMPOTENCY_CONFLICT = "RESET_IDEMPOTENCY_CONFLICT"
+_RESET_BACKLOG_ITEMS_EMPTY = "RESET_BACKLOG_ITEMS_EMPTY"
 
 
 class ActiveBacklogResetError(RuntimeError):
@@ -82,6 +83,13 @@ def reset_active_backlog_rows(
         if replay is not None:
             return replay
 
+        projected_items = project_savable_backlog_items(request.artifact)
+        if not projected_items:
+            raise ActiveBacklogResetError(_RESET_BACKLOG_ITEMS_EMPTY)
+        validated_items = [
+            BacklogItem.model_validate(raw_item) for raw_item in projected_items
+        ]
+
         active_stories = session.exec(
             select(UserStory)
             .where(UserStory.product_id == request.project_id)
@@ -105,9 +113,7 @@ def reset_active_backlog_rows(
             session.add(story)
 
         created_story_ids: list[int] = []
-        projected_items = project_savable_backlog_items(request.artifact)
-        for raw_item in projected_items:
-            item = BacklogItem.model_validate(raw_item)
+        for item in validated_items:
             story = _story_from_backlog_item(request.project_id, item)
             session.add(story)
             session.flush()
