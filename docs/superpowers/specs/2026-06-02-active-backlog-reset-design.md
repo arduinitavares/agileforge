@@ -103,16 +103,17 @@ The command must fail closed unless all conditions hold:
 
 1. `expected_state` is `BACKLOG_REVIEW`.
 2. Workflow state is `BACKLOG_REVIEW`.
-3. `attempt_id` exists in backlog attempt history.
-4. Attempt artifact fingerprint equals `expected_artifact_fingerprint`.
-5. Attempt artifact is complete.
-6. Attempt is a refined attempt or imported refined attempt.
-7. Attempt is approved by the host approval boundary.
-8. Attempt is `refinement_saveable=true`.
-9. `reset_reason` is non-empty.
-10. `archive_all_active_stories=true`.
-11. Request idempotency key is non-empty.
-12. Existing active backlog rows are blocked by the normal replacement guard.
+3. `backlog_review_origin` is `next_cycle_refinement`.
+4. `attempt_id` exists in backlog attempt history.
+5. Attempt artifact fingerprint equals `expected_artifact_fingerprint`.
+6. Attempt artifact is complete.
+7. Attempt is a refined attempt or imported refined attempt.
+8. Attempt is approved by the host approval boundary.
+9. Attempt is `refinement_saveable=true`.
+10. `reset_reason` is non-empty.
+11. `archive_all_active_stories=true`.
+12. Request idempotency key is non-empty.
+13. Existing active backlog rows are blocked by the normal replacement guard.
 
 If normal `backlog save` would succeed, `reset-active` must fail with guidance to
 use ordinary `backlog save`. This avoids two persistence paths for the trivial
@@ -139,7 +140,9 @@ Within one transaction, reset performs:
    - title/rank/source fields follow the existing `save_backlog_tool`
      projection semantics;
    - no story refinement or Sprint planning occurs.
-7. Write a `WorkflowEvent` with `action = "active_backlog_reset"`.
+7. Write a `WorkflowEvent` with
+   `event_type = WorkflowEventType.BACKLOG_SAVED` and
+   `action = "active_backlog_reset"`.
 8. Update workflow state:
    - `fsm_state = "BACKLOG_PERSISTENCE"`;
    - `backlog_saved_at = now`;
@@ -183,6 +186,8 @@ Rules:
 - existing rows are not transformed during migration;
 - `status` is not overwritten during reset;
 - `archive_previous_status` snapshots the story status at reset time;
+- `archived_by` is recorded from the host command boundary and defaults to
+  `"po"` in Phase 1;
 - `archived_reason = "active_backlog_reset"` identifies reset-archived rows;
 - ordinary save supersession may continue to set `is_superseded=true` without
   setting `archived_reason`;
@@ -199,7 +204,8 @@ source of truth for active-baseline filtering and reset archive inspection.
 
 ## WorkflowEvent Payload
 
-The command records a `WorkflowEvent` with:
+The command records a `WorkflowEvent` using existing
+`WorkflowEventType.BACKLOG_SAVED` with:
 
 ```json
 {
@@ -218,6 +224,21 @@ The command records a `WorkflowEvent` with:
 
 The event is audit evidence, not the primary projection for determining whether
 a story is active or reset-archived.
+
+Because reset reuses the `BACKLOG_SAVED` event type, all readers must filter by
+`event_metadata.action`, not event type alone:
+
+- normal backlog-save idempotency replay must replay only
+  `action = "backlog_saved"`;
+- backlog-reconcile idempotency replay must replay only
+  `action = "backlog_reconciled"`;
+- backlog-reconcile saved-count inference must count only
+  `action = "backlog_saved"`;
+- reset-active idempotency replay must replay only
+  `action = "active_backlog_reset"`.
+
+`active_backlog_reset` events must not be interpreted as ordinary saves or
+reconcile events.
 
 ## Idempotency
 
@@ -281,6 +302,21 @@ Roadmap generation is the stale-exit path for reset. A stale marker with
 backlog baseline is the reset attempt. Story and Sprint generation still block
 until a new roadmap has been generated and saved against that baseline.
 
+This requires changing the generic stale guard or the roadmap generation entry
+point. The current helper blocks roadmap, story, and sprint generation
+unconditionally whenever `downstream_backlog_stale = true`. Reset-active must add
+a roadmap-only exception:
+
+```text
+allow roadmap generate when:
+  fsm_state = BACKLOG_PERSISTENCE
+  downstream_backlog_stale = true
+  stale_backlog_reason = active_backlog_reset
+  stale_since_backlog_attempt_id = active_backlog_reset_attempt_id
+```
+
+The same marker must continue to block story and sprint generation.
+
 After the regenerated roadmap is saved, AgileForge may clear
 `downstream_backlog_stale` or update the marker to the next stale boundary that
 still needs regeneration. It must not silently reuse pre-reset roadmap/story/sprint
@@ -295,6 +331,7 @@ artifacts as current.
 | `RESET_ATTEMPT_INCOMPLETE` | attempt artifact is incomplete |
 | `RESET_ATTEMPT_NOT_APPROVED` | attempt lacks host-mediated approval |
 | `RESET_NOT_REFINEMENT_ATTEMPT` | attempt kind is unsupported |
+| `RESET_WRONG_REVIEW_ORIGIN` | workflow is not a next-cycle refinement review |
 | `RESET_NOT_REQUIRED` | ordinary `backlog save` would not be replacement-blocked |
 | `RESET_REASON_REQUIRED` | reset reason is blank |
 | `RESET_ARCHIVE_FLAG_REQUIRED` | `--archive-all-active-stories` missing |
@@ -307,39 +344,53 @@ artifacts as current.
    non-destructive, and idempotency-required.
 2. Reset fails without `attempt_id`, expected fingerprint, expected state,
    reset reason, archive-all flag, and idempotency key.
-3. Reset fails if the attempt is not complete.
-4. Reset fails if the attempt is not approved.
-5. Reset fails if normal `backlog save` would not be replacement-blocked.
-6. Reset soft-archives every active pre-reset story row, including `Done` rows.
-7. Reset never deletes UserStory, Sprint, SprintStory, Task, StoryCompletionLog,
+3. Reset fails when `backlog_review_origin` is not `next_cycle_refinement`.
+4. Reset fails if the attempt is not complete.
+5. Reset fails if the attempt is not approved.
+6. Reset fails if normal `backlog save` would not be replacement-blocked.
+7. Reset soft-archives every active pre-reset story row, including `Done` rows.
+8. Reset never deletes UserStory, Sprint, SprintStory, Task, StoryCompletionLog,
    TaskExecutionLog, or WorkflowEvent rows.
-8. Reset creates new active `backlog_seed` rows from the approved refined
+9. Reset creates new active `backlog_seed` rows from the approved refined
    attempt.
-9. Reset stamps archive metadata columns on archived rows.
-10. Reset leaves archived row `status` unchanged and snapshots it into
+10. Reset stamps archive metadata columns on archived rows.
+11. Reset leaves archived row `status` unchanged and snapshots it into
     `archive_previous_status`.
-11. Reset records `WorkflowEvent.action = "active_backlog_reset"`.
-12. Reset moves workflow to `BACKLOG_PERSISTENCE`.
-13. Reset keeps `downstream_backlog_stale = true`.
-14. Reset sets `stale_since_backlog_attempt_id` to the reset attempt id.
-15. `workflow next` after reset does not route to Sprint planning.
-16. `workflow next` after reset routes to roadmap regeneration from the reset
+12. Reset records `WorkflowEventType.BACKLOG_SAVED` with
+    `metadata.action = "active_backlog_reset"`.
+13. Existing save/reconcile replay and saved-count readers ignore
+    `active_backlog_reset` except in reset-active replay.
+14. Reset moves workflow to `BACKLOG_PERSISTENCE`.
+15. Reset keeps `downstream_backlog_stale = true`.
+16. Reset sets `stale_since_backlog_attempt_id` to the reset attempt id.
+17. `workflow next` after reset does not route to Sprint planning.
+18. `workflow next` after reset routes to roadmap regeneration from the reset
     backlog baseline.
-17. Story and Sprint generation remain blocked until downstream artifacts are
-    regenerated or explicitly acknowledged against the reset baseline.
-18. Same idempotency request replays without duplicate story creation.
-19. Same idempotency key with different fingerprint fails.
-20. Completed Sprint history remains visible and linked to the archived stories.
+19. Roadmap generation is not blocked by the reset stale marker, but story and
+    sprint generation remain blocked until downstream artifacts are regenerated
+    or explicitly acknowledged against the reset baseline.
+20. Same idempotency request replays without duplicate story creation.
+21. Same idempotency key with different fingerprint fails.
+22. Completed Sprint history remains visible and linked to the archived stories.
 
-## Open Questions
+## Closed Decisions
 
-- Should reset use `changed_by = "po"` by default, or should the CLI accept
-  `--archived-by` for explicit actor identity?
-- Should active backlog reset be allowed only from `next_cycle_refinement`, or
-  from any `BACKLOG_REVIEW` state with an approved refined attempt?
+- `archived_by` is recorded from the host command boundary and defaults to
+  `"po"` in Phase 1. There is no separate `--archived-by` option in the first
+  implementation slice.
+- Reset-active is allowed only from `BACKLOG_REVIEW` when
+  `backlog_review_origin = "next_cycle_refinement"`.
+- Roadmap generation is the first stale-exit path after reset. Story and Sprint
+  generation remain blocked until downstream artifacts are regenerated or
+  explicitly acknowledged against the reset baseline.
 
-These questions do not block the core design. They affect implementation
-defaults and command copy.
+## Deferred Questions
+
+- After roadmap save, should AgileForge clear `downstream_backlog_stale`
+  entirely or update it to a narrower story/sprint stale boundary?
+- Should a later admin-only reset support non-`next_cycle_refinement` cases?
+
+These deferred questions do not block the core design.
 
 ## Implementation Boundaries
 
