@@ -132,6 +132,55 @@ def _refinement_operations_payload(
     }
 
 
+def _authority_ref_change_operations_payload(
+    state: JsonDict,
+    *,
+    new_authority_ref: str,
+) -> JsonDict:
+    source_attempt = state["backlog_attempts"][0]
+    return {
+        "source_attempt_id": source_attempt["attempt_id"],
+        "source_artifact_fingerprint": source_attempt["artifact_fingerprint"],
+        "authority_fingerprint": "sha256:authority",
+        "as_built_cache_fingerprint": "sha256:as-built",
+        "operations": [
+            {
+                "operation_id": "op-authority-ref-change",
+                "operation_type": "authority_ref_change",
+                "source_item_ids": ["item-001"],
+                "source_item_fingerprints": ["AUTO_SOURCE_ITEM_FINGERPRINT"],
+                "result_item_ids": ["item-001"],
+                "old_authority_ref": "REQ.backlog.refinement",
+                "new_authority_ref": new_authority_ref,
+                "rationale": "Move the item to a supported authority ref.",
+                "requested_by": "po",
+            }
+        ],
+    }
+
+
+def _add_refinement_supported_authority_refs(state: JsonDict) -> None:
+    state["compiled_authority_cached"] = {
+        "invariants": [
+            {
+                "id": "INV-backlog-supported",
+                "parameters": {"source_item_id": "REQ.backlog.supported"},
+            }
+        ],
+        "source_map": [
+            {"source_item_id": "REQ.backlog.source-map"},
+        ],
+    }
+    state["as_built_assessment_cached"] = {
+        "capability_assessments": [
+            {
+                "authority_ref": "REQ.backlog.as-built",
+                "invariant_refs": ["INV-backlog-as-built"],
+            }
+        ]
+    }
+
+
 def _split_operations_with_stale_annotation(
     state: JsonDict,
     *,
@@ -935,6 +984,70 @@ async def test_record_backlog_refinement_rejects_as_built_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_backlog_refinement_rejects_unsupported_authority_ref() -> None:
+    """Record validates authority_ref changes against host-owned authority refs."""
+    state = _refinement_source_state()
+    _add_refinement_supported_authority_refs(state)
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await record_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+            operations_payload=_authority_ref_change_operations_payload(
+                state,
+                new_authority_ref="REQ.unsupported",
+            ),
+            expected_source_fingerprint=state["backlog_attempts"][0][
+                "artifact_fingerprint"
+            ],
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="refine-record-unsupported-authority",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "unsupported authority ref: REQ.unsupported" in exc_info.value.detail
+    assert saved == {}
+    assert len(state["backlog_attempts"]) == 1
+    assert state["fsm_state"] == "SPRINT_COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_record_backlog_refinement_accepts_supported_authority_ref() -> None:
+    """Record allows authority_ref changes backed by compiled authority."""
+    state = _refinement_source_state()
+    _add_refinement_supported_authority_refs(state)
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    payload = await record_backlog_refinement(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+        operations_payload=_authority_ref_change_operations_payload(
+            state,
+            new_authority_ref="REQ.backlog.supported",
+        ),
+        expected_source_fingerprint=state["backlog_attempts"][0][
+            "artifact_fingerprint"
+        ],
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="refine-record-supported-authority",
+        now_iso=lambda: "2026-06-01T00:00:00Z",
+    )
+
+    assert payload["attempt_id"] == "backlog-attempt-2"
+    refined_item = saved["state"]["product_backlog_assessment"]["backlog_items"][0]
+    assert refined_item["authority_ref"] == "REQ.backlog.supported"
+
+
+@pytest.mark.asyncio
 async def test_import_backlog_refinement_records_source_then_refined_attempt() -> None:
     """Import records the supplied source before recording refined operations."""
     state: JsonDict = {
@@ -1000,6 +1113,52 @@ async def test_import_backlog_refinement_records_source_then_refined_attempt() -
         == "Verify imported backlog refinement workflow"
     )
     assert "refine-import-1" in saved["state"]["backlog_refine_import_idempotency_keys"]
+
+
+@pytest.mark.asyncio
+async def test_import_backlog_refinement_rejects_unsupported_authority_ref() -> None:
+    """Edited artifacts cannot import unsupported authority_ref changes."""
+    state: JsonDict = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "compiled_authority_fingerprint": "sha256:authority",
+        "as_built_assessment_cache_meta": {"assessment_fingerprint": "sha256:as-built"},
+    }
+    _add_refinement_supported_authority_refs(state)
+    source_artifact: JsonDict = {
+        "backlog_items": [_refinement_source_item()],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+    edited_artifact: JsonDict = {
+        "backlog_items": [
+            {
+                **_refinement_source_item(authority_ref="REQ.unsupported"),
+                "source_item_id": "item-001",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await import_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+            source_artifact=source_artifact,
+            edited_artifact=edited_artifact,
+            expected_source_fingerprint=source_fingerprint,
+            idempotency_key="refine-import-unsupported-authority",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+
+    assert "unsupported authority ref: REQ.unsupported" in exc_info.value.detail
+    assert saved == {}
 
 
 @pytest.mark.asyncio

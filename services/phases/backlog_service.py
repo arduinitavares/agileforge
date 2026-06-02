@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -23,6 +24,7 @@ from services.backlog_runtime import (
 from services.phases import workflow_state
 from services.phases.backlog_refinement import (
     AmbiguousRefinementDiffError,
+    AuthorityRefChangeOperation,
     BacklogRefinementError,
     BacklogRefinementOperationSet,
     apply_refinement_operations,
@@ -61,6 +63,23 @@ BACKLOG_RUNTIME_DIAGNOSTIC_KEYS: tuple[str, ...] = ()
 AUTO_SOURCE_ITEM_FINGERPRINT = "AUTO_SOURCE_ITEM_FINGERPRINT"
 REFINE_RECORD_IDEMPOTENCY_REUSED_MESSAGE = (
     "Backlog refinement idempotency key reused with different request"
+)
+COMPILED_AUTHORITY_STATE_KEYS = ("compiled_authority_cached", "compiled_authority_json")
+COMPILED_AUTHORITY_REF_COLLECTION_KEYS = (
+    "items",
+    "invariants",
+    "source_map",
+    "requirement_candidates",
+    "authority_mappings",
+)
+COMPILED_AUTHORITY_REF_KEYS = (
+    "id",
+    "authority_ref",
+    "authority_item_id",
+    "candidate_id",
+    "invariant_id",
+    "source_item_id",
+    "target_id",
 )
 
 
@@ -748,10 +767,18 @@ def _prepare_backlog_refinement(
         resolved_payload,
         state=state,
     )
+    supported_authority_refs = _supported_refinement_authority_refs(
+        state,
+        operation_set,
+    )
     operation_set_fingerprint = canonical_operations_fingerprint(operation_set)
     try:
         refined_artifact = normalize_refined_artifact(
-            apply_refinement_operations(source_with_identity, operation_set)
+            apply_refinement_operations(
+                source_with_identity,
+                operation_set,
+                supported_authority_refs=supported_authority_refs,
+            )
         )
         refined_artifact = _derive_refined_brownfield_metadata(
             refined_artifact,
@@ -958,6 +985,97 @@ def _validate_refinement_operation_set(
                 "Backlog refinement as-built cache fingerprint mismatch"
             )
     return operation_set
+
+
+def _supported_refinement_authority_refs(
+    state: dict[str, Any],
+    operation_set: BacklogRefinementOperationSet,
+) -> set[str] | None:
+    if not _operation_set_requires_authority_refs(operation_set):
+        return None
+
+    refs: set[str] = set()
+    for state_key in COMPILED_AUTHORITY_STATE_KEYS:
+        _collect_compiled_authority_refs(state.get(state_key), refs)
+
+    active_project = state.get("active_project")
+    if isinstance(active_project, dict):
+        for state_key in COMPILED_AUTHORITY_STATE_KEYS:
+            _collect_compiled_authority_refs(active_project.get(state_key), refs)
+
+    _collect_as_built_authority_refs(state.get("as_built_assessment_cached"), refs)
+    if not refs:
+        raise BacklogPhaseError(
+            "Backlog refinement authority refs unavailable for authority_ref_change",
+        )
+    return refs
+
+
+def _operation_set_requires_authority_refs(
+    operation_set: BacklogRefinementOperationSet,
+) -> bool:
+    return any(
+        isinstance(operation, AuthorityRefChangeOperation)
+        and operation.new_authority_ref is not None
+        for operation in operation_set.operations
+    )
+
+
+def _json_object(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return cast("dict[str, Any]", value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return cast("dict[str, Any]", parsed)
+    return None
+
+
+def _add_authority_ref(refs: set[str], value: object) -> None:
+    if isinstance(value, str) and value.strip():
+        refs.add(value.strip())
+
+
+def _collect_authority_ref_keys(value: object, refs: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if key in COMPILED_AUTHORITY_REF_KEYS:
+                _add_authority_ref(refs, nested_value)
+            _collect_authority_ref_keys(nested_value, refs)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_authority_ref_keys(item, refs)
+
+
+def _collect_compiled_authority_refs(value: object, refs: set[str]) -> None:
+    authority = _json_object(value)
+    if authority is None:
+        return
+    for collection_key in COMPILED_AUTHORITY_REF_COLLECTION_KEYS:
+        _collect_authority_ref_keys(authority.get(collection_key), refs)
+
+
+def _collect_as_built_authority_refs(value: object, refs: set[str]) -> None:
+    assessment = _json_object(value)
+    if assessment is None:
+        return
+    raw_capabilities = assessment.get("capability_assessments")
+    if not isinstance(raw_capabilities, list):
+        return
+    for raw_capability in raw_capabilities:
+        if not isinstance(raw_capability, dict):
+            continue
+        _add_authority_ref(refs, raw_capability.get("authority_ref"))
+        invariant_refs = raw_capability.get("invariant_refs")
+        if not isinstance(invariant_refs, list):
+            continue
+        for invariant_ref in invariant_refs:
+            _add_authority_ref(refs, invariant_ref)
 
 
 def _as_built_cache_fingerprint(state: dict[str, Any]) -> str:
