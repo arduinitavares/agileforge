@@ -330,6 +330,23 @@ class _BacklogPersistenceReadProjection(_FakeReadProjection):
         return result
 
 
+class _BacklogPersistenceActiveResetReadProjection(_BacklogPersistenceReadProjection):
+    """Fake read projection for active-reset stale Backlog persistence."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Backlog persistence workflow state with reset stale marker."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "downstream_backlog_stale": True,
+                "stale_backlog_reason": "active_backlog_reset",
+                "stale_since_backlog_attempt_id": "backlog-attempt-12",
+                "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            }
+        )
+        return result
+
+
 class _RoadmapInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Roadmap interview state."""
 
@@ -2468,6 +2485,43 @@ def test_application_workflow_next_reports_roadmap_after_backlog_save() -> None:
     ]
     assert result["data"]["blocked_future_commands"] == []
     assert result["data"]["status"] == "next_phase_available"
+
+
+def test_application_workflow_next_routes_active_reset_to_roadmap_only() -> None:
+    """Expose roadmap regeneration while documenting Story/Sprint stale dead-end."""
+    app = AgentWorkbenchApplication(
+        read_projection=_BacklogPersistenceActiveResetReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge roadmap generate --project-id 7"
+    ]
+    assert result["data"]["status"] == (
+        "active_backlog_reset_requires_roadmap_regeneration"
+    )
+    assert result["data"]["blocked_commands"] == [
+        {
+            "command": "agileforge story generate",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Story generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+        {
+            "command": "agileforge sprint save",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Sprint generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+    ]
+    assert result["data"]["blocked_future_commands"] == []
 
 
 def test_application_workflow_next_routes_roadmap_interview_to_generate() -> None:

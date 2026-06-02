@@ -123,7 +123,7 @@ async def generate_roadmap_draft(
 ) -> dict[str, Any]:
     state = await load_state()
     try:
-        workflow_state.assert_downstream_backlog_not_stale(state)
+        workflow_state.assert_downstream_backlog_not_stale_for_roadmap(state)
     except workflow_state.DownstreamBacklogStaleError as exc:
         raise RoadmapPhaseError(str(exc)) from exc
 

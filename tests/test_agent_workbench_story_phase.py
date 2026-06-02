@@ -499,6 +499,87 @@ def test_story_generate_blocks_stale_downstream_backlog(
     )
 
 
+def test_story_generate_blocks_active_reset_stale_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story generation remains blocked by active-reset stale markers."""
+    captured: dict[str, Any] = {"agent_calls": 0}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_story_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, parent_requirement, user_input
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "parent_requirement": "Review match result",
+                "user_stories": [],
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "classification": "reusable_content_result",
+            "draft_kind": "incomplete_draft",
+            "is_reusable": True,
+            "is_complete": False,
+            "request_payload": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.run_story_agent_from_state",
+        fake_run_story_agent_from_state,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+        }
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+        user_input="draft story",
+    )
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["warnings"] == []
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "downstream backlog is stale" in result["errors"][0]["message"]
+    assert "active_backlog_reset" in result["errors"][0]["message"]
+    assert "backlog-attempt-12" in result["errors"][0]["message"]
+    assert captured["agent_calls"] == 0
+    assert workflow_service.state["downstream_backlog_stale"] is True
+    assert workflow_service.state["stale_backlog_reason"] == "active_backlog_reset"
+    assert workflow_service.state["stale_since_backlog_attempt_id"] == (
+        "backlog-attempt-12"
+    )
+
+
 def test_story_retry_blocks_stale_downstream_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

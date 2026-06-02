@@ -1729,6 +1729,46 @@ def _setup_status(envelope: dict[str, Any]) -> str | None:
     return str(setup_status).strip().lower() if setup_status is not None else None
 
 
+def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
+    """Return whether workflow state has the exact active-reset stale marker."""
+    data = _envelope_data(envelope)
+    state = data.get("state")
+    if not isinstance(state, dict):
+        return False
+
+    stale_attempt_id = state.get("stale_since_backlog_attempt_id")
+    reset_attempt_id = state.get("active_backlog_reset_attempt_id")
+    return (
+        str(state.get("fsm_state")).strip().upper() == "BACKLOG_PERSISTENCE"
+        and state.get("downstream_backlog_stale") is True
+        and state.get("stale_backlog_reason") == "active_backlog_reset"
+        and stale_attempt_id is not None
+        and stale_attempt_id == reset_attempt_id
+    )
+
+
+def _active_backlog_reset_blocked_commands() -> list[dict[str, str]]:
+    """Return downstream commands intentionally blocked after active reset."""
+    return [
+        {
+            "command": "agileforge story generate",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Story generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+        {
+            "command": "agileforge sprint save",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Sprint generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+    ]
+
+
 def _setup_workflow_next(
     *,
     project_id: int,
@@ -1997,13 +2037,19 @@ def _backlog_workflow_next(
         return None
 
     next_valid_commands: list[str] = []
+    blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
     status: str | None = None
+    reset_stale_marker = _active_backlog_reset_stale_marker(workflow)
     if fsm_state == "BACKLOG_PERSISTENCE":
         roadmap_command = f"agileforge roadmap generate --project-id {project_id}"
         if command_is_available("agileforge roadmap generate"):
             next_valid_commands.append(roadmap_command)
-            status = "next_phase_available"
+            status = (
+                "active_backlog_reset_requires_roadmap_regeneration"
+                if reset_stale_marker
+                else "next_phase_available"
+            )
         else:
             blocked_future_commands.append(
                 {
@@ -2013,6 +2059,8 @@ def _backlog_workflow_next(
                 }
             )
             status = "blocked_by_uninstalled_next_phase"
+        if reset_stale_marker:
+            blocked_commands.extend(_active_backlog_reset_blocked_commands())
 
     command_candidates = _backlog_command_candidates(
         project_id=project_id,
@@ -2029,7 +2077,7 @@ def _backlog_workflow_next(
     data: dict[str, Any] = {
         "project_id": project_id,
         "next_valid_commands": next_valid_commands,
-        "blocked_commands": [],
+        "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
     }
     if status is not None:

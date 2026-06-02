@@ -32,6 +32,24 @@ def assert_downstream_backlog_not_stale(state: dict[str, Any]) -> None:
     )
 
 
+def assert_downstream_backlog_not_stale_for_roadmap(state: dict[str, Any]) -> None:
+    """Block stale backlog except reset marker whose exit path is roadmap."""
+    if state.get("downstream_backlog_stale") is not True:
+        return
+
+    stale_attempt_id = state.get("stale_since_backlog_attempt_id")
+    reset_attempt_id = state.get("active_backlog_reset_attempt_id")
+    if (
+        state.get("fsm_state") == OrchestratorState.BACKLOG_PERSISTENCE.value
+        and state.get("stale_backlog_reason") == "active_backlog_reset"
+        and stale_attempt_id is not None
+        and stale_attempt_id == reset_attempt_id
+    ):
+        return
+
+    assert_downstream_backlog_not_stale(state)
+
+
 def failure_meta(
     source: dict[str, Any] | None,
     *,
