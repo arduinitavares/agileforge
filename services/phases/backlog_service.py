@@ -468,8 +468,8 @@ async def import_backlog_refinement(
                 "expected_state": expected_state,
                 "source_artifact_fingerprint": source_fingerprint,
             },
-            output_artifact=copy.deepcopy(source_artifact),
-            is_complete=bool(source_artifact.get("is_complete")),
+            output_artifact=copy.deepcopy(canonical_source),
+            is_complete=bool(canonical_source.get("is_complete")),
             created_at=now_iso(),
         )
         source_attempt_id = f"backlog-attempt-{attempt_count}"
@@ -479,7 +479,11 @@ async def import_backlog_refinement(
             artifact_fingerprint=source_fingerprint,
         )
         source_attempt = ensure_backlog_attempts(state)[-1]
-        source_attempt["attempt_kind"] = "refine_import_source"
+        source_attempt["attempt_kind"] = "imported_preview_source"
+    else:
+        source_output_artifact = source_attempt.get("output_artifact")
+        if isinstance(source_output_artifact, dict):
+            canonical_source = copy.deepcopy(source_output_artifact)
 
     payload = await record_backlog_refinement(
         project_id=project_id,
@@ -491,7 +495,12 @@ async def import_backlog_refinement(
         idempotency_key=idempotency_key,
         now_iso=now_iso,
     )
+    refined_attempt = _find_backlog_attempt(state, str(payload.get("attempt_id")))
+    if isinstance(refined_attempt, dict):
+        refined_attempt["trigger"] = "refine_import"
+        refined_attempt["attempt_kind"] = "import_refinement"
     payload["trigger"] = "refine-import"
+    payload["attempt_kind"] = "import_refinement"
     payload["request_fingerprint"] = request_fingerprint
     _record_backlog_refine_import_replay(
         state,
@@ -708,11 +717,12 @@ def _prepare_backlog_refinement(
         expected_source_fingerprint=source_artifact_fingerprint,
         source_artifact_fingerprint=attempt_fingerprint,
     )
-    recomputed_source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
-    _assert_refinement_source_fingerprint(
-        expected_source_fingerprint=source_artifact_fingerprint,
-        source_artifact_fingerprint=recomputed_source_fingerprint,
-    )
+    if source_attempt.get("attempt_kind") != "imported_preview_source":
+        recomputed_source_fingerprint = _backlog_artifact_fingerprint(source_artifact)
+        _assert_refinement_source_fingerprint(
+            expected_source_fingerprint=source_artifact_fingerprint,
+            source_artifact_fingerprint=recomputed_source_fingerprint,
+        )
 
     source_with_identity = assign_item_identity(
         cast("dict[str, object]", source_artifact),
@@ -736,6 +746,7 @@ def _prepare_backlog_refinement(
             refined_artifact,
             state=state,
         )
+        refined_artifact = normalize_refined_artifact(refined_artifact)
     except BacklogRefinementError as exc:
         raise BacklogPhaseError(f"Backlog refinement failed: {exc}") from exc
 
@@ -1289,7 +1300,8 @@ def _find_refine_import_source_attempt(
         if not isinstance(attempt, dict):
             continue
         if (
-            attempt.get("attempt_kind") == "refine_import_source"
+            attempt.get("attempt_kind")
+            in {"imported_preview_source", "refine_import_source"}
             and attempt.get("artifact_fingerprint") == source_artifact_fingerprint
         ):
             return attempt

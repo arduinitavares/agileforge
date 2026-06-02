@@ -742,7 +742,14 @@ def test_backlog_refine_import_returns_success_for_valid_files(
     assert result["data"]["trigger"] == "refine-import"
     assert result["data"]["attempt_id"] == "backlog-attempt-2"
     assert workflow.state["backlog_attempts"][0]["trigger"] == "refine_import_source"
-    assert workflow.state["backlog_attempts"][1]["attempt_kind"] == "refinement"
+    assert workflow.state["backlog_attempts"][0]["attempt_kind"] == (
+        "imported_preview_source"
+    )
+    assert workflow.state["backlog_attempts"][0]["output_artifact"]["backlog_items"][0][
+        "item_id"
+    ] == "item-001"
+    assert workflow.state["backlog_attempts"][1]["trigger"] == "refine_import"
+    assert workflow.state["backlog_attempts"][1]["attempt_kind"] == "import_refinement"
     assert (
         workflow.state["product_backlog_assessment"]["backlog_items"][0]["requirement"]
         == "Verify imported backlog refinement workflow"

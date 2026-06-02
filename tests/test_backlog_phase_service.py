@@ -128,6 +128,45 @@ def _refinement_operations_payload(
     }
 
 
+def _split_operations_with_stale_annotation(
+    state: JsonDict,
+    *,
+    stale_authority_ref: str,
+) -> JsonDict:
+    source_attempt = state["backlog_attempts"][0]
+    first_result = _refinement_source_item(
+        requirement="Validate backlog refinement source identity",
+        justification="Confirm source identity stays host-owned.",
+    )
+    second_result = _refinement_source_item(
+        requirement="Document backlog refinement approval boundary",
+        justification="Confirm approval stays host-owned.",
+    )
+    for item in (first_result, second_result):
+        item["as_built_annotation"] = {
+            "schema_version": "agileforge.brownfield_annotation.v1",
+            "selected": {"authority_ref": stale_authority_ref},
+        }
+    return {
+        "source_attempt_id": source_attempt["attempt_id"],
+        "source_artifact_fingerprint": source_attempt["artifact_fingerprint"],
+        "authority_fingerprint": "sha256:authority",
+        "as_built_cache_fingerprint": "sha256:as-built",
+        "operations": [
+            {
+                "operation_id": "op-split",
+                "operation_type": "split",
+                "source_item_ids": ["item-001"],
+                "source_item_fingerprints": ["AUTO_SOURCE_ITEM_FINGERPRINT"],
+                "result_item_ids": ["item-001-a", "item-001-b"],
+                "result_items": [first_result, second_result],
+                "rationale": "Split imported review feedback into two refined items.",
+                "requested_by": "po",
+            }
+        ],
+    }
+
+
 def test_backlog_state_from_complete_maps_to_review_and_interview() -> None:
     """Verify backlog state from complete maps to review and interview."""
     assert backlog_state_from_complete(True) == "BACKLOG_REVIEW"
@@ -592,6 +631,52 @@ async def test_record_backlog_refinement_discards_stale_brownfield_metadata() ->
 
 
 @pytest.mark.asyncio
+async def test_record_refinement_fingerprint_ignores_stale_inbound_annotation() -> None:
+    """Refined fingerprints are based on host-rederived metadata, not proposer data."""
+
+    async def record_with_stale_annotation(stale_authority_ref: str) -> JsonDict:
+        state = _refinement_source_state()
+        saved: JsonDict = {}
+
+        async def load_state() -> JsonDict:
+            return state
+
+        payload = await record_backlog_refinement(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda updated: saved.update({"state": copy.deepcopy(updated)}),
+            operations_payload=_split_operations_with_stale_annotation(
+                state,
+                stale_authority_ref=stale_authority_ref,
+            ),
+            expected_source_fingerprint=state["backlog_attempts"][0][
+                "artifact_fingerprint"
+            ],
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key=f"refine-record-strip-{stale_authority_ref}",
+            now_iso=lambda: "2026-06-01T00:00:00Z",
+        )
+        return {
+            "payload": payload,
+            "artifact": saved["state"]["product_backlog_assessment"],
+        }
+
+    first = await record_with_stale_annotation("REQ.stale-one")
+    second = await record_with_stale_annotation("REQ.stale-two")
+
+    assert first["artifact"]["backlog_items"] == second["artifact"]["backlog_items"]
+    assert first["artifact"]["artifact_fingerprint"] == (
+        second["artifact"]["artifact_fingerprint"]
+    )
+    assert first["payload"]["artifact_fingerprint"] == (
+        second["payload"]["artifact_fingerprint"]
+    )
+    assert [
+        item["item_fingerprint"] for item in first["artifact"]["backlog_items"]
+    ] == [item["item_fingerprint"] for item in second["artifact"]["backlog_items"]]
+
+
+@pytest.mark.asyncio
 async def test_record_backlog_refinement_replays_same_idempotency_key() -> None:
     """Same refine-record idempotency key and request replays the first payload."""
     state = _refinement_source_state()
@@ -871,10 +956,11 @@ async def test_import_backlog_refinement_records_source_then_refined_attempt() -
     assert payload["attempt_id"] == "backlog-attempt-2"
     assert len(save_calls) == 1
     assert attempts[0]["trigger"] == "refine_import_source"
-    assert attempts[0]["attempt_kind"] == "refine_import_source"
+    assert attempts[0]["attempt_kind"] == "imported_preview_source"
     assert attempts[0]["artifact_fingerprint"] == source_fingerprint
-    assert attempts[1]["trigger"] == "refine_record"
-    assert attempts[1]["attempt_kind"] == "refinement"
+    assert attempts[0]["output_artifact"]["backlog_items"][0]["item_id"] == "item-001"
+    assert attempts[1]["trigger"] == "refine_import"
+    assert attempts[1]["attempt_kind"] == "import_refinement"
     assert attempts[1]["source_attempt_id"] == "backlog-attempt-1"
     assert (
         saved["state"]["product_backlog_assessment"]["backlog_items"][0]["requirement"]
