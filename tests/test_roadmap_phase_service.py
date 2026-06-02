@@ -162,6 +162,62 @@ def test_ensure_roadmap_attempts_returns_existing_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_roadmap_draft_blocks_stale_downstream_backlog() -> None:
+    """Verify roadmap generation stops when downstream backlog is stale."""
+    state: JsonDict = {
+        "fsm_state": "VISION_PERSISTENCE",
+        "downstream_backlog_stale": True,
+        "stale_backlog_reason": "backlog refinement changed",
+        "stale_since_backlog_attempt_id": "backlog-attempt-7",
+    }
+    saved: JsonDict = {}
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_roadmap_agent_from_state(
+        _state: object, **_kwargs: object
+    ) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "roadmap_releases": [],
+                "roadmap_summary": "Draft roadmap",
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "is_complete": False,
+            "error": None,
+        }
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await generate_roadmap_draft(
+            project_id=7,
+            load_state=load_state,
+            save_state=save_state,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            run_roadmap_agent=fake_run_roadmap_agent_from_state,
+            user_input=None,
+        )
+
+    message = exc_info.value.detail
+    assert "downstream backlog is stale" in message
+    assert "backlog refinement changed" in message
+    assert "backlog-attempt-7" in message
+    assert captured["agent_calls"] == 0
+    assert "state" not in saved
+    assert state["downstream_backlog_stale"] is True
+    assert state["stale_backlog_reason"] == "backlog refinement changed"
+    assert state["stale_since_backlog_attempt_id"] == "backlog-attempt-7"
+
+
+@pytest.mark.asyncio
 async def test_generate_roadmap_draft_allows_empty_input_on_first_attempt() -> None:
     """Verify generate roadmap draft allows empty input on first attempt."""
     state: JsonDict = {"fsm_state": "VISION_PERSISTENCE"}

@@ -110,6 +110,74 @@ def test_sprint_runner_generate_wraps_keyword_only_failure_meta(
     assert result["data"]["attempt_id"] == "sprint-attempt-1"
 
 
+def test_sprint_runner_generate_blocks_stale_downstream_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint generate returns existing failure envelope when backlog is stale."""
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {"available_stories": []},
+            "output_artifact": {"is_complete": True},
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        sprint_phase_module,
+        "run_sprint_agent_from_state",
+        fake_run_sprint_agent,
+    )
+    monkeypatch.setattr(
+        sprint_service,
+        "load_sprint_candidates",
+        lambda _project_id: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 1}],
+            "readiness": {"status": "ready"},
+        },
+    )
+    monkeypatch.setattr(
+        SprintPhaseRunner,
+        "_current_planned_sprint_id",
+        lambda _self, _project_id: None,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "backlog refinement changed",
+            "stale_since_backlog_attempt_id": "backlog-attempt-7",
+        }
+    )
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow_service),
+    )
+
+    result = runner.generate(project_id=7)
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["warnings"] == []
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "downstream backlog is stale" in result["errors"][0]["message"]
+    assert "backlog refinement changed" in result["errors"][0]["message"]
+    assert "backlog-attempt-7" in result["errors"][0]["message"]
+    assert captured["agent_calls"] == 0
+    assert workflow_service.state["downstream_backlog_stale"] is True
+    assert workflow_service.state["stale_backlog_reason"] == (
+        "backlog refinement changed"
+    )
+    assert workflow_service.state["stale_since_backlog_attempt_id"] == (
+        "backlog-attempt-7"
+    )
+
+
 def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -158,7 +226,7 @@ def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(
                 artifact_targets=["live.py"],
                 checklist_items=["CLI accepts explicit budget"],
             )
-        )
+        ),
     )
     session.add(task)
     session.commit()
@@ -368,9 +436,7 @@ def test_sprint_runner_tasks_include_dependency_safe_execution_metadata(
     assert by_story_id[middle.story_id]["direct_blocked_by_story_ids"] == [
         upstream.story_id
     ]
-    assert by_story_id[middle.story_id]["blocked_by_story_ids"] == [
-        upstream.story_id
-    ]
+    assert by_story_id[middle.story_id]["blocked_by_story_ids"] == [upstream.story_id]
     assert by_story_id[middle.story_id]["is_blocked"] is True
 
     assert (
@@ -1433,6 +1499,4 @@ def test_sprint_close_rejects_stale_sprint_fingerprint(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
-    assert result["errors"][0]["details"]["reason_code"] == (
-        "SPRINT_FINGERPRINT_STALE"
-    )
+    assert result["errors"][0]["details"]["reason_code"] == ("SPRINT_FINGERPRINT_STALE")

@@ -17,6 +17,7 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import hydrate_story_runtime_from_legacy
+from services.phases import workflow_state
 
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
 _EFFORT_TO_STORY_POINTS: dict[str, int] = {
@@ -850,6 +851,11 @@ async def generate_story_draft(
     failure_meta: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     state = await load_state()
+    try:
+        workflow_state.assert_downstream_backlog_not_stale(state)
+    except workflow_state.DownstreamBacklogStaleError as exc:
+        raise StoryPhaseError(str(exc)) from exc
+
     normalized_parent_requirement = _normalize_story_requirement(
         state,
         parent_requirement,
@@ -975,6 +981,11 @@ async def retry_story_draft(
     failure_meta: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     state = await load_state()
+    try:
+        workflow_state.assert_downstream_backlog_not_stale(state)
+    except workflow_state.DownstreamBacklogStaleError as exc:
+        raise StoryPhaseError(str(exc)) from exc
+
     normalized_parent_requirement = _normalize_story_requirement(
         state,
         parent_requirement,

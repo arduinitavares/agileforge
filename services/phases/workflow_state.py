@@ -9,6 +9,29 @@ from typing import Any
 from orchestrator_agent.fsm.states import OrchestratorState
 
 
+class DownstreamBacklogStaleError(RuntimeError):
+    """Raised when downstream generation is blocked by a stale backlog marker."""
+
+    def __init__(self, *, reason: object, attempt_id: object) -> None:
+        """Initialize the stale-backlog guard message."""
+        super().__init__(
+            f"downstream backlog is stale (reason: {reason}; attempt: {attempt_id})"
+        )
+
+
+def assert_downstream_backlog_not_stale(state: dict[str, Any]) -> None:
+    """Block downstream generation while coarse backlog stale markers are set."""
+    if state.get("downstream_backlog_stale") is not True:
+        return
+
+    reason = state.get("stale_backlog_reason") or "unknown"
+    attempt_id = state.get("stale_since_backlog_attempt_id") or "unknown"
+    raise DownstreamBacklogStaleError(
+        reason=reason,
+        attempt_id=attempt_id,
+    )
+
+
 def failure_meta(
     source: dict[str, Any] | None,
     *,

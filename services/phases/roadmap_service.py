@@ -122,6 +122,11 @@ async def generate_roadmap_draft(
     user_input: str | None,
 ) -> dict[str, Any]:
     state = await load_state()
+    try:
+        workflow_state.assert_downstream_backlog_not_stale(state)
+    except workflow_state.DownstreamBacklogStaleError as exc:
+        raise RoadmapPhaseError(str(exc)) from exc
+
     has_refinable_draft = _has_refinable_roadmap_draft(state)
     normalized_user_input = (user_input or "").strip()
     if has_refinable_draft and not normalized_user_input:

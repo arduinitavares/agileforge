@@ -711,9 +711,7 @@ class SprintPhaseRunner:
                 _assert_story_close_guards(
                     current_status=str(current_payload["current_status"]),
                     expected_status=expected,
-                    current_story_fingerprint=str(
-                        current_payload["story_fingerprint"]
-                    ),
+                    current_story_fingerprint=str(current_payload["story_fingerprint"]),
                     expected_story_fingerprint=expected_story_fingerprint,
                     story_id=story_id,
                 )
@@ -1416,9 +1414,7 @@ def _build_sprint_task_view(
         current_story_ids=current_story_ids,
     )
     dependency_order_source = (
-        "rank_fallback"
-        if ordering == "rank_fallback"
-        else "active_story_dependencies"
+        "rank_fallback" if ordering == "rank_fallback" else "active_story_dependencies"
     )
     story_metadata = _story_dependency_metadata(
         ordered_stories,
@@ -1455,9 +1451,7 @@ def _build_sprint_task_view(
             "active_edge_count": active_edge_count,
             "cycle_count": len(graph.cycle_paths),
             "blocked_story_count": sum(
-                1
-                for metadata in story_metadata.values()
-                if metadata["is_blocked"]
+                1 for metadata in story_metadata.values() if metadata["is_blocked"]
             ),
             "dependency_review_required_story_count": (
                 dependency_review_required_story_count
@@ -1593,7 +1587,7 @@ def _build_task_ticket(
         "next_actions": {
             "update": (
                 f"agileforge sprint task update --project-id {project_id} "
-                f"--task-id {task_id} --expected-status \"{_enum_value(task.status)}\" "
+                f'--task-id {task_id} --expected-status "{_enum_value(task.status)}" '
                 f"--expected-task-fingerprint {fingerprint} "
                 "--idempotency-key <idempotency_key> --status <status>"
             ),
@@ -2015,9 +2009,7 @@ def _build_sprint_close_readiness(stories: list[UserStory]) -> SprintCloseReadin
         story_id = int(story.story_id) if story.story_id is not None else 0
         story_done = story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
         tasks_done = total_tasks == 0 or all_actionable_done
-        completion_state = (
-            "completed" if story_done and tasks_done else "unfinished"
-        )
+        completion_state = "completed" if story_done and tasks_done else "unfinished"
         if completion_state == "completed":
             completed_story_count += 1
         elif story.story_id is not None:
@@ -2361,8 +2353,7 @@ def _assert_sprint_close_guards(  # noqa: PLR0913
         )
     if current_state != expected_state:
         message = (
-            f"Sprint workflow state is {current_state!r}, expected "
-            f"{expected_state!r}."
+            f"Sprint workflow state is {current_state!r}, expected {expected_state!r}."
         )
         raise _SprintCloseError(
             message,

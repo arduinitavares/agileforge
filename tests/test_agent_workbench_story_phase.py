@@ -417,6 +417,186 @@ def test_story_generate_hydrates_spec_authority_and_roadmap(
     assert "data" not in result["data"]
 
 
+def test_story_generate_blocks_stale_downstream_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story generate returns existing failure envelope when backlog is stale."""
+    captured: dict[str, Any] = {"agent_calls": 0}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_story_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, parent_requirement, user_input
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "parent_requirement": "Review match result",
+                "user_stories": [],
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "classification": "reusable_content_result",
+            "draft_kind": "incomplete_draft",
+            "is_reusable": True,
+            "is_complete": False,
+            "request_payload": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.run_story_agent_from_state",
+        fake_run_story_agent_from_state,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "backlog refinement changed",
+            "stale_since_backlog_attempt_id": "backlog-attempt-7",
+        }
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+        user_input="draft story",
+    )
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["warnings"] == []
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "downstream backlog is stale" in result["errors"][0]["message"]
+    assert "backlog refinement changed" in result["errors"][0]["message"]
+    assert "backlog-attempt-7" in result["errors"][0]["message"]
+    assert captured["agent_calls"] == 0
+    assert workflow_service.state["downstream_backlog_stale"] is True
+    assert workflow_service.state["stale_backlog_reason"] == (
+        "backlog refinement changed"
+    )
+    assert workflow_service.state["stale_since_backlog_attempt_id"] == (
+        "backlog-attempt-7"
+    )
+
+
+def test_story_retry_blocks_stale_downstream_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story retry returns existing failure envelope when backlog is stale."""
+    captured: dict[str, Any] = {"agent_calls": 0}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_story_agent_request(
+        request_payload: dict[str, Any],
+        *,
+        project_id: int,
+        parent_requirement: str,
+    ) -> dict[str, Any]:
+        del request_payload, project_id, parent_requirement
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "parent_requirement": "Review match result",
+                "user_stories": [],
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "classification": "reusable_content_result",
+            "draft_kind": "incomplete_draft",
+            "is_reusable": True,
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.run_story_agent_request",
+        fake_run_story_agent_request,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "backlog refinement changed",
+            "stale_since_backlog_attempt_id": "backlog-attempt-7",
+            "interview_runtime": {
+                "story": {
+                    "Review match result": {
+                        "request_projection": {
+                            "request_snapshot_id": "request-1",
+                            "payload": {"parent_requirement": "Review match result"},
+                            "included_feedback_ids": [],
+                        },
+                        "attempt_history": [
+                            {
+                                "attempt_id": "attempt-1",
+                                "classification": ("nonreusable_provider_failure"),
+                                "retryable": True,
+                                "output_artifact": {"error": "STORY_GENERATION_FAILED"},
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.retry(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+    )
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["warnings"] == []
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert "downstream backlog is stale" in result["errors"][0]["message"]
+    assert "backlog refinement changed" in result["errors"][0]["message"]
+    assert "backlog-attempt-7" in result["errors"][0]["message"]
+    assert captured["agent_calls"] == 0
+    assert workflow_service.state["downstream_backlog_stale"] is True
+    assert workflow_service.state["stale_backlog_reason"] == (
+        "backlog refinement changed"
+    )
+    assert workflow_service.state["stale_since_backlog_attempt_id"] == (
+        "backlog-attempt-7"
+    )
+
+
 def test_story_generate_returns_failure_envelope_for_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

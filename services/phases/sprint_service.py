@@ -246,6 +246,11 @@ async def generate_sprint_plan(
     load_candidates: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
+    try:
+        workflow_state.assert_downstream_backlog_not_stale(state)
+    except workflow_state.DownstreamBacklogStaleError as exc:
+        raise SprintPhaseError(str(exc)) from exc
+
     reset_stale_saved_sprint_planner_working_set(
         state,
         current_planned_sprint_id=current_planned_sprint_id,
