@@ -59,11 +59,19 @@ def _non_empty_string(value: object) -> str | None:
 
 
 def _active_reset_stale_attempt_id(state: dict[str, Any]) -> str | None:
-    stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
-    reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
     if (
         state.get("downstream_backlog_stale") is True
         and state.get("stale_backlog_reason") == "active_backlog_reset"
+    ):
+        return _active_reset_metadata_attempt_id(state)
+    return None
+
+
+def _active_reset_metadata_attempt_id(state: dict[str, Any]) -> str | None:
+    stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
+    reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
+    if (
+        state.get("stale_backlog_reason") == "active_backlog_reset"
         and stale_attempt_id is not None
         and stale_attempt_id == reset_attempt_id
     ):
@@ -482,7 +490,7 @@ def _maybe_clear_active_reset_stale_marker(
     now: str,
     clear_source: str,
 ) -> bool:
-    reset_attempt_id = _active_reset_stale_attempt_id(state)
+    reset_attempt_id = _active_reset_metadata_attempt_id(state)
     if reset_attempt_id is None:
         return False
 

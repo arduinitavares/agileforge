@@ -1125,6 +1125,54 @@ async def test_save_roadmap_draft_replay_repairs_legacy_post_reset_attempt() -> 
 
 
 @pytest.mark.asyncio
+async def test_save_replay_repairs_partial_active_reset_stale_clear() -> None:
+    """Replay clears stale metadata left behind by an earlier partial repair."""
+    state = _state_for_guarded_save(created_at="2026-06-03T11:22:30Z")
+    state.update(
+        {
+            "fsm_state": "ROADMAP_PERSISTENCE",
+            "downstream_backlog_stale": False,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_at": "2026-06-03T10:00:00Z",
+            "roadmap_saved_at": "2026-06-03T11:35:00Z",
+            "roadmap_save_idempotency_keys": {
+                "save-roadmap-1": {
+                    "fsm_state": "ROADMAP_PERSISTENCE",
+                    "attempt_id": "roadmap-attempt-1",
+                    "artifact_fingerprint": _fingerprint_from_state(state),
+                    "idempotent_replay": True,
+                }
+            },
+        }
+    )
+    saved: JsonDict = {}
+    persisted = dict(state)
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=state)
+
+    await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-1",
+        save_state=_merged_session_save(persisted=persisted, captured=saved),
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=_fake_save_roadmap_tool,
+    )
+
+    assert saved["state"]["downstream_backlog_stale"] is False
+    assert saved["state"]["stale_backlog_reason"] is None
+    assert saved["state"]["stale_since_backlog_attempt_id"] is None
+    assert saved["state"]["active_backlog_stale_cleared_by"] == "roadmap_save_replay"
+
+
+@pytest.mark.asyncio
 async def test_save_roadmap_draft_translates_save_failure() -> None:
     """Verify save roadmap draft translates save failure."""
     state = _state_for_guarded_save()
