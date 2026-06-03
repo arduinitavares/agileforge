@@ -1,5 +1,6 @@
 """Tests for roadmap phase service."""
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, Never
 
@@ -78,6 +79,18 @@ def _fingerprint_from_state(state: JsonDict) -> str:
     fingerprint = state["product_roadmap_assessment"]["artifact_fingerprint"]
     assert isinstance(fingerprint, str)
     return fingerprint
+
+
+def _merged_session_save(
+    *,
+    persisted: JsonDict,
+    captured: JsonDict,
+) -> Callable[[JsonDict], None]:
+    def save_state(updated: JsonDict) -> None:
+        persisted.update(updated)
+        captured["state"] = dict(persisted)
+
+    return save_state
 
 
 def test_record_roadmap_attempt_updates_working_state() -> None:
@@ -790,12 +803,10 @@ async def test_save_roadmap_draft_clears_active_reset_stale_marker() -> None:
         }
     )
     saved: JsonDict = {}
+    persisted = dict(state)
 
     async def hydrate_context() -> object:
         return SimpleNamespace(state=dict(state), session_id="7")
-
-    def save_state(updated: JsonDict) -> None:
-        saved["state"] = dict(updated)
 
     def fake_save_roadmap_tool(
         roadmap_input: SaveRoadmapToolInput,
@@ -809,7 +820,7 @@ async def test_save_roadmap_draft_clears_active_reset_stale_marker() -> None:
         expected_artifact_fingerprint=_fingerprint_from_state(state),
         expected_state="ROADMAP_REVIEW",
         idempotency_key="save-roadmap-1",
-        save_state=save_state,
+        save_state=_merged_session_save(persisted=persisted, captured=saved),
         now_iso=lambda: "2026-06-03T12:00:00Z",
         hydrate_context=hydrate_context,
         build_tool_context=lambda context: context,
@@ -817,8 +828,8 @@ async def test_save_roadmap_draft_clears_active_reset_stale_marker() -> None:
     )
 
     assert saved["state"]["downstream_backlog_stale"] is False
-    assert "stale_backlog_reason" not in saved["state"]
-    assert "stale_since_backlog_attempt_id" not in saved["state"]
+    assert saved["state"]["stale_backlog_reason"] is None
+    assert saved["state"]["stale_since_backlog_attempt_id"] is None
     assert saved["state"]["active_backlog_reset_attempt_id"] == "backlog-attempt-12"
     assert saved["state"]["active_backlog_stale_cleared_by"] == "roadmap_save"
     assert (
@@ -1043,12 +1054,10 @@ async def test_save_roadmap_draft_replay_repairs_active_reset_stale_marker() -> 
         }
     )
     saved: JsonDict = {}
+    persisted = dict(state)
 
     async def hydrate_context() -> object:
         return SimpleNamespace(state=state)
-
-    def save_state(updated: JsonDict) -> None:
-        saved["state"] = dict(updated)
 
     payload = await save_roadmap_draft(
         project_id=7,
@@ -1056,7 +1065,7 @@ async def test_save_roadmap_draft_replay_repairs_active_reset_stale_marker() -> 
         expected_artifact_fingerprint=_fingerprint_from_state(state),
         expected_state="ROADMAP_REVIEW",
         idempotency_key="save-roadmap-1",
-        save_state=save_state,
+        save_state=_merged_session_save(persisted=persisted, captured=saved),
         now_iso=lambda: "2026-06-03T12:00:00Z",
         hydrate_context=hydrate_context,
         build_tool_context=lambda context: context,
@@ -1065,8 +1074,8 @@ async def test_save_roadmap_draft_replay_repairs_active_reset_stale_marker() -> 
 
     assert payload["idempotent_replay"] is True
     assert saved["state"]["downstream_backlog_stale"] is False
-    assert "stale_backlog_reason" not in saved["state"]
-    assert "stale_since_backlog_attempt_id" not in saved["state"]
+    assert saved["state"]["stale_backlog_reason"] is None
+    assert saved["state"]["stale_since_backlog_attempt_id"] is None
 
 
 @pytest.mark.asyncio
@@ -1093,12 +1102,10 @@ async def test_save_roadmap_draft_replay_repairs_legacy_post_reset_attempt() -> 
         }
     )
     saved: JsonDict = {}
+    persisted = dict(state)
 
     async def hydrate_context() -> object:
         return SimpleNamespace(state=state)
-
-    def save_state(updated: JsonDict) -> None:
-        saved["state"] = dict(updated)
 
     await save_roadmap_draft(
         project_id=7,
@@ -1106,7 +1113,7 @@ async def test_save_roadmap_draft_replay_repairs_legacy_post_reset_attempt() -> 
         expected_artifact_fingerprint=_fingerprint_from_state(state),
         expected_state="ROADMAP_REVIEW",
         idempotency_key="save-roadmap-1",
-        save_state=save_state,
+        save_state=_merged_session_save(persisted=persisted, captured=saved),
         now_iso=lambda: "2026-06-03T12:00:00Z",
         hydrate_context=hydrate_context,
         build_tool_context=lambda context: context,

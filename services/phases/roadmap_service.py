@@ -494,8 +494,8 @@ def _maybe_clear_active_reset_stale_marker(
         return False
 
     state["downstream_backlog_stale"] = False
-    state.pop("stale_backlog_reason", None)
-    state.pop("stale_since_backlog_attempt_id", None)
+    state["stale_backlog_reason"] = None
+    state["stale_since_backlog_attempt_id"] = None
     state["active_backlog_stale_cleared_at"] = now
     state["active_backlog_stale_cleared_by"] = clear_source
     return True
