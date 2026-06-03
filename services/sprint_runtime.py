@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger: logging.Logger = logging.getLogger(name=__name__)
+MAX_SPRINT_OUTPUT_REPAIR_ATTEMPTS: int = 2
+MAX_SPRINT_OUTPUT_REPAIR_FEEDBACK_CHARS: int = 4000
 PUBLIC_TASK_KIND_VALUES = (
     "analysis",
     "design",
@@ -111,6 +114,11 @@ def _as_object_dict(value: object) -> dict[str, object] | None:
 def _normalize_input_context(value: object) -> SprintInputContext:
     normalized = _as_object_dict(value)
     return normalized or {}
+
+
+def _sprint_input_context_from_model(payload: SprintPlannerInput) -> SprintInputContext:
+    """Return the serializable Sprint request context for a validated payload."""
+    return payload.model_dump(exclude_none=True)
 
 
 def _normalize_source_fingerprint(value: object) -> str | None:
@@ -237,6 +245,67 @@ def _compact_public_validation_errors(
             seen.add(hint)
             hints.append(hint)
     return hints
+
+
+def _output_repair_feedback_text(
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> str:
+    """Build bounded validation feedback for a Sprint output-repair attempt."""
+    details = ""
+    if validation_errors is not None:
+        try:
+            details = json.dumps(validation_errors, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            details = str(validation_errors)
+    feedback = (
+        "SYSTEM_FEEDBACK: Your previous SprintPlanner response failed validation.\n"
+        f"ERROR: {error}\n"
+        f"VALIDATION_ERRORS: {details}\n"
+        "Return JSON only. Match the SprintPlannerOutput schema exactly. "
+        "Keep the selected stories and capacity analysis consistent with the locked "
+        "input. Repair task decomposition quality. For task artifact_targets, "
+        "Use component/module names instead of exact file names or paths such as "
+        "*.py, *.json, docs/foo.md, or src/foo.py."
+    )
+    return feedback[:MAX_SPRINT_OUTPUT_REPAIR_FEEDBACK_CHARS]
+
+
+def _payload_with_output_repair_feedback(
+    payload: SprintPlannerInput,
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> SprintPlannerInput:
+    """Return a Sprint payload with validation feedback appended to user context."""
+    feedback = _output_repair_feedback_text(
+        error=error,
+        validation_errors=validation_errors,
+    )
+    current_context = payload.user_context.strip() if payload.user_context else ""
+    user_context = f"{current_context}\n\n{feedback}" if current_context else feedback
+    return payload.model_copy(update={"user_context": user_context})
+
+
+def _prepared_with_payload(
+    prepared: _PreparedSprintPayload,
+    payload: SprintPlannerInput,
+) -> _PreparedSprintPayload:
+    """Return prepared Sprint context using the current attempt payload."""
+    return _PreparedSprintPayload(
+        input_context=_sprint_input_context_from_model(payload),
+        payload=payload,
+        selection_policy=prepared.selection_policy,
+        source_fingerprint=prepared.source_fingerprint,
+    )
+
+
+def _is_output_repairable_failure(result: dict[str, Any]) -> bool:
+    """Return whether a Sprint failure can receive deterministic retry feedback."""
+    if result.get("success") is True:
+        return False
+    return result.get("failure_stage") in {"invalid_json", "output_validation"}
 
 
 def _expected_locked_story_ids(prepared: _PreparedSprintPayload) -> list[int]:
@@ -758,16 +827,34 @@ async def run_sprint_agent_from_state(
     if not isinstance(prepared, _PreparedSprintPayload):
         return prepared
 
-    raw_text: str | dict[str, Any] = await _invoke_prepared_sprint_payload(
-        project_id=project_id,
-        prepared=prepared,
-    )
-    if not isinstance(raw_text, str):
-        return raw_text
+    attempt_payload = prepared.payload
+    for attempt_index in range(1, MAX_SPRINT_OUTPUT_REPAIR_ATTEMPTS + 1):
+        attempt_prepared = (
+            prepared
+            if attempt_payload is prepared.payload
+            else _prepared_with_payload(prepared, attempt_payload)
+        )
+        raw_text: str | dict[str, Any] = await _invoke_prepared_sprint_payload(
+            project_id=project_id,
+            prepared=attempt_prepared,
+        )
+        if not isinstance(raw_text, str):
+            return raw_text
 
-    return _validate_sprint_output(
-        project_id=project_id,
-        prepared=prepared,
-        raw_text=raw_text,
-        include_task_decomposition=run_options["include_task_decomposition"],
-    )
+        result = _validate_sprint_output(
+            project_id=project_id,
+            prepared=attempt_prepared,
+            raw_text=raw_text,
+            include_task_decomposition=run_options["include_task_decomposition"],
+        )
+        if not _is_output_repairable_failure(result):
+            return result
+        if attempt_index >= MAX_SPRINT_OUTPUT_REPAIR_ATTEMPTS:
+            return result
+        attempt_payload = _payload_with_output_repair_feedback(
+            attempt_payload,
+            error=str(result.get("error") or "Sprint output validation failed"),
+            validation_errors=result.get("validation_errors"),
+        )
+
+    raise AssertionError

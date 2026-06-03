@@ -1520,6 +1520,98 @@ async def test_runtime_rejects_poor_task_decomposition_quality(
 
 
 @pytest.mark.asyncio
+async def test_runtime_retries_task_decomposition_validation_with_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify task decomposition validation failures receive one repair attempt."""
+    invoke_payloads: list[sprint_runtime.SprintPlannerInput] = []
+    expected_attempt_count = 2
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 12,
+                    "story_title": "Event Delta Persistence",
+                    "priority": 2,
+                    "story_points": 3,
+                    "evaluated_invariant_ids": [],
+                    "acceptance_criteria": "Persist the event",
+                }
+            ],
+        }
+
+    async def fake_invoke(payload: sprint_runtime.SprintPlannerInput) -> object:
+        invoke_payloads.append(payload)
+        artifact_target = (
+            "event_delta.json"
+            if len(invoke_payloads) == 1
+            else "event delta persistence artifact"
+        )
+        return json.dumps(
+            {
+                "sprint_goal": "Deliver onboarding-ready event persistence",
+                "sprint_number": 1,
+                "duration_days": 14,
+                "selected_stories": [
+                    {
+                        "story_id": 12,
+                        "story_title": "Event Delta Persistence",
+                        "tasks": [
+                            {
+                                "description": "Create event persistence artifact",
+                                "task_kind": "implementation",
+                                "checklist_items": ["Define persisted event fields"],
+                                "artifact_targets": [artifact_target],
+                                "workstream_tags": ["persistence"],
+                                "relevant_invariant_ids": [],
+                            }
+                        ],
+                        "reason_for_selection": "Supports the sprint goal.",
+                    }
+                ],
+                "deselected_stories": [],
+                "capacity_analysis": {
+                    "velocity_assumption": "Medium",
+                    "capacity_band": "4-5 stories",
+                    "selected_count": 1,
+                    "story_points_used": 3,
+                    "max_story_points": 13,
+                    "commitment_note": "Does this scope feel achievable in 2 weeks?",
+                    "reasoning": "This scope fits the chosen capacity band.",
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {},
+        project_id=7,
+        team_velocity_assumption="medium",
+        sprint_duration_days=14,
+        max_story_points=13,
+        include_task_decomposition=True,
+        selected_story_ids=[12],
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert len(invoke_payloads) == expected_attempt_count
+    retry_context = invoke_payloads[1].user_context
+    assert retry_context is not None
+    assert "SYSTEM_FEEDBACK" in retry_context
+    assert "event_delta.json" in retry_context
+    assert "Use component/module names instead" in retry_context
+
+
+@pytest.mark.asyncio
 async def test_runtime_exposes_compact_public_task_kind_retry_hints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
