@@ -51,6 +51,26 @@ def _normalize_fsm_state(value: str | None) -> str:
     return OrchestratorState.SETUP_REQUIRED.value
 
 
+def _non_empty_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _active_reset_stale_attempt_id(state: dict[str, Any]) -> str | None:
+    stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
+    reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
+    if (
+        state.get("downstream_backlog_stale") is True
+        and state.get("stale_backlog_reason") == "active_backlog_reset"
+        and stale_attempt_id is not None
+        and stale_attempt_id == reset_attempt_id
+    ):
+        return reset_attempt_id
+    return None
+
+
 def roadmap_state_from_complete(is_complete: bool) -> str:
     return workflow_state.phase_state_from_complete(
         is_complete,
@@ -64,6 +84,21 @@ def ensure_roadmap_attempts(state: dict[str, Any]) -> list[dict[str, Any]]:
         state,
         attempts_key="roadmap_attempts",
     )
+
+
+def _active_reset_provenance(state: dict[str, Any]) -> dict[str, str]:
+    reset_attempt_id = _active_reset_stale_attempt_id(state)
+    if reset_attempt_id is None:
+        return {}
+
+    provenance = {
+        "active_backlog_reset_attempt_id": reset_attempt_id,
+        "stale_since_backlog_attempt_id": reset_attempt_id,
+    }
+    reset_at = _non_empty_string(state.get("active_backlog_reset_at"))
+    if reset_at is not None:
+        provenance["active_backlog_reset_at"] = reset_at
+    return provenance
 
 
 def record_roadmap_attempt(
@@ -148,10 +183,13 @@ async def generate_roadmap_draft(
     output_artifact["is_complete"] = is_complete
     artifact_fingerprint = _roadmap_artifact_fingerprint(output_artifact)
 
+    input_context = dict(roadmap_result.get("input_context") or {})
+    input_context.update(_active_reset_provenance(state))
+
     attempt_count = record_roadmap_attempt(
         state,
         trigger="manual_refine" if normalized_user_input else "auto_transition",
-        input_context=roadmap_result.get("input_context") or {},
+        input_context=input_context,
         output_artifact=output_artifact,
         is_complete=is_complete,
         failure_meta=roadmap_result,
@@ -176,7 +214,7 @@ async def generate_roadmap_draft(
         "roadmap_run_success": bool(roadmap_result.get("success")),
         "error": roadmap_result.get("error"),
         "trigger": "manual_refine" if normalized_user_input else "auto_transition",
-        "input_context": roadmap_result.get("input_context"),
+        "input_context": input_context,
         "output_artifact": output_artifact,
         "attempt_count": attempt_count,
         "attempt_id": attempt_id,
@@ -215,13 +253,26 @@ async def save_roadmap_draft(
     context = await hydrate_context()
     replay = _roadmap_save_replay(context.state, idempotency_key)
     if replay is not None:
+        if _replay_matches_request(
+            replay,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+        ):
+            selected_attempt = _find_roadmap_attempt(context.state, attempt_id)
+            if selected_attempt is not None and _maybe_clear_active_reset_stale_marker(
+                context.state,
+                selected_attempt=selected_attempt,
+                now=now_iso(),
+                clear_source="roadmap_save_replay",
+            ):
+                save_state(context.state)
         return replay
 
     _assert_save_expected_state(context.state, expected_state)
     assessment = context.state.get("product_roadmap_assessment")
     if not isinstance(assessment, dict):
         raise RoadmapPhaseError("No roadmap draft available to save")
-    _assert_save_guards(
+    selected_attempt = _assert_save_guards(
         state=context.state,
         assessment=assessment,
         attempt_id=attempt_id,
@@ -266,9 +317,16 @@ async def save_roadmap_draft(
             status_code=500,
         )
 
+    saved_at = now_iso()
     context.state["fsm_state"] = OrchestratorState.ROADMAP_PERSISTENCE.value
-    context.state["fsm_state_entered_at"] = now_iso()
-    context.state["roadmap_saved_at"] = now_iso()
+    context.state["fsm_state_entered_at"] = saved_at
+    context.state["roadmap_saved_at"] = saved_at
+    _maybe_clear_active_reset_stale_marker(
+        context.state,
+        selected_attempt=selected_attempt,
+        now=saved_at,
+        clear_source="roadmap_save",
+    )
 
     payload = {
         "fsm_state": OrchestratorState.ROADMAP_PERSISTENCE.value,
@@ -347,6 +405,18 @@ def _roadmap_save_replay(
     return dict(payload) if isinstance(payload, dict) else None
 
 
+def _replay_matches_request(
+    payload: dict[str, Any],
+    *,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+) -> bool:
+    return (
+        payload.get("attempt_id") == attempt_id
+        and payload.get("artifact_fingerprint") == expected_artifact_fingerprint
+    )
+
+
 def _record_roadmap_save_replay(
     state: dict[str, Any],
     idempotency_key: str,
@@ -377,7 +447,7 @@ def _assert_save_guards(
     assessment: dict[str, Any],
     attempt_id: str,
     expected_artifact_fingerprint: str,
-) -> None:
+) -> dict[str, Any]:
     current_attempt_id = assessment.get("attempt_id")
     current_fingerprint = assessment.get("artifact_fingerprint")
     selected_attempt = _find_roadmap_attempt(state, attempt_id)
@@ -391,6 +461,7 @@ def _assert_save_guards(
             "Roadmap save guard mismatch: draft attempt or artifact fingerprint "
             "does not match the reviewed Roadmap draft.",
         )
+    return selected_attempt
 
 
 def _find_roadmap_attempt(
@@ -402,6 +473,66 @@ def _find_roadmap_attempt(
         if attempt.get("attempt_id") == attempt_id:
             return attempt
     return None
+
+
+def _maybe_clear_active_reset_stale_marker(
+    state: dict[str, Any],
+    *,
+    selected_attempt: dict[str, Any],
+    now: str,
+    clear_source: str,
+) -> bool:
+    reset_attempt_id = _active_reset_stale_attempt_id(state)
+    if reset_attempt_id is None:
+        return False
+
+    if not _roadmap_attempt_matches_active_reset(
+        state,
+        selected_attempt=selected_attempt,
+        reset_attempt_id=reset_attempt_id,
+    ):
+        return False
+
+    state["downstream_backlog_stale"] = False
+    state.pop("stale_backlog_reason", None)
+    state.pop("stale_since_backlog_attempt_id", None)
+    state["active_backlog_stale_cleared_at"] = now
+    state["active_backlog_stale_cleared_by"] = clear_source
+    return True
+
+
+def _roadmap_attempt_matches_active_reset(
+    state: dict[str, Any],
+    *,
+    selected_attempt: dict[str, Any],
+    reset_attempt_id: str,
+) -> bool:
+    input_context = selected_attempt.get("input_context")
+    if isinstance(input_context, dict):
+        attempt_reset_id = _non_empty_string(
+            input_context.get("active_backlog_reset_attempt_id")
+        )
+        if attempt_reset_id is not None:
+            return attempt_reset_id == reset_attempt_id
+
+    return _legacy_roadmap_attempt_is_after_active_reset(
+        state,
+        selected_attempt=selected_attempt,
+    )
+
+
+def _legacy_roadmap_attempt_is_after_active_reset(
+    state: dict[str, Any],
+    *,
+    selected_attempt: dict[str, Any],
+) -> bool:
+    reset_at = _non_empty_string(state.get("active_backlog_reset_at"))
+    roadmap_saved_at = _non_empty_string(state.get("roadmap_saved_at"))
+    attempt_created_at = _non_empty_string(selected_attempt.get("created_at"))
+    if reset_at is None or roadmap_saved_at is None or attempt_created_at is None:
+        return False
+
+    return attempt_created_at >= reset_at and roadmap_saved_at >= reset_at
 
 
 def _assert_exact_backlog_coverage(

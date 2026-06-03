@@ -1747,34 +1747,51 @@ def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
     reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
     return (
-        str(state.get("fsm_state")).strip().upper() == "BACKLOG_PERSISTENCE"
-        and state.get("downstream_backlog_stale") is True
+        state.get("downstream_backlog_stale") is True
         and state.get("stale_backlog_reason") == "active_backlog_reset"
         and stale_attempt_id is not None
         and stale_attempt_id == reset_attempt_id
     )
 
 
-def _active_backlog_reset_blocked_commands() -> list[dict[str, str]]:
+def _active_backlog_reset_blocked_commands(
+    *,
+    include_story_pending: bool = False,
+) -> list[dict[str, str]]:
     """Return downstream commands intentionally blocked after active reset."""
-    return [
-        {
-            "command": "agileforge story generate",
-            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
-            "message": (
-                "Story generation remains blocked until downstream reset-stale "
-                "clearing exists."
-            ),
-        },
-        {
-            "command": "agileforge sprint save",
-            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
-            "message": (
-                "Sprint generation remains blocked until downstream reset-stale "
-                "clearing exists."
-            ),
-        },
-    ]
+    commands: list[dict[str, str]] = []
+    if include_story_pending:
+        commands.append(
+            {
+                "command": "agileforge story pending",
+                "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+                "message": (
+                    "Story generation remains blocked until downstream reset-stale "
+                    "clearing exists."
+                ),
+            }
+        )
+    commands.extend(
+        [
+            {
+                "command": "agileforge story generate",
+                "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+                "message": (
+                    "Story generation remains blocked until downstream reset-stale "
+                    "clearing exists."
+                ),
+            },
+            {
+                "command": "agileforge sprint save",
+                "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+                "message": (
+                    "Sprint generation remains blocked until downstream reset-stale "
+                    "clearing exists."
+                ),
+            },
+        ]
+    )
+    return commands
 
 
 def _setup_workflow_next(
@@ -2165,36 +2182,19 @@ def _roadmap_workflow_next(
         return None
 
     next_valid_commands: list[str] = []
+    blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
     status: str | None = None
     if fsm_state == "ROADMAP_PERSISTENCE":
-        story_commands = [
-            (
-                "agileforge story pending",
-                f"agileforge story pending --project-id {project_id}",
-            ),
-            (
-                "agileforge story generate",
-                (
-                    f"agileforge story generate --project-id {project_id} "
-                    "--parent-requirement <parent_requirement>"
-                ),
-            ),
-        ]
-        for command_name, command_text in story_commands:
-            if command_is_available(command_name):
-                next_valid_commands.append(command_text)
-        if next_valid_commands:
-            status = "next_phase_available"
-        else:
-            blocked_future_commands.append(
-                {
-                    "command": (f"agileforge story pending --project-id {project_id}"),
-                    "installed": False,
-                    "reason": "Story phase CLI is not installed yet.",
-                }
-            )
-            status = "blocked_by_uninstalled_next_phase"
+        (
+            next_valid_commands,
+            blocked_commands,
+            blocked_future_commands,
+            status,
+        ) = _roadmap_persistence_story_routing(
+            project_id=project_id,
+            workflow=workflow,
+        )
 
     command_candidates = _roadmap_command_candidates(
         project_id=project_id,
@@ -2211,7 +2211,7 @@ def _roadmap_workflow_next(
     data: dict[str, Any] = {
         "project_id": project_id,
         "next_valid_commands": next_valid_commands,
-        "blocked_commands": [],
+        "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
     }
     if status is not None:
@@ -2238,6 +2238,67 @@ def _roadmap_workflow_next(
         ),
         "errors": [],
     }
+
+
+def _roadmap_persistence_story_routing(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> tuple[list[str], list[Any], list[Any], str]:
+    """Return Story handoff routing from Roadmap persistence."""
+    next_valid_commands: list[str] = []
+    blocked_commands: list[Any] = []
+    blocked_future_commands: list[Any] = []
+
+    if _active_backlog_reset_stale_marker(workflow):
+        blocked_commands.extend(
+            _active_backlog_reset_blocked_commands(include_story_pending=True)
+        )
+        return (
+            next_valid_commands,
+            blocked_commands,
+            blocked_future_commands,
+            "blocked_by_stale_active_backlog_reset",
+        )
+
+    story_commands = [
+        (
+            "agileforge story pending",
+            f"agileforge story pending --project-id {project_id}",
+        ),
+        (
+            "agileforge story generate",
+            (
+                f"agileforge story generate --project-id {project_id} "
+                "--parent-requirement <parent_requirement>"
+            ),
+        ),
+    ]
+    for command_name, command_text in story_commands:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+
+    if next_valid_commands:
+        return (
+            next_valid_commands,
+            blocked_commands,
+            blocked_future_commands,
+            "next_phase_available",
+        )
+
+    blocked_future_commands.append(
+        {
+            "command": f"agileforge story pending --project-id {project_id}",
+            "installed": False,
+            "reason": "Story phase CLI is not installed yet.",
+        }
+    )
+    return (
+        next_valid_commands,
+        blocked_commands,
+        blocked_future_commands,
+        "blocked_by_uninstalled_next_phase",
+    )
 
 
 def _roadmap_command_candidates(

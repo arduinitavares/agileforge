@@ -48,6 +48,8 @@ def _state_for_guarded_save(
     *,
     artifact: JsonDict | None = None,
     backlog_items: list[JsonDict] | None = None,
+    input_context: JsonDict | None = None,
+    created_at: str = "2026-04-04T00:00:00Z",
 ) -> JsonDict:
     output_artifact = dict(artifact or _complete_roadmap_artifact())
     artifact_fingerprint = canonical_hash(
@@ -65,6 +67,8 @@ def _state_for_guarded_save(
                 "attempt_id": "roadmap-attempt-1",
                 "artifact_fingerprint": artifact_fingerprint,
                 "output_artifact": output_artifact,
+                "input_context": dict(input_context or {}),
+                "created_at": created_at,
             }
         ],
     }
@@ -261,6 +265,12 @@ async def test_generate_roadmap_allows_active_reset_stale_marker() -> None:
     assert payload["attempt_count"] == 1
     assert payload["attempt_id"] == "roadmap-attempt-1"
     assert saved["state"]["roadmap_attempts"][0]["is_complete"] is True
+    assert (
+        saved["state"]["roadmap_attempts"][0]["input_context"][
+            "active_backlog_reset_attempt_id"
+        ]
+        == "backlog-attempt-12"
+    )
     assert saved["state"]["downstream_backlog_stale"] is True
     assert saved["state"]["stale_backlog_reason"] == "active_backlog_reset"
     assert saved["state"]["stale_since_backlog_attempt_id"] == "backlog-attempt-12"
@@ -765,6 +775,106 @@ async def test_save_roadmap_draft_persists_persistence_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_roadmap_draft_clears_active_reset_stale_marker() -> None:
+    """Saving the roadmap generated from reset lineage clears downstream stale."""
+    state = _state_for_guarded_save(
+        input_context={"active_backlog_reset_attempt_id": "backlog-attempt-12"}
+    )
+    state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_at": "2026-06-02T12:00:00Z",
+        }
+    )
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    def fake_save_roadmap_tool(
+        roadmap_input: SaveRoadmapToolInput,
+        _tool_context: object,
+    ) -> JsonDict:
+        return {"success": True, "product_id": roadmap_input.product_id}
+
+    await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=fake_save_roadmap_tool,
+    )
+
+    assert saved["state"]["downstream_backlog_stale"] is False
+    assert "stale_backlog_reason" not in saved["state"]
+    assert "stale_since_backlog_attempt_id" not in saved["state"]
+    assert saved["state"]["active_backlog_reset_attempt_id"] == "backlog-attempt-12"
+    assert saved["state"]["active_backlog_stale_cleared_by"] == "roadmap_save"
+    assert (
+        saved["state"]["active_backlog_stale_cleared_at"]
+        == "2026-06-03T12:00:00Z"
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_draft_does_not_clear_mismatched_reset_lineage() -> None:
+    """An old or mismatched roadmap attempt must not clear active-reset stale."""
+    state = _state_for_guarded_save(
+        input_context={"active_backlog_reset_attempt_id": "backlog-attempt-9"}
+    )
+    state.update(
+        {
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+        }
+    )
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    def fake_save_roadmap_tool(
+        roadmap_input: SaveRoadmapToolInput,
+        _tool_context: object,
+    ) -> JsonDict:
+        return {"success": True, "product_id": roadmap_input.product_id}
+
+    await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=fake_save_roadmap_tool,
+    )
+
+    assert saved["state"]["downstream_backlog_stale"] is True
+    assert saved["state"]["stale_backlog_reason"] == "active_backlog_reset"
+    assert saved["state"]["stale_since_backlog_attempt_id"] == "backlog-attempt-12"
+    assert "active_backlog_stale_cleared_at" not in saved["state"]
+
+
+@pytest.mark.asyncio
 async def test_save_roadmap_draft_rejects_stale_attempt_guard() -> None:
     """Roadmap save must be tied to the reviewed draft fingerprint."""
     state = _state_for_guarded_save()
@@ -907,6 +1017,104 @@ async def test_save_roadmap_draft_replays_idempotency_key() -> None:
     )
 
     assert payload == replay
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_draft_replay_repairs_active_reset_stale_marker() -> None:
+    """Replay should repair the caRtola-shaped state after a pre-fix save."""
+    state = _state_for_guarded_save(
+        input_context={"active_backlog_reset_attempt_id": "backlog-attempt-12"}
+    )
+    state.update(
+        {
+            "fsm_state": "ROADMAP_PERSISTENCE",
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "roadmap_save_idempotency_keys": {
+                "save-roadmap-1": {
+                    "fsm_state": "ROADMAP_PERSISTENCE",
+                    "attempt_id": "roadmap-attempt-1",
+                    "artifact_fingerprint": _fingerprint_from_state(state),
+                    "idempotent_replay": True,
+                }
+            },
+        }
+    )
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=state)
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    payload = await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=_fake_save_roadmap_tool,
+    )
+
+    assert payload["idempotent_replay"] is True
+    assert saved["state"]["downstream_backlog_stale"] is False
+    assert "stale_backlog_reason" not in saved["state"]
+    assert "stale_since_backlog_attempt_id" not in saved["state"]
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_draft_replay_repairs_legacy_post_reset_attempt() -> None:
+    """Replay repairs saved attempts recorded before reset lineage existed."""
+    state = _state_for_guarded_save(created_at="2026-06-03T11:22:30Z")
+    state.update(
+        {
+            "fsm_state": "ROADMAP_PERSISTENCE",
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_at": "2026-06-03T10:00:00Z",
+            "roadmap_saved_at": "2026-06-03T11:35:00Z",
+            "roadmap_save_idempotency_keys": {
+                "save-roadmap-1": {
+                    "fsm_state": "ROADMAP_PERSISTENCE",
+                    "attempt_id": "roadmap-attempt-1",
+                    "artifact_fingerprint": _fingerprint_from_state(state),
+                    "idempotent_replay": True,
+                }
+            },
+        }
+    )
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=state)
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=_fake_save_roadmap_tool,
+    )
+
+    assert saved["state"]["downstream_backlog_stale"] is False
+    assert saved["state"]["active_backlog_stale_cleared_by"] == "roadmap_save_replay"
 
 
 @pytest.mark.asyncio
