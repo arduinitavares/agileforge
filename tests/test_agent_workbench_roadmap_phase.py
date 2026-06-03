@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import pytest
 
+from sqlmodel import Session, SQLModel, create_engine
+
+from models.core import Product, UserStory
+from models.enums import StoryStatus
 from services.agent_workbench.roadmap_phase import RoadmapPhaseRunner
 
 
@@ -210,3 +214,130 @@ def test_roadmap_generate_returns_failure_envelope_for_runtime_failure(
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
     assert result["errors"][0]["details"]["roadmap_run_success"] is False
     assert result["errors"][0]["details"]["failure_stage"] == "invocation_exception"
+
+
+def test_roadmap_generate_reloads_active_seed_backlog_after_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active reset must route Roadmap through persisted seed rows, not stale state."""
+    engine = create_engine("sqlite://", echo=False)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Product(product_id=2, name="Cartola"))
+        session.add(
+            UserStory(
+                product_id=2,
+                title="Validate Captain-Aware Optimization Contract",
+                status=StoryStatus.TO_DO,
+                rank="1",
+                story_points=3,
+                story_description="Verify existing captain multiplier behavior.",
+                story_origin="backlog_seed",
+                is_superseded=False,
+            )
+        )
+        session.commit()
+
+    workflow = _FakeWorkflowService()
+    workflow.state.update(
+        {
+            "fsm_state": "BACKLOG_PERSISTENCE",
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Stale refined item",
+                    "value_driver": "Strategic",
+                    "justification": "Old refinement artifact item.",
+                    "estimated_effort": "M",
+                    "item_id": "item-001",
+                    "item_fingerprint": "sha256:item",
+                    "classification": "verification",
+                    "refinement_provenance": {"operation_id": "op-1"},
+                    "source_attempt_id": "backlog-attempt-12",
+                    "source_artifact_fingerprint": "sha256:source",
+                }
+            ],
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_roadmap_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        captured["state"] = dict(state)
+        captured["project_id"] = project_id
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {
+                "product_vision": state["product_vision_assessment"][
+                    "product_vision_statement"
+                ],
+                "technical_spec": state.get("pending_spec_content"),
+                "compiled_authority": state.get("compiled_authority_cached"),
+                "backlog_items": state.get("backlog_items"),
+                "prior_roadmap_state": "NO_HISTORY",
+                "user_input": user_input or "",
+            },
+            "output_artifact": {
+                "roadmap_releases": [
+                    {
+                        "release_name": "Milestone 1",
+                        "theme": "Foundation",
+                        "focus_area": "Technical Foundation",
+                        "items": ["Validate Captain-Aware Optimization Contract"],
+                        "reasoning": "Start from active reset baseline.",
+                    }
+                ],
+                "roadmap_summary": "Draft roadmap",
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.get_engine",
+        lambda: engine,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.run_roadmap_agent_from_state",
+        fake_run_roadmap_agent_from_state,
+    )
+    runner = RoadmapPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.generate(project_id=2, user_input="Regenerate after reset")
+
+    assert result["ok"] is True
+    assert captured["state"]["backlog_items"] == [
+        {
+            "priority": 1,
+            "requirement": "Validate Captain-Aware Optimization Contract",
+            "value_driver": "Strategic",
+            "justification": "Verify existing captain multiplier behavior.",
+            "estimated_effort": "M",
+        }
+    ]

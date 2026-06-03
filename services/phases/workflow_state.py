@@ -47,8 +47,14 @@ def assert_downstream_backlog_not_stale_for_roadmap(state: dict[str, Any]) -> No
 
     stale_attempt_id = _non_empty_string(state.get("stale_since_backlog_attempt_id"))
     reset_attempt_id = _non_empty_string(state.get("active_backlog_reset_attempt_id"))
+    fsm_state = state.get("fsm_state")
+    reset_roadmap_states = {
+        OrchestratorState.BACKLOG_PERSISTENCE.value,
+        OrchestratorState.ROADMAP_INTERVIEW.value,
+        OrchestratorState.ROADMAP_REVIEW.value,
+    }
     if (
-        state.get("fsm_state") == OrchestratorState.BACKLOG_PERSISTENCE.value
+        fsm_state in reset_roadmap_states
         and state.get("stale_backlog_reason") == "active_backlog_reset"
         and stale_attempt_id is not None
         and stale_attempt_id == reset_attempt_id

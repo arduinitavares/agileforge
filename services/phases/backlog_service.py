@@ -772,6 +772,7 @@ def _record_active_reset_state(
     state["active_backlog_reset_request_fingerprint"] = reset_request_fingerprint(
         request,
     )
+    state.pop("backlog_items", None)
 
 
 def _assert_reset_review_origin(state: dict[str, Any]) -> None:

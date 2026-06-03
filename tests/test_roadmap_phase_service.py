@@ -266,6 +266,52 @@ async def test_generate_roadmap_allows_active_reset_stale_marker() -> None:
     assert saved["state"]["stale_since_backlog_attempt_id"] == "backlog-attempt-12"
 
 
+@pytest.mark.asyncio
+async def test_generate_roadmap_allows_active_reset_retry_from_interview() -> None:
+    """Roadmap retry remains allowed after a failed reset-regeneration attempt."""
+    state: JsonDict = {
+        "fsm_state": "ROADMAP_INTERVIEW",
+        "downstream_backlog_stale": True,
+        "stale_backlog_reason": "active_backlog_reset",
+        "stale_since_backlog_attempt_id": "backlog-attempt-12",
+        "active_backlog_reset_attempt_id": "backlog-attempt-12",
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_roadmap_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id, user_input
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": _complete_roadmap_artifact(is_complete=True),
+            "is_complete": True,
+            "error": None,
+        }
+
+    payload = await generate_roadmap_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-06-02T12:00:00Z",
+        run_roadmap_agent=fake_run_roadmap_agent_from_state,
+        user_input="Regenerate after reset",
+    )
+
+    assert payload["fsm_state"] == "ROADMAP_REVIEW"
+    assert payload["attempt_count"] == 1
+    assert saved["state"]["roadmap_attempts"][0]["is_complete"] is True
+    assert saved["state"]["downstream_backlog_stale"] is True
+    assert saved["state"]["stale_backlog_reason"] == "active_backlog_reset"
+
+
 def test_roadmap_stale_helper_blocks_blank_active_reset_attempt_ids() -> None:
     """Blank reset attempt ids are malformed and remain stale-blocked."""
     state: JsonDict = {

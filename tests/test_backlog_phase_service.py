@@ -2140,6 +2140,7 @@ async def test_reset_active_backlog_updates_state_after_success() -> None:
         saved["state"]["active_backlog_reset_attempt_id"]
         == "backlog-attempt-1"
     )
+    assert "backlog_items" not in saved["state"]
 
 
 @pytest.mark.asyncio

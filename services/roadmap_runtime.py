@@ -14,6 +14,9 @@ from orchestrator_agent.agent_tools.roadmap_builder.agent import (
     root_agent as roadmap_agent,
 )
 from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
+    BacklogItem as RoadmapBacklogItem,
+)
+from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
     RoadmapBuilderInput,
     RoadmapBuilderOutput,
 )
@@ -34,6 +37,10 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 
 type RoadmapInputContext = dict[str, object]
 type ValidationErrors = list[dict[str, object]]
+
+_ROADMAP_BACKLOG_ITEM_FIELDS: frozenset[str] = frozenset(
+    RoadmapBacklogItem.model_fields
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,25 @@ def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
     )
 
 
+def _project_roadmap_backlog_items(value: object) -> list[object]:
+    """Return backlog items with host refinement metadata stripped."""
+    if not isinstance(value, list):
+        return []
+    projected: list[object] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            projected.append(
+                {
+                    str(key): raw_value
+                    for key, raw_value in item.items()
+                    if isinstance(key, str) and key in _ROADMAP_BACKLOG_ITEM_FIELDS
+                }
+            )
+        else:
+            projected.append(item)
+    return projected
+
+
 def build_roadmap_input_context(
     state: dict[str, Any],
     *,
@@ -96,8 +122,9 @@ def build_roadmap_input_context(
     vision_assessment = state.get("product_vision_assessment") or {}
     vision_stmt = vision_assessment.get("product_vision_statement") or ""
 
-    # backlog_items comes from session state (populated after Backlog phase completed)
-    backlog_items = state.get("backlog_items") or []
+    # backlog_items comes from session state; strip refinement lineage metadata
+    # before passing nested items into RoadmapBuilderInput(extra="forbid").
+    backlog_items = _project_roadmap_backlog_items(state.get("backlog_items"))
 
     return {
         "backlog_items": backlog_items,

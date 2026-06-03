@@ -251,7 +251,8 @@ def _hydrate_active_backlog_from_db(
 ) -> None:
     """Backfill canonical active backlog items from persisted seed stories."""
     backlog_items = state.get("backlog_items")
-    if isinstance(backlog_items, list) and backlog_items:
+    force_db_reload = bool(state.get("active_backlog_reset_attempt_id"))
+    if not force_db_reload and isinstance(backlog_items, list) and backlog_items:
         return
 
     with Session(get_engine()) as session:
