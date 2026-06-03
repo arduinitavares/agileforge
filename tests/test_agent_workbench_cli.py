@@ -689,16 +689,23 @@ class _FakeApplication:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> JsonObject:
         """Return a story complete payload."""
+        call_args: JsonObject = {
+            "project_id": project_id,
+            "expected_state": expected_state,
+            "idempotency_key": idempotency_key,
+        }
+        if scope is not None:
+            call_args["scope"] = scope
+        if scope_id is not None:
+            call_args["scope_id"] = scope_id
         self.calls.append(
             (
                 "story_complete",
-                {
-                    "project_id": project_id,
-                    "expected_state": expected_state,
-                    "idempotency_key": idempotency_key,
-                },
+                call_args,
             )
         )
         return {
@@ -2543,6 +2550,33 @@ def test_cli_routes_roadmap_commands(
                     "project_id": PROJECT_ID,
                     "expected_state": "STORY_PERSISTENCE",
                     "idempotency_key": "complete-story-1",
+                },
+            ),
+            "agileforge story complete",
+        ),
+        (
+            [
+                "story",
+                "complete",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "STORY_PERSISTENCE",
+                "--idempotency-key",
+                "complete-story-milestone-0",
+                "--scope",
+                "milestone",
+                "--scope-id",
+                "milestone_0",
+            ],
+            (
+                "story_complete",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "STORY_PERSISTENCE",
+                    "idempotency_key": "complete-story-milestone-0",
+                    "scope": "milestone",
+                    "scope_id": "milestone_0",
                 },
             ),
             "agileforge story complete",

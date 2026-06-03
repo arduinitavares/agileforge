@@ -25,6 +25,7 @@ from services.agent_workbench.schema_readiness import (
 )
 from services.agent_workbench.session_reader import ReadOnlySessionReader
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
+from services.sprint_input import apply_story_completion_scope_to_candidate_result
 from utils.spec_schemas import ValidationEvidence
 
 if TYPE_CHECKING:
@@ -627,6 +628,11 @@ class ReadProjectionService:
             story_sources = _sprint_candidate_story_sources(session, project_id)
             raw = fetch_sprint_candidates_from_session(session, project_id)
 
+        state = self._session_reader.get_project_state(project_id)
+        raw = apply_story_completion_scope_to_candidate_result(
+            raw,
+            state.get("story_completion_scope"),
+        )
         items = raw.get("stories", [])
         excluded_counts = raw.get("excluded_counts", {})
         readiness = raw.get("readiness") or {
@@ -648,6 +654,7 @@ class ReadProjectionService:
             "excluded_counts": excluded_counts,
             "readiness": readiness,
             "message": raw.get("message"),
+            "story_completion_scope": raw.get("story_completion_scope"),
         }
         data = {
             "items": items,
@@ -655,6 +662,7 @@ class ReadProjectionService:
             "excluded_counts": excluded_counts,
             "readiness": readiness,
             "message": raw.get("message"),
+            "story_completion_scope": raw.get("story_completion_scope"),
             "source_fingerprint": canonical_hash(source_payload),
         }
         return _success(data)

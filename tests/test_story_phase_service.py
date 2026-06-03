@@ -1466,6 +1466,7 @@ async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_s
         "fsm_state": "STORY_PERSISTENCE",
         "roadmap_releases": [{"items": ["Enable login", "Reset password"]}],
         "story_saved": {"Enable login": True, "Reset password": True},
+        "story_completion_scope": {"scope": "milestone", "scope_id": "milestone_0"},
     }
     saved_states: list[JsonDict] = []
 
@@ -1484,6 +1485,7 @@ async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_s
     }
     assert state["fsm_state"] == "SPRINT_SETUP"
     assert state["story_phase_completed_at"] == "2026-04-04T12:00:00Z"
+    assert "story_completion_scope" not in state
     assert state["story_complete_idempotency"]["complete-story-all-saved"] == payload
     assert len(saved_states) == 1
 
@@ -1521,6 +1523,126 @@ async def test_complete_story_phase_blocks_until_all_roadmap_requirements_saved(
     assert exc_info.value.detail == (
         "Story phase cannot complete: 1 of 2 roadmap requirements are saved or merged."
     )
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_allows_saved_milestone_scope_with_pending_later_milestone() -> None:  # noqa: E501
+    """Verify scoped completion gates only the selected roadmap milestone."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [
+            {
+                "theme": "First Slice",
+                "items": ["Enable login", "Reset password"],
+            },
+            {
+                "theme": "Later Slice",
+                "items": ["Invite teammates"],
+            },
+        ],
+        "story_saved": {"Enable login": True, "Reset password": True},
+    }
+    saved_states: list[JsonDict] = []
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-story-milestone-0",
+        scope="milestone",
+        scope_id="milestone_0",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+    )
+
+    expected_scope = {
+        "schema_version": "agileforge.story_completion_scope.v1",
+        "scope": "milestone",
+        "scope_id": "milestone_0",
+        "requirements": ["Enable login", "Reset password"],
+        "completed_at": "2026-06-03T12:00:00Z",
+    }
+    assert payload == {
+        "fsm_state": "SPRINT_SETUP",
+        "coverage": {"saved": 2, "merged": 0, "total": 2},
+        "idempotency_key": "complete-story-milestone-0",
+        "story_completion_scope": expected_scope,
+    }
+    assert state["fsm_state"] == "SPRINT_SETUP"
+    assert state["story_completion_scope"] == expected_scope
+    assert state["story_complete_idempotency"]["complete-story-milestone-0"] == payload
+    assert len(saved_states) == 1
+
+    replay_payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-story-milestone-0",
+        scope="milestone",
+        scope_id="milestone_0",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-03T12:01:00Z",
+    )
+
+    assert replay_payload == payload
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_rejects_unknown_milestone_scope_id() -> None:
+    """Verify unknown milestone scopes fail without advancing the FSM."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Enable login"]}],
+        "story_saved": {"Enable login": True},
+    }
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-missing-scope",
+            scope="milestone",
+            scope_id="milestone_7",
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-03T12:00:00Z",
+        )
+
+    assert exc_info.value.status_code == 400  # noqa: PLR2004
+    assert exc_info.value.detail == (
+        "Story completion scope milestone_7 does not match any roadmap milestone."
+    )
+    assert state["fsm_state"] == "STORY_PERSISTENCE"
+    assert "story_completion_scope" not in state
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_blocks_incomplete_milestone_scope() -> None:
+    """Verify scoped completion reports coverage only for the selected milestone."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [
+            {"items": ["Enable login", "Reset password"]},
+            {"items": ["Invite teammates"]},
+        ],
+        "story_saved": {"Enable login": True, "Invite teammates": True},
+    }
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-incomplete-scope",
+            scope="milestone",
+            scope_id="milestone_0",
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-03T12:00:00Z",
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert exc_info.value.detail == (
+        "Story phase cannot complete for milestone_0: "
+        "1 of 2 roadmap requirements are saved or merged."
+    )
+    assert state["fsm_state"] == "STORY_PERSISTENCE"
 
 
 @pytest.mark.asyncio

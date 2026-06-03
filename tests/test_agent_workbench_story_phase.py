@@ -1095,6 +1095,44 @@ def test_story_complete_passes_guard_fields(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["idempotency_key"] == "complete-key"
 
 
+def test_story_complete_passes_scope_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Story complete passes optional milestone scope fields."""
+    captured: dict[str, Any] = {}
+
+    async def fake_complete_story_phase(**kwargs: object) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "fsm_state": "SPRINT_SETUP",
+            "coverage": {"saved": 2, "merged": 0, "total": 2},
+            "idempotency_key": kwargs["idempotency_key"],
+            "story_completion_scope": {
+                "scope": kwargs["scope"],
+                "scope_id": kwargs["scope_id"],
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.complete_story_phase",
+        fake_complete_story_phase,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.complete(
+        project_id=PROJECT_ID,
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-key",
+        scope="milestone",
+        scope_id="milestone_0",
+    )
+
+    assert result["ok"] is True
+    assert captured["scope"] == "milestone"
+    assert captured["scope_id"] == "milestone_0"
+
+
 def test_story_reopen_runner_passes_guards(monkeypatch: pytest.MonkeyPatch) -> None:
     """Story reopen passes expected state and idempotency guard fields."""
     captured: dict[str, Any] = {}

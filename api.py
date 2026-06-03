@@ -417,6 +417,8 @@ class StoryCompleteRequest(BaseModel):
 
     expected_state: str
     idempotency_key: str
+    scope: str | None = None
+    scope_id: str | None = None
 
 
 class SprintGenerateRequest(BaseModel):
@@ -2606,6 +2608,8 @@ async def complete_story_phase(
         data = await complete_story_phase_service(
             expected_state=req.expected_state,
             idempotency_key=req.idempotency_key,
+            scope=req.scope,
+            scope_id=req.scope_id,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             now_iso=_now_iso,
@@ -2644,7 +2648,11 @@ async def get_project_sprint_candidates(project_id: int) -> dict[str, Any]:
     if not product:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    result = load_sprint_candidates(project_id)
+    state = await _ensure_session(str(project_id))
+    result = load_sprint_candidates(
+        project_id,
+        story_completion_scope=state.get("story_completion_scope"),
+    )
     if not result.get("success"):
         raise HTTPException(
             status_code=500,

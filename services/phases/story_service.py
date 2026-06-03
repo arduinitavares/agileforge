@@ -48,6 +48,70 @@ def get_all_roadmap_requirements(state: dict[str, Any]) -> list[str]:
     return reqs
 
 
+def _roadmap_milestone_requirements(
+    state: dict[str, Any],
+    *,
+    scope_id: str,
+) -> list[str] | None:
+    """Return requirement names for a milestone scope, or None when absent."""
+    roadmap_releases = state.get("roadmap_releases")
+    if not isinstance(roadmap_releases, list):
+        return None
+
+    for release_index, release in enumerate(roadmap_releases):
+        if not isinstance(release, dict):
+            continue
+        if f"milestone_{release_index}" != scope_id:
+            continue
+        release_data = cast("dict[str, Any]", release)
+        items = release_data.get("items")
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, str)]
+    return None
+
+
+def _story_completion_scope_requirements(
+    state: dict[str, Any],
+    *,
+    scope: str | None,
+    scope_id: str | None,
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Resolve Story completion requirements for full or scoped completion."""
+    normalized_scope = scope.strip() if isinstance(scope, str) else None
+    normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else None
+    if not normalized_scope and not normalized_scope_id:
+        return get_all_roadmap_requirements(state), None
+    if not normalized_scope or not normalized_scope_id:
+        raise StoryPhaseError(
+            "story complete scope requires both --scope and --scope-id",
+            status_code=400,
+        )
+    if normalized_scope != "milestone":
+        raise StoryPhaseError(
+            f"Unsupported story completion scope: {normalized_scope}",
+            status_code=400,
+        )
+
+    requirements = _roadmap_milestone_requirements(
+        state,
+        scope_id=normalized_scope_id,
+    )
+    if requirements is None:
+        raise StoryPhaseError(
+            "Story completion scope "
+            f"{normalized_scope_id} does not match any roadmap milestone.",
+            status_code=400,
+        )
+
+    return requirements, {
+        "schema_version": "agileforge.story_completion_scope.v1",
+        "scope": normalized_scope,
+        "scope_id": normalized_scope_id,
+        "requirements": requirements,
+    }
+
+
 def story_parent_rank(state: dict[str, Any], parent_requirement: str) -> int | None:
     """Return 1-based Roadmap order for a parent requirement."""
     parent_key = normalize_requirement_key(parent_requirement)
@@ -1492,6 +1556,8 @@ async def complete_story_phase(
     *,
     expected_state: str | None,
     idempotency_key: str | None,
+    scope: str | None = None,
+    scope_id: str | None = None,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
@@ -1523,7 +1589,11 @@ async def complete_story_phase(
             status_code=409,
         )
 
-    req_names = get_all_roadmap_requirements(state)
+    req_names, scope_payload = _story_completion_scope_requirements(
+        state,
+        scope=scope,
+        scope_id=scope_id,
+    )
     saved_reqs_dict = state.get("story_saved", {})
     if not isinstance(saved_reqs_dict, dict):
         saved_reqs_dict = {}
@@ -1542,8 +1612,11 @@ async def complete_story_phase(
     total_count = len(req_names)
     covered_count = saved_count + merged_count
     if covered_count != total_count:
+        scope_prefix = (
+            f" for {scope_payload['scope_id']}" if scope_payload is not None else ""
+        )
         raise StoryPhaseError(
-            "Story phase cannot complete: "
+            f"Story phase cannot complete{scope_prefix}: "
             f"{covered_count} of {total_count} roadmap requirements are saved "
             "or merged.",
             status_code=409,
@@ -1553,8 +1626,13 @@ async def complete_story_phase(
     state["fsm_state"] = OrchestratorState.SPRINT_SETUP.value
     state["fsm_state_entered_at"] = completed_at
     state["story_phase_completed_at"] = completed_at
+    if scope_payload is not None:
+        scope_payload = {**scope_payload, "completed_at": completed_at}
+        state["story_completion_scope"] = scope_payload
+    else:
+        state.pop("story_completion_scope", None)
 
-    payload = {
+    payload: dict[str, Any] = {
         "fsm_state": OrchestratorState.SPRINT_SETUP.value,
         "coverage": {
             "saved": saved_count,
@@ -1563,6 +1641,8 @@ async def complete_story_phase(
         },
         "idempotency_key": normalized_idempotency_key,
     }
+    if scope_payload is not None:
+        payload["story_completion_scope"] = scope_payload
     if not isinstance(idempotency_registry, dict):
         idempotency_registry = {}
         state["story_complete_idempotency"] = idempotency_registry

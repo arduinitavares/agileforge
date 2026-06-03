@@ -5,8 +5,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, NotRequired, Protocol, TypedDict, Unpack
+from typing import Any, NotRequired, Protocol, TypedDict, Unpack, cast
 
+from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.agent_workbench.fingerprints import canonical_hash
 from services.orchestrator_query_service import fetch_sprint_candidates
 from services.sprint_selection import (
@@ -31,6 +32,7 @@ class _PrepareSprintInputOptions(TypedDict):
     include_task_decomposition: object
     selected_story_ids: NotRequired[list[int] | None]
     fetch_candidates: NotRequired[_SprintCandidateFetcher | None]
+    story_completion_scope: NotRequired[object]
 
 
 def as_text(value: object) -> str:
@@ -109,6 +111,78 @@ def _sprint_candidate_readiness(candidates: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _story_completion_scope_payload(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    scope_data = cast("dict[str, Any]", value)
+    raw_requirements = scope_data.get("requirements")
+    if not isinstance(raw_requirements, list):
+        return None
+    requirements = [
+        str(requirement).strip()
+        for requirement in raw_requirements
+        if str(requirement).strip()
+    ]
+    if not requirements:
+        return None
+    return {
+        "scope": str(scope_data.get("scope") or "").strip() or None,
+        "scope_id": str(scope_data.get("scope_id") or "").strip() or None,
+        "requirements": requirements,
+    }
+
+
+def _scope_requirement_keys(scope_payload: dict[str, Any]) -> set[str]:
+    return {
+        normalize_requirement_key(requirement)
+        for requirement in scope_payload["requirements"]
+        if normalize_requirement_key(requirement)
+    }
+
+
+def apply_story_completion_scope_to_candidate_result(
+    candidate_result: dict[str, Any],
+    story_completion_scope: object,
+) -> dict[str, Any]:
+    """Return a candidate result filtered to the completed Story scope."""
+    scope_payload = _story_completion_scope_payload(story_completion_scope)
+    if scope_payload is None or candidate_result.get("success") is not True:
+        return candidate_result
+
+    requirement_keys = _scope_requirement_keys(scope_payload)
+    if not requirement_keys:
+        return candidate_result
+
+    raw_stories = candidate_result.get("stories")
+    if not isinstance(raw_stories, list):
+        raw_stories = []
+
+    filtered: list[dict[str, Any]] = []
+    excluded_count = 0
+    for story in raw_stories:
+        if not isinstance(story, dict):
+            continue
+        source_requirement = as_text(story.get("source_requirement")).strip()
+        if normalize_requirement_key(source_requirement) in requirement_keys:
+            filtered.append(story)
+        else:
+            excluded_count += 1
+
+    result = dict(candidate_result)
+    result["stories"] = filtered
+    result["count"] = len(filtered)
+    result["readiness"] = _sprint_candidate_readiness(filtered)
+    excluded_counts = dict(result.get("excluded_counts") or {})
+    if excluded_count:
+        excluded_counts["story_completion_scope"] = excluded_count
+    result["excluded_counts"] = excluded_counts
+    scope_id = scope_payload.get("scope_id") or "selected scope"
+    result["message"] = f"Found {len(filtered)} sprint candidates for {scope_id}."
+    result["story_completion_scope"] = scope_payload
+    result.pop("source_fingerprint", None)
+    return result
+
+
 def normalize_selected_story_ids(value: object) -> list[int]:
     """Normalize selected story IDs while preserving positive manual repeats."""
     if not isinstance(value, list):
@@ -136,6 +210,7 @@ def load_sprint_candidates(
     product_id: int,
     *,
     fetch_candidates: _SprintCandidateFetcher | None = None,
+    story_completion_scope: object = None,
 ) -> dict[str, Any]:
     """Load and normalize sprint-eligible candidate stories from the database."""
     resolver = fetch_candidates or fetch_sprint_candidates
@@ -211,13 +286,27 @@ def load_sprint_candidates(
 
         stories.append(normalized_story)
 
-    readiness = (
-        raw_result.get("readiness")
-        if isinstance(raw_result.get("readiness"), dict)
-        else _sprint_candidate_readiness(stories)
+    candidate_result = {
+        "success": True,
+        "count": len(stories),
+        "stories": stories,
+        "readiness": (
+            raw_result.get("readiness")
+            if isinstance(raw_result.get("readiness"), dict)
+            else _sprint_candidate_readiness(stories)
+        ),
+        "excluded_counts": raw_result.get("excluded_counts") or {},
+        "message": raw_result.get("message")
+        or f"Found {len(stories)} sprint candidates.",
+    }
+    candidate_result = apply_story_completion_scope_to_candidate_result(
+        candidate_result,
+        story_completion_scope=story_completion_scope,
     )
-    excluded_counts = raw_result.get("excluded_counts") or {}
-    message = raw_result.get("message") or f"Found {len(stories)} sprint candidates."
+    stories = list(candidate_result["stories"])
+    readiness = candidate_result["readiness"]
+    excluded_counts = candidate_result["excluded_counts"]
+    message = candidate_result["message"]
     source_fingerprint = canonical_hash(
         {
             "command": "agileforge sprint candidates",
@@ -226,6 +315,7 @@ def load_sprint_candidates(
             "readiness": readiness,
             "excluded_counts": excluded_counts,
             "message": message,
+            "story_completion_scope": candidate_result.get("story_completion_scope"),
         }
     )
 
@@ -237,6 +327,7 @@ def load_sprint_candidates(
         "excluded_counts": excluded_counts,
         "message": message,
         "source_fingerprint": source_fingerprint,
+        "story_completion_scope": candidate_result.get("story_completion_scope"),
     }
 
 
@@ -249,6 +340,7 @@ def prepare_sprint_input_context(
     candidate_result = load_sprint_candidates(
         product_id,
         fetch_candidates=options.get("fetch_candidates"),
+        story_completion_scope=options.get("story_completion_scope"),
     )
     if not candidate_result.get("success"):
         return {

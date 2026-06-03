@@ -94,6 +94,17 @@ def reset_sprint_planner_working_set(state: dict[str, Any]) -> None:
     state["sprint_planner_owner_sprint_id"] = None
 
 
+def _load_sprint_candidates_for_state(
+    project_id: int,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Load sprint candidates filtered by any completed Story scope."""
+    return load_sprint_candidates(
+        project_id,
+        story_completion_scope=state.get("story_completion_scope"),
+    )
+
+
 def reset_stale_saved_sprint_planner_working_set(
     state: dict[str, Any],
     *,
@@ -264,7 +275,7 @@ async def generate_sprint_plan(
     candidates_payload = (
         load_candidates()
         if load_candidates is not None
-        else load_sprint_candidates(project_id)
+        else _load_sprint_candidates_for_state(project_id, state)
     )
     readiness = candidates_payload.get("readiness")
     if isinstance(readiness, dict) and readiness.get("status") == "blocked":
@@ -905,7 +916,7 @@ def _assert_sprint_source_current(
     candidates_payload = (
         load_candidates()
         if load_candidates is not None
-        else load_sprint_candidates(project_id)
+        else _load_sprint_candidates_for_state(project_id, state)
     )
     current_source = candidates_payload.get("source_fingerprint")
     if not isinstance(current_source, str):

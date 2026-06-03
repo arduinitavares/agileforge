@@ -500,11 +500,23 @@ def test_complete_story_phase_moves_to_sprint_setup(monkeypatch):  # noqa: ANN00
 def test_sprint_candidates_endpoint_returns_normalized_items(monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_setup_project(repo, workflow)
+    workflow.states[str(project_id)]["story_completion_scope"] = {
+        "scope": "milestone",
+        "scope_id": "milestone_0",
+        "requirements": ["Event Delta Persistence"],
+    }
 
-    monkeypatch.setattr(
-        api_module,
-        "load_sprint_candidates",
-        lambda project_id: {  # noqa: ARG005
+    def fake_load_sprint_candidates(
+        project_id: int,  # noqa: ARG001
+        *,
+        story_completion_scope: object = None,
+    ) -> dict[str, object]:
+        assert story_completion_scope == {
+            "scope": "milestone",
+            "scope_id": "milestone_0",
+            "requirements": ["Event Delta Persistence"],
+        }
+        return {
             "success": True,
             "count": 1,
             "stories": [
@@ -519,7 +531,12 @@ def test_sprint_candidates_endpoint_returns_normalized_items(monkeypatch):  # no
             ],
             "excluded_counts": {"non_refined": 1, "superseded": 0},
             "message": "Found 1 sprint candidate.",
-        },
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "load_sprint_candidates",
+        fake_load_sprint_candidates,
     )
 
     response = client.get(f"/api/projects/{project_id}/sprint/candidates")

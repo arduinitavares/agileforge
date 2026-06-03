@@ -681,8 +681,9 @@ attempt id and artifact fingerprint from that latest reviewed file instead.
 Never save an older attempt after a newer refinement.
 
 Repeat `story pending`, `story generate`, review, and guarded `story save` until
-every Roadmap requirement is saved or explicitly merged by Story resolution
-state. Then complete the Story phase:
+the desired planning slice is saved or explicitly merged by Story resolution
+state. To require full Roadmap coverage, complete the Story phase without a
+scope:
 
 ```sh
 agileforge story complete \
@@ -692,8 +693,28 @@ agileforge story complete \
   > story-complete.json
 ```
 
-Story complete fails closed unless all Roadmap requirements are covered. On
-success, it moves the workflow to Sprint setup:
+Unscoped Story complete fails closed unless all Roadmap requirements are
+covered. To proceed with one saved roadmap milestone, use the group id from
+`story pending`:
+
+```sh
+agileforge story complete \
+  --project-id "$PROJECT_ID" \
+  --expected-state STORY_PERSISTENCE \
+  --scope milestone \
+  --scope-id milestone_0 \
+  --idempotency-key "complete-story-$PROJECT_ID-milestone-0-$(date +%Y%m%d%H%M%S)" \
+  > story-complete.json
+```
+
+Scoped Story complete gates only the requirements in that milestone. Unknown
+`--scope-id` values fail without advancing the workflow. Reusing the same
+`--idempotency-key` replays the prior result; a later different scope is not
+accepted after the workflow has moved past `STORY_PERSISTENCE`. Sprint
+candidates and Sprint generation are filtered to stories whose
+`source_requirement` belongs to the completed scope.
+
+On success, Story complete moves the workflow to Sprint setup:
 
 ```sh
 agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
@@ -1523,6 +1544,7 @@ agileforge story retry --project-id 1 --parent-requirement "Roadmap requirement"
 agileforge story history --project-id 1 --parent-requirement "Roadmap requirement"
 agileforge story save --project-id 1 --parent-requirement "Roadmap requirement" --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state STORY_REVIEW --idempotency-key save-story-001
 agileforge story complete --project-id 1 --expected-state STORY_PERSISTENCE --idempotency-key complete-story-001
+agileforge story complete --project-id 1 --expected-state STORY_PERSISTENCE --scope milestone --scope-id milestone_0 --idempotency-key complete-story-milestone-0-001
 agileforge story reopen --project-id 1 --parent-requirement "Roadmap requirement" --expected-state SPRINT_SETUP --idempotency-key reopen-story-001
 agileforge story repair-readiness --project-id 1 --expected-state SPRINT_SETUP --idempotency-key repair-story-readiness-001
 agileforge story dependencies inspect --project-id 1
@@ -1536,7 +1558,13 @@ are read-only. `story generate`, `story retry`, `story save`, `story complete`,
 `story reopen`, `story repair-readiness`, `story dependencies propose`, and
 `story dependencies apply` mutate workflow state. Save, complete, reopen,
 repair-readiness, dependency propose, and dependency apply are guarded and
-require explicit idempotency keys.
+require explicit idempotency keys. `story complete` may be scoped to a
+milestone from `story pending`; scoped completion persists
+`story_completion_scope`, and `sprint candidates` / `sprint generate` only use
+saved stories whose `source_requirement` belongs to that scope. A repeat with
+the same idempotency key is a replay. A different milestone after the workflow
+has left `STORY_PERSISTENCE` requires an explicit future workflow reopen or
+next-cycle path.
 
 ### Sprint Commands
 

@@ -164,9 +164,18 @@ class StoryPhaseRunner:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         """Complete the Story phase after all roadmap requirements are covered."""
-        return anyio.run(self._complete, project_id, expected_state, idempotency_key)
+        return anyio.run(
+            self._complete,
+            project_id,
+            expected_state,
+            idempotency_key,
+            scope,
+            scope_id,
+        )
 
     def reopen(
         self,
@@ -416,6 +425,8 @@ class StoryPhaseRunner:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None,
+        scope_id: str | None,
     ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
@@ -425,6 +436,8 @@ class StoryPhaseRunner:
             data = await complete_story_phase(
                 expected_state=expected_state,
                 idempotency_key=idempotency_key,
+                scope=scope,
+                scope_id=scope_id,
                 load_state=lambda: self._load_story_state(
                     str(project_id), project_id, product
                 ),

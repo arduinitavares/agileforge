@@ -829,16 +829,20 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
     )
     assert missing_body_response.status_code == 422  # noqa: PLR2004
 
-    async def fake_complete_story_phase_service(
+    async def fake_complete_story_phase_service(  # noqa: PLR0913
         *,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None,
+        scope_id: str | None,
         load_state: object,
         save_state: object,
         now_iso: object,
     ) -> dict[str, object]:
         assert expected_state == "STORY_PERSISTENCE"
         assert idempotency_key == "story-complete-api"
+        assert scope == "milestone"
+        assert scope_id == "milestone_0"
         assert load_state is not None
         assert save_state is not None
         assert now_iso is not None
@@ -859,6 +863,8 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
         json={
             "expected_state": "STORY_PERSISTENCE",
             "idempotency_key": "story-complete-api",
+            "scope": "milestone",
+            "scope_id": "milestone_0",
         },
     )
 

@@ -692,6 +692,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         phase="phase_2d",
         requires_idempotency_key=True,
         input_required=("project_id", "expected_state", "idempotency_key"),
+        input_optional=("scope", "scope_id"),
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,

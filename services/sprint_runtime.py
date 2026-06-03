@@ -64,6 +64,7 @@ class _SprintRunOptions(_RequiredSprintRunOptions, total=False):
     max_story_points: int | None
     selected_story_ids: list[int] | None
     user_input: str | None
+    story_completion_scope: object
 
 
 @dataclass(frozen=True)
@@ -427,6 +428,7 @@ def _prepare_sprint_payload(
         max_story_points=options.get("max_story_points"),
         include_task_decomposition=options["include_task_decomposition"],
         selected_story_ids=options.get("selected_story_ids"),
+        story_completion_scope=options.get("story_completion_scope"),
     )
     input_context = _normalize_input_context(prepared.get("input_context"))
     source_fingerprint = _normalize_source_fingerprint(
@@ -740,7 +742,6 @@ async def run_sprint_agent_from_state(
     **options: Unpack[_SprintRunOptions],
 ) -> dict[str, Any]:
     """Run the sprint agent from prepared project state and normalize failures."""
-    _ = state
     run_options: _SprintRunOptions = {
         "team_velocity_assumption": options["team_velocity_assumption"],
         "sprint_duration_days": options["sprint_duration_days"],
@@ -748,6 +749,7 @@ async def run_sprint_agent_from_state(
         "max_story_points": options.get("max_story_points"),
         "selected_story_ids": options.get("selected_story_ids"),
         "user_input": options.get("user_input"),
+        "story_completion_scope": state.get("story_completion_scope"),
     }
     prepared: _PreparedSprintPayload | dict[str, Any] = _prepare_sprint_payload(
         project_id=project_id,

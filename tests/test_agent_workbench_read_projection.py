@@ -34,13 +34,14 @@ def _engine(session: Session) -> Engine:
 class _FakeSessionReader:
     """Session reader test double that records read-only workflow lookups."""
 
-    def __init__(self) -> None:
+    def __init__(self, state: dict[str, Any] | None = None) -> None:
         self.project_ids: list[int] = []
+        self.state = state or {"fsm_state": "SPRINT_SETUP", "setup_status": "ready"}
 
     def get_project_state(self, project_id: int) -> dict[str, Any]:
         """Return a deterministic workflow state payload."""
         self.project_ids.append(project_id)
-        return {"fsm_state": "SPRINT_SETUP", "setup_status": "ready"}
+        return dict(self.state)
 
 
 def _seed_project_with_story(session: Session) -> tuple[int, int, int, int]:
@@ -270,6 +271,71 @@ def test_sprint_candidates_counts_excluded_story_reasons(
         "superseded": 1,
         "open_sprint": 1,
     }
+
+
+def test_sprint_candidates_filters_to_story_completion_scope(
+    session: Session,
+) -> None:
+    """Sprint candidate projection should honor scoped Story completion."""
+    product = Product(name="Scoped Sprint Project", description="Demo")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    in_scope = UserStory(
+        product_id=product_id,
+        title="Login UI",
+        story_description="Ready",
+        acceptance_criteria="- AC",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        rank="1",
+        story_points=2,
+        source_requirement="enable login",
+    )
+    out_of_scope = UserStory(
+        product_id=product_id,
+        title="Invite teammates",
+        story_description="Later",
+        acceptance_criteria="- AC",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        rank="2",
+        story_points=3,
+        source_requirement="invite teammates",
+    )
+    session.add_all([in_scope, out_of_scope])
+    session.commit()
+    session.refresh(in_scope)
+    session.refresh(out_of_scope)
+    service = ReadProjectionService(
+        engine=_engine(session),
+        session_reader=cast(
+            "ReadOnlySessionReader",
+            _FakeSessionReader(
+                {
+                    "fsm_state": "SPRINT_SETUP",
+                    "story_completion_scope": {
+                        "scope": "milestone",
+                        "scope_id": "milestone_0",
+                        "requirements": ["Enable Login"],
+                    },
+                }
+            ),
+        ),
+    )
+
+    result = service.sprint_candidates(project_id=product_id)
+
+    assert result["ok"] is True
+    assert [item["story_id"] for item in result["data"]["items"]] == [
+        in_scope.story_id
+    ]
+    assert result["data"]["count"] == 1
+    assert result["data"]["excluded_counts"]["story_completion_scope"] == 1
+    assert out_of_scope.story_id not in [
+        item["story_id"] for item in result["data"]["items"]
+    ]
 
 
 def test_sprint_candidates_reports_readiness_blockers(

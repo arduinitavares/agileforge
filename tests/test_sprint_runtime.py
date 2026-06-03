@@ -585,6 +585,95 @@ def test_load_sprint_candidates_preserves_readiness_from_fetcher() -> None:
     }
 
 
+def test_prepare_sprint_input_filters_to_story_completion_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint input should only include stories from the completed Story scope."""
+    expected_scoped_count = 2
+    first_scoped_story_id = 11
+    second_scoped_story_id = 12
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, Any]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 3,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "priority": 1,
+                    "story_points": 2,
+                    "source_requirement": "enable login",
+                },
+                {
+                    "story_id": 12,
+                    "story_title": "Reset email",
+                    "priority": 2,
+                    "story_points": 2,
+                    "source_requirement": "reset password",
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Invite teammates",
+                    "priority": 999,
+                    "story_points": None,
+                    "source_requirement": "invite teammates",
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "unsized_count": 1,
+                "default_priority_count": 1,
+                "blocking_codes": [
+                    "SPRINT_CANDIDATES_UNSIZED",
+                    "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+                ],
+                "blocking_story_ids": [13],
+            },
+        }
+
+    monkeypatch.setattr(
+        sprint_input,
+        "fetch_sprint_candidates",
+        fake_fetch_sprint_candidates,
+    )
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        team_velocity_assumption="High",
+        sprint_duration_days=14,
+        user_context=None,
+        max_story_points=10,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        story_completion_scope={
+            "scope": "milestone",
+            "scope_id": "milestone_0",
+            "requirements": ["Enable Login", "Reset Password"],
+        },
+    )
+
+    assert prepared["success"] is True
+    assert prepared["candidate_result"]["count"] == expected_scoped_count
+    assert prepared["candidate_result"]["readiness"] == {
+        "status": "ready",
+        "unsized_count": 0,
+        "default_priority_count": 0,
+        "blocking_codes": [],
+        "blocking_story_ids": [],
+    }
+    assert prepared["candidate_result"]["excluded_counts"] == {
+        "story_completion_scope": 1
+    }
+    assert prepared["input_context"]["available_stories"][0]["story_id"] == (
+        first_scoped_story_id
+    )
+    assert prepared["input_context"]["available_stories"][1]["story_id"] == (
+        second_scoped_story_id
+    )
+
+
 def test_prepare_sprint_input_preserves_dependency_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -638,6 +727,95 @@ def test_prepare_sprint_input_preserves_dependency_metadata(
     assert stories[1]["prerequisite_story_ids"] == [11]
     assert stories[1]["blocked_by_story_ids"] == [11]
     assert stories[1]["dependency_status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_run_sprint_agent_filters_candidates_from_story_completion_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint generation should use the Story completion scope from workflow state."""
+    captured: dict[str, Any] = {}
+    first_scoped_story_id = 11
+    second_scoped_story_id = 12
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> object:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 3,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "priority": 1,
+                    "story_points": 2,
+                    "source_requirement": "enable login",
+                },
+                {
+                    "story_id": 12,
+                    "story_title": "Reset email",
+                    "priority": 2,
+                    "story_points": 2,
+                    "source_requirement": "reset password",
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Invite teammates",
+                    "priority": 999,
+                    "story_points": None,
+                    "source_requirement": "invite teammates",
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "unsized_count": 1,
+                "default_priority_count": 1,
+                "blocking_codes": [
+                    "SPRINT_CANDIDATES_UNSIZED",
+                    "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+                ],
+                "blocking_story_ids": [13],
+            },
+        }
+
+    async def fake_invoke(payload: sprint_runtime.SprintPlannerInput) -> str:
+        captured["payload"] = payload.model_dump()
+        return _sprint_output_for_story_ids([11, 12], max_story_points=10)
+
+    monkeypatch.setattr(
+        sprint_input,
+        "fetch_sprint_candidates",
+        fake_fetch_sprint_candidates,
+    )
+    monkeypatch.setattr(sprint_runtime, "_invoke_sprint_agent", fake_invoke)
+
+    result = await sprint_runtime.run_sprint_agent_from_state(
+        {
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_0",
+                "requirements": ["Enable Login", "Reset Password"],
+            }
+        },
+        project_id=7,
+        team_velocity_assumption="High",
+        sprint_duration_days=14,
+        max_story_points=10,
+        include_task_decomposition=False,
+        selected_story_ids=None,
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert [
+        story["story_id"] for story in captured["payload"]["available_stories"]
+    ] == [first_scoped_story_id, second_scoped_story_id]
+    assert result["input_context"]["available_stories"][0]["story_id"] == (
+        first_scoped_story_id
+    )
+    assert result["input_context"]["available_stories"][1]["story_id"] == (
+        second_scoped_story_id
+    )
 
 
 @pytest.mark.asyncio

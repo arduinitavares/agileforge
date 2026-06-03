@@ -722,6 +722,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "expected_state",
         "idempotency_key",
     ]
+    assert complete["input"]["optional"] == ["scope", "scope_id"]
     assert complete["idempotency_required"] is True
     assert reopen["mutates"] is True
     assert reopen["input"]["required"] == [

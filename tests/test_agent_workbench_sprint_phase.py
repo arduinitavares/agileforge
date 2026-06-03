@@ -85,7 +85,7 @@ def test_sprint_runner_generate_wraps_keyword_only_failure_meta(
     monkeypatch.setattr(
         sprint_service,
         "load_sprint_candidates",
-        lambda _project_id: {
+        lambda _project_id, **_kwargs: {
             "success": True,
             "count": 1,
             "stories": [{"story_id": 1}],
@@ -134,7 +134,7 @@ def test_sprint_runner_generate_blocks_stale_downstream_backlog(
     monkeypatch.setattr(
         sprint_service,
         "load_sprint_candidates",
-        lambda _project_id: {
+        lambda _project_id, **_kwargs: {
             "success": True,
             "count": 1,
             "stories": [{"story_id": 1}],
@@ -202,7 +202,7 @@ def test_sprint_runner_generate_blocks_active_reset_stale_marker(
     monkeypatch.setattr(
         sprint_service,
         "load_sprint_candidates",
-        lambda _project_id: {
+        lambda _project_id, **_kwargs: {
             "success": True,
             "count": 1,
             "stories": [{"story_id": 1}],

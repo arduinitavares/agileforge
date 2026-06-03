@@ -492,6 +492,24 @@ class _StoryCompleteReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _StoryMilestoneReadyReadProjection(_FakeReadProjection):
+    """Fake read projection with a partially covered Story state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story persistence workflow state with one complete milestone."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_PERSISTENCE",
+            "setup_status": "passed",
+            "roadmap_releases": [
+                {"items": ["Requirement A", "Requirement B"]},
+                {"items": ["Requirement C"]},
+            ],
+            "story_saved": {"Requirement A": True, "Requirement B": True},
+        }
+        return result
+
+
 class _AuthorityPendingReviewReadProjection(_FakeReadProjection):
     """Fake read projection for setup blocked on authority review."""
 
@@ -1195,16 +1213,23 @@ class _FakeStoryRunner:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         """Record Story completion."""
+        call_args: dict[str, object] = {
+            "project_id": project_id,
+            "expected_state": expected_state,
+            "idempotency_key": idempotency_key,
+        }
+        if scope is not None:
+            call_args["scope"] = scope
+        if scope_id is not None:
+            call_args["scope_id"] = scope_id
         self.calls.append(
             (
                 "complete",
-                {
-                    "project_id": project_id,
-                    "expected_state": expected_state,
-                    "idempotency_key": idempotency_key,
-                },
+                call_args,
             )
         )
         return {
@@ -2100,6 +2125,16 @@ def test_application_routes_story_commands_to_runner() -> None:
         == "SPRINT_SETUP"
     )
     assert (
+        app.story_complete(
+            project_id=PROJECT_ID,
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-milestone-0",
+            scope="milestone",
+            scope_id="milestone_0",
+        )["data"]["fsm_state"]
+        == "SPRINT_SETUP"
+    )
+    assert (
         app.story_reopen(
             project_id=PROJECT_ID,
             parent_requirement="REQ.checkout",
@@ -2107,6 +2142,16 @@ def test_application_routes_story_commands_to_runner() -> None:
             idempotency_key="reopen-story-1",
         )["data"]["fsm_state"]
         == "STORY_INTERVIEW"
+    )
+    assert runner.calls[6] == (
+        "complete",
+        {
+            "project_id": PROJECT_ID,
+            "expected_state": "STORY_PERSISTENCE",
+            "idempotency_key": "complete-story-milestone-0",
+            "scope": "milestone",
+            "scope_id": "milestone_0",
+        },
     )
     assert app.story_repair_readiness(
         project_id=PROJECT_ID,
@@ -2154,6 +2199,16 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "project_id": PROJECT_ID,
                 "expected_state": "STORY_PERSISTENCE",
                 "idempotency_key": "complete-story-1",
+            },
+        ),
+        (
+            "complete",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "STORY_PERSISTENCE",
+                "idempotency_key": "complete-story-milestone-0",
+                "scope": "milestone",
+                "scope_id": "milestone_0",
             },
         ),
         (
@@ -2815,6 +2870,44 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_routes_story_persistence_to_scoped_complete_when_milestone_ready() -> None:  # noqa: E501
+    """Expose scoped Story completion when one milestone is planning-ready."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryMilestoneReadyReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+        "agileforge story dependencies inspect --project-id 7",
+        (
+            "agileforge story dependencies propose --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story dependencies apply --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--scope milestone --scope-id milestone_0 "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
 
 
 def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:

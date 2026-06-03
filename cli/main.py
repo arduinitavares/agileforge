@@ -479,6 +479,8 @@ class _Application(Protocol):
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> JsonObject:
         """Complete the Story phase."""
         ...
@@ -1391,10 +1393,41 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_save.add_argument("--expected-state", required=True)
     story_save.add_argument("--idempotency-key", required=True)
     story_save.set_defaults(command_handler=_story_save)
-    story_complete = story_sub.add_parser("complete", help="Complete the Story phase.")
+    story_complete = story_sub.add_parser(
+        "complete",
+        help="Complete the Story phase.",
+        description=(
+            "Complete Story work and move to Sprint setup. Without --scope, every "
+            "Roadmap requirement must be saved or merged. With --scope milestone, "
+            "only requirements in that milestone are gated."
+        ),
+        epilog=(
+            "Scoped completion example: --scope milestone --scope-id milestone_0. "
+            "Scope ids come from agileforge story pending. Unknown scope ids fail "
+            "without advancing state. Reusing the same idempotency key replays the "
+            "prior result; a later different scope is not accepted after the "
+            "workflow has already moved past STORY_PERSISTENCE."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     story_complete.add_argument("--project-id", type=int, required=True)
     story_complete.add_argument("--expected-state", required=True)
     story_complete.add_argument("--idempotency-key", required=True)
+    story_complete.add_argument(
+        "--scope",
+        choices=["milestone"],
+        help=(
+            "Optionally complete only a planning scope. Currently supported: "
+            "milestone."
+        ),
+    )
+    story_complete.add_argument(
+        "--scope-id",
+        help=(
+            "Scope identifier from story pending, for example milestone_0. "
+            "Use with --scope milestone."
+        ),
+    )
     story_complete.set_defaults(command_handler=_story_complete)
     story_reopen = story_sub.add_parser(
         "reopen",
@@ -2810,6 +2843,8 @@ def _story_complete(
         project_id=args.project_id,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+        scope=args.scope,
+        scope_id=args.scope_id,
     )
 
 

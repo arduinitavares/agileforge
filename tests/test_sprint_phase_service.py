@@ -7,6 +7,7 @@ from typing import Any, Never
 import pytest
 
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import SaveSprintPlanInput
+from services.phases import sprint_service
 from services.phases.sprint_service import (
     SprintPhaseError,
     close_sprint,
@@ -271,6 +272,79 @@ async def test_generate_sprint_plan_stamps_attempt_with_source_fingerprint() -> 
     assert state["sprint_candidate_source_fingerprint"] == source_fingerprint
     assert state["sprint_attempts"][0]["source_fingerprint"] == source_fingerprint
     assert state["sprint_plan_assessment"]["source_fingerprint"] == source_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_generate_sprint_plan_loads_candidates_with_story_completion_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Sprint readiness uses the scoped Story completion candidate set."""
+    scope = {
+        "scope": "milestone",
+        "scope_id": "milestone_0",
+        "requirements": ["Enable Login"],
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_SETUP",
+        "story_completion_scope": scope,
+    }
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def fake_load_sprint_candidates(
+        project_id: int,
+        *,
+        story_completion_scope: object = None,
+    ) -> JsonDict:
+        captured["project_id"] = project_id
+        captured["story_completion_scope"] = story_completion_scope
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 11}],
+            "readiness": {"status": "ready"},
+            "source_fingerprint": "sha256:" + "c" * 64,
+        }
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {"available_stories": [{"story_id": 11}]},
+            "output_artifact": {"is_complete": True},
+            "is_complete": True,
+            "error": None,
+            "source_fingerprint": "sha256:" + "c" * 64,
+        }
+
+    monkeypatch.setattr(
+        sprint_service,
+        "load_sprint_candidates",
+        fake_load_sprint_candidates,
+    )
+
+    payload = await generate_sprint_plan(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda updated: None,  # noqa: ARG005
+        current_planned_sprint_id=None,
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+        run_sprint_agent=fake_run_sprint_agent,
+        failure_meta_builder=_failure_meta_builder,
+        team_velocity_assumption="Medium",
+        sprint_duration_days=14,
+        max_story_points=13,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        user_input=None,
+    )
+
+    assert payload["fsm_state"] == "SPRINT_DRAFT"
+    assert captured["project_id"] == 7  # noqa: PLR2004
+    assert captured["story_completion_scope"] == scope
+    assert captured["agent_calls"] == 1
 
 
 @pytest.mark.asyncio

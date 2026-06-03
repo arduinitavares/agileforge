@@ -334,6 +334,8 @@ class _StoryPhaseRunner(Protocol):
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         """Complete the Story phase."""
         ...
@@ -1277,12 +1279,16 @@ class AgentWorkbenchApplication:
         project_id: int,
         expected_state: str,
         idempotency_key: str,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         """Complete the Story phase."""
         return self._get_story_runner().complete(
             project_id=project_id,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
+            scope=scope,
+            scope_id=scope_id,
         )
 
     def story_reopen(
@@ -2416,6 +2422,20 @@ def _story_command_candidates(
         return [pending_command, generate_command]
     if fsm_state == "STORY_PERSISTENCE":
         if not _story_coverage_is_complete(workflow):
+            scoped_complete_commands = _covered_story_milestone_complete_commands(
+                project_id=project_id,
+                workflow=workflow,
+            )
+            if scoped_complete_commands:
+                return [
+                    pending_command,
+                    generate_command,
+                    *_story_dependency_command_candidates(
+                        project_id=project_id,
+                        expected_state="STORY_PERSISTENCE",
+                    ),
+                    *scoped_complete_commands,
+                ]
             return [pending_command, generate_command]
         return [
             pending_command,
@@ -2460,6 +2480,55 @@ def _story_command_candidates(
             ),
         ),
     ]
+
+
+def _covered_story_milestone_complete_commands(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return scoped Story complete commands for covered roadmap milestones."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    releases = state_data.get("roadmap_releases")
+    if not isinstance(releases, list):
+        return []
+
+    saved = state_data.get("story_saved")
+    saved_map = saved if isinstance(saved, dict) else {}
+    commands: list[tuple[str, str]] = []
+    for release_index, release in enumerate(releases):
+        if not isinstance(release, dict):
+            continue
+        release_data = cast("dict[str, Any]", release)
+        items = release_data.get("items")
+        if not isinstance(items, list):
+            continue
+        requirements = [item for item in items if isinstance(item, str) and item]
+        if not requirements:
+            continue
+        if not all(
+            bool(saved_map.get(requirement))
+            or _story_requirement_has_merge_resolution(
+                state_data,
+                parent_requirement=requirement,
+            )
+            for requirement in requirements
+        ):
+            continue
+        scope_id = f"milestone_{release_index}"
+        commands.append(
+            (
+                "agileforge story complete",
+                (
+                    f"agileforge story complete --project-id {project_id} "
+                    "--expected-state STORY_PERSISTENCE "
+                    f"--scope milestone --scope-id {scope_id} "
+                    "--idempotency-key <idempotency_key>"
+                ),
+            )
+        )
+    return commands
 
 
 def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
