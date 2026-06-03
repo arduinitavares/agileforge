@@ -63,8 +63,8 @@ attempt as the new active baseline.
 - Create new active `backlog_seed` rows from the approved refined attempt.
 - Record both queryable row-level archive metadata and an audit `WorkflowEvent`.
 - Keep reset-archival distinguishable from ordinary save supersession.
-- Keep downstream artifacts stale until roadmap/story/sprint artifacts are
-  regenerated or acknowledged against the new baseline.
+- Keep downstream artifacts stale until a Roadmap generated from the reset
+  backlog baseline is successfully saved.
 - Make the command idempotent and fingerprint-guarded.
 - Fail closed when ordinary `backlog save` would work, so reset remains an
   exceptional override path.
@@ -154,8 +154,8 @@ Within one transaction, reset performs:
 
 Reset unblocks backlog persistence. It does not make existing downstream
 roadmap/story/sprint artifacts current. Those artifacts now reference
-superseded stories and must regenerate or explicitly acknowledge the new
-baseline later.
+superseded stories. A Roadmap generated from the reset backlog baseline must be
+saved before Story and Sprint commands can continue.
 
 ## Data Model
 
@@ -317,10 +317,9 @@ allow roadmap generate when:
 
 The same marker must continue to block story and sprint generation.
 
-After the regenerated roadmap is saved, AgileForge may clear
-`downstream_backlog_stale` or update the marker to the next stale boundary that
-still needs regeneration. It must not silently reuse pre-reset roadmap/story/sprint
-artifacts as current.
+After the regenerated roadmap is saved with a matching active-reset lineage,
+AgileForge clears the active-reset stale marker. It must not silently reuse
+pre-reset roadmap/story/sprint artifacts as current.
 
 ## Failure Modes
 
@@ -367,8 +366,8 @@ artifacts as current.
 18. `workflow next` after reset routes to roadmap regeneration from the reset
     backlog baseline.
 19. Roadmap generation is not blocked by the reset stale marker, but story and
-    sprint generation remain blocked until downstream artifacts are regenerated
-    or explicitly acknowledged against the reset baseline.
+    sprint generation remain blocked until a Roadmap generated from the reset
+    backlog baseline is successfully saved.
 20. Same idempotency request replays without duplicate story creation.
 21. Same idempotency key with different fingerprint fails.
 22. Completed Sprint history remains visible and linked to the archived stories.
@@ -381,16 +380,19 @@ artifacts as current.
 - Reset-active is allowed only from `BACKLOG_REVIEW` when
   `backlog_review_origin = "next_cycle_refinement"`.
 - Roadmap generation is the first stale-exit path after reset. Story and Sprint
-  generation remain blocked until downstream artifacts are regenerated or
-  explicitly acknowledged against the reset baseline.
+  generation remain blocked until a Roadmap generated from the reset backlog
+  baseline is successfully saved.
+- A guarded Roadmap save clears the active-reset stale marker only when the
+  saved Roadmap attempt was generated against the active reset lineage. The
+  clear removes `downstream_backlog_stale`, `stale_backlog_reason`, and
+  `stale_since_backlog_attempt_id`, while preserving active-reset audit fields
+  such as `active_backlog_reset_attempt_id`.
 
 ## Deferred Questions
 
-- After roadmap save, should AgileForge clear `downstream_backlog_stale`
-  entirely or update it to a narrower story/sprint stale boundary?
 - Should a later admin-only reset support non-`next_cycle_refinement` cases?
 
-These deferred questions do not block the core design.
+This deferred question does not block the core design.
 
 ## Implementation Boundaries
 

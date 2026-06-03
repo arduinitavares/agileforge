@@ -51,6 +51,8 @@ _GENERIC_CLARIFYING_QUESTION_PHRASES: tuple[str, ...] = (
     "more details",
 )
 _MIN_ACTIONABLE_QUESTION_WORDS: int = 5
+MAX_STORY_SCHEMA_REPAIR_ATTEMPTS: int = 2
+MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS: int = 4000
 
 
 class StoryInputContext(TypedDict):
@@ -99,6 +101,58 @@ def _normalize_validation_errors(errors: object) -> ValidationErrors:
             continue
         normalized.append({str(key): value for key, value in error.items()})
     return normalized
+
+
+def _story_input_context_from_model(
+    payload: UserStoryWriterInput,
+) -> StoryInputContext:
+    """Return the serializable Story request context for a validated payload."""
+    return {
+        "parent_requirement": payload.parent_requirement,
+        "requirement_context": payload.requirement_context,
+        "technical_spec": payload.technical_spec,
+        "compiled_authority": payload.compiled_authority,
+        "global_roadmap_context": payload.global_roadmap_context,
+        "already_generated_milestone_stories": (
+            payload.already_generated_milestone_stories
+        ),
+        "artifact_registry": dict(payload.artifact_registry),
+    }
+
+
+def _schema_repair_feedback_text(
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> str:
+    """Build bounded validation feedback for a Story schema-repair attempt."""
+    details = ""
+    if validation_errors is not None:
+        details = json.dumps(validation_errors, sort_keys=True, default=str)
+    feedback = (
+        "SYSTEM_FEEDBACK: Your previous User Story response failed validation.\n"
+        f"ERROR: {error}\n"
+        f"VALIDATION_ERRORS: {details}\n"
+        "Return JSON only. Match the UserStoryWriterOutput schema exactly. "
+        "Required top-level fields are parent_requirement, user_stories, "
+        "is_complete, and clarifying_questions. Do not add wrapper fields."
+    )
+    return feedback[:MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS]
+
+
+def _payload_with_schema_repair_feedback(
+    payload: UserStoryWriterInput,
+    *,
+    error: str,
+    validation_errors: object | None = None,
+) -> UserStoryWriterInput:
+    """Return a Story payload with validation feedback appended to context."""
+    feedback = _schema_repair_feedback_text(
+        error=error,
+        validation_errors=validation_errors,
+    )
+    requirement_context = f"{payload.requirement_context}\n\n{feedback}"
+    return payload.model_copy(update={"requirement_context": requirement_context})
 
 
 def _has_clarifying_questions(output: UserStoryWriterOutput) -> bool:
@@ -528,7 +582,7 @@ def build_story_request_payload(
     return input_context
 
 
-async def run_story_agent_request(
+async def run_story_agent_request(  # noqa: PLR0911
     request_payload: StoryInputContext,
     *,
     project_id: int,
@@ -556,92 +610,146 @@ async def run_story_agent_request(
             request_payload=request_payload,
         )
 
-    try:
-        raw_text = await _invoke_story_agent(payload)
-    except AgentInvocationError as exc:
-        return _with_failure_metadata(
-            _failure(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                input_context=request_payload,
-                failure_stage="invocation_exception",
-                details=_FailureDetails(
-                    message=f"Story runtime failed: {exc}",
-                    raw_text=exc.partial_output,
-                    exception=exc,
+    attempt_payload = payload
+    for attempt_index in range(1, MAX_STORY_SCHEMA_REPAIR_ATTEMPTS + 1):
+        attempt_request_payload = _story_input_context_from_model(attempt_payload)
+        try:
+            raw_text = await _invoke_story_agent(attempt_payload)
+        except AgentInvocationError as exc:
+            validation_errors = exc.validation_errors
+            if (
+                validation_errors
+                and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS
+            ):
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=str(exc),
+                    validation_errors=validation_errors,
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="output_validation"
+                    if validation_errors
+                    else "invocation_exception",
+                    details=_FailureDetails(
+                        message=(
+                            f"Story output validation failed: {exc}"
+                            if validation_errors
+                            else f"Story runtime failed: {exc}"
+                        ),
+                        raw_text=exc.partial_output,
+                        validation_errors=validation_errors,
+                        exception=exc,
+                    ),
                 ),
-            ),
-            classification="nonreusable_provider_failure",
-            draft_kind=None,
-            is_reusable=False,
-            request_payload=request_payload,
-        )
-    except ValueError as exc:
-        return _with_failure_metadata(
-            _failure(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                input_context=request_payload,
-                failure_stage="invocation_exception",
-                details=_FailureDetails(
-                    message=f"Story runtime failed: {exc}",
-                    exception=exc,
+                classification="nonreusable_schema_failure"
+                if validation_errors
+                else "nonreusable_provider_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+        except ValueError as exc:
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="invocation_exception",
+                    details=_FailureDetails(
+                        message=f"Story runtime failed: {exc}",
+                        exception=exc,
+                    ),
                 ),
-            ),
-            classification="nonreusable_provider_failure",
-            draft_kind=None,
-            is_reusable=False,
-            request_payload=request_payload,
+                classification="nonreusable_provider_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        parsed = parse_json_payload(raw_text)
+        if parsed is None:
+            error = "Story response is not valid JSON"
+            if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=error,
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="invalid_json",
+                    details=_FailureDetails(
+                        message=error,
+                        raw_text=raw_text,
+                    ),
+                ),
+                classification="nonreusable_schema_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        try:
+            output_model: UserStoryWriterOutput = UserStoryWriterOutput.model_validate(
+                parsed
+            )
+        except ValidationError as exc:
+            error = f"Story output validation failed: {exc}"
+            validation_errors = _normalize_validation_errors(exc.errors())
+            if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=error,
+                    validation_errors=validation_errors,
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="output_validation",
+                    details=_FailureDetails(
+                        message=error,
+                        raw_text=raw_text,
+                        validation_errors=validation_errors,
+                        exception=exc,
+                    ),
+                ),
+                classification="nonreusable_schema_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        return _story_success_result(
+            output_model,
+            raw_text=raw_text,
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            request_payload=attempt_request_payload,
         )
 
-    parsed = parse_json_payload(raw_text)
-    if parsed is None:
-        return _with_failure_metadata(
-            _failure(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                input_context=request_payload,
-                failure_stage="invalid_json",
-                details=_FailureDetails(
-                    message="Story response is not valid JSON",
-                    raw_text=raw_text,
-                ),
-            ),
-            classification="nonreusable_schema_failure",
-            draft_kind=None,
-            is_reusable=False,
-            request_payload=request_payload,
-        )
-
-    try:
-        output_model: UserStoryWriterOutput = UserStoryWriterOutput.model_validate(
-            parsed
-        )
-    except ValidationError as exc:
-        return _with_failure_metadata(
-            _failure(
-                project_id=project_id,
-                parent_requirement=parent_requirement,
-                input_context=request_payload,
-                failure_stage="output_validation",
-                details=_FailureDetails(
-                    message=f"Story output validation failed: {exc}",
-                    raw_text=raw_text,
-                    validation_errors=_normalize_validation_errors(exc.errors()),
-                    exception=exc,
-                ),
-            ),
-            classification="nonreusable_schema_failure",
-            draft_kind=None,
-            is_reusable=False,
-            request_payload=request_payload,
-        )
-
-    return _story_success_result(
-        output_model,
-        raw_text=raw_text,
-        project_id=project_id,
-        parent_requirement=parent_requirement,
+    msg = "Story runtime exhausted schema repair attempts."
+    return _with_failure_metadata(
+        _failure(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            input_context=request_payload,
+            failure_stage="output_validation",
+            details=_FailureDetails(message=msg),
+        ),
+        classification="nonreusable_schema_failure",
+        draft_kind=None,
+        is_reusable=False,
         request_payload=request_payload,
     )
 

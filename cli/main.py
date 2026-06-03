@@ -60,6 +60,7 @@ Examples:
   agileforge vision generate --project-id 1 --input "optional guidance"
   agileforge vision save --project-id 1
   agileforge backlog generate --project-id 1 --input "optional guidance"
+  agileforge backlog preview --project-id 1
   agileforge backlog save --project-id 1 --attempt-id <attempt_id> """
     """--expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW """
     """--idempotency-key save-backlog-001
@@ -76,6 +77,10 @@ Examples:
   agileforge backlog refine-import --project-id 1 --source-artifact source.json """
     """--edited-file edited.json --expected-source-fingerprint <fingerprint> """
     """--idempotency-key refine-import-001
+  agileforge backlog reset-active --project-id 1 --attempt-id <attempt_id> """
+    """--expected-artifact-fingerprint <fingerprint> --expected-state """
+    """BACKLOG_REVIEW --reset-reason "active_backlog_reset" """
+    """--archive-all-active-stories --idempotency-key reset-active-001
   agileforge evidence collect --project-id 1 --repo-path /path/to/repo """
     """--idempotency-key evidence-001
   agileforge evidence collect --project-id 1 --from-file evidence_report.json """
@@ -86,6 +91,11 @@ Examples:
   agileforge roadmap save --project-id 1 --attempt-id <attempt_id> """
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
     """--idempotency-key save-roadmap-001
+  agileforge story pending --project-id 1
+  agileforge story generate --project-id 1 --parent-requirement 'Roadmap requirement'
+  agileforge story save --project-id 1 --parent-requirement 'Roadmap requirement' """
+    """--attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> """
+    """--expected-state STORY_REVIEW --idempotency-key save-story-001
   agileforge sprint candidates --project-id 1
   agileforge sprint generate --project-id 1
   agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date """

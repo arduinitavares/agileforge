@@ -20,8 +20,10 @@ The installed CLI supports:
 - Spec Authority status, review, accept, reject, and invariant inspection.
 - Vision generate, history, and save.
 - Implementation evidence collection for evidence-aware Backlog generation.
-- Backlog generate, history, and save.
-- Roadmap generate, history, and save.
+- Backlog generate, preview, refinement attempts, approval, import, history,
+  save, reconcile, and active-backlog reset.
+- Roadmap generate, history, and save, including active-reset stale clearing
+  after guarded save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
 - Sprint candidates, generate, history, save, start, status, tasks, task
   tickets, and explicit story close.
@@ -31,7 +33,8 @@ The installed CLI supports:
 
 The installed CLI does not yet support:
 
-- Sprint close, deleting, or resetting workflow artifacts from the CLI.
+- Sprint close, deleting workflow artifacts, or arbitrary workflow artifact reset
+  from the CLI.
 - Task claim/lease, per-checklist-item tracking, or automatic validation run
   capture.
 
@@ -398,6 +401,71 @@ supersedes replaceable active `backlog_seed` rows before inserting the new
 draft. If any active backlog row has already progressed downstream, save fails
 closed with `MUTATION_FAILED`.
 
+### Brownfield Backlog Refinement and Active Reset
+
+For brownfield projects, use `backlog preview` or As-Built-aware generation
+before saving a new Backlog. Preview is non-persistent and is allowed from
+completed project states where ordinary `backlog generate` may be blocked:
+
+```sh
+agileforge backlog preview --project-id "$PROJECT_ID" > backlog-preview.json
+```
+
+Preview artifacts can include host-derived `as_built_annotation` and
+`brownfield_warnings`. Those fields are review context; agents must not hand-edit
+them into saved state. If the PO edits a preview artifact, import the edit
+through canonical refinement instead of saving the edited file directly:
+
+```sh
+agileforge backlog refine-import \
+  --project-id "$PROJECT_ID" \
+  --source-artifact source-backlog.json \
+  --edited-file edited-backlog.json \
+  --expected-source-fingerprint "sha256:..." \
+  --idempotency-key "refine-import-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > backlog-refine-import.json
+```
+
+`refine-import` records an imported source attempt and a refined attempt. It is
+not a Backlog save. Review the refined attempt, then record host-mediated
+approval against the exact refined artifact fingerprint:
+
+```sh
+agileforge backlog approve \
+  --project-id "$PROJECT_ID" \
+  --attempt-id "$ATTEMPT_ID" \
+  --approved-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --idempotency-key "approve-backlog-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > backlog-approve.json
+```
+
+After approval, try the ordinary guarded `backlog save` first when replacement
+is safe. If `backlog save` fails with `BACKLOG_REPLACEMENT_BLOCKED` because old
+active backlog stories have progressed downstream, an explicit PO-authorized
+active reset can soft-archive all active stories and install the approved
+refined backlog as the new baseline:
+
+```sh
+agileforge backlog reset-active \
+  --project-id "$PROJECT_ID" \
+  --attempt-id "$ATTEMPT_ID" \
+  --expected-artifact-fingerprint "$ARTIFACT_FINGERPRINT" \
+  --expected-state BACKLOG_REVIEW \
+  --reset-reason "active_backlog_reset" \
+  --archive-all-active-stories \
+  --idempotency-key "reset-active-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  > backlog-reset-active.json
+```
+
+`reset-active` is intentionally stronger than ordinary save. It reuses the same
+approved attempt/fingerprint contract, but it bypasses the replacement guard
+only because the operator explicitly asked to archive the active baseline.
+It soft-archives old active stories, preserves prior status in archive metadata,
+creates new `backlog_seed` rows from the approved refined attempt, moves the FSM
+to `BACKLOG_PERSISTENCE`, and sets the active-reset stale marker. Story and
+Sprint commands must remain blocked until the Roadmap is regenerated and saved
+against the reset backlog baseline.
+
 For projects affected by older CLI versions that appended multiple active
 Backlog seed sets, use the supported reconciliation command. It keeps the latest
 saved active seed cohort and supersedes older replaceable seed rows:
@@ -423,6 +491,17 @@ After Backlog save, the next installed command should be Roadmap generation:
 
 ```sh
 agileforge roadmap generate --project-id "$PROJECT_ID" > roadmap-generate.json
+```
+
+After an active-backlog reset, Roadmap generation is the first allowed stale-exit
+path. If the project already has a prior Roadmap draft/history, the runtime may
+require explicit `--input`. Use concrete reset context, not generic prompting:
+
+```sh
+agileforge roadmap generate \
+  --project-id "$PROJECT_ID" \
+  --input "Regenerate the roadmap from the active backlog after active-backlog reset. Treat the reset backlog attempt as the new reviewed baseline. Do not preserve roadmap structure that only existed for the pre-reset backlog." \
+  > roadmap-generate.json
 ```
 
 If the Roadmap command returns `ok: false`, stop and report the first error
@@ -477,6 +556,16 @@ Roadmap save enforces exact coverage of the canonical active Backlog. Every
 active backlog item must appear exactly once in the saved roadmap releases. If
 an item is missing, unknown, or duplicated, save fails closed.
 
+If the Roadmap attempt was generated after an active-backlog reset and the
+guarded `roadmap save` succeeds, AgileForge clears
+`downstream_backlog_stale`, `stale_backlog_reason`, and
+`stale_since_backlog_attempt_id`. It preserves active-reset audit fields such as
+`active_backlog_reset_attempt_id` and records stale-clear metadata. If an
+idempotent `roadmap save` replay returns an older saved response, the replay
+still repairs the stale marker when the saved attempt lineage matches the active
+reset. Story and Sprint commands are safe to continue only after the stale
+fields are clean.
+
 Then ask for the next installed command again:
 
 ```sh
@@ -525,6 +614,12 @@ Save:
 If the Story command returns `ok: false`, stop and report the first error code,
 message, and details. Story runtime and persistence failures are hard CLI
 failures and should not be hidden.
+
+Story generation makes one bounded internal schema-repair attempt when the model
+returns invalid JSON or schema-invalid `UserStoryWriterOutput` such as a missing
+top-level `is_complete` field. The retry appends `SYSTEM_FEEDBACK` with the
+validation errors to the same authoritative request context. If that repair also
+fails, stop and report the structured failure; do not save the prior draft.
 
 If the Story command returns `ok: true` with a retryable runtime failure in
 history, retry the same frozen request without inventing feedback:
@@ -1388,14 +1483,22 @@ input, not proof that all behavior is correct.
 ```sh
 agileforge backlog generate --project-id 1
 agileforge backlog generate --project-id 1 --input "answers or review feedback"
+agileforge backlog preview --project-id 1
+agileforge backlog refine-preview --project-id 1 --source-attempt-id <attempt_id> --operations-file refinement_ops.json
+agileforge backlog refine-record --project-id 1 --source-attempt-id <attempt_id> --operations-file refinement_ops.json --expected-source-fingerprint <fingerprint> --expected-state SPRINT_COMPLETE --idempotency-key refine-backlog-001
+agileforge backlog approve --project-id 1 --attempt-id <attempt_id> --approved-artifact-fingerprint <fingerprint> --idempotency-key approve-backlog-001
+agileforge backlog refine-import --project-id 1 --source-artifact source.json --edited-file edited.json --expected-source-fingerprint <fingerprint> --idempotency-key refine-import-001
 agileforge backlog history --project-id 1
 agileforge backlog save --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW --idempotency-key save-backlog-001
 agileforge backlog reconcile --project-id 1 --idempotency-key reconcile-backlog-001
+agileforge backlog reset-active --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state BACKLOG_REVIEW --reset-reason "active_backlog_reset" --archive-all-active-stories --idempotency-key reset-active-001
 ```
 
 Use `backlog generate` without `--input` for the initial Backlog run. Save only
 the reviewed current draft, using its returned attempt id and artifact
-fingerprint.
+fingerprint. Use `backlog preview`, refinement attempts, approval, and
+`reset-active` for reviewed next-cycle brownfield backlog replacement when
+ordinary save is blocked by progressed downstream stories.
 
 ### Roadmap Commands
 

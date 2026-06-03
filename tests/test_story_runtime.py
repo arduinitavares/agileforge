@@ -14,6 +14,9 @@ if TYPE_CHECKING:
         UserStoryWriterInput,
     )
 
+EXPECTED_SCHEMA_REPAIR_CALLS: int = 2
+ADK_SCHEMA_ERROR_MESSAGE: str = "1 validation error for UserStoryWriterOutput"
+
 
 def _base_state() -> dict[str, Any]:
     return {
@@ -538,6 +541,113 @@ async def test_story_runtime_invalid_json_is_nonreusable_schema_failure(
     assert result["classification"] == "nonreusable_schema_failure"
     assert result["is_reusable"] is False
     assert result["draft_kind"] is None
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_retries_schema_invalid_output_with_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify schema-invalid Story output receives one feedback repair attempt."""
+    captured_contexts: list[str] = []
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        captured_contexts.append(payload.requirement_context)
+        if len(captured_contexts) == 1:
+            return json.dumps(
+                {
+                    "parent_requirement": payload.parent_requirement,
+                    "user_stories": [_valid_story("Budget proof story")],
+                    "clarifying_questions": [],
+                }
+            )
+        return _valid_story_output(payload.parent_requirement)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert result["classification"] == "reusable_content_result"
+    assert len(captured_contexts) == EXPECTED_SCHEMA_REPAIR_CALLS
+    assert "SYSTEM_FEEDBACK" in captured_contexts[1]
+    assert "is_complete" in captured_contexts[1]
+    assert "UserStoryWriterOutput" in captured_contexts[1]
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_retries_adk_schema_validation_error_with_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ADK output-schema validation errors receive feedback retry."""
+    captured_contexts: list[str] = []
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        captured_contexts.append(payload.requirement_context)
+        if len(captured_contexts) == 1:
+            raise story_runtime.AgentInvocationError(
+                ADK_SCHEMA_ERROR_MESSAGE,
+                validation_errors=[
+                    {
+                        "loc": ("is_complete",),
+                        "msg": "Field required",
+                        "type": "missing",
+                    }
+                ],
+            )
+        return _valid_story_output(payload.parent_requirement)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert len(captured_contexts) == EXPECTED_SCHEMA_REPAIR_CALLS
+    assert "SYSTEM_FEEDBACK" in captured_contexts[1]
+    assert "is_complete" in captured_contexts[1]
+    assert "UserStoryWriterOutput" in captured_contexts[1]
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_exhausted_adk_schema_validation_stays_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify exhausted ADK output-schema failures are classified as schema failures."""
+
+    async def fake_invoke(_payload: UserStoryWriterInput) -> str:
+        raise story_runtime.AgentInvocationError(
+            ADK_SCHEMA_ERROR_MESSAGE,
+            validation_errors=[
+                {
+                    "loc": ("is_complete",),
+                    "msg": "Field required",
+                    "type": "missing",
+                }
+            ],
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input=None,
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert result["classification"] == "nonreusable_schema_failure"
+    assert result["is_reusable"] is False
 
 
 @pytest.mark.asyncio
