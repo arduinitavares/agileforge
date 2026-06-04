@@ -1,0 +1,3 @@
+## 2025-01-28 - Tooltips for Dynamically Disabled Buttons
+**Learning:** When buttons are dynamically disabled based on complex state conditions (e.g., in a workflow wizard), visual hint text alone might not be directly associated with the button for all users. Adding the explanatory text to the button's native `title` attribute ensures that the context explaining *why* the button is disabled is accessible via native tooltips when users hover or focus on the disabled control.
+**Action:** For dynamically disabled buttons, apply the explanatory text to both an adjacent visual hint element and the button's native `title` attribute.
