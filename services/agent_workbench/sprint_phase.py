@@ -827,6 +827,15 @@ class SprintPhaseRunner:
             replay = ledger_result.response or {}
             if isinstance(replay.get("data"), dict):
                 replay["data"].setdefault("idempotency", {})["replayed"] = True
+                if replay["data"].get("fsm_state") == "SPRINT_COMPLETE":
+                    resolved_replay_sprint_id = _int_or_none(
+                        replay["data"].get("sprint_id")
+                    )
+                    if resolved_replay_sprint_id is not None:
+                        self._sync_completed_sprint_state(
+                            project_id=project_id,
+                            sprint_id=resolved_replay_sprint_id,
+                        )
             return replay
 
         try:
@@ -860,8 +869,13 @@ class SprintPhaseRunner:
                     request=write_request,
                 )
                 state["fsm_state"] = "SPRINT_COMPLETE"
+                state["fsm_state_entered_at"] = _now_iso()
+                state["active_sprint_id"] = None
+                state["latest_completed_sprint_id"] = resolved_sprint_id
+                state["sprint_completed_at"] = state["fsm_state_entered_at"]
                 self._save_session_state(str(project_id), state)
                 closed["fsm_state"] = "SPRINT_COMPLETE"
+                closed["active_sprint_id"] = None
                 closed["sprint_fingerprint"] = _sprint_fingerprint_for_ids(
                     session=session,
                     sprint_id=resolved_sprint_id,
@@ -1105,6 +1119,34 @@ class SprintPhaseRunner:
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
 
+    def _sync_completed_sprint_state(self, *, project_id: int, sprint_id: int) -> None:
+        state = self._workflow_service.get_session_status(str(project_id)) or {}
+        completed_at = self._completed_sprint_timestamp(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+        state["fsm_state"] = "SPRINT_COMPLETE"
+        if completed_at is not None:
+            state["fsm_state_entered_at"] = completed_at
+        state["active_sprint_id"] = None
+        state["latest_completed_sprint_id"] = sprint_id
+        state["sprint_completed_at"] = completed_at
+        self._save_session_state(str(project_id), state)
+
+    def _completed_sprint_timestamp(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int,
+    ) -> str | None:
+        with Session(get_engine()) as session:
+            sprint = _get_saved_sprint(session, project_id, sprint_id)
+            if sprint is None:
+                return None
+            return _serialize_utc_temporal(
+                sprint.completed_at or sprint.updated_at or sprint.created_at
+            )
+
     def _current_planned_sprint_id(self, project_id: int) -> int | None:
         with Session(get_engine()) as session:
             sprint = session.exec(
@@ -1291,6 +1333,14 @@ def _serialize_temporal(value: object) -> str | None:
     if callable(isoformat):
         return str(isoformat())
     return str(value)
+
+
+def _serialize_utc_temporal(value: object) -> str | None:
+    """Serialize timestamp-like values as UTC ISO-8601 strings."""
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return normalized.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return _serialize_temporal(value)
 
 
 def _sorted_sprint_stories(sprint: Sprint) -> list[UserStory]:
@@ -2701,6 +2751,19 @@ def _dependency_closure(
 def _now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _int_or_none(value: object) -> int | None:
+    """Return an integer for int-shaped values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdecimal():
+            return int(stripped)
+    return None
 
 
 def _build_tool_context(context: object) -> ToolContext:

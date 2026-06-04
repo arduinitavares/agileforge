@@ -532,11 +532,60 @@ def _normalize_fsm_state(value: str | None) -> str:
 
 
 def _normalize_shell_fsm_state(value: str | None) -> str:
-    """Normalize shell-visible FSM state for legacy terminal sprint values."""
-    state = _normalize_fsm_state(value)
-    if state == OrchestratorState.SPRINT_COMPLETE.value:
-        return OrchestratorState.SPRINT_PERSISTENCE.value
-    return state
+    """Normalize shell-visible FSM state."""
+    return _normalize_fsm_state(value)
+
+
+def _coerce_int(value: object) -> int | None:
+    """Return an integer when the value is an int-shaped scalar."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdecimal():
+            return int(stripped)
+    return None
+
+
+def _reconcile_completed_sprint_state(
+    *,
+    project_id: int,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Project stale active-sprint state as complete when persisted truth wins."""
+    fsm_state = state.get("fsm_state")
+    if fsm_state not in {
+        OrchestratorState.SPRINT_PERSISTENCE.value,
+        OrchestratorState.SPRINT_VIEW.value,
+    }:
+        return state
+
+    active_sprint_id = _coerce_int(state.get("active_sprint_id"))
+    if active_sprint_id is None:
+        return state
+
+    with Session(get_engine()) as session:
+        sprint = session.get(Sprint, active_sprint_id)
+
+    if (
+        sprint is None
+        or sprint.product_id != project_id
+        or sprint.status != SprintStatus.COMPLETED
+    ):
+        return state
+
+    reconciled = dict(state)
+    completed_at = _serialize_utc_temporal(
+        sprint.completed_at or sprint.updated_at or sprint.created_at
+    )
+    reconciled["fsm_state"] = OrchestratorState.SPRINT_COMPLETE.value
+    reconciled["active_sprint_id"] = None
+    reconciled["latest_completed_sprint_id"] = active_sprint_id
+    reconciled["sprint_completed_at"] = completed_at
+    reconciled["sprint_state_reconciled_reason"] = "active_sprint_completed"
+    return reconciled
 
 
 def _failure_meta(
@@ -1038,6 +1087,13 @@ def _serialize_temporal(value: object) -> str | None:
     if isinstance(value, _SupportsIsoFormat):
         return value.isoformat()
     return str(value)
+
+
+def _serialize_utc_temporal(value: object) -> str | None:
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return normalized.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return _serialize_temporal(value)
 
 
 def _hash_payload(payload: object) -> str:
@@ -1659,6 +1715,10 @@ def _effective_project_state(
         state["setup_failure_summary"] = state["setup_error"]
     else:
         state = _effective_setup_or_ready_state(project, state)
+
+    project_id = _coerce_int(getattr(project, "product_id", None))
+    if project_id is not None:
+        state = _reconcile_completed_sprint_state(project_id=project_id, state=state)
 
     spec_path = getattr(project, "spec_file_path", None)
     state.setdefault("setup_failure_artifact_id", None)
@@ -2920,6 +2980,12 @@ def post_sprint_close(
                 detail=exc.detail,
             ) from exc
 
+        if data.get("current_status") == SprintStatus.COMPLETED.value:
+            _sync_completed_sprint_workflow_state(
+                project_id=project_id,
+                sprint_id=sprint_id,
+            )
+
         return SprintCloseReadResponse(**data)
 
 
@@ -3343,6 +3409,19 @@ def _sync_started_sprint_workflow_state(*, project_id: int, sprint_id: int) -> N
     state["fsm_state_entered_at"] = now
     state["active_sprint_id"] = sprint_id
     state["sprint_started_at"] = now
+    workflow_service.update_session_status(session_id, state)
+
+
+def _sync_completed_sprint_workflow_state(*, project_id: int, sprint_id: int) -> None:
+    """Move the workbench session to Sprint complete after API close."""
+    session_id = str(project_id)
+    state = workflow_service.get_session_status(session_id) or {}
+    now = _now_iso()
+    state["fsm_state"] = OrchestratorState.SPRINT_COMPLETE.value
+    state["fsm_state_entered_at"] = now
+    state["active_sprint_id"] = None
+    state["latest_completed_sprint_id"] = sprint_id
+    state["sprint_completed_at"] = now
     workflow_service.update_session_status(session_id, state)
 
 

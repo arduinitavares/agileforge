@@ -1474,6 +1474,9 @@ def test_sprint_close_marks_sprint_completed_and_updates_workflow(
     assert replay["ok"] is True
     assert replay["data"]["idempotency"]["replayed"] is True
     assert workflow.state["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.state["active_sprint_id"] is None
+    assert workflow.state["latest_completed_sprint_id"] == sprint.sprint_id
+    assert workflow.state["sprint_completed_at"] is not None
 
     session.expire_all()
     persisted_sprint = session.get(Sprint, sprint.sprint_id)

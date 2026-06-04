@@ -85,7 +85,7 @@ def test_post_sprint_close_persists_snapshot_and_completion_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persist the close snapshot and emit the sprint-completed workflow event."""
-    client, repo, _workflow = _build_client(monkeypatch)
+    client, repo, workflow = _build_client(monkeypatch)
     project_id, sprint_id = _seed_saved_sprint(
         session,
         repo,
@@ -134,6 +134,10 @@ def test_post_sprint_close_persists_snapshot_and_completion_event(
         )
     ).first()
     assert event is not None
+    assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.states[str(project_id)]["active_sprint_id"] is None
+    assert workflow.states[str(project_id)]["latest_completed_sprint_id"] == sprint_id
+    assert workflow.states[str(project_id)]["sprint_completed_at"] is not None
 
     detail_response = client.get(f"/api/projects/{project_id}/sprints/{sprint_id}")
     assert detail_response.status_code == HTTP_OK

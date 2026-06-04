@@ -191,6 +191,40 @@ def test_workflow_state_uses_injected_read_only_session_reader(
     assert result["data"]["source_fingerprint"].startswith("sha256:")
 
 
+def test_workflow_state_reconciles_completed_active_sprint(
+    session: Session,
+) -> None:
+    """Prevent stale session state from advertising a completed Sprint as active."""
+    product_id, _story_id, sprint_id, _task_id = _seed_project_with_story(session)
+    sprint = session.get(Sprint, sprint_id)
+    assert sprint is not None
+    sprint.status = SprintStatus.COMPLETED
+    sprint.completed_at = datetime(2026, 5, 28, 18, tzinfo=UTC)
+    session.add(sprint)
+    session.commit()
+    reader = _FakeSessionReader(
+        {
+            "fsm_state": "SPRINT_PERSISTENCE",
+            "setup_status": "passed",
+            "active_sprint_id": sprint_id,
+        }
+    )
+    service = ReadProjectionService(
+        engine=_engine(session),
+        session_reader=cast("ReadOnlySessionReader", reader),
+    )
+
+    result = service.workflow_state(project_id=product_id)
+
+    assert result["ok"] is True
+    state = result["data"]["state"]
+    assert state["fsm_state"] == "SPRINT_COMPLETE"
+    assert state["active_sprint_id"] is None
+    assert state["latest_completed_sprint_id"] == sprint_id
+    assert state["sprint_completed_at"] == "2026-05-28T18:00:00Z"
+    assert state["sprint_state_reconciled_reason"] == "active_sprint_completed"
+
+
 def test_story_show_returns_validation_and_fingerprint(session: Session) -> None:
     """Verify story show exposes story details without validation side effects."""
     _product_id, story_id, _sprint_id, _task_id = _seed_project_with_story(session)

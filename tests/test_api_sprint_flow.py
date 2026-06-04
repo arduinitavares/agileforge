@@ -1289,7 +1289,7 @@ def test_sprint_save_surfaces_unexpected_persistence_tool_error(monkeypatch):  #
     assert response.json()["detail"] == "database unavailable"
 
 
-def test_project_state_normalizes_legacy_sprint_complete(monkeypatch):  # noqa: ANN001, ANN201, D103
+def test_project_state_preserves_sprint_complete(monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_setup_project(repo, workflow)
     workflow.states[str(project_id)] = {
@@ -1300,7 +1300,40 @@ def test_project_state_normalizes_legacy_sprint_complete(monkeypatch):  # noqa: 
     response = client.get(f"/api/projects/{project_id}/state")
 
     assert response.status_code == 200  # noqa: PLR2004
-    assert response.json()["data"]["fsm_state"] == "SPRINT_PERSISTENCE"
+    assert response.json()["data"]["fsm_state"] == "SPRINT_COMPLETE"
+
+
+def test_project_state_reconciles_completed_active_sprint(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    product = repo.get_by_id(project_id)
+    assert product is not None
+    product.spec_file_path = __file__
+    product.compiled_authority_json = '{"ok": true}'
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_PERSISTENCE",
+        "setup_status": "passed",
+        "active_sprint_id": sprint_id,
+    }
+
+    response = client.get(f"/api/projects/{project_id}/state")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    payload = response.json()["data"]
+    assert payload["fsm_state"] == "SPRINT_COMPLETE"
+    assert payload["active_sprint_id"] is None
+    assert payload["latest_completed_sprint_id"] == sprint_id
+    assert payload["sprint_completed_at"] == "2026-03-15T18:00:00Z"
+    assert payload["sprint_state_reconciled_reason"] == "active_sprint_completed"
+    assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.states[str(project_id)]["active_sprint_id"] is None
 
 
 def test_list_sprints_returns_saved_sprints_newest_first(session, monkeypatch):  # noqa: ANN001, ANN201, D103

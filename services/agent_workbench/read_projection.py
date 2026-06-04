@@ -375,6 +375,51 @@ def _hierarchy_payload(hierarchy: _StoryHierarchy) -> JsonDict:
     }
 
 
+def _int_or_none(value: object) -> int | None:
+    """Return an integer for int-shaped values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdecimal():
+            return int(stripped)
+    return None
+
+
+def _reconcile_completed_sprint_projection(
+    *,
+    session: Session,
+    project_id: int,
+    state: JsonDict,
+) -> JsonDict:
+    """Project stale active-sprint state as complete when persisted Sprint is done."""
+    if state.get("fsm_state") not in {"SPRINT_PERSISTENCE", "SPRINT_VIEW"}:
+        return state
+
+    active_sprint_id = _int_or_none(state.get("active_sprint_id"))
+    if active_sprint_id is None:
+        return state
+
+    sprint = session.get(Sprint, active_sprint_id)
+    if (
+        sprint is None
+        or sprint.product_id != project_id
+        or sprint.status != SprintStatus.COMPLETED
+    ):
+        return state
+
+    reconciled = dict(state)
+    completed_at = _iso_z(sprint.completed_at or sprint.updated_at or sprint.created_at)
+    reconciled["fsm_state"] = "SPRINT_COMPLETE"
+    reconciled["active_sprint_id"] = None
+    reconciled["latest_completed_sprint_id"] = active_sprint_id
+    reconciled["sprint_completed_at"] = completed_at
+    reconciled["sprint_state_reconciled_reason"] = "active_sprint_completed"
+    return reconciled
+
+
 class ReadProjectionService:
     """Read-only projections for CLI orientation commands."""
 
@@ -530,6 +575,8 @@ class ReadProjectionService:
         if schema_error is not None:
             return schema_error
 
+        state = self._session_reader.get_project_state(project_id)
+
         with Session(self._engine) as session:
             product = session.get(Product, project_id)
             if product is None:
@@ -538,8 +585,12 @@ class ReadProjectionService:
                 "product_id": product.product_id,
                 "updated_at": _iso_z(product.updated_at),
             }
+            state = _reconcile_completed_sprint_projection(
+                session=session,
+                project_id=project_id,
+                state=state,
+            )
 
-        state = self._session_reader.get_project_state(project_id)
         data = {
             "project_id": project_id,
             "state": state,
