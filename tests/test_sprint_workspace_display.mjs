@@ -73,6 +73,8 @@ test('openSprintPlanner resets planner working state for create-next mode', asyn
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
+            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
         ],
@@ -103,6 +105,7 @@ test('openSprintPlanner resets planner working state for create-next mode', asyn
     globalThis.updateSprintSaveButton = () => { calls.saveButton += 1; };
 
     globalThis.sprintRuntimeSummary = { can_create_next_sprint: true };
+    globalThis.activeFsmState = 'SPRINT_SETUP';
     globalThis.selectedSprintStoryIds = new Set([12, 18]);
     globalThis.latestSprintIsComplete = true;
     globalThis.sprintAttemptCount = 4;
@@ -131,10 +134,65 @@ test('openSprintPlanner resets planner working state for create-next mode', asyn
     assert.equal(calls.loadHistory, 1);
 });
 
+test('openSprintPlanner preserves reviewable sprint draft even if summary is stale', async () => {
+    const openSprintPlanner = loadSprintFunction(
+        'openSprintPlanner',
+        [
+            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
+            /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
+            /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
+        ],
+    );
+
+    const calls = {
+        resetCycle: 0,
+        historyRender: null,
+        attemptPanels: null,
+    };
+
+    globalThis.resetSprintClosePanel = () => {};
+    globalThis.resetSprintPlannerStateForCreateNext = async () => { calls.resetCycle += 1; };
+    globalThis.renderPhaseSection = () => {};
+    globalThis.updateNextButton = () => {};
+    globalThis.loadSprintCandidates = async () => {};
+    globalThis.loadSprintHistory = async () => {};
+    globalThis.renderSprintHistory = (items) => { calls.historyRender = items; };
+    globalThis.renderSprintAttemptPanels = (inputContext, outputArtifact) => {
+        calls.attemptPanels = [inputContext, outputArtifact];
+    };
+    globalThis.updateSprintSaveButton = () => {};
+
+    globalThis.activeFsmState = 'SPRINT_DRAFT';
+    globalThis.sprintRuntimeSummary = { can_create_next_sprint: true };
+    globalThis.selectedSprintStoryIds = new Set([86, 99]);
+    globalThis.latestSprintIsComplete = true;
+    globalThis.sprintAttemptCount = 2;
+    globalThis.currentSprintArtifactJSON = { sprint_goal: 'Review this draft' };
+    globalThis.currentSprintInputContextJSON = { available_stories: [{ story_id: 86 }] };
+    globalThis.viewPhaseId = 'overview';
+    globalThis.showSprintPlanner = false;
+
+    await openSprintPlanner();
+
+    assert.deepEqual(Array.from(globalThis.selectedSprintStoryIds), [86, 99]);
+    assert.equal(globalThis.latestSprintIsComplete, true);
+    assert.equal(globalThis.sprintAttemptCount, 2);
+    assert.deepEqual(globalThis.currentSprintArtifactJSON, { sprint_goal: 'Review this draft' });
+    assert.deepEqual(globalThis.currentSprintInputContextJSON, { available_stories: [{ story_id: 86 }] });
+    assert.equal(globalThis.viewPhaseId, 'sprint');
+    assert.equal(globalThis.showSprintPlanner, true);
+    assert.equal(calls.resetCycle, 0);
+    assert.equal(calls.historyRender, null);
+    assert.equal(calls.attemptPanels, null);
+});
+
 test('openSprintPlanner preserves planner working state for modify-planned mode', async () => {
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
+            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
         ],
@@ -159,6 +217,7 @@ test('openSprintPlanner preserves planner working state for modify-planned mode'
     globalThis.updateSprintSaveButton = () => {};
 
     globalThis.sprintRuntimeSummary = { can_create_next_sprint: false };
+    globalThis.activeFsmState = 'SPRINT_PERSISTENCE';
     globalThis.selectedSprintStoryIds = new Set([12, 18]);
     globalThis.latestSprintIsComplete = true;
     globalThis.sprintAttemptCount = 4;

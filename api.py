@@ -868,6 +868,8 @@ def _load_sprint_close_snapshot(sprint: Sprint) -> dict[str, Any] | None:
 
 def _build_sprint_runtime_summary(
     sprints: Sequence[Sprint],
+    *,
+    workflow_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     active = next(
         (sprint for sprint in sprints if sprint.status == SprintStatus.ACTIVE),
@@ -884,20 +886,45 @@ def _build_sprint_runtime_summary(
         ),
         reverse=True,
     )
-    return {
+    state = workflow_state or {}
+    draft_assessment = state.get("sprint_plan_assessment")
+    if not isinstance(draft_assessment, dict):
+        draft_assessment = {}
+    has_reviewable_draft = (
+        state.get("fsm_state") == OrchestratorState.SPRINT_DRAFT.value
+        and bool(draft_assessment.get("is_complete"))
+    )
+    can_create_next_sprint = planned is None and not has_reviewable_draft
+    disabled_reason = None
+    if has_reviewable_draft:
+        disabled_reason = (
+            "A sprint draft is waiting for review. Save or refine it before "
+            "creating another sprint."
+        )
+    elif planned is not None:
+        disabled_reason = (
+            "A planned sprint already exists. "
+            "Modify it instead of creating another."
+        )
+
+    summary = {
         "active_sprint_id": active.sprint_id if active else None,
         "planned_sprint_id": planned.sprint_id if planned else None,
         "latest_completed_sprint_id": completed[0].sprint_id if completed else None,
-        "can_create_next_sprint": planned is None,
-        "create_next_sprint_disabled_reason": (
-            None
-            if planned is None
-            else (
-                "A planned sprint already exists. "
-                "Modify it instead of creating another."
-            )
-        ),
+        "can_create_next_sprint": can_create_next_sprint,
+        "create_next_sprint_disabled_reason": disabled_reason,
     }
+    if has_reviewable_draft:
+        summary.update(
+            {
+                "has_reviewable_sprint_draft": True,
+                "sprint_draft_attempt_id": draft_assessment.get("attempt_id"),
+                "sprint_draft_artifact_fingerprint": draft_assessment.get(
+                    "artifact_fingerprint"
+                ),
+            }
+        )
+    return summary
 
 
 def _allowed_actions_for_sprint(
@@ -2761,13 +2788,17 @@ async def list_project_sprints(project_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Project not found")
 
     with Session(get_engine()) as session:
+        workflow_state = workflow_service.get_session_status(str(project_id))
         payload = list_saved_sprints_service(
             load_sprints=lambda: session.exec(
                 _saved_sprint_query()
                 .where(Sprint.product_id == project_id)
                 .order_by(desc(_queryable_attr(Sprint.created_at)))
             ).all(),
-            build_runtime_summary=_build_sprint_runtime_summary,
+            build_runtime_summary=lambda sprints: _build_sprint_runtime_summary(
+                sprints,
+                workflow_state=workflow_state,
+            ),
             serialize_sprint_list_item=lambda sprint, runtime_summary: (
                 _serialize_sprint_list_item(
                     sprint,
@@ -2789,6 +2820,7 @@ async def get_project_sprint(project_id: int, sprint_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Project not found")
 
     with Session(get_engine()) as session:
+        workflow_state = workflow_service.get_session_status(str(project_id))
         try:
             data = get_saved_sprint_detail_service(
                 load_sprint=lambda: _get_saved_sprint(session, project_id, sprint_id),
@@ -2797,7 +2829,10 @@ async def get_project_sprint(project_id: int, sprint_id: int) -> dict[str, Any]:
                     .where(Sprint.product_id == project_id)
                     .order_by(desc(_queryable_attr(Sprint.created_at)))
                 ).all(),
-                build_runtime_summary=_build_sprint_runtime_summary,
+                build_runtime_summary=lambda sprints: _build_sprint_runtime_summary(
+                    sprints,
+                    workflow_state=workflow_state,
+                ),
                 serialize_sprint_detail=lambda sprint, runtime_summary: (
                     _serialize_sprint_detail(
                         sprint,

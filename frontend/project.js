@@ -342,7 +342,11 @@ function getCompletedPhaseCount() {
 }
 
 function shouldHideWorkflowFooter() {
-    return viewPhaseId === 'overview' || (viewPhaseId === 'sprint' && currentSprintId && !showSprintPlanner);
+    return viewPhaseId === 'overview'
+        || (viewPhaseId === 'sprint'
+            && currentSprintId
+            && !showSprintPlanner
+            && !hasReviewableSprintDraft());
 }
 
 function applyResolvedLanding(stateKey, landing) {
@@ -355,6 +359,13 @@ function applyResolvedLanding(stateKey, landing) {
     }
 
     if (landing.phaseId === 'sprint') {
+        if (hasReviewableSprintDraft(stateKey)) {
+            currentSprintId = null;
+            sprintMode = null;
+            showSprintPlanner = true;
+            setPhaseState(stateKey, 'sprint');
+            return;
+        }
         const savedSprint = landing.currentSprintId ? getSavedSprintById(landing.currentSprintId) : null;
         if (savedSprint) {
             currentSprintId = savedSprint.id;
@@ -1316,7 +1327,11 @@ function handleNextPhase() {
     if (!target) return;
 
     if (target === 'sprint') {
-        if (isPlanningCompleteState(activeFsmState) && ensureCurrentSprintSelection()) {
+        if (hasReviewableSprintDraft()) {
+            currentSprintId = null;
+            sprintMode = null;
+            showSprintPlanner = true;
+        } else if (isPlanningCompleteState(activeFsmState) && ensureCurrentSprintSelection()) {
             showSprintPlanner = false;
             sprintMode = getSprintMode(getSavedSprintById(currentSprintId));
         } else {
@@ -1342,8 +1357,9 @@ function runAutoLoadForVisiblePhase() {
         generateRoadmapDraft();
     } else if (viewPhaseId === 'story') {
         loadStoryRequirements();
-    } else if (viewPhaseId === 'sprint' && (!currentSprintId || showSprintPlanner)) {
+    } else if (viewPhaseId === 'sprint' && (!currentSprintId || showSprintPlanner || hasReviewableSprintDraft())) {
         loadSprintCandidates();
+        loadSprintHistory();
     }
 }
 
@@ -1375,7 +1391,9 @@ function handlePhaseNavigation(phaseId) {
     if (!isPhaseNavigable(phaseId)) return;
 
     if (phaseId === 'sprint') {
-        const selectedSprint = ensureCurrentSprintSelection();
+        const selectedSprint = hasReviewableSprintDraft()
+            ? null
+            : ensureCurrentSprintSelection();
         if (selectedSprint) {
             sprintMode = getSprintMode(selectedSprint);
             showSprintPlanner = false;
@@ -3409,6 +3427,19 @@ function resetSprintClosePanel() {
     if (followUpNotes) followUpNotes.value = '';
 }
 
+function hasReviewableSprintDraft(stateKey = activeFsmState) {
+    const normalizedState = typeof stateKey === 'string'
+        ? stateKey.trim().toUpperCase()
+        : '';
+    return normalizedState === 'SPRINT_DRAFT'
+        || Boolean(sprintRuntimeSummary?.has_reviewable_sprint_draft);
+}
+
+function shouldStartFreshSprintCycle() {
+    return Boolean(sprintRuntimeSummary?.can_create_next_sprint)
+        && !hasReviewableSprintDraft();
+}
+
 function renderOverviewPanel() {
     const container = document.getElementById('overview-panel-content');
     if (!container) return;
@@ -3416,12 +3447,18 @@ function renderOverviewPanel() {
     const completedCount = getCompletedPhaseCount();
     const nextPhase = getNextIncompletePlanningPhase(activeFsmState);
     const planningComplete = isPlanningCompleteState(activeFsmState);
+    const hasDraftToReview = hasReviewableSprintDraft();
     const activeSprintId = sprintRuntimeSummary?.active_sprint_id || null;
     const plannedSprintId = sprintRuntimeSummary?.planned_sprint_id || null;
     const latestCompletedSprintId = sprintRuntimeSummary?.latest_completed_sprint_id || null;
     const savedSprintCount = savedSprints.length;
 
-    const primaryActionHtml = activeSprintId
+    const primaryActionHtml = hasDraftToReview
+        ? `<button type="button" onclick="openSprintPlanner()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
+                <span class="material-symbols-outlined text-sm">fact_check</span>
+                Review Sprint Draft
+           </button>`
+        : activeSprintId
         ? `<button type="button" onclick="selectSavedSprintById(${activeSprintId})" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
                 <span class="material-symbols-outlined text-sm">play_circle</span>
                 Open Active Sprint
@@ -3478,8 +3515,10 @@ function renderOverviewPanel() {
                 </div>
                 <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                     <div class="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sprint Runtime</div>
-                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${activeSprintId ? 'Sprint Active' : plannedSprintId ? 'Planned Sprint Ready' : latestCompletedSprintId ? 'Last Sprint Completed' : 'No Sprint Yet'}</div>
-                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${activeSprintId
+                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${hasDraftToReview ? 'Sprint Draft Ready' : activeSprintId ? 'Sprint Active' : plannedSprintId ? 'Planned Sprint Ready' : latestCompletedSprintId ? 'Last Sprint Completed' : 'No Sprint Yet'}</div>
+                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${hasDraftToReview
+                        ? 'A generated sprint draft is ready for review and save.'
+                        : activeSprintId
                         ? 'Execution is active. Open the sprint workspace to manage in-flight work.'
                         : plannedSprintId
                             ? 'A planned sprint is ready to start or refine.'
@@ -3515,7 +3554,10 @@ function renderSprintSavedWorkspace() {
         ? currentSprintDetail
         : null;
     const sprintRecord = selectedSprint || selectedSprintLite;
-    const shouldShowSavedWorkspace = viewPhaseId === 'sprint' && Boolean(sprintRecord) && !showSprintPlanner;
+    const shouldShowSavedWorkspace = viewPhaseId === 'sprint'
+        && Boolean(sprintRecord)
+        && !showSprintPlanner
+        && !hasReviewableSprintDraft();
 
     savedWorkspace.classList.toggle('hidden', !shouldShowSavedWorkspace);
     plannerWorkspace.classList.toggle('hidden', shouldShowSavedWorkspace);
@@ -3579,10 +3621,16 @@ function renderSprintSavedWorkspace() {
         closeButton.disabled = !canClose;
     }
     if (plannerButton) {
-        const canCreateNextSprint = Boolean(sprintRuntimeSummary?.can_create_next_sprint);
-        const plannerLabel = canCreateNextSprint ? 'Create Next Sprint' : 'Modify Planned Sprint';
+        const hasDraftToReview = hasReviewableSprintDraft();
+        const canCreateNextSprint = Boolean(sprintRuntimeSummary?.can_create_next_sprint)
+            && !hasDraftToReview;
+        const plannerLabel = hasDraftToReview
+            ? 'Review Sprint Draft'
+            : canCreateNextSprint
+                ? 'Create Next Sprint'
+                : 'Modify Planned Sprint';
         plannerButton.innerHTML = `
-            <span class="material-symbols-outlined text-sm">${canCreateNextSprint ? 'add_task' : 'edit_note'}</span>
+            <span class="material-symbols-outlined text-sm">${hasDraftToReview ? 'fact_check' : canCreateNextSprint ? 'add_task' : 'edit_note'}</span>
             ${plannerLabel}
         `;
     }
@@ -3821,7 +3869,7 @@ async function openSprintPlanner() {
     resetSprintClosePanel();
     viewPhaseId = 'sprint';
     showSprintPlanner = true;
-    const shouldStartFreshCycle = Boolean(sprintRuntimeSummary?.can_create_next_sprint);
+    const shouldStartFreshCycle = shouldStartFreshSprintCycle();
     if (shouldStartFreshCycle) {
         resetSprintPlannerWorkingSet();
     }

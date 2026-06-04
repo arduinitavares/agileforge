@@ -1374,6 +1374,45 @@ def test_list_sprints_returns_saved_sprints_newest_first(session, monkeypatch): 
     assert "selected_stories" not in payload["data"]["items"][0]
 
 
+def test_list_sprints_blocks_create_next_when_reviewable_draft_exists(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_DRAFT",
+        "sprint_plan_assessment": {
+            "attempt_id": "sprint-attempt-2",
+            "artifact_fingerprint": "sha256:reviewable",
+            "is_complete": True,
+        },
+    }
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    payload = response.json()
+    assert payload["data"]["count"] == 1
+    assert payload["data"]["runtime_summary"] == {
+        "active_sprint_id": None,
+        "planned_sprint_id": None,
+        "latest_completed_sprint_id": completed_sprint_id,
+        "can_create_next_sprint": False,
+        "create_next_sprint_disabled_reason": (
+            "A sprint draft is waiting for review. Save or refine it before "
+            "creating another sprint."
+        ),
+        "has_reviewable_sprint_draft": True,
+        "sprint_draft_attempt_id": "sprint-attempt-2",
+        "sprint_draft_artifact_fingerprint": "sha256:reviewable",
+    }
+
+
 def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id, sprint_id = _seed_saved_sprint(
