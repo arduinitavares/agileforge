@@ -453,6 +453,128 @@ def test_repair_setup_recovery_target_rejects_active_pending_create(
     assert result.ledger.status == MutationStatus.PENDING.value
 
 
+def test_repair_setup_recovery_target_reports_in_progress_on_lease_race(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify setup repair classifies lease-refresh races as in progress."""
+    repo = _repo(engine)
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-project-001",
+        request_hash="sha256:req",
+        project_id=PROJECT_ID,
+        correlation_id="corr-1",
+        changed_by="cli-agent",
+        lease_owner="worker-1",
+        now=now,
+        lease_seconds=1,
+    ).ledger
+    assert row.mutation_event_id is not None
+    original_exec = mutation_ledger_mod.Session.exec
+    raced = False
+    refreshing_lease = False
+
+    def exec_with_lease_race(session: Session, statement: object) -> object:
+        nonlocal raced, refreshing_lease
+        if (
+            not raced
+            and not refreshing_lease
+            and isinstance(statement, Update)
+        ):
+            raced = True
+            refreshing_lease = True
+            with Session(engine) as competing_session:
+                competing_session.exec(
+                    update(CliMutationLedger)
+                    .where(_LEDGER_MUTATION_EVENT_ID == row.mutation_event_id)
+                    .values(
+                        lease_owner="worker-race",
+                        lease_acquired_at=_db_time(now + timedelta(seconds=1)),
+                        last_heartbeat_at=_db_time(now + timedelta(seconds=1)),
+                        lease_expires_at=_db_time(now + timedelta(seconds=60)),
+                        updated_at=_db_time(now + timedelta(seconds=1)),
+                    )
+                )
+                competing_session.commit()
+            refreshing_lease = False
+        return original_exec(session, statement)
+
+    monkeypatch.setattr(mutation_ledger_mod.Session, "exec", exec_with_lease_race)
+
+    result = repo.repair_setup_recovery_target(
+        mutation_event_id=row.mutation_event_id,
+        expected_command="agileforge project create",
+        expected_project_id=PROJECT_ID,
+        now=now + timedelta(seconds=1),
+    )
+
+    assert result.error_code == MUTATION_IN_PROGRESS
+    assert result.ledger.status == MutationStatus.PENDING.value
+    assert result.ledger.lease_owner == "worker-race"
+    assert result.ledger.lease_expires_at == _db_time(now + timedelta(seconds=60))
+
+
+def test_repair_setup_recovery_target_fences_snapshot_lease_owner(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify setup repair misses when the expired lease owner changes."""
+    repo = _repo(engine)
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-project-001",
+        request_hash="sha256:req",
+        project_id=PROJECT_ID,
+        correlation_id="corr-1",
+        changed_by="cli-agent",
+        lease_owner="worker-1",
+        now=now,
+        lease_seconds=1,
+    ).ledger
+    assert row.mutation_event_id is not None
+    original_exec = mutation_ledger_mod.Session.exec
+    raced = False
+    changing_owner = False
+
+    def exec_with_owner_race(session: Session, statement: object) -> object:
+        nonlocal raced, changing_owner
+        if (
+            not raced
+            and not changing_owner
+            and isinstance(statement, Update)
+        ):
+            raced = True
+            changing_owner = True
+            with Session(engine) as competing_session:
+                competing_session.exec(
+                    update(CliMutationLedger)
+                    .where(_LEDGER_MUTATION_EVENT_ID == row.mutation_event_id)
+                    .values(
+                        lease_owner="worker-race",
+                        updated_at=_db_time(now + timedelta(seconds=1)),
+                    )
+                )
+                competing_session.commit()
+            changing_owner = False
+        return original_exec(session, statement)
+
+    monkeypatch.setattr(mutation_ledger_mod.Session, "exec", exec_with_owner_race)
+
+    result = repo.repair_setup_recovery_target(
+        mutation_event_id=row.mutation_event_id,
+        expected_command="agileforge project create",
+        expected_project_id=PROJECT_ID,
+        now=now + timedelta(seconds=1),
+    )
+
+    assert result.error_code == MUTATION_RESUME_CONFLICT
+    assert result.ledger.status == MutationStatus.PENDING.value
+    assert result.ledger.lease_owner == "worker-race"
+
+
 def test_stale_recovery_loses_race_when_same_owner_refreshes_lease(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,

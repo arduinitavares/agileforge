@@ -424,12 +424,24 @@ class MutationLedgerRepository:
             if row.lease_expires_at is None or row.lease_expires_at > db_now:
                 return LedgerLoadResult(ledger=row, error_code=MUTATION_IN_PROGRESS)
 
-            result = session.exec(
+            snapshot_lease_owner = row.lease_owner
+            snapshot_lease_expires_at = row.lease_expires_at
+            statement = (
                 update(CliMutationLedger)
                 .where(_MUTATION_EVENT_ID == mutation_event_id)
+                .where(_COMMAND == expected_command)
+                .where(_PROJECT_ID == expected_project_id)
                 .where(_STATUS == MutationStatus.PENDING.value)
+                .where(_LEASE_EXPIRES_AT == snapshot_lease_expires_at)
                 .where(_LEASE_EXPIRES_AT <= db_now)
-                .values(
+            )
+            if snapshot_lease_owner is None:
+                statement = statement.where(_LEASE_OWNER.is_(None))
+            else:
+                statement = statement.where(_LEASE_OWNER == snapshot_lease_owner)
+
+            result = session.exec(
+                statement.values(
                     status=MutationStatus.RECOVERY_REQUIRED.value,
                     recovery_action=RecoveryAction.RECONCILE_THEN_RESUME.value,
                     recovery_safe_to_auto_resume=False,
@@ -442,14 +454,24 @@ class MutationLedgerRepository:
                 )
             )
             session.commit()
+            session.expire_all()
             repaired = session.get(CliMutationLedger, mutation_event_id)
             if repaired is None:
                 message = f"Mutation event {mutation_event_id} not found."
                 raise ValueError(message)
             if result.rowcount != 1:
+                error_code = MUTATION_RESUME_CONFLICT
+                if (
+                    repaired.status == MutationStatus.PENDING.value
+                    and (
+                        repaired.lease_expires_at is None
+                        or repaired.lease_expires_at > db_now
+                    )
+                ):
+                    error_code = MUTATION_IN_PROGRESS
                 return LedgerLoadResult(
                     ledger=repaired,
-                    error_code=MUTATION_RESUME_CONFLICT,
+                    error_code=error_code,
                 )
             return LedgerLoadResult(ledger=repaired)
 
