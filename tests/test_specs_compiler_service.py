@@ -2132,6 +2132,59 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
     assert sample_product.compiled_authority_json == existing.compiled_artifact_json
 
 
+def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority(
+    engine: Engine,
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported cached authority artifacts fail closed without cache updates."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: (_ for _ in ()).throw(AssertionError("compiler should not run")),
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+    _create_compiled_authority(
+        session,
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+    tool_context = make_tool_context()
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=engine,
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        force_recompile=False,
+        tool_context=tool_context,
+    )
+
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    project_id = require_id(sample_product.product_id, "product_id")
+    assert result["success"] is False
+    assert result["error_code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result["details"] == {
+        "project_id": project_id,
+        "spec_version_id": spec_version_id,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert result["remediation"] == [
+        "Run agileforge authority regenerate "
+        f"--project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <new-key>."
+    ]
+    assert "compiled_authority_cached" not in tool_context.state
+    session.refresh(sample_product)
+    assert sample_product.compiled_authority_json is None
+
+
 def test_compile_spec_authority_for_version_uses_content_ref_when_content_empty(
     session: Session,
     sample_product: Product,

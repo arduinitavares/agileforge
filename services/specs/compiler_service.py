@@ -2190,6 +2190,25 @@ def _cached_compilation_result(
         return None
 
     load_result = load_compiled_artifact(existing_authority)
+    if load_result.unsupported:
+        observed_schema_version = load_result.observed_schema_version
+        return {
+            "success": False,
+            "cached": False,
+            "error": "Compiled authority artifact schema is unsupported.",
+            "error_code": ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
+            "details": compiled_authority_schema_unsupported_details(
+                project_id=context.product.product_id,
+                spec_version_id=context.spec_version.spec_version_id,
+                observed_schema_version=observed_schema_version,
+            ),
+            "remediation": compiled_authority_schema_unsupported_remediation(
+                project_id=context.product.product_id,
+                spec_version_id=context.spec_version.spec_version_id,
+            ),
+            "observed_schema_version": observed_schema_version,
+            "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
+        }
     artifact = load_result.artifact
     if load_result.ok and artifact is not None:
         scope_themes_count = len(artifact.scope_themes)
