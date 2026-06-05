@@ -1,6 +1,7 @@
 """Tests for specs compiler service."""
 
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1261,6 +1262,96 @@ def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(
     with Session(other_engine) as other_session:
         other_rows = other_session.exec(select(CompiledSpecAuthority)).all()
     assert other_rows == []
+
+
+def test_compiler_invocation_guard_heartbeats_until_blocking_call_finishes() -> None:
+    """Blocking compiler invocations should heartbeat until the worker finishes."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[str] = []
+    result_value = object()
+
+    def invoke() -> object:
+        time.sleep(0.03)
+        return result_value
+
+    def lease_guard(boundary: str) -> bool:
+        calls.append(boundary)
+        return True
+
+    result = compiler_service._run_compiler_invocation_with_guards(
+        invoke=invoke,
+        lease_guard=lease_guard,
+        heartbeat_interval_seconds=0.005,
+        timeout_seconds=1.0,
+        timeout_result=lambda: {"success": False, "error": "timeout"},
+    )
+
+    assert result is result_value
+    assert calls[0] == "authority_compile_invocation_started"
+    assert "authority_compile_invocation_heartbeat" in calls
+    assert calls[-1] == "authority_compile_invocation_finished"
+
+
+def test_compiler_invocation_guard_returns_timeout_without_finish_guard() -> None:
+    """Timed-out compiler invocations should not run the finish lease guard."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[str] = []
+
+    def invoke() -> object:
+        time.sleep(0.05)
+        return object()
+
+    result = compiler_service._run_compiler_invocation_with_guards(
+        invoke=invoke,
+        lease_guard=lambda boundary: calls.append(boundary) or True,
+        heartbeat_interval_seconds=0.005,
+        timeout_seconds=0.01,
+        timeout_result=lambda: {
+            "success": False,
+            "error": "SPEC_COMPILER_INVOCATION_TIMEOUT",
+            "failure_stage": "invocation_timeout",
+        },
+    )
+
+    assert result == {
+        "success": False,
+        "error": "SPEC_COMPILER_INVOCATION_TIMEOUT",
+        "failure_stage": "invocation_timeout",
+    }
+    assert "authority_compile_invocation_started" in calls
+    assert "authority_compile_invocation_finished" not in calls
+
+
+def test_compiler_invocation_guard_returns_lease_loss_when_heartbeat_fails() -> None:
+    """Heartbeat lease loss should use the mutation lease-loss envelope."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[str] = []
+
+    def invoke() -> object:
+        time.sleep(0.05)
+        return object()
+
+    def lease_guard(boundary: str) -> bool:
+        calls.append(boundary)
+        return boundary != "authority_compile_invocation_heartbeat"
+
+    result = compiler_service._run_compiler_invocation_with_guards(
+        invoke=invoke,
+        lease_guard=lease_guard,
+        heartbeat_interval_seconds=0.005,
+        timeout_seconds=1.0,
+        timeout_result=lambda: {"success": False, "error": "timeout"},
+    )
+
+    assert result == {
+        "success": False,
+        "error": "MUTATION_LEASE_LOST",
+        "error_code": "MUTATION_IN_PROGRESS",
+        "boundary": "authority_compile_invocation_heartbeat",
+    }
 
 
 def test_compile_spec_authority_for_version_with_engine_runs_lease_guard_before_persist(

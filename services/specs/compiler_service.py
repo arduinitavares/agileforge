@@ -6,10 +6,12 @@ import asyncio
 import importlib
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, Field, ValidationError
@@ -82,6 +84,8 @@ _ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
 )
 _NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
 _FOCUSED_ITEM_COMPILER_ATTEMPTS: int = 2
+DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
+DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 
 
 class SpecAuthorityAcceptanceError(ValueError):
@@ -1658,13 +1662,16 @@ def _update_product_compiled_authority_cache(
     return _record_mutation_progress(record_progress, boundary)
 
 
-def _mutation_lease_lost_result() -> dict[str, Any]:
+def _mutation_lease_lost_result(boundary: str | None = None) -> dict[str, Any]:
     """Return the canonical mutation lease-loss envelope."""
-    return {
+    result: dict[str, Any] = {
         "success": False,
         "error": "MUTATION_LEASE_LOST",
         "error_code": "MUTATION_IN_PROGRESS",
     }
+    if boundary is not None:
+        result["boundary"] = boundary
+    return result
 
 
 def _mutation_progress_failed_result(boundary: str) -> dict[str, Any]:
@@ -1675,6 +1682,67 @@ def _mutation_progress_failed_result(boundary: str) -> dict[str, Any]:
         "error_code": "MUTATION_RECOVERY_REQUIRED",
         "boundary": boundary,
     }
+
+
+def _compiler_invocation_guard_allows(
+    lease_guard: Callable[[str], bool] | None,
+    boundary: str,
+) -> bool:
+    """Return whether the mutation lease still allows compiler progress."""
+    if lease_guard is None:
+        return True
+    try:
+        return bool(lease_guard(boundary))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _run_compiler_invocation_with_guards[CompilerInvocationResult](
+    *,
+    invoke: Callable[[], CompilerInvocationResult],
+    lease_guard: Callable[[str], bool] | None,
+    heartbeat_interval_seconds: float,
+    timeout_seconds: float,
+    timeout_result: Callable[[], dict[str, Any]],
+) -> CompilerInvocationResult | dict[str, Any]:
+    """Run a blocking compiler call while preserving mutation lease boundaries."""
+    started_boundary = "authority_compile_invocation_started"
+    if not _compiler_invocation_guard_allows(lease_guard, started_boundary):
+        return _mutation_lease_lost_result(started_boundary)
+
+    finished = Event()
+    worker_result: dict[str, CompilerInvocationResult | BaseException] = {}
+
+    def run_worker() -> None:
+        try:
+            worker_result["value"] = invoke()
+        except BaseException as exc:  # noqa: BLE001
+            worker_result["exception"] = exc
+        finally:
+            finished.set()
+
+    worker = Thread(target=run_worker, daemon=True)
+    worker.start()
+
+    deadline = time.monotonic() + timeout_seconds
+    heartbeat_interval = max(heartbeat_interval_seconds, 0.001)
+    while True:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            return timeout_result()
+        if finished.wait(min(heartbeat_interval, remaining_seconds)):
+            break
+        heartbeat_boundary = "authority_compile_invocation_heartbeat"
+        if not _compiler_invocation_guard_allows(lease_guard, heartbeat_boundary):
+            return _mutation_lease_lost_result(heartbeat_boundary)
+
+    finished_boundary = "authority_compile_invocation_finished"
+    if not _compiler_invocation_guard_allows(lease_guard, finished_boundary):
+        return _mutation_lease_lost_result(finished_boundary)
+
+    if "exception" in worker_result:
+        raise worker_result["exception"]
+    return cast("CompilerInvocationResult", worker_result["value"])
 
 
 def _record_mutation_progress(
@@ -1781,14 +1849,33 @@ def _invoke_compiler_for_version(
     spec_version: SpecRegistry,
     *,
     spec_content: str,
+    lease_guard: Callable[[str], bool] | None = None,
+    heartbeat_interval_seconds: float = DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS,
+    timeout_seconds: float = DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS,
 ) -> SpecAuthorityCompilationSuccess | dict[str, Any]:
     """Invoke the compiler and normalize either a success artifact or failure result."""
     try:
-        compiled = _compile_spec_authority_output(
-            spec_content=spec_content,
-            content_ref=spec_version.content_ref,
-            product_id=spec_version.product_id,
-            spec_version_id=spec_version.spec_version_id,
+        compiled = _run_compiler_invocation_with_guards(
+            invoke=lambda: _compile_spec_authority_output(
+                spec_content=spec_content,
+                content_ref=spec_version.content_ref,
+                product_id=spec_version.product_id,
+                spec_version_id=spec_version.spec_version_id,
+            ),
+            lease_guard=lease_guard,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            timeout_result=lambda: _compiler_failure_result(
+                product_id=spec_version.product_id,
+                spec_version_id=spec_version.spec_version_id,
+                content_ref=spec_version.content_ref,
+                failure_stage="invocation_timeout",
+                error="SPEC_COMPILER_INVOCATION_TIMEOUT",
+                reason=(
+                    "Spec authority compiler exceeded "
+                    f"{timeout_seconds:.0f} seconds."
+                ),
+            ),
         )
     except AgentInvocationError as exc:
         return _compiler_failure_result(
@@ -1812,6 +1899,8 @@ def _invoke_compiler_for_version(
             exception=exc,
         )
 
+    if isinstance(compiled, dict):
+        return compiled
     raw_json = compiled.raw_json
     normalized = compiled.output
     if isinstance(normalized.root, SpecAuthorityCompilationFailure):
@@ -1955,6 +2044,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
     compiled = _invoke_compiler_for_version(
         context.spec_version,
         spec_content=spec_content,
+        lease_guard=lease_guard,
     )
     if isinstance(compiled, dict):
         return compiled
