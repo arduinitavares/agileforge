@@ -586,7 +586,7 @@ class ProjectSetupMutationRunner:
                 _setup_failure_requires_recovery(error_code)
                 or not finalize_domain_failures
             ):
-                self._mark_create_recovery_required(
+                marked = self._mark_create_recovery_required(
                     mutation_event_id=mutation_event_id,
                     lease_owner=lease_owner,
                     project_id=project_id,
@@ -595,10 +595,9 @@ class ProjectSetupMutationRunner:
                     safe_to_auto_resume=False,
                     spec_version_id=authority_result.get("spec_version_id"),
                 )
-                return _recovery_required_response(
-                    self._must_get_ledger(mutation_event_id),
-                    requested_spec_file,
-                )
+                if isinstance(marked, dict):
+                    return marked
+                return _recovery_required_response(marked, requested_spec_file)
             return self._mark_setup_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
@@ -1007,8 +1006,8 @@ class ProjectSetupMutationRunner:
         spec_file: str,
         safe_to_auto_resume: bool,
         spec_version_id: int | None = None,
-    ) -> None:
-        self._ledger.mark_recovery_required(
+    ) -> CliMutationLedger | dict[str, Any]:
+        marked = self._ledger.mark_recovery_required(
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
             recovery_action=RecoveryAction.RESUME_FROM_STEP,
@@ -1020,6 +1019,24 @@ class ProjectSetupMutationRunner:
                 "spec_file": spec_file,
             },
             now=_now(),
+        )
+        if marked:
+            return self._must_get_ledger(mutation_event_id)
+
+        repaired = self._ledger.repair_setup_recovery_target(
+            mutation_event_id=mutation_event_id,
+            expected_command=PROJECT_CREATE_COMMAND,
+            expected_project_id=project_id,
+            now=_now(),
+        )
+        if (
+            repaired.error_code is None
+            and repaired.ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+        ):
+            return repaired.ledger
+        return _error_for_ledger(
+            repaired.error_code or MUTATION_IN_PROGRESS,
+            repaired.ledger,
         )
 
     def _mark_setup_validation_failed(
@@ -1529,10 +1546,17 @@ def _error_for_ledger(code: str, row: CliMutationLedger) -> dict[str, Any]:
             details={"mutation_event_id": row.mutation_event_id},
             remediation=["Use a new idempotency key for changed inputs."],
         )
+    data = {
+        "mutation_event_id": row.mutation_event_id,
+        "command": row.command,
+        "project_id": row.project_id,
+        "status": row.status,
+    }
     return _error(
         code,
         details={"mutation_event_id": row.mutation_event_id},
         remediation=[f"agileforge mutation show --mutation-event-id {row.mutation_event_id}"],
+        data=data,
     )
 
 

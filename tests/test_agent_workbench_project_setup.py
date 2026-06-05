@@ -642,6 +642,77 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
     assert listed["data"]["items"] == []
 
 
+def test_project_create_compiler_timeout_is_failed_setup_not_recovery(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(
+        monkeypatch,
+        error_code="SPEC_COMPILE_FAILED",
+        failure_artifact_id="spec-timeout-1",
+        blocking_gaps=["Spec authority compiler exceeded 1800 seconds."],
+    )
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+
+    failed = runner.create_project(
+        ProjectCreateRequest(
+            name="Compiler Timeout Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-timeout-001",
+            changed_by="agent",
+        )
+    )
+
+    assert failed["ok"] is False
+    assert _error_code(failed) == "SPEC_COMPILE_FAILED"
+    assert failed["data"]["setup_status"] == "failed"
+    assert failed["data"]["next_actions"][0]["command"] == "agileforge project setup retry"
+    assert "recovery_mutation_event_id" not in failed["data"]["next_actions"][0]["args"]
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, failed["data"]["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.VALIDATION_FAILED.value
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_create_recovery_mark_failure_does_not_claim_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(monkeypatch, error_code="MUTATION_IN_PROGRESS")
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    monkeypatch.setattr(
+        MutationLedgerRepository,
+        "mark_recovery_required",
+        lambda *args, **kwargs: False,
+    )
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Recovery Mark Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-recovery-mark-fails-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_IN_PROGRESS"
+    assert result["data"]["status"] == MutationStatus.PENDING.value
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.PENDING.value
+
+
 def test_project_setup_retry_without_recovery_link_recovers_failed_setup(
     engine: Engine,
     tmp_path: Path,
