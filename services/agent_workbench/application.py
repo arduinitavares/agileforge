@@ -13,6 +13,11 @@ from services.agent_workbench.authority_decision import (
     AuthorityDecisionRunner,
     AuthorityRejectRequest,
 )
+from services.agent_workbench.authority_regenerate import (
+    AuthorityRegenerateRequest,
+    AuthorityRegenerateRunner,
+    default_authority_regenerate_runner,
+)
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_review import AuthorityReviewService
 from services.agent_workbench.command_registry import (
@@ -119,6 +124,14 @@ class _AuthorityDecisionRunner(Protocol):
 
     def reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
         """Reject pending authority from a guarded request."""
+        ...
+
+
+class _AuthorityRegenerateRunner(Protocol):
+    """Authority regenerate methods exposed through the facade."""
+
+    def regenerate(self, request: AuthorityRegenerateRequest) -> dict[str, Any]:
+        """Regenerate authority for an approved spec version."""
         ...
 
 
@@ -598,6 +611,7 @@ class AgentWorkbenchApplication:
         project_setup_runner: _ProjectSetupRunner | None = None,
         authority_review: _AuthorityReview | None = None,
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
+        authority_regenerate_runner: _AuthorityRegenerateRunner | None = None,
         vision_runner: _VisionPhaseRunner | None = None,
         backlog_runner: _BacklogPhaseRunner | None = None,
         roadmap_runner: _RoadmapPhaseRunner | None = None,
@@ -612,6 +626,7 @@ class AgentWorkbenchApplication:
         self._project_setup_runner = project_setup_runner
         self._authority_review = authority_review
         self._authority_decision_runner = authority_decision_runner
+        self._authority_regenerate_runner = authority_regenerate_runner
         self._vision_runner = vision_runner
         self._backlog_runner = backlog_runner
         self._roadmap_runner = roadmap_runner
@@ -944,6 +959,26 @@ class AgentWorkbenchApplication:
     def authority_reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
         """Reject pending authority through the decision runner."""
         return self._get_authority_decision_runner().reject(request)
+
+    def authority_regenerate(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        idempotency_key: str | None = None,
+        changed_by: str = "cli-agent",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Regenerate compiled authority through the workbench facade."""
+        return self._get_authority_regenerate_runner().regenerate(
+            AuthorityRegenerateRequest(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                idempotency_key=idempotency_key,
+                changed_by=changed_by,
+                dry_run=dry_run,
+            )
+        )
 
     def authority_status(self, *, project_id: int) -> dict[str, Any]:
         """Return authority status projection."""
@@ -1639,6 +1674,12 @@ class AgentWorkbenchApplication:
         if self._authority_decision_runner is None:
             self._authority_decision_runner = AuthorityDecisionRunner()
         return self._authority_decision_runner
+
+    def _get_authority_regenerate_runner(self) -> _AuthorityRegenerateRunner:
+        """Return the authority regenerate runner, constructing it lazily."""
+        if self._authority_regenerate_runner is None:
+            self._authority_regenerate_runner = default_authority_regenerate_runner()
+        return self._authority_regenerate_runner
 
     def _get_vision_runner(self) -> _VisionPhaseRunner:
         """Return the Vision runner, constructing the default lazily."""

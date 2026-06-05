@@ -13,6 +13,7 @@ import services.agent_workbench.application as application_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
 from services.agent_workbench.application import AgentWorkbenchApplication
+from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
@@ -710,6 +711,27 @@ class _FakeAuthorityDecisionRunner:
         return {
             "ok": True,
             "data": {"decision": "rejected", "project_id": request.project_id},
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _FakeAuthorityRegenerateRunner:
+    """Fake authority regenerate runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[AuthorityRegenerateRequest] = []
+
+    def regenerate(self, request: AuthorityRegenerateRequest) -> dict[str, Any]:
+        """Record a regenerate request."""
+        self.calls.append(request)
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "spec_version_id": request.spec_version_id,
+                "status": "authority_pending_review",
+            },
             "warnings": [],
             "errors": [],
         }
@@ -1812,6 +1834,31 @@ def test_application_authority_reject_delegates_to_decision_runner() -> None:
 
     assert result["data"] == {"decision": "rejected", "project_id": PROJECT_ID}
     assert runner.calls == [("reject", request)]
+
+
+def test_application_authority_regenerate_delegates_to_runner() -> None:
+    """Verify authority regenerate routes through the injected runner."""
+    runner = _FakeAuthorityRegenerateRunner()
+    app = AgentWorkbenchApplication(authority_regenerate_runner=runner)
+
+    result = app.authority_regenerate(
+        project_id=PROJECT_ID,
+        spec_version_id=SPEC_VERSION_ID,
+        idempotency_key="regen-app-001",
+        changed_by="test",
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert runner.calls == [
+        AuthorityRegenerateRequest(
+            project_id=PROJECT_ID,
+            spec_version_id=SPEC_VERSION_ID,
+            idempotency_key="regen-app-001",
+            changed_by="test",
+            dry_run=True,
+        )
+    ]
 
 
 def test_application_routes_vision_commands_to_runner() -> None:
