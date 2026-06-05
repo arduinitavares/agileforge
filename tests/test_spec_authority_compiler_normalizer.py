@@ -2224,6 +2224,62 @@ def test_normalizer_handles_duplicate_placeholder_invariant_ids() -> None:
     )
 
 
+def test_normalizer_repairs_invalid_placeholder_ids_before_validation() -> None:
+    """Invalid LLM placeholder IDs are repaired before strict schema validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["payload validation", "authentication security"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-xxxxxxxxxxxxxxxx",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            },
+            {
+                "id": "INV-xxxxxxxxxxxxxxxx",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "OAuth1"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-xxxxxxxxxxxxxxxx",
+                "excerpt": "The payload must include user_id.",
+                "location": "REQ.user-id.statement",
+            },
+            {
+                "invariant_id": "INV-xxxxxxxxxxxxxxxx",
+                "excerpt": "The system must not use OAuth1 authentication.",
+                "location": "NFR.auth.statement",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_ids = [invariant.id for invariant in normalized.root.invariants]
+    assert len(invariant_ids) == 2  # noqa: PLR2004
+    assert len(set(invariant_ids)) == len(invariant_ids)
+    assert all(re.match(r"^INV-[0-9a-f]{16}$", item_id) for item_id in invariant_ids)
+    assert invariant_ids == [
+        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        for invariant in normalized.root.invariants
+    ]
+    assert {entry.invariant_id for entry in normalized.root.source_map} == set(
+        invariant_ids
+    )
+
+
 def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> None:
     """Different invariants from one source excerpt must still get unique IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415

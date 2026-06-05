@@ -103,6 +103,7 @@ _STRUCTURED_ITEM_ID_RE = re.compile(
     r"\b(?:GOAL|NON_GOAL|REQ|QUALITY|CONSTRAINT|INTERFACE|DATA|DECISION|"
     r"ASSUMPTION|RISK|EXAMPLE|OPEN_QUESTION)\.[A-Za-z0-9_-]+"
 )
+_STRICT_INVARIANT_ID_RE = re.compile(r"^INV-[0-9a-f]{16}$")
 _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
     {
         "scope_themes",
@@ -237,6 +238,65 @@ def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
 
     for key in _DEPRECATED_COMPACT_IR_KEYS:
         payload_dict.pop(key, None)
+
+
+def _temporary_invariant_id(index: int) -> str:
+    """Return a schema-valid temporary ID used only before semantic rewrite."""
+    return f"INV-{index + 1:016x}"
+
+
+def _repair_invalid_invariant_ids_for_validation(payload: object) -> None:
+    """Repair invalid LLM IDs before strict schema validation.
+
+    The compiler contract is deterministic host-side IDs. Some model outputs use
+    placeholders such as `INV-xxxxxxxxxxxxxxxx`, which are semantically harmless
+    but fail schema validation before the deterministic rewrite can run.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    payload_dict = cast("dict[str, Any]", payload)
+    result = payload_dict.get("result")
+    if isinstance(result, dict):
+        _repair_invalid_invariant_ids_for_validation(result)
+
+    if "error" in payload_dict:
+        return
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload_dict):
+        return
+
+    invariants = payload_dict.get("invariants")
+    if not isinstance(invariants, list):
+        return
+
+    used_ids = {
+        item.get("id")
+        for item in invariants
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and _STRICT_INVARIANT_ID_RE.fullmatch(cast("str", item.get("id")))
+    }
+    repaired_count = 0
+    for index, item in enumerate(invariants):
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("id")
+        if isinstance(raw_id, str) and _STRICT_INVARIANT_ID_RE.fullmatch(raw_id):
+            continue
+        candidate_index = index
+        replacement = _temporary_invariant_id(candidate_index)
+        while replacement in used_ids:
+            candidate_index += len(invariants) + 1
+            replacement = _temporary_invariant_id(candidate_index)
+        item["id"] = replacement
+        used_ids.add(replacement)
+        repaired_count += 1
+
+    if repaired_count:
+        logger.info(
+            "Repaired %s invalid compiler invariant IDs before validation",
+            repaired_count,
+        )
 
 
 def _is_meta_policy_source(location: str | None, excerpt: str) -> bool:
@@ -1285,6 +1345,7 @@ def normalize_compiler_output(
     validation_gaps: list[str] = []
     _drop_deprecated_compact_ir_for_success_payload(payload)
     _default_missing_source_map_for_success_payload(payload)
+    _repair_invalid_invariant_ids_for_validation(payload)
 
     try:
         parsed = SpecAuthorityCompilerOutput.model_validate(payload)
