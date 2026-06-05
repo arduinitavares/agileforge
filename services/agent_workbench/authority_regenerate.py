@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 AUTHORITY_REGENERATE_COMMAND: str = "agileforge authority regenerate"
+AUTHORITY_REGENERATE_LEASE_SECONDS: int = 300
 
 
 class AuthorityRegenerateRequest(BaseModel):
@@ -54,26 +55,75 @@ class AuthorityRegenerateRunner:
 
     engine: Engine
 
+    @dataclass(frozen=True)
+    class _ActiveMutation:
+        """Active regeneration mutation with a fenced ledger lease."""
+
+        ledger: MutationLedgerRepository
+        lease_owner: str
+        mutation_event_id: int
+
     def regenerate(self, request: AuthorityRegenerateRequest) -> dict[str, Any]:
         """Regenerate authority and stop at pending review."""
         spec_error = self._validate_request(request)
         if spec_error is not None:
             return spec_error
+        dry_run_response = self._dry_run_response(request)
+        if dry_run_response is not None:
+            return dry_run_response
 
-        if request.dry_run:
-            return success_envelope(
-                command=AUTHORITY_REGENERATE_COMMAND,
-                data={
-                    "status": "dry_run",
-                    "would_regenerate": True,
-                    "project_id": request.project_id,
-                    "spec_version_id": request.spec_version_id,
-                    "compiled_authority_schema_version": (
-                        COMPILED_AUTHORITY_SCHEMA_VERSION
-                    ),
-                },
+        active_mutation = self._start_mutation(request)
+        if isinstance(active_mutation, dict):
+            return active_mutation
+
+        compile_result = self._compile_authority(
+            request=request,
+            active_mutation=active_mutation,
+        )
+        if compile_result.get("success") is not True:
+            return self._compile_failure_response(
+                request=request,
+                active_mutation=active_mutation,
+                compile_result=compile_result,
             )
 
+        authority = self._load_compiled_authority(request.spec_version_id)
+        if authority is None or authority.authority_id is None:
+            return self._missing_authority_response(
+                request=request,
+                active_mutation=active_mutation,
+                compile_result=compile_result,
+            )
+
+        return self._success_response(
+            request=request,
+            active_mutation=active_mutation,
+            authority=authority,
+        )
+
+    def _dry_run_response(
+        self, request: AuthorityRegenerateRequest
+    ) -> dict[str, Any] | None:
+        """Return the non-mutating dry-run response when requested."""
+        if not request.dry_run:
+            return None
+        return success_envelope(
+            command=AUTHORITY_REGENERATE_COMMAND,
+            data={
+                "status": "dry_run",
+                "would_regenerate": True,
+                "project_id": request.project_id,
+                "spec_version_id": request.spec_version_id,
+                "compiled_authority_schema_version": (
+                    COMPILED_AUTHORITY_SCHEMA_VERSION
+                ),
+            },
+        )
+
+    def _start_mutation(
+        self, request: AuthorityRegenerateRequest
+    ) -> _ActiveMutation | dict[str, Any]:
+        """Acquire the mutation lease or return the existing deterministic result."""
         if request.idempotency_key is None:
             return error_envelope(
                 command=AUTHORITY_REGENERATE_COMMAND,
@@ -110,7 +160,7 @@ class AuthorityRegenerateRunner:
             changed_by=request.changed_by,
             lease_owner=lease_owner,
             now=now,
-            lease_seconds=300,
+            lease_seconds=AUTHORITY_REGENERATE_LEASE_SECONDS,
         )
         if loaded.response is not None:
             return loaded.response
@@ -119,61 +169,136 @@ class AuthorityRegenerateRunner:
                 error_code=loaded.error_code,
                 mutation_event_id=loaded.ledger.mutation_event_id,
             )
+        return self._ActiveMutation(
+            ledger=ledger,
+            lease_owner=lease_owner,
+            mutation_event_id=_required_mutation_event_id(
+                loaded.ledger.mutation_event_id
+            ),
+        )
 
-        compile_result = compile_spec_authority_for_version_with_engine(
+    def _compile_authority(
+        self,
+        *,
+        request: AuthorityRegenerateRequest,
+        active_mutation: _ActiveMutation,
+    ) -> dict[str, Any]:
+        """Compile the approved authority with ledger-backed fence callbacks."""
+
+        def lease_guard(_boundary: str) -> bool:
+            return active_mutation.ledger.require_active_owner(
+                mutation_event_id=active_mutation.mutation_event_id,
+                lease_owner=active_mutation.lease_owner,
+                now=datetime.now(UTC),
+                lease_seconds=AUTHORITY_REGENERATE_LEASE_SECONDS,
+            )
+
+        def record_progress(boundary: str) -> bool:
+            return active_mutation.ledger.mark_step_complete(
+                mutation_event_id=active_mutation.mutation_event_id,
+                lease_owner=active_mutation.lease_owner,
+                step=boundary,
+                next_step=boundary,
+                now=datetime.now(UTC),
+            )
+
+        return compile_spec_authority_for_version_with_engine(
             engine=self.engine,
             spec_version_id=request.spec_version_id,
             force_recompile=True,
+            lease_guard=lease_guard,
+            record_progress=record_progress,
         )
-        if compile_result.get("success") is not True:
-            response = error_envelope(
-                command=AUTHORITY_REGENERATE_COMMAND,
-                error=workbench_error(
-                    ErrorCode.SPEC_COMPILE_FAILED,
-                    message="Authority regeneration failed during compilation.",
-                    details={
-                        "project_id": request.project_id,
-                        "spec_version_id": request.spec_version_id,
-                        "compile_result": compile_result,
-                    },
-                    remediation=["Fix the compile failure, then rerun regenerate."],
-                ),
-            )
-            _finalize_mutation_status(
-                engine=self.engine,
-                mutation_event_id=loaded.ledger.mutation_event_id,
-                lease_owner=lease_owner,
-                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
-                response=response,
-            )
-            return response
 
-        authority = self._load_compiled_authority(request.spec_version_id)
-        if authority is None or authority.authority_id is None:
-            response = error_envelope(
-                command=AUTHORITY_REGENERATE_COMMAND,
-                error=workbench_error(
-                    ErrorCode.MUTATION_FAILED,
-                    message=(
-                        "Authority regeneration compiled successfully but did not "
-                        "persist a compiled authority row."
-                    ),
-                    details={
-                        "project_id": request.project_id,
-                        "spec_version_id": request.spec_version_id,
-                        "compile_result": compile_result,
-                    },
-                ),
+    def _compile_failure_response(
+        self,
+        *,
+        request: AuthorityRegenerateRequest,
+        active_mutation: _ActiveMutation,
+        compile_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the bounded response for an unsuccessful compile attempt."""
+        compile_error_code = _compiler_error_code(compile_result)
+        if compile_error_code is not None:
+            return _ledger_error_response(
+                error_code=compile_error_code,
+                mutation_event_id=active_mutation.mutation_event_id,
             )
-            _finalize_mutation_status(
-                engine=self.engine,
-                mutation_event_id=loaded.ledger.mutation_event_id,
-                lease_owner=lease_owner,
-                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
-                response=response,
-            )
-            return response
+        response = error_envelope(
+            command=AUTHORITY_REGENERATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.SPEC_COMPILE_FAILED,
+                message="Authority regeneration failed during compilation.",
+                details={
+                    "project_id": request.project_id,
+                    "spec_version_id": request.spec_version_id,
+                    "compile_result": compile_result,
+                },
+                remediation=["Fix the compile failure, then rerun regenerate."],
+            ),
+        )
+        return self._finalize_failure_response(
+            active_mutation=active_mutation,
+            response=response,
+        )
 
+    def _missing_authority_response(
+        self,
+        *,
+        request: AuthorityRegenerateRequest,
+        active_mutation: _ActiveMutation,
+        compile_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the bounded response when compile did not persist authority."""
+        response = error_envelope(
+            command=AUTHORITY_REGENERATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.MUTATION_FAILED,
+                message=(
+                    "Authority regeneration compiled successfully but did not "
+                    "persist a compiled authority row."
+                ),
+                details={
+                    "project_id": request.project_id,
+                    "spec_version_id": request.spec_version_id,
+                    "compile_result": compile_result,
+                },
+            ),
+        )
+        return self._finalize_failure_response(
+            active_mutation=active_mutation,
+            response=response,
+        )
+
+    def _finalize_failure_response(
+        self,
+        *,
+        active_mutation: _ActiveMutation,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fence a terminal failure or surface a truthful mutation conflict."""
+        finalized = _finalize_mutation_status(
+            engine=self.engine,
+            mutation_event_id=active_mutation.mutation_event_id,
+            lease_owner=active_mutation.lease_owner,
+            status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+            response=response,
+        )
+        if finalized:
+            return response
+        return _ledger_error_response(
+            error_code=MUTATION_RESUME_CONFLICT,
+            mutation_event_id=active_mutation.mutation_event_id,
+        )
+
+    def _success_response(
+        self,
+        *,
+        request: AuthorityRegenerateRequest,
+        active_mutation: _ActiveMutation,
+        authority: CompiledSpecAuthority,
+    ) -> dict[str, Any]:
+        """Fence the successful regenerate result or surface a mutation conflict."""
         response = success_envelope(
             command=AUTHORITY_REGENERATE_COMMAND,
             data={
@@ -182,7 +307,7 @@ class AuthorityRegenerateRunner:
                 "spec_version_id": request.spec_version_id,
                 "authority_id": authority.authority_id,
                 "pending_authority_id": authority.authority_id,
-                "mutation_event_id": loaded.ledger.mutation_event_id,
+                "mutation_event_id": active_mutation.mutation_event_id,
                 "compiled_authority_schema_version": (
                     COMPILED_AUTHORITY_SCHEMA_VERSION
                 ),
@@ -203,9 +328,9 @@ class AuthorityRegenerateRunner:
                 ],
             },
         )
-        finalized = ledger.finalize_success(
-            mutation_event_id=loaded.ledger.mutation_event_id,
-            lease_owner=lease_owner,
+        finalized = active_mutation.ledger.finalize_success(
+            mutation_event_id=active_mutation.mutation_event_id,
+            lease_owner=active_mutation.lease_owner,
             after={
                 "project_id": request.project_id,
                 "spec_version_id": request.spec_version_id,
@@ -217,12 +342,12 @@ class AuthorityRegenerateRunner:
             response=response,
             now=datetime.now(UTC),
         )
-        if not finalized:
-            return _ledger_error_response(
-                error_code=MUTATION_RESUME_CONFLICT,
-                mutation_event_id=loaded.ledger.mutation_event_id,
-            )
-        return response
+        if finalized:
+            return response
+        return _ledger_error_response(
+            error_code=MUTATION_RESUME_CONFLICT,
+            mutation_event_id=active_mutation.mutation_event_id,
+        )
 
     def _validate_request(
         self, request: AuthorityRegenerateRequest
@@ -301,6 +426,27 @@ def _ledger_error_response(
     )
 
 
+def _compiler_error_code(compile_result: dict[str, Any]) -> str | None:
+    """Return a ledger-style compiler error code when present."""
+    error_code = compile_result.get("error_code")
+    if isinstance(error_code, str) and error_code in {
+        IDEMPOTENCY_KEY_REUSED,
+        MUTATION_IN_PROGRESS,
+        MUTATION_RECOVERY_REQUIRED,
+        MUTATION_RESUME_CONFLICT,
+    }:
+        return error_code
+    return None
+
+
+def _required_mutation_event_id(mutation_event_id: int | None) -> int:
+    """Require a persisted mutation event identifier."""
+    if mutation_event_id is None:
+        message = "Mutation event id was not persisted."
+        raise RuntimeError(message)
+    return mutation_event_id
+
+
 def _finalize_mutation_status(
     *,
     engine: Engine,
@@ -308,13 +454,13 @@ def _finalize_mutation_status(
     lease_owner: str,
     status: MutationStatus,
     response: dict[str, Any],
-) -> None:
+) -> bool:
     """Persist a terminal non-success ledger response while the lease is active."""
     if mutation_event_id is None:
-        return
+        return False
     now = datetime.now(UTC).replace(tzinfo=None)
     with Session(engine) as session:
-        session.exec(
+        result = session.exec(
             update(CliMutationLedger)
             .where(CliMutationLedger.mutation_event_id == mutation_event_id)
             .where(CliMutationLedger.status == MutationStatus.PENDING.value)
@@ -336,6 +482,7 @@ def _finalize_mutation_status(
             )
         )
         session.commit()
+        return result.rowcount == 1
 
 
 def default_authority_regenerate_runner() -> AuthorityRegenerateRunner:

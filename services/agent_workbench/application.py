@@ -13,12 +13,11 @@ from services.agent_workbench.authority_decision import (
     AuthorityDecisionRunner,
     AuthorityRejectRequest,
 )
+from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_regenerate import (
     AuthorityRegenerateRequest,
-    AuthorityRegenerateRunner,
     default_authority_regenerate_runner,
 )
-from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_review import AuthorityReviewService
 from services.agent_workbench.command_registry import (
     command_is_available,

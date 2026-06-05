@@ -13,11 +13,11 @@ import services.agent_workbench.application as application_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
 from services.agent_workbench.application import AgentWorkbenchApplication
-from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
 )
+from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
 from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
