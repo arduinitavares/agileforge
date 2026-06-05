@@ -106,13 +106,16 @@ cp .env.example .env
 The CLI is the supported agent interface for workflow inspection and guarded
 mutations. For the full contract, workflows, idempotency rules, and recovery
 guidance, see [docs/agent-cli-manual.md](docs/agent-cli-manual.md).
+Create and validate an AgileForge profile spec at `specs/spec.json` before
+running `project create`; Markdown specs are review views, not project-create
+inputs.
 
 ```bash
 uv run --frozen agileforge --help
 uv run --frozen agileforge project list
 uv run --frozen agileforge status --project-id 1
 uv run --frozen agileforge context pack --project-id 1 --phase sprint-planning
-uv run --frozen agileforge project create --name "Example" --spec-file specs/app.md --idempotency-key create-example-001
+uv run --frozen agileforge project create --name "Example" --spec-file specs/spec.json --idempotency-key create-example-001
 ```
 
 ### Running the Application
@@ -148,7 +151,7 @@ Agent: Great! Vision saved. Now, do you want to define the Technical Specificati
 ```
 You: Here is the technical spec for MealMuse... [Pastes Spec]
 
-Agent: Spec compiled and Authority accepted. 
+Agent: Spec compiled and Authority accepted.
 I will now generate the Initial Product Backlog (Gross Requirements) before we build the Roadmap.
 
 You: Proceed.

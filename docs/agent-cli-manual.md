@@ -26,15 +26,14 @@ The installed CLI supports:
   after guarded save.
 - Story pending, generate, retry, history, save, complete, repair, and read projections.
 - Sprint candidates, generate, history, save, start, status, tasks, task
-  tickets, and explicit story close.
+  tickets, explicit story close, close readiness, and guarded Sprint close.
 - Bounded context packs for agents.
 - CLI diagnostics, schema readiness, command discovery, and command schemas.
 - Mutation ledger inspection and recovery lease acquisition.
 
 The installed CLI does not yet support:
 
-- Sprint close, deleting workflow artifacts, or arbitrary workflow artifact reset
-  from the CLI.
+- Deleting workflow artifacts or arbitrary workflow artifact reset from the CLI.
 - Task claim/lease, per-checklist-item tracking, or automatic validation run
   capture.
 
@@ -178,6 +177,20 @@ running Vision, Backlog, Roadmap, and Story. Run these commands from the caller
 repository, not from the AgileForge repo, so relative paths such as
 `specs/spec.json` resolve correctly.
 
+Bootstrap precondition:
+
+- If `specs/spec.json` is missing, stop the CLI setup flow and use
+  `writing-technical-specs` in AgileForge profile mode to create the canonical
+  `agileforge.spec.v1` JSON at `specs/spec.json` plus the rendered review view
+  at `specs/spec.md`.
+- Do not pass Markdown, prose, PRDs, or `specs/spec.md` to
+  `agileforge project create`. Markdown is a review view; `project create`
+  consumes only structured `agileforge.spec.v1` JSON.
+- Validate the spec, run a `project create --dry-run`, then run the guarded
+  mutation with an explicit `--idempotency-key`.
+- After project creation, stop at authority review/accept unless the user
+  clearly authorizes continuing into Vision, Backlog, Roadmap, Story, or Sprint.
+
 Validate the structured spec and rendered Markdown pair when both are present:
 
 ```sh
@@ -186,6 +199,16 @@ cd /path/to/caller-project
 agileforge spec profile validate \
   --spec-file specs/spec.json \
   --render-md specs/spec.md
+```
+
+Preview the project create mutation:
+
+```sh
+agileforge project create \
+  --dry-run \
+  --dry-run-id "preview-project-$(date +%Y%m%d%H%M%S)" \
+  --name "Project Name" \
+  --spec-file specs/spec.json
 ```
 
 Create the AgileForge project:
@@ -217,7 +240,22 @@ PY
 Ask AgileForge for the next installed command:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+uv run --frozen python - workflow-next.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+commands = data.get("next_valid_commands") or data.get("commands") or []
+print("ok", payload.get("ok"))
+print("status", data.get("status"))
+print("state", data.get("state") or data.get("workflow_state"))
+print("command_count", len(commands) if isinstance(commands, list) else "unknown")
+for command in commands[:12] if isinstance(commands, list) else []:
+    print("command", command if isinstance(command, str) else command.get("command"))
+PY
 ```
 
 For a newly created project, the next step should be authority review. Produce a
@@ -246,8 +284,21 @@ agileforge authority accept \
 Confirm authority is current and ask for the next step:
 
 ```sh
-agileforge authority status --project-id "$PROJECT_ID" | python -m json.tool
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge authority status --project-id "$PROJECT_ID" > authority-status.json
+uv run --frozen python - authority-status.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("status", data.get("status"))
+print("authority_id", data.get("authority_id"))
+print("pending_authority_id", data.get("pending_authority_id"))
+PY
+
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 After authority acceptance, the next installed command should be Vision
@@ -286,13 +337,13 @@ agents can confirm exactly what became canonical.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 Use history only for inspection/debugging:
 
 ```sh
-agileforge vision history --project-id "$PROJECT_ID" | python -m json.tool
+agileforge vision history --project-id "$PROJECT_ID" > vision-history.json
 ```
 
 Before Backlog generation on a brownfield project, collect implementation
@@ -484,7 +535,7 @@ moved out of `To Do`.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 After Backlog save, the next installed command should be Roadmap generation:
@@ -569,20 +620,20 @@ fields are clean.
 Then ask for the next installed command again:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
 ```
 
 Use history only for inspection/debugging:
 
 ```sh
-agileforge backlog history --project-id "$PROJECT_ID" | python -m json.tool
-agileforge roadmap history --project-id "$PROJECT_ID" | python -m json.tool
+agileforge backlog history --project-id "$PROJECT_ID" > backlog-history.json
+agileforge roadmap history --project-id "$PROJECT_ID" > roadmap-history.json
 ```
 
 After Roadmap save, the next installed command should be Story pending:
 
 ```sh
-agileforge story pending --project-id "$PROJECT_ID" | python -m json.tool
+agileforge story pending --project-id "$PROJECT_ID" > story-pending.json
 ```
 
 Story generation is per Roadmap requirement. Pick an exact pending requirement
@@ -717,8 +768,8 @@ candidates and Sprint generation are filtered to stories whose
 On success, Story complete moves the workflow to Sprint setup:
 
 ```sh
-agileforge workflow next --project-id "$PROJECT_ID" | python -m json.tool
-agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+agileforge sprint candidates --project-id "$PROJECT_ID" > sprint-candidates.json
 ```
 
 Story save persists Sprint planning metadata:
@@ -852,7 +903,7 @@ Review `data.output_artifact`, then save with the returned
 After Story completion, inspect candidate readiness before invoking the model:
 
 ```sh
-agileforge sprint candidates --project-id "$PROJECT_ID" | python -m json.tool
+agileforge sprint candidates --project-id "$PROJECT_ID" > sprint-candidates.json
 ```
 
 Do not generate a Sprint while `data.readiness.status` is `blocked`. Resolve the
@@ -992,8 +1043,8 @@ idempotency key replay the same payload.
 Inspect execution status and task rows:
 
 ```sh
-agileforge sprint status --project-id "$PROJECT_ID" | python -m json.tool
-agileforge sprint tasks --project-id "$PROJECT_ID" | python -m json.tool
+agileforge sprint status --project-id "$PROJECT_ID" > sprint-status.json
+agileforge sprint tasks --project-id "$PROJECT_ID" > sprint-tasks.json
 ```
 
 `sprint tasks` is dependency-aware. The task rows preserve the existing fields
@@ -1063,7 +1114,7 @@ agileforge sprint task show \
 
 agileforge sprint task history \
   --project-id "$PROJECT_ID" \
-  --task-id "$TASK_ID" | python -m json.tool
+  --task-id "$TASK_ID" > task-history.json
 ```
 
 Start work by moving the task to `In Progress` with the guard values from the
@@ -1927,7 +1978,17 @@ Retrieve the review packet:
 
 ```sh
 agileforge authority review --project-id "$PROJECT_ID" --open > review.json
-python -m json.tool review.json >/dev/null
+uv run --frozen python - review.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("review_status", data.get("review_summary", {}).get("status") if isinstance(data.get("review_summary"), dict) else None)
+print("guard_keys", sorted((data.get("guard_tokens") or {}).keys()))
+PY
 ```
 
 Important review packet fields:
@@ -1958,7 +2019,17 @@ Accept after a positive review:
 agileforge authority accept \
   --project-id "$PROJECT_ID" > accept.json
 
-python -m json.tool accept.json >/dev/null
+uv run --frozen python - accept.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("status", data.get("status"))
+print("authority_id", data.get("authority_id"))
+PY
 ```
 
 Reject when the compiled authority is wrong or unreviewable:
@@ -1974,7 +2045,17 @@ agileforge authority reject \
   --idempotency-key "authority-reject-$PROJECT_ID-001" \
   --reason "Compiled authority omits the dashboard requirement." > reject.json
 
-python -m json.tool reject.json >/dev/null
+uv run --frozen python - reject.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("status", data.get("status"))
+print("decision_id", data.get("decision_id"))
+PY
 ```
 
 If the source spec is missing or unreadable at decision time, accept/reject
@@ -2266,6 +2347,11 @@ agileforge capabilities
 ```sh
 cd /path/to/caller-project
 
+test -f specs/spec.json
+agileforge spec profile validate \
+  --spec-file specs/spec.json \
+  --render-md specs/spec.md
+
 agileforge project create \
   --dry-run \
   --dry-run-id preview-my-project-001 \
@@ -2290,24 +2376,67 @@ agileforge authority status --project-id "$PROJECT_ID"
 ### Inspect Pending Authority
 
 ```sh
-agileforge authority status --project-id "$PROJECT_ID" |
-python -c 'import json,sys; p=json.load(sys.stdin); d=p["data"]; print({"status": d["status"], "authority_id": d["authority_id"], "pending_authority_id": d["pending_authority_id"], "pending_spec": d["pending_compiled_spec_version_id"]})'
+agileforge authority status --project-id "$PROJECT_ID" > authority-status.json
+uv run --frozen python - authority-status.json <<'PY'
+import json
+import sys
+from pathlib import Path
 
-agileforge workflow next --project-id "$PROJECT_ID" |
-python -c 'import json,sys; p=json.load(sys.stdin); print(p["data"].get("next_valid_commands") or p["data"].get("next_actions"))'
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload["data"]
+print({
+    "status": data["status"],
+    "authority_id": data["authority_id"],
+    "pending_authority_id": data["pending_authority_id"],
+    "pending_spec": data["pending_compiled_spec_version_id"],
+})
+PY
+
+agileforge workflow next --project-id "$PROJECT_ID" > workflow-next.json
+uv run --frozen python - workflow-next.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+commands = data.get("next_valid_commands") or data.get("next_actions") or []
+print("command_count", len(commands) if isinstance(commands, list) else "unknown")
+for command in commands[:12] if isinstance(commands, list) else []:
+    print("command", command if isinstance(command, str) else command.get("command"))
+PY
 ```
 
 ### Review And Accept Authority
 
 ```sh
 agileforge authority review --project-id "$PROJECT_ID" --open > review.json
-python -m json.tool review.json >/dev/null
+uv run --frozen python - review.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("review_status", data.get("review_summary", {}).get("status") if isinstance(data.get("review_summary"), dict) else None)
+PY
 
 # Ask: Does this compiled interpretation correctly represent the spec?
 
 agileforge authority accept \
   --project-id "$PROJECT_ID" > accept.json
-python -m json.tool accept.json >/dev/null
+uv run --frozen python - accept.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+print("ok", payload.get("ok"))
+print("status", data.get("status"))
+print("authority_id", data.get("authority_id"))
+PY
 
 agileforge authority status --project-id "$PROJECT_ID" |
 python -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["status"] == "current"; assert d["authority_id"] is not None; assert d["pending_authority_id"] is None; print("authority current")'
