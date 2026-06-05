@@ -103,6 +103,12 @@ def _stored_compiled_success_json(
     )
 
 
+def _legacy_compiled_success_json(*, source_excerpt: str) -> str:
+    payload = json.loads(_compiled_success_json(source_excerpt=source_excerpt))
+    payload.pop("schema_version", None)
+    return json.dumps(payload)
+
+
 def _seed_pending_review_project(  # noqa: PLR0913
     session: Session,
     *,
@@ -461,31 +467,58 @@ def test_review_accepts_v2_stored_compiled_artifact(
     ]
 
 
+def test_review_rejects_unsupported_compiled_authority_schema(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Unsupported stored artifacts should fail closed with regenerate guidance."""
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+            artifact_json=_legacy_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert "agileforge authority regenerate" in " ".join(error["remediation"])
+
+
 def test_review_malformed_compiled_artifact_blocks_acceptance(
     session: Session,
     tmp_path: Path,
 ) -> None:
     """Malformed compiler artifacts are structural blockers."""
+    malformed_artifact = json.loads(
+        _compiled_success_json(
+            source_excerpt="The review output must include guard tokens."
+        )
+    )
+    malformed_artifact["assumptions"] = [
+        {
+            "id": "ASM-7",
+            "text": "Review assumes CLI output is JSON.",
+            "support": "direct",
+            "source_refs": ["REQ.guard-tokens.statement"],
+            "source_excerpt": "The review output must include guard tokens.",
+        }
+    ]
+    malformed_artifact["invariants"] = "bad"
     project_id, _spec_version_id, authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
             tmp_path=tmp_path,
             spec_content=_base_spec(),
-            artifact_json=json.dumps(
-                {
-                    "assumptions": [
-                        {
-                            "id": "ASM-7",
-                            "text": "Review assumes CLI output is JSON.",
-                            "support": "direct",
-                            "source_refs": ["REQ.guard-tokens.statement"],
-                            "source_excerpt": (
-                                "The review output must include guard tokens."
-                            ),
-                        }
-                    ]
-                }
-            ),
+            artifact_json=json.dumps(malformed_artifact),
         )
     )
     authority = session.get(CompiledSpecAuthority, authority_id)

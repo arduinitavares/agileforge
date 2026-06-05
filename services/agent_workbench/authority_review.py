@@ -28,6 +28,8 @@ from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
 from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
     load_compiled_artifact as load_stored_compiled_artifact,
 )
 from services.specs.profile_content import (
@@ -311,6 +313,13 @@ class AuthorityReviewService:
             authority = selection.pending_authority
             if latest_spec is None or authority is None:
                 return _authority_not_pending_error(project_id)
+            load_result = load_stored_compiled_artifact(authority)
+            if load_result.unsupported:
+                return _unsupported_compiled_authority_error(
+                    project_id=project_id,
+                    spec_version_id=authority.spec_version_id,
+                    observed_schema_version=load_result.observed_schema_version,
+                )
 
             snapshot = build_authority_review_snapshot(
                 project_id=project_id,
@@ -353,6 +362,30 @@ def _authority_not_pending_error(project_id: int) -> JsonDict:
             message="No pending compiled authority exists for this project.",
             details={"project_id": project_id},
             remediation=["Compile a new pending authority before requesting review."],
+        ),
+    )
+
+
+def _unsupported_compiled_authority_error(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> JsonDict:
+    """Return the fail-closed review error for unsupported artifacts."""
+    return error_envelope(
+        command=AUTHORITY_REVIEW_COMMAND,
+        error=workbench_error(
+            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+            details=compiled_authority_schema_unsupported_details(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                observed_schema_version=observed_schema_version,
+            ),
+            remediation=compiled_authority_schema_unsupported_remediation(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            ),
         ),
     )
 
@@ -510,6 +543,13 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     )
     if not isinstance(source, _SourceLoad):
         return cast("JsonDict", source)
+    load_result = load_stored_compiled_artifact(authority)
+    if load_result.unsupported:
+        return _unsupported_compiled_authority_error(
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
 
     source_limit = _review_source_limit()
     content_included = include_spec == "full" or (
@@ -1180,6 +1220,24 @@ def _compiled_artifact_shape_findings(
         load_result = load_stored_compiled_artifact(authority)
         if load_result.ok:
             return []
+        if load_result.unsupported:
+            return [
+                {
+                    "finding_id": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+                    "severity": "blocking",
+                    "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+                    "message": "Compiled authority artifact schema is unsupported.",
+                    "candidate_ids": [],
+                    "source_unit_ids": [],
+                    "override_allowed": False,
+                    "details": {
+                        "observed_schema_version": load_result.observed_schema_version,
+                        "required_schema_version": (
+                            "agileforge.compiled_authority.v2"
+                        ),
+                    },
+                }
+            ]
         if load_result.status == "compiler_failure":
             reason = "compiled_artifact_json contains a compiler failure object."
         else:

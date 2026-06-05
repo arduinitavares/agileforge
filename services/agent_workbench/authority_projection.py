@@ -30,6 +30,11 @@ from services.agent_workbench.schema_readiness import (
     SchemaRequirement,
     check_schema_readiness,
 )
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -236,6 +241,36 @@ def _authority_acceptance_mismatch_error(
             ],
         ),
     )
+
+
+def _unsupported_compiled_authority_error(
+    *,
+    command: str,
+    project_id: int,
+    spec_version_id: int | None,
+    authority_id: int | None,
+    observed_schema_version: str | None,
+    data: JsonDict,
+) -> JsonDict:
+    """Return a structured unsupported-artifact error with stable data."""
+    envelope = error_envelope(
+        command=command,
+        error=workbench_error(
+            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+            details=compiled_authority_schema_unsupported_details(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                observed_schema_version=observed_schema_version,
+            )
+            | {"authority_id": authority_id},
+            remediation=compiled_authority_schema_unsupported_remediation(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            ),
+        ),
+    )
+    envelope["data"] = data
+    return envelope
 
 
 def _spec_version_not_found_error(project_id: int, spec_version_id: int) -> JsonDict:
@@ -793,6 +828,31 @@ class AuthorityProjectionService:
                 return _project_not_found_error(AUTHORITY_STATUS_COMMAND, project_id)
 
             selection = _load_authority_selection(session, project_id=project_id)
+            status_authority = selection.authority or selection.pending_authority
+            if status_authority is not None:
+                load_result = load_compiled_artifact(status_authority)
+                if load_result.unsupported:
+                    return _unsupported_compiled_authority_error(
+                        command=AUTHORITY_STATUS_COMMAND,
+                        project_id=project_id,
+                        spec_version_id=status_authority.spec_version_id,
+                        authority_id=status_authority.authority_id,
+                        observed_schema_version=load_result.observed_schema_version,
+                        data={
+                            "project_id": project_id,
+                            "authority_status": "unsupported_schema",
+                            "status": "unsupported_schema",
+                            "current": False,
+                            "accepted_current": False,
+                            "authority_id": status_authority.authority_id,
+                            "accepted_spec_version_id": (
+                                selection.accepted.spec_version_id
+                                if selection.accepted is not None
+                                else None
+                            ),
+                            "spec_version_id": status_authority.spec_version_id,
+                        },
+                    )
             disk_spec = self._resolve_spec_path(
                 _status_spec_path(product=product, selection=selection),
                 accepted_hash=(
@@ -961,6 +1021,26 @@ class AuthorityProjectionService:
         authority = _compiled_authority(session, selected_id)
         if authority is None:
             return _authority_not_compiled_error(project_id, selected_id)
+        load_result = load_compiled_artifact(authority)
+        if load_result.unsupported:
+            return _unsupported_compiled_authority_error(
+                command=AUTHORITY_INVARIANTS_COMMAND,
+                project_id=project_id,
+                spec_version_id=authority.spec_version_id,
+                authority_id=authority.authority_id,
+                observed_schema_version=load_result.observed_schema_version,
+                data={
+                    "project_id": project_id,
+                    "spec_version_id": authority.spec_version_id,
+                    "authority_id": authority.authority_id,
+                    "authority_status": "unsupported_schema",
+                    "current": False,
+                    "accepted_current": False,
+                    "invariants": [],
+                    "count": 0,
+                    "authority_fingerprint": None,
+                },
+            )
         if selection.accepted is not None and not _authority_matches_acceptance(
             authority=authority,
             accepted=selection.accepted,

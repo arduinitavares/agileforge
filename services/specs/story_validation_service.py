@@ -25,7 +25,10 @@ from orchestrator_agent.agent_tools.spec_validator_agent.schemes import (
     SpecValidationResult,
 )
 from services.specs._engine_resolution import resolve_spec_engine
-from services.specs.compiler_service import load_compiled_artifact
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 from utils.adk_runner import invoke_agent_to_text
 from utils.failure_artifacts import AgentInvocationError
 from utils.runtime_config import SPEC_VALIDATOR_IDENTITY, get_default_validation_mode
@@ -173,6 +176,7 @@ class _FailedValidationDetails:
     actual: str
     message: str
     error: str
+    remediation: list[str] | None = None
 
 
 @dataclass
@@ -856,6 +860,7 @@ def _build_failed_validation_result(
         "error": details.error,
         "passed": False,
         "input_hash": context.input_hash,
+        "remediation": list(details.remediation or []),
     }
 
 
@@ -1129,7 +1134,29 @@ def validate_story_with_spec_authority(
                 ),
             )
 
-        artifact = _resolve_loaded_artifact(dependencies["load_artifact"](authority))
+        loaded_artifact = dependencies["load_artifact"](authority)
+        if getattr(loaded_artifact, "unsupported", False):
+            remediation = compiled_authority_schema_unsupported_remediation(
+                project_id=story.product_id,
+                spec_version_id=parsed.spec_version_id,
+            )
+            error_message = (
+                "Compiled authority artifact schema is unsupported. "
+                + " ".join(remediation)
+            )
+            return _build_failed_validation_result(
+                failure_context,
+                _FailedValidationDetails(
+                    rule="SPEC_VERSION_COMPILED",
+                    expected="Supported compiled authority exists",
+                    actual="Unsupported compiled authority schema",
+                    message=error_message,
+                    error=error_message,
+                    remediation=remediation,
+                ),
+            )
+
+        artifact = _resolve_loaded_artifact(loaded_artifact)
         invariants_checked = _build_invariants_checked(
             artifact,
             dependencies["render_invariant"],

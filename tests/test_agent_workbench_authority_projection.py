@@ -25,6 +25,13 @@ from utils.agileforge_spec_profile import (
     canonical_spec_hash,
     canonical_spec_json,
 )
+from utils.spec_schemas import (
+    Invariant,
+    InvariantType,
+    RequiredFieldParams,
+    SourceMapEntry,
+    SpecAuthorityCompilationSuccess,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -153,6 +160,7 @@ def _seed_authority(
     compiler_version: str = "1.0.0",
     prompt_hash: str = "a" * 64,
     invariants: str = '[{"id":"INV-1","text":"Must stay in scope"}]',
+    compiled_artifact_json: str | None = None,
 ) -> CompiledSpecAuthority:
     """Persist a compiled authority row without accepting it."""
     authority = CompiledSpecAuthority(
@@ -160,8 +168,10 @@ def _seed_authority(
         compiler_version=compiler_version,
         prompt_hash=prompt_hash,
         compiled_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
-        compiled_artifact_json=json.dumps(
-            {"invariants": [{"id": "INV-1", "text": "Must stay in scope"}]}
+        compiled_artifact_json=compiled_artifact_json
+        or _compiled_authority_json(
+            compiler_version=compiler_version,
+            prompt_hash=prompt_hash,
         ),
         scope_themes="[]",
         invariants=invariants,
@@ -173,6 +183,48 @@ def _seed_authority(
     session.commit()
     session.refresh(authority)
     return authority
+
+
+def _legacy_compiled_authority_json() -> str:
+    return json.dumps({"invariants": [{"id": "INV-1", "text": "Must stay in scope"}]})
+
+
+def _compiled_authority_json(
+    *,
+    compiler_version: str = "1.0.0",
+    prompt_hash: str = "a" * 64,
+) -> str:
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        _compiled_authority_artifact_json,
+    )
+
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority projection"],
+        domain="agent workbench",
+        invariants=[
+            Invariant(
+                id="INV-0123456789abcdef",
+                type=InvariantType.REQUIRED_FIELD,
+                parameters=RequiredFieldParams(field_name="guard_tokens"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[
+            SourceMapEntry(
+                invariant_id="INV-0123456789abcdef",
+                excerpt="The review output must include guard tokens.",
+                location="REQ.guard-tokens",
+            )
+        ],
+        compiler_version=compiler_version,
+        prompt_hash=prompt_hash,
+        ir_schema_version=None,
+        ir_provenance=None,
+    )
+    return _compiled_authority_artifact_json(success)
 
 
 def _accept_spec(
@@ -464,6 +516,34 @@ def test_authority_status_marks_compiler_prompt_mismatch_stale(
     assert result["data"]["status"] == "stale"
     assert result["data"]["reason"] == "accepted_compiler_prompt_mismatch"
     assert result["data"]["stale_reason"] == "accepted_compiler_prompt_mismatch"
+
+
+def test_authority_status_reports_regenerate_for_unsupported_schema(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Accepted legacy artifacts should not appear current or available."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiled_artifact_json=_legacy_compiled_authority_json(),
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result["data"]["authority_status"] == "unsupported_schema"
+    assert result["data"]["current"] is False
+    assert result["data"]["accepted_current"] is False
+    assert "agileforge authority regenerate" in " ".join(
+        result["errors"][0]["remediation"]
+    )
 
 
 def test_authority_status_marks_latest_spec_hash_drift_stale(
@@ -791,6 +871,31 @@ def test_invariants_default_rejects_unaccepted_recompile(
         "compiled_compiler_version": "2.0.0",
         "compiled_prompt_hash": "b" * 64,
     }
+
+
+def test_invariants_reports_regenerate_for_unsupported_schema(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Legacy stored artifacts should block default invariants reads."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiled_artifact_json=_legacy_compiled_authority_json(),
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.invariants(project_id=product_id)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert "agileforge authority regenerate" in " ".join(
+        result["errors"][0]["remediation"]
+    )
 
 
 def test_invariants_returns_explicit_compiled_authority_without_acceptance(

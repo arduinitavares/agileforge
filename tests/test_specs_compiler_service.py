@@ -618,6 +618,37 @@ def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
     assert result.validation_error is None
 
 
+def test_compiled_authority_schema_unsupported_helpers_include_regenerate_details(
+) -> None:
+    """Unsupported-artifact helpers should point operators at regeneration."""
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        COMPILED_AUTHORITY_SCHEMA_VERSION,
+        compiled_authority_schema_unsupported_details,
+        compiled_authority_schema_unsupported_remediation,
+    )
+
+    details = compiled_authority_schema_unsupported_details(
+        project_id=7,
+        spec_version_id=11,
+        observed_schema_version=None,
+    )
+    remediation = compiled_authority_schema_unsupported_remediation(
+        project_id=7,
+        spec_version_id=11,
+    )
+
+    assert details == {
+        "project_id": 7,
+        "spec_version_id": 11,
+        "observed_schema_version": None,
+        "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
+    }
+    assert remediation == [
+        "Run agileforge authority regenerate --project-id 7 --spec-version-id 11 "
+        "--idempotency-key <new-key>."
+    ]
+
+
 def test_services_package_exports_ensure_accepted_spec_authority() -> None:
     """Verify services package exports ensure accepted spec authority."""
     from services import specs  # noqa: PLC0415
@@ -826,6 +857,42 @@ def test_ensure_spec_authority_accepted_rejects_failure_artifact(
     with pytest.raises(
         ValueError,
         match="compiled artifact invalid",
+    ):
+        compiler_service.ensure_spec_authority_accepted(
+            product_id=require_id(sample_product.product_id, "product_id"),
+            spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+            policy="auto",
+            decided_by="system",
+        )
+
+
+def test_ensure_spec_authority_accepted_rejects_unsupported_artifact_with_regenerate(
+    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance must fail closed for unsupported stored artifacts."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "get_engine",
+        session.get_bind,
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+    _create_compiled_authority(
+        session,
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Compiled authority artifact schema is unsupported.*"
+            "agileforge authority regenerate"
+        ),
     ):
         compiler_service.ensure_spec_authority_accepted(
             product_id=require_id(sample_product.product_id, "product_id"),

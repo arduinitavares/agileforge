@@ -147,6 +147,27 @@ class SpecAuthorityAcceptanceError(ValueError):
         """Build the canonical invalid-artifact error."""
         return cls(f"spec_version_id {spec_version_id} compiled artifact invalid")
 
+    @classmethod
+    def unsupported_artifact(
+        cls,
+        *,
+        product_id: int,
+        spec_version_id: int,
+        observed_schema_version: str | None,
+    ) -> SpecAuthorityAcceptanceError:
+        """Build the canonical unsupported-schema acceptance error."""
+        remediation = " ".join(
+            compiled_authority_schema_unsupported_remediation(
+                project_id=product_id,
+                spec_version_id=spec_version_id,
+            )
+        )
+        observed = observed_schema_version or "missing"
+        return cls(
+            "Compiled authority artifact schema is unsupported. "
+            f"Observed schema version: {observed}. {remediation}"
+        )
+
 
 class SpecAuthorityGateError(RuntimeError):
     """Raised when the story-generation authority gate cannot be satisfied."""
@@ -402,6 +423,41 @@ class CompiledArtifactLoadResult:
         return self.status == "schema_unsupported"
 
 
+def compiled_authority_schema_unsupported_details(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> dict[str, Any]:
+    """Return standard details for unsupported compiled-authority artifacts."""
+    return {
+        "project_id": project_id,
+        "spec_version_id": spec_version_id,
+        "observed_schema_version": observed_schema_version,
+        "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
+    }
+
+
+def compiled_authority_schema_unsupported_remediation(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+) -> list[str]:
+    """Return standard regenerate guidance for unsupported authority artifacts."""
+    if spec_version_id is None:
+        return [
+            "Find the approved spec version, then run agileforge authority regenerate."
+        ]
+    return [
+        (
+            "Run agileforge authority regenerate "
+            f"--project-id {project_id} "
+            f"--spec-version-id {spec_version_id} "
+            "--idempotency-key <new-key>."
+        )
+    ]
+
+
 def _resolve_tool_module() -> object | None:
     """Load the legacy tools module when present."""
     try:
@@ -537,6 +593,12 @@ def _load_acceptance_context(
         raise SpecAuthorityAcceptanceError.not_compiled(spec_version_id)
 
     load_result = load_compiled_artifact(authority)
+    if load_result.unsupported:
+        raise SpecAuthorityAcceptanceError.unsupported_artifact(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
     if not load_result.ok or load_result.artifact is None:
         raise SpecAuthorityAcceptanceError.invalid_artifact(spec_version_id)
     return spec_version, authority
