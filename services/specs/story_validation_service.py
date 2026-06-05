@@ -497,11 +497,12 @@ def run_deterministic_alignment_checks(
     alignment_warnings: list[AlignmentFinding] = []
     warnings: list[str] = []
 
-    artifact = (
+    loaded = (
         load_compiled_artifact_fn(authority)
         if callable(load_compiled_artifact_fn)
         else None
     )
+    artifact = _resolve_loaded_artifact(loaded)
     if not artifact or not getattr(artifact, "invariants", None):
         return alignment_failures, alignment_warnings, warnings
 
@@ -1027,6 +1028,16 @@ def _collect_finding_invariant_ids(
     return finding_invariant_ids
 
 
+def _resolve_loaded_artifact(loaded: object | None) -> SpecAuthorityCompilationSuccess | None:
+    """Normalize either a loader result or legacy raw artifact to an artifact."""
+    if getattr(loaded, "ok", False):
+        artifact = getattr(loaded, "artifact", None)
+        return artifact if isinstance(artifact, SpecAuthorityCompilationSuccess) else None
+    if getattr(loaded, "invariants", None) is not None:
+        return loaded if isinstance(loaded, SpecAuthorityCompilationSuccess) else None
+    return None
+
+
 def validate_story_with_spec_authority(
     params: dict[str, Any] | ValidateStoryInput,
     **options: Unpack[_ValidateStoryOptions],
@@ -1112,7 +1123,7 @@ def validate_story_with_spec_authority(
                 ),
             )
 
-        artifact = dependencies["load_artifact"](authority)
+        artifact = _resolve_loaded_artifact(dependencies["load_artifact"](authority))
         invariants_checked = _build_invariants_checked(
             artifact,
             dependencies["render_invariant"],

@@ -9,6 +9,7 @@ from sqlmodel import Session
 from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry, UserStory
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
+    ForbiddenCapabilityParams,
     Invariant,
     InvariantType,
     RequiredFieldParams,
@@ -423,3 +424,60 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
     assert persisted["story"].story_id == story.story_id
     assert persisted["passed"] is True
     assert persisted["evidence"].spec_version_id == spec_version_id
+
+
+def test_run_deterministic_alignment_checks_unwraps_loader_result_success() -> None:
+    """Deterministic checks should inspect invariants from loader success results."""
+    from services.specs.compiler_service import CompiledArtifactLoadResult  # noqa: PLC0415
+    from services.specs.story_validation_service import (  # noqa: PLC0415
+        run_deterministic_alignment_checks,
+    )
+
+    story = UserStory(
+        product_id=1,
+        title="Avoid direct DOM access",
+        story_description="Story must not use direct DOM access.",
+        acceptance_criteria="No direct DOM access is allowed.",
+    )
+    authority_artifact = SpecAuthorityCompilationSuccess(
+        scope_themes=["ui"],
+        invariants=[
+            Invariant(
+                id="INV-0123456789abcdef",
+                type=InvariantType.FORBIDDEN_CAPABILITY,
+                parameters=ForbiddenCapabilityParams(capability="direct DOM access"),
+            )
+        ],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="1.0.0",
+        prompt_hash="0" * 64,
+    )
+    authority = CompiledSpecAuthority(
+        spec_version_id=1,
+        compiler_version="1.0.0",
+        prompt_hash="0" * 64,
+        scope_themes='["ui"]',
+        invariants='["FORBIDDEN_CAPABILITY:direct DOM access"]',
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+        compiled_artifact_json="{}",
+    )
+
+    failures, warnings, messages = run_deterministic_alignment_checks(
+        story,
+        authority,
+        load_compiled_artifact_fn=lambda _authority: CompiledArtifactLoadResult(
+            status="success",
+            artifact=authority_artifact,
+        ),
+    )
+
+    assert len(failures) == 1
+    assert failures[0].code == "FORBIDDEN_CAPABILITY"
+    assert failures[0].invariant == "INV-0123456789abcdef"
+    assert warnings == []
+    assert messages == []
