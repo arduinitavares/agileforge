@@ -665,17 +665,7 @@ def _seed_authority(
             prompt_hash="prompt",
             compiled_at=datetime(2026, 5, 27, tzinfo=UTC),
             compiled_artifact_json=json.dumps(
-                compiled_artifact
-                or {
-                    "spec_version_id": 1,
-                    "items": [
-                        {
-                            "id": "REQ.budget-validation",
-                            "type": "REQ",
-                            "verification": "unit-test",
-                        }
-                    ],
-                }
+                compiled_artifact or _compiled_authority_v2()
             ),
             scope_themes="[]",
             invariants="[]",
@@ -702,6 +692,47 @@ def _seed_authority(
         )
         session.commit()
         return authority_fingerprint
+
+
+def _compiled_authority_v2(
+    *,
+    invariants: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Build a minimal stored compiled-authority v2 artifact for runner tests."""
+    invariant_items = (
+        invariants
+        if invariants is not None
+        else [
+            {
+                "id": "INV-0000000000000001",
+                "type": "REQUIRED_FIELD",
+                "source_item_id": "REQ.budget-validation",
+                "source_level": "MUST",
+                "parameters": {"field_name": "budget"},
+            }
+        ]
+    )
+    return {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["Evidence"],
+        "domain": "evidence",
+        "invariants": invariant_items,
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": str(invariant_items[0]["id"]),
+                "excerpt": "Budget validation is required.",
+                "location": "REQ.budget-validation",
+            }
+        ]
+        if invariant_items
+        else [],
+        "compiler_version": "1",
+        "prompt_hash": "0" * 64,
+    }
 
 
 def test_runner_stores_report_and_event(tmp_path: Path) -> None:
@@ -745,16 +776,7 @@ def test_runner_caches_empty_report_when_authority_has_no_supported_targets(
     SQLModel.metadata.create_all(engine)
     _seed_authority(
         engine,
-        compiled_artifact={
-            "spec_version_id": 1,
-            "items": [
-                {
-                    "id": "GOAL.budget-control",
-                    "type": "GOAL",
-                    "verification": "inspection",
-                }
-            ],
-        },
+        compiled_artifact=_compiled_authority_v2(invariants=[]),
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -775,15 +797,18 @@ def test_runner_caches_empty_report_when_authority_has_no_supported_targets(
 
     assert result["ok"] is True
     warnings = cast("list[dict[str, object]]", result["warnings"])
-    assert [warning["code"] for warning in warnings] == ["EVIDENCE_TARGETS_EMPTY"]
+    assert [warning["code"] for warning in warnings] == [
+        "EVIDENCE_AUTHORITY_ITEMS_MISSING"
+    ]
     warning = warnings[0]
     assert _mapping(warning)["details"] == {
+        "expected_path": "items",
         "supported_item_types": ["REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"],
         "target_terms": ["spec item id", "related INV-* ids"],
     }
     assert _mapping(warning)["remediation"] == [
-        "Ensure compiled authority contains normative items with stable ids.",
-        "Reference those ids or related INV-* ids in repo files "
+        "Ensure compiled authority exposes normative items under an items list.",
+        "Reference normative item ids or related INV-* ids in repo files "
         "to create exact evidence matches.",
     ]
     assert IMPLEMENTATION_EVIDENCE_STATE_KEY in workflow.state
@@ -1031,6 +1056,49 @@ def test_runner_returns_error_envelope_for_non_object_compiled_authority_json(
 
     assert result["ok"] is False
     assert _mapping(result["errors"][0])["code"] == "AUTHORITY_NOT_COMPILED"
+
+
+def test_runner_rejects_unsupported_compiled_authority_schema(
+    tmp_path: Path,
+) -> None:
+    """Legacy accepted authority artifacts must not produce evidence reports."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine, compiled_artifact={"invariants": []})
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "budget.py").write_text("# REQ.budget-validation\n", encoding="utf-8")
+    workflow = _WorkflowStub()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="unsupported-schema",
+    )
+
+    assert result["ok"] is False
+    error = _mapping(result["errors"][0])
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert error["message"] == "Compiled authority artifact schema is unsupported."
+    assert error["details"] == {
+        "project_id": 1,
+        "spec_version_id": 1,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert error["remediation"] == [
+        "Run agileforge authority regenerate "
+        "--project-id 1 --spec-version-id 1 --idempotency-key <new-key>."
+    ]
+    assert IMPLEMENTATION_EVIDENCE_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
 
 
 def test_runner_rejects_idempotency_key_reuse_with_changed_file(

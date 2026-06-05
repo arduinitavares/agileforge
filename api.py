@@ -687,6 +687,59 @@ def _raise_compiled_authority_schema_unsupported(
     )
 
 
+def _phase_authority_spec_version_id(state: dict[str, Any]) -> int | None:
+    """Return the active spec version id from workflow state when available."""
+    raw_spec_version_id = state.get("latest_spec_version_id")
+    if isinstance(raw_spec_version_id, bool):
+        return None
+    if isinstance(raw_spec_version_id, int):
+        return raw_spec_version_id
+    if isinstance(raw_spec_version_id, str) and raw_spec_version_id.isdecimal():
+        return int(raw_spec_version_id)
+    return None
+
+
+def _raise_if_authority_json_unsupported(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    authority_json: object,
+) -> None:
+    """Fail closed when a phase start source has unsupported authority JSON."""
+    if not isinstance(authority_json, str) or not authority_json:
+        return
+    load_result = load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=authority_json)
+    )
+    if load_result.unsupported:
+        _raise_compiled_authority_schema_unsupported(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
+
+
+async def _guard_phase_generation_authority(
+    *,
+    project_id: int,
+    product: object,
+    session_id: str,
+) -> None:
+    """Block phase generation when active authority is an unsupported artifact."""
+    state = await _ensure_session(session_id)
+    spec_version_id = _phase_authority_spec_version_id(state)
+    _raise_if_authority_json_unsupported(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_json=state.get("compiled_authority_cached"),
+    )
+    _raise_if_authority_json_unsupported(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_json=getattr(product, "compiled_authority_json", None),
+    )
+
+
 def _extract_workbench_error(result: dict[str, Any]) -> str:
     """Extract a user-friendly error message from a failed result envelope."""
     errors = result.get("errors") or []
@@ -2299,6 +2352,11 @@ async def generate_project_vision(
 
     blocker = _setup_blocker(product)
     session_id = str(project_id)
+    await _guard_phase_generation_authority(
+        project_id=project_id,
+        product=product,
+        session_id=session_id,
+    )
     try:
         data = await generate_vision_draft_service(
             project_id=project_id,
@@ -2380,6 +2438,11 @@ async def generate_project_backlog(
         raise HTTPException(status_code=404, detail="Project not found")
 
     session_id = str(project_id)
+    await _guard_phase_generation_authority(
+        project_id=project_id,
+        product=product,
+        session_id=session_id,
+    )
     try:
         data = await generate_backlog_draft_service(
             project_id=project_id,
@@ -2463,6 +2526,11 @@ async def generate_project_roadmap(
         raise HTTPException(status_code=404, detail="Project not found")
 
     session_id = str(project_id)
+    await _guard_phase_generation_authority(
+        project_id=project_id,
+        product=product,
+        session_id=session_id,
+    )
     try:
         data = await generate_roadmap_draft_service(
             project_id=project_id,
@@ -2568,6 +2636,11 @@ async def generate_project_story(
         raise HTTPException(status_code=404, detail="Project not found")
 
     session_id = str(project_id)
+    await _guard_phase_generation_authority(
+        project_id=project_id,
+        product=product,
+        session_id=session_id,
+    )
     try:
         result = await generate_story_draft_service(
             project_id=project_id,
@@ -2846,6 +2919,11 @@ async def generate_project_sprint(
         raise HTTPException(status_code=404, detail="Project not found")
 
     session_id = str(project_id)
+    await _guard_phase_generation_authority(
+        project_id=project_id,
+        product=product,
+        session_id=session_id,
+    )
     try:
         data = await generate_sprint_plan_service(
             project_id=project_id,

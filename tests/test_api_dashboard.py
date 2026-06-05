@@ -27,6 +27,7 @@ HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
 REVIEW_FIELD = "review_" "token"
 AUTHORITY_REVIEW_FIXTURE = "agileforge.authority_review.v1:sha256:test"
+LEGACY_COMPILED_AUTHORITY_JSON = '{"invariants":[]}'
 
 
 class _StateContext(Protocol):
@@ -1306,6 +1307,88 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
     assert response.status_code == HTTP_CONFLICT
     payload = response.json()["detail"]
     error = payload["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert error["message"] == "Compiled authority artifact schema is unsupported."
+    assert error["details"] == {
+        "project_id": product.product_id,
+        "spec_version_id": 9,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert error["remediation"] == [
+        (
+            "Run agileforge authority regenerate "
+            f"--project-id {product.product_id} "
+            "--spec-version-id 9 "
+            "--idempotency-key <new-key>."
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "service_attr", "body"),
+    [
+        (
+            "/api/projects/{project_id}/vision/generate",
+            "generate_vision_draft_service",
+            {"user_input": "draft vision"},
+        ),
+        (
+            "/api/projects/{project_id}/backlog/generate",
+            "generate_backlog_draft_service",
+            {"user_input": "draft backlog"},
+        ),
+        (
+            "/api/projects/{project_id}/roadmap/generate",
+            "generate_roadmap_draft_service",
+            {"user_input": "draft roadmap"},
+        ),
+        (
+            "/api/projects/{project_id}/story/generate"
+            "?parent_requirement=Seed%20backlog%20item",
+            "generate_story_draft_service",
+            {"user_input": "draft story"},
+        ),
+        (
+            "/api/projects/{project_id}/sprint/generate",
+            "generate_sprint_plan_service",
+            {"user_input": "draft sprint"},
+        ),
+    ],
+)
+def test_phase_generate_blocks_legacy_cached_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    service_attr: str,
+    body: dict[str, object],
+) -> None:
+    """Phase generation must not start from a legacy cached authority artifact."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Legacy Phase Project")
+    product.spec_file_path = __file__
+    product.compiled_authority_json = LEGACY_COMPILED_AUTHORITY_JSON
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": 9,
+        "compiled_authority_cached": LEGACY_COMPILED_AUTHORITY_JSON,
+    }
+    service_calls: list[str] = []
+
+    async def unexpected_service_call(*_args: object, **_kwargs: object) -> object:
+        service_calls.append(service_attr)
+        msg = f"{service_attr} should not run with unsupported authority"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, service_attr, unexpected_service_call)
+
+    response = client.post(
+        endpoint.format(project_id=product.product_id),
+        json=body,
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
     assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
     assert error["message"] == "Compiled authority artifact schema is unsupported."
     assert error["details"] == {

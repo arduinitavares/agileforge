@@ -52,6 +52,11 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
@@ -668,7 +673,7 @@ class AsBuiltAssessmentRunner:
             return _project_not_found(project_id)
         return None
 
-    def _load_authority(
+    def _load_authority(  # noqa: PLR0911
         self,
         project_id: int,
     ) -> tuple[str, dict[str, Any]] | dict[str, Any]:
@@ -704,9 +709,14 @@ class AsBuiltAssessmentRunner:
                         message="Accepted authority does not match compiled authority.",
                     ),
                 )
-            try:
-                compiled = json.loads(authority.compiled_artifact_json)
-            except json.JSONDecodeError:
+            load_result = load_compiled_artifact(authority)
+            if load_result.unsupported:
+                return _unsupported_authority_schema_envelope(
+                    project_id=project_id,
+                    spec_version_id=accepted.spec_version_id,
+                    observed_schema_version=load_result.observed_schema_version,
+                )
+            if load_result.status == "invalid_json":
                 return error_envelope(
                     command=AS_BUILT_ASSESS_COMMAND,
                     error=_authority_not_compiled(
@@ -714,13 +724,23 @@ class AsBuiltAssessmentRunner:
                         message="Accepted authority artifact JSON is invalid.",
                     ),
                 )
-            if not isinstance(compiled, dict):
+            if load_result.status == "schema_invalid":
                 return error_envelope(
                     command=AS_BUILT_ASSESS_COMMAND,
                     error=_authority_not_compiled(
                         project_id,
-                        message="Accepted authority artifact JSON is not an object.",
+                        message="Accepted authority artifact failed schema validation.",
                     ),
+                )
+            compiled = (
+                load_result.artifact.model_dump(mode="json")
+                if load_result.artifact is not None
+                else None
+            )
+            if not isinstance(compiled, dict):
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(project_id),
                 )
             return str(accepted.authority_fingerprint), compiled
 
@@ -1401,6 +1421,73 @@ def _authority_not_compiled(
     )
 
 
+def _authority_regenerate_next_action(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+) -> dict[str, Any]:
+    """Return the next action for unsupported compiled authority."""
+    return {
+        "command": "agileforge authority regenerate",
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "idempotency_key": "<new-key>",
+        },
+        "reason": "regenerate unsupported compiled authority before continuing.",
+    }
+
+
+def _unsupported_authority_schema_error(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> WorkbenchError:
+    """Return the standard unsupported compiled-authority schema error."""
+    return workbench_error(
+        ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+        message="Compiled authority artifact schema is unsupported.",
+        details=compiled_authority_schema_unsupported_details(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=observed_schema_version,
+        ),
+        remediation=compiled_authority_schema_unsupported_remediation(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        ),
+    )
+
+
+def _unsupported_authority_schema_envelope(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> dict[str, Any]:
+    """Return a failed envelope with regenerate next action."""
+    result = error_envelope(
+        command=AS_BUILT_ASSESS_COMMAND,
+        error=_unsupported_authority_schema_error(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=observed_schema_version,
+        ),
+    )
+    result["data"] = {
+        "project_id": project_id,
+        "authority_status": "unsupported_schema",
+        "next_actions": [
+            _authority_regenerate_next_action(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            )
+        ],
+    }
+    return result
+
+
 def _mutation_failed(message: str, details: dict[str, Any]) -> WorkbenchError:
     return workbench_error(
         ErrorCode.MUTATION_FAILED,
@@ -1905,7 +1992,9 @@ def _targets_from_invariants(compiled: dict[str, Any]) -> list[AuthorityTarget]:
             continue
         invariant_type = _str_or_none(invariant.get("type"))
         parameters = _dict_or_empty(invariant.get("parameters"))
-        source_requirement_id = _str_or_none(parameters.get("source_item_id"))
+        source_requirement_id = _str_or_none(
+            invariant.get("source_item_id")
+        ) or _str_or_none(parameters.get("source_item_id"))
         authority_ref = source_requirement_id or invariant_id
         terms = _unique_terms(
             [

@@ -29,6 +29,11 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -313,12 +318,55 @@ def report_fingerprint(report: ReconciliationReport) -> str:
     return canonical_hash(report.model_dump(mode="json"))
 
 
+def _targets_from_compiled_invariants(
+    compiled_authority: dict[str, Any],
+) -> list[SpecEvidenceTarget]:
+    """Extract exact evidence targets from v2 compiled-authority invariants."""
+    raw_invariants = compiled_authority.get("invariants")
+    if not isinstance(raw_invariants, list):
+        return []
+    targets: list[SpecEvidenceTarget] = []
+    for raw_invariant in raw_invariants:
+        if not isinstance(raw_invariant, Mapping):
+            continue
+        invariant = cast("Mapping[str, object]", raw_invariant)
+        invariant_id = str(invariant.get("id") or "").strip()
+        if not invariant_id:
+            continue
+        parameters = invariant.get("parameters")
+        parameter_map = (
+            cast("Mapping[str, object]", parameters)
+            if isinstance(parameters, Mapping)
+            else {}
+        )
+        source_item_id = str(
+            invariant.get("source_item_id")
+            or parameter_map.get("source_item_id")
+            or invariant_id
+        ).strip()
+        item_type = source_item_id.split(".", 1)[0]
+        if item_type not in NORMATIVE_ITEM_TYPES:
+            item_type = "REQ"
+        targets.append(
+            SpecEvidenceTarget(
+                spec_item_id=source_item_id,
+                item_type=item_type,
+                verification_method="not-yet-defined",
+                matched_terms=sorted({source_item_id, invariant_id}),
+            )
+        )
+    return targets
+
+
 def targets_from_compiled_authority(
     compiled_authority: dict[str, Any],
 ) -> tuple[list[SpecEvidenceTarget], list[WorkbenchWarning]]:
     """Extract exact evidence targets from compiled authority JSON."""
     raw_items = compiled_authority.get("items")
     if not isinstance(raw_items, list):
+        invariant_targets = _targets_from_compiled_invariants(compiled_authority)
+        if invariant_targets:
+            return (invariant_targets, [])
         return (
             [],
             [
@@ -562,7 +610,7 @@ class EvidenceCollectionRunner:
             return _project_not_found(project_id)
         return None
 
-    def _load_authority(
+    def _load_authority(  # noqa: PLR0911
         self,
         project_id: int,
     ) -> tuple[str, int, dict[str, Any]] | dict[str, Any]:
@@ -597,9 +645,17 @@ class EvidenceCollectionRunner:
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_acceptance_mismatch(project_id),
                 )
-            try:
-                compiled_artifact = json.loads(authority.compiled_artifact_json)
-            except json.JSONDecodeError:
+            load_result = load_compiled_artifact(authority)
+            if load_result.unsupported:
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_unsupported_authority_schema(
+                        project_id=project_id,
+                        spec_version_id=accepted.spec_version_id,
+                        observed_schema_version=load_result.observed_schema_version,
+                    ),
+                )
+            if load_result.status == "invalid_json":
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_not_compiled(
@@ -607,13 +663,23 @@ class EvidenceCollectionRunner:
                         message="Accepted authority artifact JSON is invalid.",
                     ),
                 )
-            if not isinstance(compiled_artifact, dict):
+            if load_result.status == "schema_invalid":
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_not_compiled(
                         project_id,
-                        message="Accepted authority artifact JSON is not an object.",
+                        message="Accepted authority artifact failed schema validation.",
                     ),
+                )
+            compiled_artifact = (
+                load_result.artifact.model_dump(mode="json")
+                if load_result.artifact is not None
+                else None
+            )
+            if not isinstance(compiled_artifact, dict):
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_not_compiled(project_id),
                 )
             return (
                 str(accepted.authority_fingerprint),
@@ -895,6 +961,28 @@ def _authority_not_compiled(
         ErrorCode.AUTHORITY_NOT_COMPILED,
         message=message,
         details={"project_id": project_id},
+    )
+
+
+def _unsupported_authority_schema(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> WorkbenchError:
+    """Return the standard unsupported compiled-authority schema error."""
+    return workbench_error(
+        ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+        message="Compiled authority artifact schema is unsupported.",
+        details=compiled_authority_schema_unsupported_details(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=observed_schema_version,
+        ),
+        remediation=compiled_authority_schema_unsupported_remediation(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        ),
     )
 
 

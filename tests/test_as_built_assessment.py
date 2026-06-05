@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import pytest
@@ -100,7 +100,7 @@ CARTOLA_AUTHORITY: dict[str, Any] = {
 GROUPED_INVARIANT_AUTHORITY: dict[str, Any] = {
     "invariants": [
         {
-            "id": "INV-group-a",
+            "id": "INV-aaaaaaaaaaaaaaaa",
             "type": "DATA_CONTRACT",
             "parameters": {
                 "source_item_id": "REQ.grouped-capability",
@@ -108,7 +108,7 @@ GROUPED_INVARIANT_AUTHORITY: dict[str, Any] = {
             },
         },
         {
-            "id": "INV-group-b",
+            "id": "INV-bbbbbbbbbbbbbbbb",
             "type": "DATA_CONTRACT",
             "parameters": {
                 "source_item_id": "REQ.grouped-capability",
@@ -174,7 +174,7 @@ def _seed_authority(
     compiled_authority: dict[str, object] | None = None,
 ) -> str:
     """Seed one accepted authority row for runner tests."""
-    authority_json = json.dumps(compiled_authority or CARTOLA_AUTHORITY)
+    authority_json = json.dumps(_compiled_authority_v2(compiled_authority))
     with Session(engine) as session:
         product = Product(name="As-Built Project")
         session.add(product)
@@ -218,6 +218,77 @@ def _seed_authority(
         session.add(acceptance)
         session.commit()
         return authority_fingerprint
+
+
+def _compiled_authority_v2(
+    authority: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a valid stored compiled-authority v2 artifact for runner tests."""
+    source = authority or CARTOLA_AUTHORITY
+    raw_invariants = source.get("invariants")
+    invariants = raw_invariants if isinstance(raw_invariants, list) else []
+    normalized_invariants = [
+        _compiled_authority_v2_invariant(cast("dict[str, object]", invariant))
+        for invariant in invariants
+        if isinstance(invariant, dict)
+    ]
+    return {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["As-Built"],
+        "domain": "as-built",
+        "invariants": normalized_invariants,
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": str(invariant["id"]),
+                "excerpt": (
+                    f"Authority for {invariant.get('source_item_id') or 'spec'}."
+                ),
+                "location": str(invariant.get("source_item_id") or invariant["id"]),
+            }
+            for invariant in normalized_invariants
+        ],
+        "compiler_version": "1",
+        "prompt_hash": "0" * 64,
+    }
+
+
+def _compiled_authority_v2_invariant(
+    invariant: dict[str, object],
+) -> dict[str, object]:
+    """Normalize legacy test invariant dictionaries into the v2 closed schema."""
+    parameters = cast("dict[str, object]", invariant.get("parameters") or {})
+    source_item_id = str(
+        invariant.get("source_item_id") or parameters.get("source_item_id") or ""
+    )
+    invariant_type = str(invariant["type"])
+    if invariant_type == "STATE_TRANSITION":
+        normalized_parameters = {
+            "state": parameters.get("state") or "state",
+            "trigger": parameters.get("trigger") or "trigger",
+            "outcome": parameters.get("outcome") or "outcome",
+        }
+    elif invariant_type == "DATA_CONTRACT":
+        normalized_parameters = {
+            "subject": parameters.get("subject") or source_item_id or "data",
+            "fields": parameters.get("fields") or [],
+            "rule": parameters.get("rule") or "rule",
+        }
+    else:
+        normalized_parameters = {"field_name": source_item_id or "field"}
+        invariant_type = "REQUIRED_FIELD"
+    return {
+        "id": invariant["id"],
+        "type": invariant_type,
+        "source_item_id": source_item_id or None,
+        "source_level": invariant.get("source_level")
+        or parameters.get("source_level")
+        or "MUST",
+        "parameters": normalized_parameters,
+    }
 
 
 def _fake_assessment(payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
@@ -320,7 +391,10 @@ class _GroupedInvariantCoverageInvoker:
                 "capability_assessments": [
                     CapabilityAssessment(
                         authority_ref="REQ.grouped-capability",
-                        invariant_refs=["INV-group-a", "INV-group-b"],
+                        invariant_refs=[
+                            "INV-aaaaaaaaaaaaaaaa",
+                            "INV-bbbbbbbbbbbbbbbb",
+                        ],
                         capability_title="Grouped Capability",
                         status="observed_with_missing_evidence",
                         confidence="medium",
@@ -1034,6 +1108,71 @@ def test_runner_stores_assessment_cache_and_event(tmp_path: Path) -> None:
         assert event.event_type == WorkflowEventType.AS_BUILT_ASSESSED
 
 
+def test_runner_rejects_unsupported_compiled_authority_schema(
+    tmp_path: Path,
+) -> None:
+    """Legacy accepted authority artifacts should not invoke assessment."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.compiled_artifact_json = json.dumps({"invariants": []})
+        session.add(authority)
+        session.flush()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
+    workflow = _WorkflowStub()
+    invoker = _RecordingBatchInvoker()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=invoker,
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="unsupported-schema",
+    )
+
+    assert result["ok"] is False
+    assert invoker.payloads == []
+    error = result["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert error["message"] == "Compiled authority artifact schema is unsupported."
+    assert error["details"] == {
+        "project_id": 1,
+        "spec_version_id": 1,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert result["data"]["next_actions"] == [
+        {
+            "command": "agileforge authority regenerate",
+            "args": {
+                "project_id": 1,
+                "spec_version_id": 1,
+                "idempotency_key": "<new-key>",
+            },
+            "reason": "regenerate unsupported compiled authority before continuing.",
+        }
+    ]
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
+
+
 def test_runner_invokes_assessor_in_batches_and_merges_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1349,8 +1488,8 @@ def test_runner_splits_grouped_same_requirement_invariant_assessment(
     assert [
         (item["authority_ref"], item["invariant_refs"]) for item in capabilities
     ] == [
-        ("REQ.grouped-capability", ["INV-group-a"]),
-        ("REQ.grouped-capability", ["INV-group-b"]),
+        ("REQ.grouped-capability", ["INV-aaaaaaaaaaaaaaaa"]),
+        ("REQ.grouped-capability", ["INV-bbbbbbbbbbbbbbbb"]),
     ]
     assert AS_BUILT_ASSESSMENT_STATE_KEY in workflow.state
 
@@ -1388,8 +1527,8 @@ def test_runner_splits_grouped_refs_that_include_out_of_batch_invariants(
     assert [
         (item["authority_ref"], item["invariant_refs"]) for item in capabilities
     ] == [
-        ("REQ.grouped-capability", ["INV-group-a"]),
-        ("REQ.grouped-capability", ["INV-group-b"]),
+        ("REQ.grouped-capability", ["INV-aaaaaaaaaaaaaaaa"]),
+        ("REQ.grouped-capability", ["INV-bbbbbbbbbbbbbbbb"]),
     ]
 
 
