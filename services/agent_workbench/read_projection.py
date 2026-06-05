@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 from models import db as model_db
 from models.core import Epic, Feature, Product, Sprint, SprintStory, Theme, UserStory
 from models.enums import SprintStatus, StoryStatus
-from models.specs import SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
@@ -25,6 +25,11 @@ from services.agent_workbench.schema_readiness import (
 )
 from services.agent_workbench.session_reader import ReadOnlySessionReader
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 from services.sprint_input import apply_story_completion_scope_to_candidate_result
 from utils.spec_schemas import ValidationEvidence
 
@@ -192,6 +197,60 @@ def _project_not_found_error(command: str, project_id: int) -> JsonDict:
             remediation=["agileforge project list"],
         ),
     )
+
+
+def _authority_regenerate_next_action(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+) -> JsonDict:
+    """Return the standard next action for unsupported authority artifacts."""
+    return {
+        "command": "agileforge authority regenerate",
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "idempotency_key": "<new-key>",
+        },
+        "reason": "regenerate unsupported compiled authority before continuing.",
+    }
+
+
+def _unsupported_authority_error(
+    *,
+    command: str,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> JsonDict:
+    """Return an error envelope for unsupported compiled-authority artifacts."""
+    result = error_envelope(
+        command=command,
+        error=workbench_error(
+            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+            message="Compiled authority artifact schema is unsupported.",
+            details=compiled_authority_schema_unsupported_details(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                observed_schema_version=observed_schema_version,
+            ),
+            remediation=compiled_authority_schema_unsupported_remediation(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            ),
+        ),
+    )
+    result["data"] = {
+        "project_id": project_id,
+        "authority_status": "unsupported_schema",
+        "next_actions": [
+            _authority_regenerate_next_action(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            )
+        ],
+    }
+    return result
 
 
 def _story_not_found_error(story_id: int) -> JsonDict:
@@ -590,6 +649,29 @@ class ReadProjectionService:
                 project_id=project_id,
                 state=state,
             )
+            spec_version_id = _int_or_none(state.get("latest_spec_version_id"))
+            if spec_version_id is None:
+                latest_spec = _latest_approved_spec(session, project_id)
+                spec_version_id = (
+                    latest_spec.spec_version_id if latest_spec is not None else None
+                )
+            if spec_version_id is not None:
+                authority = session.exec(
+                    select(CompiledSpecAuthority).where(
+                        CompiledSpecAuthority.spec_version_id == spec_version_id
+                    )
+                ).first()
+                if authority is not None:
+                    load_result = load_compiled_artifact(authority)
+                    if load_result.unsupported:
+                        return _unsupported_authority_error(
+                            command=WORKFLOW_STATE_COMMAND,
+                            project_id=project_id,
+                            spec_version_id=spec_version_id,
+                            observed_schema_version=(
+                                load_result.observed_schema_version
+                            ),
+                        )
 
         data = {
             "project_id": project_id,

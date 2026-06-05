@@ -21,6 +21,7 @@ from services.specs.compiler_service import CompiledArtifactLoadResult
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
+HTTP_CONFLICT = 409
 HTTP_TEMP_REDIRECT = 307
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
@@ -1244,6 +1245,85 @@ def test_get_project_authority_review_post_accept_fallback(
     )
 
 
+def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard authority readers must fail closed for legacy artifacts."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Accepted Legacy Product")
+    product.spec_file_path = "specs/cartola/spec.json"
+    product.compiled_authority_json = "{}"
+
+    class FallbackFakeAuthorityApplication(FakeAuthorityApplication):
+        def authority_review(
+            self,
+            *,
+            project_id: int,
+            include_spec: str = "auto",
+            output_format: str = "json",
+        ) -> dict[str, object]:
+            _ = (project_id, include_spec, output_format)
+            return {
+                "ok": False,
+                "errors": [{"code": "AUTHORITY_NOT_PENDING"}],
+            }
+
+    fake_app = FallbackFakeAuthorityApplication()
+    _install_fake_authority_application(monkeypatch, fake_app)
+
+    selection = _AuthoritySelection(
+        specs=[],
+        latest_spec=None,
+        accepted=None,
+        rejected=None,
+        accepted_spec=SimpleNamespace(spec_version_id=9),
+        authority=SimpleNamespace(compiled_artifact_json="{}"),
+        pending_authority=None,
+    )
+
+    monkeypatch.setattr(
+        api_module,
+        "_load_authority_selection",
+        lambda *_args, **_kwargs: selection
+    )
+    monkeypatch.setattr(
+        api_module,
+        "build_authority_review_snapshot",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_render_review_packet",
+        lambda _snapshot: {
+            "project": {},
+            "spec": {},
+            "pending_authority": {},
+        },
+    )
+
+    response = client.get(f"/api/projects/{product.product_id}/authority/review")
+
+    assert response.status_code == HTTP_CONFLICT
+    payload = response.json()["detail"]
+    error = payload["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert error["message"] == "Compiled authority artifact schema is unsupported."
+    assert error["details"] == {
+        "project_id": product.product_id,
+        "spec_version_id": 9,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert error["remediation"] == [
+        (
+            "Run agileforge authority regenerate "
+            f"--project-id {product.product_id} "
+            "--spec-version-id 9 "
+            "--idempotency-key <new-key>."
+        )
+    ]
+
+
 def test_retry_setup_nonexistent_or_invalid_spec_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1346,8 +1426,8 @@ def test_build_story_compliance_boundaries_ignores_non_success_loader_result(
         api_module,
         "load_compiled_artifact",
         lambda _authority: CompiledArtifactLoadResult(
-            status="schema_unsupported",
-            message="unsupported",
+            status="schema_invalid",
+            message="invalid",
         ),
     )
 

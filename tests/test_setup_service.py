@@ -104,7 +104,9 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
         state={
             "fsm_state": "SETUP_REQUIRED",
             "pending_spec_content": "SPEC",
-            "compiled_authority_cached": '{"ok": true}',
+            "compiled_authority_cached": (
+                '{"schema_version":"agileforge.compiled_authority.v2"}'
+            ),
         },
         session_id="7",
     )
@@ -140,7 +142,9 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
         return SimpleNamespace(
             product_id=project_id,
             spec_file_path=__file__,
-            compiled_authority_json='{"ok": true}',
+            compiled_authority_json=(
+                '{"schema_version":"agileforge.compiled_authority.v2"}'
+            ),
         )
 
     def setup_blocker(_product: object) -> str | None:
@@ -205,3 +209,90 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
     assert saved["state"]["fsm_state"] == "VISION_INTERVIEW"
     assert saved["state"]["vision_attempts"][0]["trigger"] == "auto_setup_transition"
     assert saved["state"]["vision_components"] == {"project_name": "Vision Project"}
+
+
+@pytest.mark.asyncio
+async def test_run_project_setup_blocks_legacy_authority() -> None:
+    """Unsupported authority artifacts should block setup before Vision starts."""
+    from services.setup_service import run_project_setup  # noqa: PLC0415
+
+    context = SimpleNamespace(
+        state={
+            "fsm_state": "SETUP_REQUIRED",
+            "latest_spec_version_id": 42,
+            "compiled_authority_cached": '{"invariants":[]}',
+        },
+        session_id="7",
+    )
+    saved: JsonDict = {}
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        del session_id, project_id
+        return context
+
+    def build_tool_context(ctx: object) -> object:
+        return ctx
+
+    def link_spec_to_product(
+        params: JsonDict,
+        tool_context: object = None,
+    ) -> JsonDict:
+        del params, tool_context
+        return {"success": True, "compile_success": True}
+
+    def refresh_project_context(project_id: int, tool_context: object) -> JsonDict:
+        del project_id, tool_context
+        return {"success": True}
+
+    def load_project(project_id: int) -> object:
+        return SimpleNamespace(
+            product_id=project_id,
+            latest_spec_version_id=42,
+            spec_file_path=__file__,
+            compiled_artifact_json='{"invariants":[]}',
+            compiled_authority_json='{"invariants":[]}',
+        )
+
+    def setup_blocker(_product: object) -> str | None:
+        return None
+
+    async def run_vision_agent(
+        _state: object, *, project_id: int, user_input: str
+    ) -> Never:
+        del project_id, user_input
+        msg = "vision agent should not start with unsupported authority"
+        raise AssertionError(msg)
+
+    def save_session_state(session_id: str, state: JsonDict) -> None:
+        saved["session_id"] = session_id
+        saved["state"] = dict(state)
+
+    result = await run_project_setup(
+        session_id="7",
+        project_id=7,
+        spec_file_path=__file__,
+        hydrate_context=hydrate_context,
+        build_tool_context=build_tool_context,
+        link_spec_to_product=link_spec_to_product,
+        refresh_project_context=refresh_project_context,
+        load_project=load_project,
+        setup_blocker=setup_blocker,
+        run_vision_agent=run_vision_agent,
+        now_iso=lambda: "2026-04-05T00:00:00Z",
+        save_session_state=save_session_state,
+    )
+
+    next_action = {
+        "command": "agileforge authority regenerate",
+        "args": {
+            "project_id": 7,
+            "spec_version_id": 42,
+            "idempotency_key": "<new-key>",
+        },
+        "reason": "regenerate unsupported compiled authority before continuing.",
+    }
+    assert result["passed"] is False
+    assert result["error"] == "Compiled authority artifact schema is unsupported."
+    assert result["next_actions"] == [next_action]
+    assert saved["state"]["setup_status"] == "failed"
+    assert saved["state"]["setup_next_actions"] == [next_action]

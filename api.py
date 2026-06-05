@@ -199,7 +199,11 @@ from services.roadmap_runtime import run_roadmap_agent_from_state
 from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
-from services.specs.compiler_service import load_compiled_artifact
+from services.specs.compiler_service import (
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
+    load_compiled_artifact,
+)
 from services.specs.lifecycle_service import link_spec_to_product
 from services.specs.story_validation_service import (
     compute_story_input_hash,
@@ -645,6 +649,40 @@ def _dashboard_authority_response(result: dict[str, Any]) -> dict[str, Any]:
             "data": result.get("data", {}),
             "errors": result.get("errors", []),
             "warnings": result.get("warnings", []),
+        },
+    )
+
+
+def _raise_compiled_authority_schema_unsupported(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> None:
+    """Raise the dashboard conflict for unsupported compiled-authority artifacts."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "status": "error",
+            "errors": [
+                {
+                    "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+                    "message": (
+                        "Compiled authority artifact schema is unsupported."
+                    ),
+                    "details": compiled_authority_schema_unsupported_details(
+                        project_id=project_id,
+                        spec_version_id=spec_version_id,
+                        observed_schema_version=observed_schema_version,
+                    ),
+                    "remediation": (
+                        compiled_authority_schema_unsupported_remediation(
+                            project_id=project_id,
+                            spec_version_id=spec_version_id,
+                        )
+                    ),
+                }
+            ],
         },
     )
 
@@ -1233,11 +1271,19 @@ def _build_packet_findings(
 def _build_story_compliance_boundaries(
     authority: CompiledSpecAuthority | None,
     evidence: ValidationEvidence | None,
+    *,
+    project_id: int = 0,
 ) -> list[dict[str, Any]]:
     if not authority or not evidence:
         return []
 
     load_result = load_compiled_artifact(authority)
+    if load_result.unsupported:
+        _raise_compiled_authority_schema_unsupported(
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
     artifact = load_result.artifact if load_result.ok else None
     if artifact is None:
         return []
@@ -1275,12 +1321,19 @@ def _build_story_compliance_boundaries(
 def _build_task_hard_constraints(
     authority: CompiledSpecAuthority | None,
     *,
+    project_id: int = 0,
     task_metadata: TaskMetadata,
 ) -> list[dict[str, Any]]:
     if not authority or not task_metadata.relevant_invariant_ids:
         return []
 
     load_result = load_compiled_artifact(authority)
+    if load_result.unsupported:
+        _raise_compiled_authority_schema_unsupported(
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
     artifact = load_result.artifact if load_result.ok else None
     if artifact is None:
         return []
@@ -1391,6 +1444,12 @@ def _load_packet_story_context(
 
     authority = _load_pinned_authority(session, story.accepted_spec_version_id)
     load_result = load_compiled_artifact(authority) if authority else None
+    if load_result is not None and load_result.unsupported:
+        _raise_compiled_authority_schema_unsupported(
+            project_id=project_id,
+            spec_version_id=story.accepted_spec_version_id,
+            observed_schema_version=load_result.observed_schema_version,
+        )
     compiled_artifact = (
         load_result.artifact if load_result is not None and load_result.ok else None
     )
@@ -1536,6 +1595,7 @@ def _build_story_packet(
             "story_compliance_boundaries": _build_story_compliance_boundaries(
                 context.authority,
                 evidence,
+                project_id=project_id,
             ),
             "findings": _build_packet_findings(evidence),
         },
@@ -1663,11 +1723,13 @@ def _build_task_packet(
             },
             "task_hard_constraints": _build_task_hard_constraints(
                 context.authority,
+                project_id=project_id,
                 task_metadata=task_metadata,
             ),
             "story_compliance_boundaries": _build_story_compliance_boundaries(
                 context.authority,
                 evidence,
+                project_id=project_id,
             ),
             "findings": _build_packet_findings(evidence),
         },
@@ -2132,6 +2194,19 @@ async def get_project_authority_review(
                 authority = selection.authority
 
                 if accepted_spec is not None and authority is not None:
+                    load_result = load_compiled_artifact(authority)
+                    if load_result.unsupported:
+                        _raise_compiled_authority_schema_unsupported(
+                            project_id=project_id,
+                            spec_version_id=getattr(
+                                accepted_spec,
+                                "spec_version_id",
+                                None,
+                            ),
+                            observed_schema_version=(
+                                load_result.observed_schema_version
+                            ),
+                        )
                     snapshot = build_authority_review_snapshot(
                         project_id=project_id,
                         product=product,

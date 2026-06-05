@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any, Protocol, cast
 
 from sqlalchemy import desc, func
@@ -17,7 +18,10 @@ from models.specs import (
 )
 from services.specs.compiler_service import (
     CompileSpecAuthorityForVersionInput,
+    compiled_authority_schema_unsupported_details,
+    compiled_authority_schema_unsupported_remediation,
     compile_spec_authority_for_version,
+    load_compiled_artifact,
 )
 from services.specs.lifecycle_service import hydrate_spec_state
 
@@ -26,6 +30,45 @@ logger: logging.Logger = logging.getLogger(name=__name__)
 
 class _SupportsState(Protocol):
     state: dict[str, Any]
+
+
+def _unsupported_authority_error(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> dict[str, Any]:
+    """Return the standard unsupported compiled-authority error payload."""
+    return {
+        "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+        "message": "Compiled authority artifact schema is unsupported.",
+        "details": compiled_authority_schema_unsupported_details(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=observed_schema_version,
+        ),
+        "remediation": compiled_authority_schema_unsupported_remediation(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        ),
+    }
+
+
+def _unsupported_authority_result(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    observed_schema_version: str | None,
+) -> dict[str, Any]:
+    """Return a fail-closed select-project response for unsupported authority."""
+    return {
+        "success": False,
+        "error": _unsupported_authority_error(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            observed_schema_version=observed_schema_version,
+        ),
+    }
 
 
 def get_project_details(product_id: int) -> dict[str, Any]:
@@ -147,10 +190,27 @@ def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, A
     )
 
     authority_json = product_details.get("compiled_authority_json")
+    spec_version_id = product_details.get("latest_spec_version_id")
+    if authority_json is not None:
+        load_result = load_compiled_artifact(
+            SimpleNamespace(compiled_artifact_json=authority_json)
+        )
+        if load_result.unsupported:
+            _set_or_clear(state, "compiled_authority_cached", None)
+            state["active_project"]["compiled_authority_json"] = None
+            return _unsupported_authority_result(
+                project_id=product_id,
+                spec_version_id=spec_version_id,
+                observed_schema_version=load_result.observed_schema_version,
+            )
     if authority_json is None and product_details.get("latest_spec_version_id"):
-        authority_json = _load_authority_fallback(
+        fallback = _load_authority_fallback(
             product_id, product_details["latest_spec_version_id"]
         )
+        if isinstance(fallback, dict):
+            _set_or_clear(state, "compiled_authority_cached", None)
+            return fallback
+        authority_json = fallback
         if authority_json:
             state["active_project"]["compiled_authority_json"] = authority_json
     _set_or_clear(state, "compiled_authority_cached", authority_json)
@@ -181,7 +241,10 @@ def _set_or_clear(state: dict[str, Any], key: str, value: object) -> None:
         del state[key]
 
 
-def _load_authority_fallback(product_id: int, spec_version_id: int) -> str | None:
+def _load_authority_fallback(
+    product_id: int,
+    spec_version_id: int,
+) -> str | dict[str, Any] | None:
     """Load compiled authority for the given version, compiling on demand if needed."""
     with Session(get_engine()) as session:
         authority = session.exec(
@@ -190,6 +253,13 @@ def _load_authority_fallback(product_id: int, spec_version_id: int) -> str | Non
             .limit(1)
         ).first()
         if authority and authority.compiled_artifact_json:
+            load_result = load_compiled_artifact(authority)
+            if load_result.unsupported:
+                return _unsupported_authority_result(
+                    project_id=product_id,
+                    spec_version_id=spec_version_id,
+                    observed_schema_version=load_result.observed_schema_version,
+                )
             product = session.get(Product, product_id)
             if product:
                 product.compiled_authority_json = authority.compiled_artifact_json

@@ -1,13 +1,20 @@
 """Tests for phase workflow state."""
 
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry
 from orchestrator_agent.fsm.states import OrchestratorState
+from services.agent_workbench.read_projection import ReadProjectionService
 from services.phases import workflow_state
 
 JsonDict = dict[str, Any]
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+    from sqlmodel import Session
 
 
 def test_failure_meta_uses_fallback_summary_when_source_summary_missing() -> None:
@@ -29,6 +36,85 @@ def test_failure_meta_uses_fallback_summary_when_source_summary_missing() -> Non
         "raw_output_preview": "{broken}",
         "has_full_artifact": False,
     }
+
+
+def test_workflow_state_blocks_legacy_authority_phase_start(
+    session: "Session",
+) -> None:
+    """Workflow state projections should fail closed before phase gates start."""
+    product = Product(
+        name="Legacy Phase Product",
+        description="Product with a legacy authority artifact",
+    )
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = cast("int", product.product_id)
+
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="hash",
+        content="# Spec",
+        content_ref="specs/spec.md",
+        status="approved",
+        approved_at=datetime(2026, 6, 5, tzinfo=UTC),
+        approved_by="tester",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = cast("int", spec.spec_version_id)
+
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="1.0.0",
+            prompt_hash="legacy",
+            compiled_artifact_json='{"invariants":[]}',
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+    )
+    session.commit()
+
+    class FakeSessionReader:
+        def get_project_state(self, _project_id: int) -> JsonDict:
+            return {
+                "fsm_state": "BACKLOG_READY",
+                "latest_spec_version_id": spec_version_id,
+            }
+
+    service = ReadProjectionService(
+        engine=cast("Engine", session.get_bind()),
+        session_reader=cast("Any", FakeSessionReader()),
+    )
+
+    result = service.workflow_state(project_id=product_id)
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert error["message"] == "Compiled authority artifact schema is unsupported."
+    assert error["details"] == {
+        "project_id": product_id,
+        "spec_version_id": spec_version_id,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert result["data"]["next_actions"] == [
+        {
+            "command": "agileforge authority regenerate",
+            "args": {
+                "project_id": product_id,
+                "spec_version_id": spec_version_id,
+                "idempotency_key": "<new-key>",
+            },
+            "reason": "regenerate unsupported compiled authority before continuing.",
+        }
+    ]
 
 
 def test_sprint_state_helpers_delegate_to_shared_workflow_state(

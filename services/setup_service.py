@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, Unpack
 
 from orchestrator_agent.fsm.states import OrchestratorState
@@ -10,6 +11,7 @@ from services.phases.vision_service import (
     record_vision_attempt,
     set_vision_fsm_state,
 )
+from services.specs.compiler_service import load_compiled_artifact
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -31,6 +33,45 @@ class _RunProjectSetupOptions(TypedDict):
     run_vision_agent: Callable[..., Awaitable[dict[str, Any]]]
     now_iso: Callable[[], str]
     save_session_state: Callable[[str, dict[str, Any]], None]
+
+
+def _authority_regenerate_next_action(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+) -> dict[str, Any]:
+    """Return the standard next action for unsupported authority artifacts."""
+    return {
+        "command": "agileforge authority regenerate",
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "idempotency_key": "<new-key>",
+        },
+        "reason": "regenerate unsupported compiled authority before continuing.",
+    }
+
+
+def _unsupported_authority_next_actions(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    authority_json: object,
+) -> list[dict[str, Any]]:
+    """Return regenerate next actions when the compiled artifact is unsupported."""
+    if not isinstance(authority_json, str) or not authority_json:
+        return []
+    load_result = load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=authority_json)
+    )
+    if not load_result.unsupported:
+        return []
+    return [
+        _authority_regenerate_next_action(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        )
+    ]
 
 
 def _set_setup_failure_meta(
@@ -84,6 +125,7 @@ async def run_project_setup(
 
     setup_passed = bool(result.get("success") and result.get("compile_success"))
     error_message = None
+    setup_next_actions: list[dict[str, Any]] = []
     next_state = OrchestratorState.SETUP_REQUIRED.value
     vision_auto_run: dict[str, Any] = {
         "attempted": False,
@@ -100,7 +142,29 @@ async def run_project_setup(
         )
     else:
         latest_product = options["load_project"](options["project_id"])
-        blocker = options["setup_blocker"](latest_product)
+        spec_version_id = getattr(
+            latest_product,
+            "latest_spec_version_id",
+            context.state.get("latest_spec_version_id"),
+        )
+        authority_json = (
+            getattr(latest_product, "compiled_artifact_json", None)
+            or getattr(latest_product, "compiled_authority_json", None)
+            or context.state.get("compiled_authority_cached")
+        )
+        normalized_spec_version_id = (
+            spec_version_id if isinstance(spec_version_id, int) else None
+        )
+        setup_next_actions = _unsupported_authority_next_actions(
+            project_id=options["project_id"],
+            spec_version_id=normalized_spec_version_id,
+            authority_json=authority_json,
+        )
+        blocker = (
+            "Compiled authority artifact schema is unsupported."
+            if setup_next_actions
+            else options["setup_blocker"](latest_product)
+        )
         if blocker:
             setup_passed = False
             error_message = blocker
@@ -159,6 +223,7 @@ async def run_project_setup(
     context.state["setup_status"] = "passed" if setup_passed else "failed"
     context.state["setup_error"] = error_message
     context.state["setup_spec_file_path"] = options["spec_file_path"]
+    context.state["setup_next_actions"] = setup_next_actions
 
     options["save_session_state"](session_id, context.state)
 
@@ -168,6 +233,7 @@ async def run_project_setup(
         "detail": result,
         "fsm_state": next_state,
         "vision_auto_run": vision_auto_run,
+        "next_actions": setup_next_actions,
         **setup_failure_meta,
     }
 
