@@ -28,7 +28,6 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from utils.spec_schemas import (
-    BehavioralAuthorityParams,
     Invariant,
     InvariantType,
     SourceMapEntry,
@@ -130,6 +129,15 @@ _DEPRECATED_COMPACT_IR_KEYS = frozenset(
         "requirement_candidates",
         "authority_mappings",
         "ir_packet_limits",
+    }
+)
+_BEHAVIORAL_INVARIANT_TYPES = frozenset(
+    {
+        InvariantType.USER_INTERACTION,
+        InvariantType.STATE_TRANSITION,
+        InvariantType.DATA_CONTRACT,
+        InvariantType.ROUTE_CONTRACT,
+        InvariantType.VISIBILITY_RULE,
     }
 )
 
@@ -271,6 +279,49 @@ def _repair_invalid_prompt_hash_for_validation(payload: object) -> None:
     payload_dict["prompt_hash"] = compute_prompt_hash(
         SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
     )
+
+
+def _repair_param_level_provenance_for_validation(payload: object) -> None:
+    """Move misplaced provenance into invariant top-level fields before validation."""
+    if not isinstance(payload, dict):
+        return
+
+    payload_dict = cast("dict[str, Any]", payload)
+    result = payload_dict.get("result")
+    if isinstance(result, dict):
+        _repair_param_level_provenance_for_validation(result)
+
+    if "error" in payload_dict:
+        return
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP.issubset(payload_dict):
+        return
+
+    invariants = payload_dict.get("invariants")
+    if not isinstance(invariants, list):
+        return
+
+    repaired_count = 0
+    for item in invariants:
+        if not isinstance(item, dict):
+            continue
+        parameters = item.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+
+        source_item_id = parameters.pop("source_item_id", None)
+        source_level = parameters.pop("source_level", None)
+        if source_item_id is not None and item.get("source_item_id") is None:
+            item["source_item_id"] = source_item_id
+            repaired_count += 1
+        if source_level is not None and item.get("source_level") is None:
+            item["source_level"] = source_level
+            repaired_count += 1
+
+    if repaired_count:
+        logger.info(
+            "Repaired %s misplaced compiler provenance field(s) before validation",
+            repaired_count,
+        )
 
 
 def _temporary_invariant_id(index: int) -> str:
@@ -478,7 +529,7 @@ def _support_overlap_ratio(expected: list[str], excerpt: str) -> float:
     return matched / len(expected_unique)
 
 
-def _behavioral_support_tokens(parameters: BehavioralAuthorityParams) -> list[str]:
+def _behavioral_support_tokens(parameters: Any) -> list[str]:
     """Return semantic tokens from behavioral parameters for evidence ranking."""
     dumped = parameters.model_dump(mode="json")
     text_parts: list[str] = []
@@ -491,6 +542,11 @@ def _behavioral_support_tokens(parameters: BehavioralAuthorityParams) -> list[st
         if isinstance(value, list):
             text_parts.extend(item for item in value if isinstance(item, str))
     return _tokenize_support_text(" ".join(text_parts))
+
+
+def _is_behavioral_invariant(invariant: Invariant) -> bool:
+    """Return whether an invariant uses the behavioral provenance contract."""
+    return invariant.type in _BEHAVIORAL_INVARIANT_TYPES
 
 
 def _forbidden_capability_support_tokens(capability: str) -> list[str]:
@@ -623,7 +679,7 @@ def _source_map_support_score(inv: Invariant, excerpt: str) -> float:
         if _relation_operator_supported(expression, excerpt):
             base += 0.1
         return base
-    if isinstance(parameters, BehavioralAuthorityParams):
+    if _is_behavioral_invariant(inv):
         return _support_overlap_ratio(_behavioral_support_tokens(parameters), excerpt)
     return 0.0
 
@@ -928,26 +984,31 @@ def _behavioral_source_metadata_errors(
     source_items: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
     """Return behavioral source metadata mismatch errors for an invariant."""
-    parameters = invariant.parameters
-    if not isinstance(parameters, BehavioralAuthorityParams):
+    if not _is_behavioral_invariant(invariant):
         return []
 
-    source_item = source_items.get(parameters.source_item_id)
+    source_item_id = invariant.source_item_id
+    source_level = invariant.source_level
+    if not source_item_id:
+        return [f"{invariant.id} is missing source_item_id."]
+    if not source_level:
+        return [f"{invariant.id} is missing source_level."]
+
+    source_item = source_items.get(source_item_id)
     if source_item is None:
         return [
             (
                 f"{invariant.id} references unknown source_item_id "
-                f"{parameters.source_item_id}."
+                f"{source_item_id}."
             )
         ]
 
     actual_level = source_item.get("level")
-    if actual_level != parameters.source_level:
+    if actual_level != source_level:
         return [
             (
-                f"{invariant.id} source_item_id {parameters.source_item_id} "
-                f"source_level {parameters.source_level} does not match "
-                f"{actual_level}."
+                f"{invariant.id} source_item_id {source_item_id} "
+                f"source_level {source_level} does not match {actual_level}."
             )
         ]
     return []
@@ -1112,13 +1173,13 @@ def _best_supported_source_candidate(
 ) -> _SourceEvidenceCandidate | None:
     """Select the most specific source-text candidate supporting an invariant."""
     parameters = invariant.parameters
-    if isinstance(parameters, BehavioralAuthorityParams):
+    if _is_behavioral_invariant(invariant) and invariant.source_item_id:
         item_candidates = [
             candidate
             for candidate in candidates
             if (
                 _structured_item_id_from_reference(candidate.location)
-                == parameters.source_item_id
+                == invariant.source_item_id
             )
         ]
         if item_candidates:
@@ -1475,6 +1536,7 @@ def normalize_compiler_output(
     _drop_deprecated_compact_ir_for_success_payload(payload)
     _repair_invalid_prompt_hash_for_validation(payload)
     _default_missing_source_map_for_success_payload(payload)
+    _repair_param_level_provenance_for_validation(payload)
     _repair_invalid_invariant_ids_for_validation(payload)
 
     try:

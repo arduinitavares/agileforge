@@ -335,16 +335,16 @@ def test_legacy_success_without_ir_stays_valid() -> None:
     _assert_compact_ir_cleared(success)
 
 
-def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> None:
-    """Behavioral invariant params retain source identity and normative level."""
+def test_behavioral_invariants_accept_top_level_source_metadata() -> None:
+    """Behavioral invariants keep source metadata at the invariant level."""
     payload = _legacy_success_payload()
     payload["invariants"] = [
         {
             "id": "INV-aaaaaaaaaaaaaaaa",
             "type": "USER_INTERACTION",
+            "source_item_id": "REQ.item-interactions",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.item-interactions",
-                "source_level": "MUST",
                 "trigger": "double-click label",
                 "target": "todo item label",
                 "expected_response": "parent li enters editing mode",
@@ -353,9 +353,9 @@ def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> Non
         {
             "id": "INV-bbbbbbbbbbbbbbbb",
             "type": "STATE_TRANSITION",
+            "source_item_id": "REQ.editing",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.editing",
-                "source_level": "MUST",
                 "state": "editing",
                 "trigger": "Escape key",
                 "outcome": "editing exits and unsaved changes are discarded",
@@ -364,9 +364,9 @@ def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> Non
         {
             "id": "INV-cccccccccccccccc",
             "type": "DATA_CONTRACT",
+            "source_item_id": "DATA.todo-record",
+            "source_level": "SHOULD",
             "parameters": {
-                "source_item_id": "DATA.todo-record",
-                "source_level": "SHOULD",
                 "subject": "persisted todo record",
                 "fields": ["id", "title", "completed"],
                 "rule": "records use id, title, and completed keys when possible",
@@ -375,9 +375,9 @@ def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> Non
         {
             "id": "INV-dddddddddddddddd",
             "type": "ROUTE_CONTRACT",
+            "source_item_id": "REQ.routing",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.routing",
-                "source_level": "MUST",
                 "route": "#/active",
                 "route_name": "active",
                 "behavior": "shows active todos",
@@ -386,9 +386,9 @@ def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> Non
         {
             "id": "INV-eeeeeeeeeeeeeeee",
             "type": "VISIBILITY_RULE",
+            "source_item_id": "REQ.empty-state-visibility",
+            "source_level": "SHOULD",
             "parameters": {
-                "source_item_id": "REQ.empty-state-visibility",
-                "source_level": "SHOULD",
                 "target": "#main",
                 "condition": "todo list is empty",
                 "visibility": "hidden",
@@ -403,8 +403,8 @@ def test_behavioral_invariant_parameter_models_preserve_source_metadata() -> Non
     assert isinstance(success.invariants[2].parameters, DataContractParams)
     assert isinstance(success.invariants[3].parameters, RouteContractParams)
     assert isinstance(success.invariants[4].parameters, VisibilityRuleParams)
-    assert success.invariants[0].parameters.source_item_id == "REQ.item-interactions"
-    assert success.invariants[0].parameters.source_level == "MUST"
+    assert success.invariants[0].source_item_id == "REQ.item-interactions"
+    assert success.invariants[0].source_level == "MUST"
     assert success.invariants[2].parameters.fields == ["id", "title", "completed"]
 
 
@@ -415,9 +415,9 @@ def test_behavioral_invariant_parameters_must_match_declared_type() -> None:
         {
             "id": "INV-aaaaaaaaaaaaaaaa",
             "type": "USER_INTERACTION",
+            "source_item_id": "REQ.item-interactions",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.item-interactions",
-                "source_level": "MUST",
                 "state": "editing",
                 "trigger": "Escape key",
                 "outcome": "editing exits and changes are discarded",
@@ -429,8 +429,8 @@ def test_behavioral_invariant_parameters_must_match_declared_type() -> None:
         SpecAuthorityCompilationSuccess.model_validate(payload)
 
 
-def test_normalizer_rewrites_behavioral_invariant_ids_semantically() -> None:
-    """Behavioral authority types use the same deterministic semantic ID rule."""
+def test_normalizer_repairs_fresh_behavioral_provenance_before_validation() -> None:
+    """Fresh compiler output moves behavioral provenance to top-level fields."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -458,15 +458,50 @@ def test_normalizer_rewrites_behavioral_invariant_ids_semantically() -> None:
     assert invariant.id == compute_invariant_id_from_payload(
         InvariantType.USER_INTERACTION,
         UserInteractionParams(
-            source_item_id="REQ.item-interactions",
-            source_level="MUST",
             trigger="checkbox click",
             target="todo checkbox",
             expected_response="todo completed value toggles",
         ),
     )
-    assert invariant.parameters.source_item_id == "REQ.item-interactions"
-    assert invariant.parameters.source_level == "MUST"
+    assert invariant.source_item_id == "REQ.item-interactions"
+    assert invariant.source_level == "MUST"
+    assert invariant.parameters.model_dump(mode="json") == {
+        "trigger": "checkbox click",
+        "target": "todo checkbox",
+        "expected_response": "todo completed value toggles",
+    }
+
+
+def test_normalizer_semantic_ids_ignore_provenance_fields() -> None:
+    """Top-level provenance must not affect deterministic invariant IDs."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload_a = _legacy_success_payload()
+    payload_a["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "source_item_id": "REQ.item-interactions",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "checkbox click",
+                "target": "todo checkbox",
+                "expected_response": "todo completed value toggles",
+            },
+        }
+    ]
+    payload_b = json.loads(json.dumps(payload_a))
+    payload_b["invariants"][0]["source_item_id"] = "REQ.other-item"
+    payload_b["invariants"][0]["source_level"] = "SHOULD"
+
+    normalized_a = normalize_compiler_output(json.dumps(payload_a))
+    normalized_b = normalize_compiler_output(json.dumps(payload_b))
+
+    assert isinstance(normalized_a.root, SpecAuthorityCompilationSuccess)
+    assert isinstance(normalized_b.root, SpecAuthorityCompilationSuccess)
+    assert normalized_a.root.invariants[0].id == normalized_b.root.invariants[0].id
 
 
 def test_normalizer_rejects_behavioral_source_level_mismatch() -> None:
@@ -930,6 +965,13 @@ def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> 
     assert source_item_ids_by_type[InvariantType.FORBIDDEN_CAPABILITY] == [
         "DATA.editing-state"
     ]
+    invariant_by_type = {
+        invariant.type: invariant for invariant in normalized.root.invariants
+    }
+    assert invariant_by_type[InvariantType.DATA_CONTRACT].source_item_id == (
+        "DATA.todo-record"
+    )
+    assert invariant_by_type[InvariantType.DATA_CONTRACT].source_level == "SHOULD"
 
 
 def test_success_schema_accepts_compact_ir_with_provenance() -> None:
