@@ -153,7 +153,7 @@ def _seed_spec(
     return spec
 
 
-def _seed_authority(
+def _seed_authority(  # noqa: PLR0913
     session: Session,
     *,
     spec_version_id: int,
@@ -544,6 +544,79 @@ def test_authority_status_reports_regenerate_for_unsupported_schema(
     assert "agileforge authority regenerate" in " ".join(
         result["errors"][0]["remediation"]
     )
+
+
+def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A newer pending unsupported artifact must not be masked by accepted authority."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
+    pending_spec = _seed_spec(session, product_id=product_id, content="pending")
+    _seed_authority(
+        session,
+        spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
+    )
+    pending_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(pending_spec.spec_version_id, "spec_version_id"),
+        compiled_artifact_json=_legacy_compiled_authority_json(),
+    )
+    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result["data"]["status"] == "unsupported_schema"
+    assert result["data"]["authority_status"] == "unsupported_schema"
+    assert result["data"]["current"] is False
+    assert result["data"]["accepted_current"] is False
+    assert result["data"]["pending_authority_id"] == pending_authority.authority_id
+    assert result["data"]["latest_spec_version_id"] == pending_spec.spec_version_id
+    assert "agileforge authority regenerate" in " ".join(
+        result["errors"][0]["remediation"]
+    )
+
+
+def test_authority_status_unsupported_schema_preserves_status_payload_shape(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Unsupported status responses should keep the normal status payload fields."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    accepted_spec = _seed_spec(session, product_id=product_id, content="accepted")
+    pending_spec = _seed_spec(session, product_id=product_id, content="pending")
+    accepted_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(accepted_spec.spec_version_id, "spec_version_id"),
+    )
+    pending_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(pending_spec.spec_version_id, "spec_version_id"),
+        compiled_artifact_json=_legacy_compiled_authority_json(),
+    )
+    _accept_spec(session, product_id=product_id, spec=accepted_spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    data = result["data"]
+    assert result["ok"] is False
+    assert data["status"] == "unsupported_schema"
+    assert data["reason"] == "latest_spec_hash_mismatch"
+    assert data["stale_reason"] == "latest_spec_hash_mismatch"
+    assert data["latest_spec_version_id"] == pending_spec.spec_version_id
+    assert data["accepted_spec_version_id"] == accepted_spec.spec_version_id
+    assert data["authority_id"] == accepted_authority.authority_id
+    assert data["pending_authority_id"] == pending_authority.authority_id
+    assert data["disk_spec"]["status"] == "not_configured"
+    assert data["authority_fingerprint"].startswith("sha256:")
+    assert data["pending_authority_fingerprint"].startswith("sha256:")
 
 
 def test_authority_status_marks_latest_spec_hash_drift_stale(

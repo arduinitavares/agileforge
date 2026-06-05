@@ -243,7 +243,7 @@ def _authority_acceptance_mismatch_error(
     )
 
 
-def _unsupported_compiled_authority_error(
+def _unsupported_compiled_authority_error(  # noqa: PLR0913
     *,
     command: str,
     project_id: int,
@@ -251,6 +251,7 @@ def _unsupported_compiled_authority_error(
     authority_id: int | None,
     observed_schema_version: str | None,
     data: JsonDict,
+    warnings: list[WorkbenchWarning] | None = None,
 ) -> JsonDict:
     """Return a structured unsupported-artifact error with stable data."""
     envelope = error_envelope(
@@ -268,6 +269,7 @@ def _unsupported_compiled_authority_error(
                 spec_version_id=spec_version_id,
             ),
         ),
+        warnings=warnings,
     )
     envelope["data"] = data
     return envelope
@@ -512,6 +514,23 @@ def _resolve_status(
     disk_spec: JsonDict,
 ) -> JsonDict:
     """Classify status according to accepted, compiled, latest, and disk state."""
+    data, warnings = _build_status_data(
+        project_id=project_id,
+        product=product,
+        selection=selection,
+        disk_spec=disk_spec,
+    )
+    return _success(data, warnings)
+
+
+def _build_status_data(
+    *,
+    project_id: int,
+    product: Product,
+    selection: _AuthoritySelection,
+    disk_spec: JsonDict,
+) -> tuple[JsonDict, list[WorkbenchWarning]]:
+    """Build the stable status payload and warnings."""
     classification = _classify_status(selection=selection, disk_spec=disk_spec)
     invariant_count, warnings = _invariant_count(selection.authority)
     disk_warning = _disk_spec_warning(disk_spec)
@@ -525,8 +544,7 @@ def _resolve_status(
         classification=classification,
         invariant_count=invariant_count,
     )
-    data = _status_data(context)
-    return _success(data, warnings)
+    return _status_data(context), warnings
 
 
 def _classify_status(
@@ -676,6 +694,19 @@ def _status_data(context: _StatusContext) -> JsonDict:
         "disk_spec": context.disk_spec,
         "authority_fingerprint": _authority_status_fingerprint(context),
     }
+
+
+def _first_unsupported_status_authority(
+    selection: _AuthoritySelection,
+) -> tuple[CompiledSpecAuthority, object] | None:
+    """Return the first unsupported authority row relevant to status projection."""
+    for authority in (selection.pending_authority, selection.authority):
+        if authority is None:
+            continue
+        load_result = load_compiled_artifact(authority)
+        if load_result.unsupported:
+            return authority, load_result
+    return None
 
 
 def _project_specs(session: Session, project_id: int) -> list[SpecRegistry]:
@@ -828,31 +859,6 @@ class AuthorityProjectionService:
                 return _project_not_found_error(AUTHORITY_STATUS_COMMAND, project_id)
 
             selection = _load_authority_selection(session, project_id=project_id)
-            status_authority = selection.authority or selection.pending_authority
-            if status_authority is not None:
-                load_result = load_compiled_artifact(status_authority)
-                if load_result.unsupported:
-                    return _unsupported_compiled_authority_error(
-                        command=AUTHORITY_STATUS_COMMAND,
-                        project_id=project_id,
-                        spec_version_id=status_authority.spec_version_id,
-                        authority_id=status_authority.authority_id,
-                        observed_schema_version=load_result.observed_schema_version,
-                        data={
-                            "project_id": project_id,
-                            "authority_status": "unsupported_schema",
-                            "status": "unsupported_schema",
-                            "current": False,
-                            "accepted_current": False,
-                            "authority_id": status_authority.authority_id,
-                            "accepted_spec_version_id": (
-                                selection.accepted.spec_version_id
-                                if selection.accepted is not None
-                                else None
-                            ),
-                            "spec_version_id": status_authority.spec_version_id,
-                        },
-                    )
             disk_spec = self._resolve_spec_path(
                 _status_spec_path(product=product, selection=selection),
                 accepted_hash=(
@@ -861,12 +867,35 @@ class AuthorityProjectionService:
                     else None
                 ),
             )
-            return _resolve_status(
+            data, warnings = _build_status_data(
                 project_id=project_id,
                 product=product,
                 selection=selection,
                 disk_spec=disk_spec,
             )
+            unsupported = _first_unsupported_status_authority(selection)
+            if unsupported is not None:
+                authority, load_result = unsupported
+                data.update(
+                    {
+                        "status": "unsupported_schema",
+                        "authority_status": "unsupported_schema",
+                        "current": False,
+                        "accepted_current": False,
+                    }
+                )
+                return _unsupported_compiled_authority_error(
+                    command=AUTHORITY_STATUS_COMMAND,
+                    project_id=project_id,
+                    spec_version_id=authority.spec_version_id,
+                    authority_id=authority.authority_id,
+                    observed_schema_version=getattr(
+                        load_result, "observed_schema_version", None
+                    ),
+                    data=data,
+                    warnings=warnings,
+                )
+            return _success(data, warnings)
 
     def invariants(
         self,
@@ -989,7 +1018,7 @@ class AuthorityProjectionService:
             accepted=accepted,
         )
 
-    def _invariants_from_session(
+    def _invariants_from_session(  # noqa: PLR0911
         self,
         *,
         session: Session,
