@@ -540,6 +540,259 @@ def test_normalizer_rejects_forbidden_capability_from_should_source() -> None:
     assert "CONSTRAINT.html-css-js-style" in normalized.root.blocking_gaps[0]
 
 
+def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
+    """DECISION rationale must not become a hard forbidden authority invariant."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.decision-filter",
+                "title": "Decision Filter Spec",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-05",
+                "updated_at": "2026-06-05",
+                "summary": "Exercise decision filtering.",
+                "problem_statement": "Research decisions should not become hard bans.",
+                "items": [
+                    {
+                        "id": "DECISION.research-before-algorithm",
+                        "type": "DECISION",
+                        "status": "accepted",
+                        "title": "Research before algorithm",
+                        "statement": (
+                            "Research the best model and stack before deciding "
+                            "the final algorithm."
+                        ),
+                    },
+                    {
+                        "id": "REQ.include-review-token",
+                        "type": "REQ",
+                        "status": "accepted",
+                        "title": "Review token",
+                        "statement": "The system MUST include review token evidence.",
+                        "level": "MUST",
+                        "verification": "inspection",
+                        "acceptance": [
+                            "Review packets include review token evidence."
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["research safety"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-1111111111111111",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {
+                    "capability": "final algorithm selection before research"
+                },
+            },
+            {
+                "id": "INV-2222222222222222",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "review token evidence"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": (
+                    "Research the best model and stack before deciding "
+                    "the final algorithm."
+                ),
+                "location": "DECISION.research-before-algorithm.statement",
+            },
+            {
+                "invariant_id": "INV-2222222222222222",
+                "excerpt": "The system MUST include review token evidence.",
+                "location": "REQ.include-review-token.statement",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert [invariant.type for invariant in normalized.root.invariants] == [
+        InvariantType.REQUIRED_FIELD
+    ]
+    assert all(
+        "DECISION.research-before-algorithm" not in (entry.location or "")
+        for entry in normalized.root.source_map
+    )
+    assert normalized.root.assumptions.count(
+        "Excluded non-normative DECISION item from hard forbidden authority."
+    ) == 1
+
+
+def test_normalizer_keeps_decision_hard_ban_with_unknown_source_ref() -> None:
+    """Unknown mixed evidence must not be discarded by DECISION hard-ban filter."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.decision-filter-unknown",
+                "title": "Decision Filter Unknown Spec",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-05",
+                "updated_at": "2026-06-05",
+                "summary": "Exercise decision filter safety.",
+                "problem_statement": "Unknown source refs must stay fail-closed.",
+                "items": [
+                    {
+                        "id": "DECISION.research-before-algorithm",
+                        "type": "DECISION",
+                        "status": "accepted",
+                        "title": "Research before algorithm",
+                        "statement": "Research before deciding final algorithm.",
+                    }
+                ],
+            }
+        )
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["research safety"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-1111111111111111",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "final algorithm"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": "Research before deciding final algorithm.",
+                "location": "DECISION.research-before-algorithm.statement",
+            },
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": "Unknown hard ban requirement.",
+                "location": "REQ.unknown-hard-ban.statement",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_normalizer_keeps_decision_hard_ban_with_unparseable_source_ref() -> None:
+    """Unparseable mixed evidence must not be discarded by DECISION filter."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.decision-filter-unparseable",
+                "title": "Decision Filter Unparseable Spec",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-05",
+                "updated_at": "2026-06-05",
+                "summary": "Exercise decision filter safety.",
+                "problem_statement": "Unparseable refs must stay fail-closed.",
+                "items": [
+                    {
+                        "id": "DECISION.research-before-algorithm",
+                        "type": "DECISION",
+                        "status": "accepted",
+                        "title": "Research before algorithm",
+                        "statement": "Research before deciding final algorithm.",
+                    }
+                ],
+            }
+        )
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["research safety"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-1111111111111111",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "final algorithm"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": "Research before deciding final algorithm.",
+                "location": "DECISION.research-before-algorithm.statement",
+            },
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": "Unstructured hard ban evidence.",
+                "location": "architecture notes",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
 def test_normalizer_allows_forbidden_capability_from_non_goal_source() -> None:
     """Accepted NON_GOAL items are hard exclusion evidence without a level."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415

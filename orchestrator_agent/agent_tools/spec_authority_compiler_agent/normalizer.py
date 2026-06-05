@@ -73,6 +73,9 @@ _META_POLICY_ASSUMPTION = (
 _DUPLICATE_INVARIANT_ASSUMPTION = (
     "Removed duplicate compiled invariant entries with identical type and parameters."
 )
+_NON_NORMATIVE_DECISION_ASSUMPTION = (
+    "Excluded non-normative DECISION item from hard forbidden authority."
+)
 _FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
 _RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
 _SUPPORT_RATIO_THRESHOLD = 0.5
@@ -748,13 +751,109 @@ def _source_map_item_ids_by_invariant(
     """Return source item IDs from source_map entries by invariant ID."""
     by_invariant: dict[str, set[str]] = {}
     for entry in success.source_map:
-        source_item_id = _structured_item_id_from_reference(entry.location)
-        if source_item_id is None:
-            source_item_id = _structured_item_id_from_reference(entry.excerpt)
+        source_item_id = _source_map_entry_item_id(entry)
         if source_item_id is None:
             continue
         by_invariant.setdefault(entry.invariant_id, set()).add(source_item_id)
     return by_invariant
+
+
+def _source_map_entry_item_id(entry: SourceMapEntry) -> str | None:
+    """Return the structured source item ID referenced by one source_map entry."""
+    source_item_id = _structured_item_id_from_reference(entry.location)
+    if source_item_id is None:
+        source_item_id = _structured_item_id_from_reference(entry.excerpt)
+    return source_item_id
+
+
+def _source_map_entries_by_invariant(
+    entries: list[SourceMapEntry],
+) -> dict[str, list[SourceMapEntry]]:
+    """Return source_map entries grouped by invariant ID."""
+    grouped: dict[str, list[SourceMapEntry]] = {}
+    for entry in entries:
+        grouped.setdefault(entry.invariant_id, []).append(entry)
+    return grouped
+
+
+def _filter_non_normative_decision_hard_bans(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+    original_invariants: list[Invariant] | None = None,
+    original_source_map: list[SourceMapEntry] | None = None,
+) -> int:
+    """Remove hard bans sourced only from non-normative DECISION items."""
+    source_items = _structured_profile_items_by_id(source_text)
+    if not source_items or not success.invariants:
+        return 0
+
+    current_entries = _source_map_entries_by_invariant(success.source_map)
+    original_entries = _source_map_entries_by_invariant(
+        original_source_map if original_source_map is not None else success.source_map
+    )
+    removed_ids: set[str] = set()
+    kept_invariants: list[Invariant] = []
+
+    def entries_are_only_non_normative_decisions(
+        entries: list[SourceMapEntry],
+    ) -> bool:
+        if not entries:
+            return False
+        source_item_ids: list[str] = []
+        for entry in entries:
+            source_item_id = _source_map_entry_item_id(entry)
+            if source_item_id is None:
+                return False
+            source_item_ids.append(source_item_id)
+
+        known_items = [
+            source_items[source_item_id]
+            for source_item_id in source_item_ids
+            if source_item_id in source_items
+        ]
+        if len(known_items) != len(source_item_ids):
+            return False
+        return all(
+            item.get("type") == "DECISION" and item.get("level") is None
+            for item in known_items
+        )
+
+    for index, invariant in enumerate(success.invariants):
+        if invariant.type != InvariantType.FORBIDDEN_CAPABILITY:
+            kept_invariants.append(invariant)
+            continue
+
+        invariant_entries = current_entries.get(invariant.id, [])
+        if not entries_are_only_non_normative_decisions(invariant_entries):
+            kept_invariants.append(invariant)
+            continue
+
+        if original_source_map is not None:
+            original_id = (
+                original_invariants[index].id
+                if original_invariants is not None and index < len(original_invariants)
+                else invariant.id
+            )
+            source_entries = original_entries.get(original_id)
+            if source_entries is None and index < len(original_source_map):
+                source_entries = [original_source_map[index]]
+            if not entries_are_only_non_normative_decisions(source_entries or []):
+                kept_invariants.append(invariant)
+                continue
+
+        removed_ids.add(invariant.id)
+
+    if not removed_ids:
+        return 0
+
+    success.invariants = kept_invariants
+    success.source_map = [
+        entry for entry in success.source_map if entry.invariant_id not in removed_ids
+    ]
+    if _NON_NORMATIVE_DECISION_ASSUMPTION not in success.assumptions:
+        success.assumptions.append(_NON_NORMATIVE_DECISION_ASSUMPTION)
+    return len(removed_ids)
 
 
 def _structured_authority_metadata_errors(
@@ -1434,6 +1533,12 @@ def normalize_compiler_output(
         _rewrite_source_map_invariant_ids(success, original_invariants)
 
     if source_format == "agileforge.spec.v1" and source_text:
+        _filter_non_normative_decision_hard_bans(
+            success,
+            source_text=source_text,
+            original_invariants=original_invariants,
+            original_source_map=original_source_map,
+        )
         metadata_errors = _structured_authority_metadata_errors(
             success,
             source_text=source_text,
