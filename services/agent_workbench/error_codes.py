@@ -34,6 +34,7 @@ class ErrorCode(StrEnum):
     SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
     AUTHORITY_NOT_ACCEPTED = "AUTHORITY_NOT_ACCEPTED"
     AUTHORITY_NOT_COMPILED = "AUTHORITY_NOT_COMPILED"
+    COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED = "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
     AUTHORITY_ACCEPTANCE_MISMATCH = "AUTHORITY_ACCEPTANCE_MISMATCH"
     AUTHORITY_INVARIANTS_INVALID = "AUTHORITY_INVARIANTS_INVALID"
     AUTHORITY_REVIEW_REQUIRED = "AUTHORITY_REVIEW_REQUIRED"
@@ -145,6 +146,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="The selected spec version has no compiled authority.",
+    ),
+    ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED: ErrorMetadata(
+        code=ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Compiled authority artifact schema is unsupported.",
     ),
     ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: ErrorMetadata(
         code=ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH.value,

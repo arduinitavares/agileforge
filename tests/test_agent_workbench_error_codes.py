@@ -24,6 +24,7 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.SPEC_COMPILE_FAILED: (1, True),
     ErrorCode.AUTHORITY_NOT_ACCEPTED: (4, False),
     ErrorCode.AUTHORITY_NOT_COMPILED: (4, False),
+    ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED: (4, False),
     ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH: (4, False),
     ErrorCode.AUTHORITY_INVARIANTS_INVALID: (4, False),
     ErrorCode.AUTHORITY_REVIEW_REQUIRED: (4, False),
@@ -84,6 +85,16 @@ def test_registry_covers_authority_review_decision_error_codes() -> None:
         "AUTHORITY_GUARD_INCOMPLETE",
     ]:
         assert code in codes, code
+
+
+def test_compiled_authority_schema_unsupported_error_is_registered() -> None:
+    """Expose stable metadata for unsupported compiled-authority artifacts."""
+    metadata = error_metadata(ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED)
+
+    assert metadata.code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert metadata.default_exit_code == 4
+    assert metadata.retryable is False
+    assert metadata.description == "Compiled authority artifact schema is unsupported."
 
 
 @pytest.mark.parametrize(

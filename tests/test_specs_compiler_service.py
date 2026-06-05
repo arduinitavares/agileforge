@@ -42,24 +42,42 @@ from utils.spec_schemas import (
 
 
 def _compiled_success_json() -> str:
-    success = SpecAuthorityCompilationSuccess(
-        scope_themes=["Payments"],
-        domain=None,
-        invariants=[
-            Invariant(
-                id="INV-0123456789abcdef",
-                type=InvariantType.REQUIRED_FIELD,
-                parameters=RequiredFieldParams(field_name="email"),
-            )
+    return json.dumps(v2_compiled_authority_payload())
+
+
+def v2_compiled_authority_payload() -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["Payments"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0123456789abcdef",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "email"},
+            }
         ],
-        eligible_feature_rules=[],
-        gaps=[],
-        assumptions=[],
-        source_map=[],
-        compiler_version="1.0.0",
-        prompt_hash="a" * 64,
-    )
-    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [],
+        "compiler_version": "2.0.0",
+        "prompt_hash": "a" * 64,
+        "ir_schema_version": None,
+        "ir_provenance": None,
+        "source_units": [],
+        "requirement_candidates": [],
+        "authority_mappings": [],
+        "ir_packet_limits": None,
+    }
+
+
+def legacy_compiled_authority_payload() -> dict[str, object]:
+    payload = v2_compiled_authority_payload()
+    payload.pop("schema_version")
+    payload["compiler_version"] = "1.0.0"
+    return payload
 
 
 def _compiled_failure_json() -> str:
@@ -346,37 +364,56 @@ def _create_compiled_authority(
 
 
 def test_load_compiled_artifact_returns_success_payload() -> None:
-    """Verify load compiled artifact returns success payload."""
+    """Verify load compiled artifact returns success result for v2 payloads."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
-    authority = SimpleNamespace(compiled_artifact_json=_compiled_success_json())
+    authority = SimpleNamespace(
+        compiled_artifact_json=json.dumps(v2_compiled_authority_payload())
+    )
 
-    artifact = load_compiled_artifact(authority)
+    result = load_compiled_artifact(authority)
 
-    assert artifact is not None
-    assert artifact.scope_themes == ["Payments"]
-    assert artifact.invariants[0].id == "INV-0123456789abcdef"
+    assert result.ok is True
+    assert result.status == "ok"
+    assert result.artifact is not None
+    assert result.error_code is None
+    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.artifact.scope_themes == ["Payments"]
+    assert result.artifact.invariants[0].id == "INV-0123456789abcdef"
 
 
-def test_load_compiled_artifact_returns_none_for_failure_or_invalid_json() -> None:
-    """Verify load compiled artifact returns none for failure or invalid json."""
+def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
+    """Verify stored artifacts without schema_version fail closed as unsupported."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
-    failure = SpecAuthorityCompilationFailure(
-        error="COMPILATION_FAILED",
-        reason="Missing scope",
-        blocking_gaps=["scope"],
+    authority = SimpleNamespace(
+        compiled_artifact_json=json.dumps(legacy_compiled_authority_payload())
     )
-    failure_json = SpecAuthorityCompilerOutput(root=failure).model_dump_json()
 
-    assert (
-        load_compiled_artifact(SimpleNamespace(compiled_artifact_json=failure_json))
-        is None
-    )
-    assert (
-        load_compiled_artifact(SimpleNamespace(compiled_artifact_json="not-json"))
-        is None
-    )
+    result = load_compiled_artifact(authority)
+
+    assert result.ok is False
+    assert result.status == "schema_unsupported"
+    assert result.artifact is None
+    assert result.error_code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result.observed_schema_version is None
+
+
+def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
+    """Verify stored artifacts with non-v2 schema_version fail before validation."""
+    from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
+
+    payload = v2_compiled_authority_payload()
+    payload["schema_version"] = "agileforge.compiled_authority.v1"
+    authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
+
+    result = load_compiled_artifact(authority)
+
+    assert result.ok is False
+    assert result.status == "schema_unsupported"
+    assert result.artifact is None
+    assert result.error_code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result.observed_schema_version == "agileforge.compiled_authority.v1"
 
 
 def test_services_package_exports_ensure_accepted_spec_authority() -> None:
