@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol, cast
 
 import pytest
@@ -16,6 +17,7 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_projection import _AuthoritySelection
 from services.agent_workbench.authority_review import AuthorityReviewSnapshot
+from services.specs.compiler_service import CompiledArtifactLoadResult
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -1335,3 +1337,120 @@ def test_ui_create_calls_facade_telemetry(
     assert call_params["idempotency_key"] is not None
     assert call_params["idempotency_key"].startswith("ui-create-")
 
+
+def test_build_story_compliance_boundaries_ignores_non_success_loader_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story compliance boundaries should treat unreadable artifacts as absent."""
+    monkeypatch.setattr(
+        api_module,
+        "load_compiled_artifact",
+        lambda _authority: CompiledArtifactLoadResult(
+            status="schema_unsupported",
+            message="unsupported",
+        ),
+    )
+
+    result = api_module._build_story_compliance_boundaries(
+        authority=object(),
+        evidence=SimpleNamespace(finding_invariant_ids=["INV-1"]),
+    )
+
+    assert result == []
+
+
+def test_build_task_hard_constraints_ignores_non_success_loader_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task hard constraints should treat unreadable artifacts as absent."""
+    monkeypatch.setattr(
+        api_module,
+        "load_compiled_artifact",
+        lambda _authority: CompiledArtifactLoadResult(
+            status="schema_invalid",
+            message="invalid",
+        ),
+    )
+
+    result = api_module._build_task_hard_constraints(
+        authority=object(),
+        task_metadata=SimpleNamespace(relevant_invariant_ids=["INV-1"]),
+    )
+
+    assert result == []
+
+
+def test_load_packet_story_context_marks_unreadable_authority_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Packet context should only report authority available when loader succeeds."""
+
+    class _ExecResult:
+        def __init__(self, value: object) -> None:
+            self._value = value
+
+        def first(self) -> object:
+            return self._value
+
+    class _Session:
+        def __init__(self, values: list[object]) -> None:
+            self._values = list(values)
+
+        def exec(self, _query: object) -> _ExecResult:
+            return _ExecResult(self._values.pop(0))
+
+    product = SimpleNamespace(product_id=1, updated_at=None, name="Product", vision=None)
+    story = SimpleNamespace(
+        story_id=7,
+        product_id=1,
+        product=product,
+        tasks=[],
+        validation_evidence=None,
+        accepted_spec_version_id=11,
+        updated_at=None,
+        ac_updated_at=None,
+        acceptance_criteria=None,
+        title="Story",
+        persona=None,
+        story_description=None,
+        status=SimpleNamespace(value="draft"),
+        story_points=None,
+        rank=None,
+        source_requirement=None,
+    )
+    sprint = SimpleNamespace(
+        product_id=1,
+        sprint_id=2,
+        team=None,
+        updated_at=None,
+        status=SimpleNamespace(value="planned"),
+        started_at=None,
+        start_date=None,
+        end_date=None,
+        team_id=None,
+        goal=None,
+    )
+    sprint_story = SimpleNamespace(added_at=None)
+
+    monkeypatch.setattr(api_module, "_load_validation_evidence", lambda _raw: None)
+    monkeypatch.setattr(api_module, "compute_story_input_hash", lambda _story: "hash")
+    monkeypatch.setattr(api_module, "_load_pinned_authority", lambda *_args: object())
+    monkeypatch.setattr(
+        api_module,
+        "load_compiled_artifact",
+        lambda _authority: CompiledArtifactLoadResult(
+            status="missing",
+            message="missing",
+        ),
+    )
+
+    context = api_module._load_packet_story_context(
+        _Session([story, sprint, sprint_story]),
+        project_id=1,
+        sprint_id=2,
+        story_id=7,
+    )
+
+    assert context is not None
+    assert context.spec_binding_status == "pinned"
+    assert context.authority_status == "missing"

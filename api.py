@@ -1237,8 +1237,9 @@ def _build_story_compliance_boundaries(
     if not authority or not evidence:
         return []
 
-    artifact = load_compiled_artifact(authority)
-    if not artifact:
+    load_result = load_compiled_artifact(authority)
+    artifact = load_result.artifact if load_result.ok else None
+    if artifact is None:
         return []
 
     referenced_ids = set()
@@ -1279,8 +1280,9 @@ def _build_task_hard_constraints(
     if not authority or not task_metadata.relevant_invariant_ids:
         return []
 
-    artifact = load_compiled_artifact(authority)
-    if not artifact:
+    load_result = load_compiled_artifact(authority)
+    artifact = load_result.artifact if load_result.ok else None
+    if artifact is None:
         return []
 
     source_map: dict[str, Any] = {}
@@ -1388,7 +1390,10 @@ def _load_packet_story_context(
     )
 
     authority = _load_pinned_authority(session, story.accepted_spec_version_id)
-    compiled_artifact = load_compiled_artifact(authority) if authority else None
+    load_result = load_compiled_artifact(authority) if authority else None
+    compiled_artifact = (
+        load_result.artifact if load_result is not None and load_result.ok else None
+    )
     spec_binding_status = (
         "pinned" if story.accepted_spec_version_id is not None else "unpinned"
     )
