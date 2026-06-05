@@ -84,10 +84,12 @@ _ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
     {RequirementLevel.MUST, RequirementLevel.MUST_NOT}
 )
 _NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
-_FOCUSED_ITEM_COMPILER_ATTEMPTS: int = 2
+_SCHEMA_RETRY_MAX_ATTEMPTS: int = 1
+_SCHEMA_RETRY_TOTAL_ATTEMPTS: int = _SCHEMA_RETRY_MAX_ATTEMPTS + 1
 _SCHEMA_RETRY_FAILURES: frozenset[str] = frozenset(
     {"INVALID_JSON", "JSON_VALIDATION_FAILED"}
 )
+_SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS: int = 80
 _SCHEMA_RETRY_FEEDBACK = (
     "Your previous output failed the compiled authority v2 schema.\n"
     "Return only valid JSON.\n"
@@ -241,6 +243,7 @@ class _CompilerFailureDetails:
     reason: str
     raw_output: str | None = None
     blocking_gaps: list[str] | None = None
+    schema_retry_failure_details: list[dict[str, object]] | None = None
     exception: BaseException | None = None
 
 
@@ -275,6 +278,15 @@ class _NormalizedCompilerInvocation:
 
 
 @dataclass(frozen=True)
+class _SchemaRetryFailureDetail:
+    """One failed attempt in a bounded schema-retry sequence."""
+
+    attempt: int
+    reason: str
+    raw_output: str | None
+
+
+@dataclass(frozen=True)
 class _CompilerInvocationResult:
     """Compile attempt result plus schema-retry metadata."""
 
@@ -283,6 +295,7 @@ class _CompilerInvocationResult:
     schema_retry_attempted: bool = False
     schema_retry_reason: str | None = None
     schema_retry_attempts: int = 0
+    schema_retry_failure_details: tuple[_SchemaRetryFailureDetail, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -291,6 +304,7 @@ class _FocusedItemCompilationFailure:
 
     item_id: str
     failure: SpecAuthorityCompilationFailure
+    schema_retry_failure_details: tuple[_SchemaRetryFailureDetail, ...] = ()
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -304,6 +318,7 @@ class _CompilerFailureOptions(TypedDict, total=False):
     reason: str
     raw_output: str | None
     blocking_gaps: list[str] | None
+    schema_retry_failure_details: list[dict[str, object]] | None
     exception: BaseException | None
 
 
@@ -1129,6 +1144,12 @@ def _focused_item_failure_message(failure: _FocusedItemCompilationFailure) -> st
         message += f" - {failure.failure.reason}"
     if failure.failure.blocking_gaps:
         message += f": {', '.join(failure.failure.blocking_gaps)}"
+    if failure.schema_retry_failure_details:
+        history = "; ".join(
+            _schema_retry_failure_detail_message(detail)
+            for detail in failure.schema_retry_failure_details
+        )
+        message += f" [{history}]"
     return message
 
 
@@ -1183,26 +1204,50 @@ def _invoke_focused_structured_item_authority(
 ) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
     """Compile one structured item with a bounded retry for transient failures."""
     focused_content = _focused_structured_spec_content(artifact, item_id=item_id)
-    item_failure: SpecAuthorityCompilationFailure | None = None
-    for _attempt in range(_FOCUSED_ITEM_COMPILER_ATTEMPTS):
-        item_invocation = _invoke_and_normalize_spec_authority(
-            spec_content=focused_content,
-            content_ref=None,
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-        )
-        if isinstance(item_invocation.output.root, SpecAuthorityCompilationFailure):
-            item_failure = item_invocation.output.root
-            continue
-        return cast("SpecAuthorityCompilationSuccess", item_invocation.output.root)
+    initial_invocation = _invoke_and_normalize_spec_authority(
+        spec_content=focused_content,
+        content_ref=None,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+    if not isinstance(initial_invocation.output.root, SpecAuthorityCompilationFailure):
+        return cast("SpecAuthorityCompilationSuccess", initial_invocation.output.root)
 
-    if item_failure is None:
-        item_failure = SpecAuthorityCompilationFailure(
-            error="SPEC_COMPILATION_FAILED",
-            reason="FOCUSED_ITEM_COMPILER_RETURNED_NO_RESULT",
-            blocking_gaps=[item_id],
-        )
-    return _FocusedItemCompilationFailure(item_id=item_id, failure=item_failure)
+    initial_failure = initial_invocation.output.root
+    if initial_failure.reason not in _SCHEMA_RETRY_FAILURES:
+        return _FocusedItemCompilationFailure(item_id=item_id, failure=initial_failure)
+
+    retry_failure_details = (
+        _schema_retry_failure_detail(
+            attempt=1,
+            reason=initial_failure.reason,
+            raw_output=initial_invocation.raw_json,
+        ),
+    )
+
+    retry_invocation = _invoke_and_normalize_spec_authority(
+        spec_content=focused_content,
+        content_ref=None,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        domain_hint=_SCHEMA_RETRY_FEEDBACK,
+    )
+    if not isinstance(retry_invocation.output.root, SpecAuthorityCompilationFailure):
+        return cast("SpecAuthorityCompilationSuccess", retry_invocation.output.root)
+
+    retry_failure = retry_invocation.output.root
+    return _FocusedItemCompilationFailure(
+        item_id=item_id,
+        failure=retry_failure,
+        schema_retry_failure_details=(
+            *retry_failure_details,
+            _schema_retry_failure_detail(
+                attempt=_SCHEMA_RETRY_TOTAL_ATTEMPTS,
+                reason=retry_failure.reason,
+                raw_output=retry_invocation.raw_json,
+            ),
+        ),
+    )
 
 
 def _structured_missing_authority_failure(
@@ -1487,6 +1532,7 @@ def _compiler_failure_result(
         reason=kwargs.get("reason", ""),
         raw_output=kwargs.get("raw_output"),
         blocking_gaps=kwargs.get("blocking_gaps"),
+        schema_retry_failure_details=kwargs.get("schema_retry_failure_details"),
         exception=kwargs.get("exception"),
     )
     summary = f"{details.error}: {details.reason}" if details.reason else details.error
@@ -1512,6 +1558,7 @@ def _compiler_failure_result(
             "error": details.error,
             "reason": details.reason,
             "blocking_gaps": details.blocking_gaps or [],
+            "schema_retry_failure_details": details.schema_retry_failure_details or [],
         },
     )
     metadata: FailureMetadataDict = artifact_result["metadata"]
@@ -1534,8 +1581,60 @@ def _compiler_failure_result(
         "error": details.error,
         "reason": details.reason,
         "blocking_gaps": details.blocking_gaps or [],
+        **(
+            {"schema_retry_failure_details": details.schema_retry_failure_details}
+            if details.schema_retry_failure_details is not None
+            else {}
+        ),
         **metadata,
     }
+
+
+def _schema_retry_failure_detail(
+    *,
+    attempt: int,
+    reason: str,
+    raw_output: str | None,
+) -> _SchemaRetryFailureDetail:
+    """Build one schema-retry failure-detail record."""
+    return _SchemaRetryFailureDetail(
+        attempt=attempt,
+        reason=reason,
+        raw_output=raw_output,
+    )
+
+
+def _schema_retry_failure_detail_dict(
+    detail: _SchemaRetryFailureDetail,
+) -> dict[str, object]:
+    """Serialize one schema-retry failure detail for result envelopes."""
+    return {
+        "attempt": detail.attempt,
+        "reason": detail.reason,
+        "raw_output": detail.raw_output,
+    }
+
+
+def _schema_retry_failure_details_dicts(
+    details: tuple[_SchemaRetryFailureDetail, ...],
+) -> list[dict[str, object]]:
+    """Serialize schema-retry failure details for results and artifacts."""
+    return [_schema_retry_failure_detail_dict(detail) for detail in details]
+
+
+def _schema_retry_failure_detail_message(
+    detail: _SchemaRetryFailureDetail,
+) -> str:
+    """Render a compact focused-item retry detail message."""
+    raw_output = detail.raw_output or ""
+    compact_output = " ".join(raw_output.split())
+    preview = compact_output[:_SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS]
+    if len(compact_output) > _SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS:
+        preview += "..."
+    return (
+        f"attempt_{detail.attempt} reason={detail.reason} "
+        f"raw_output={preview!r}"
+    )
 
 
 def _schema_retry_metadata_dict(
@@ -1543,13 +1642,19 @@ def _schema_retry_metadata_dict(
     attempted: bool,
     reason: str | None,
     attempts: int,
+    failure_details: tuple[_SchemaRetryFailureDetail, ...] = (),
 ) -> dict[str, Any]:
     """Return stable compile-result fields for schema-retry metadata."""
-    return {
+    metadata: dict[str, Any] = {
         "schema_retry_attempted": attempted,
         "schema_retry_reason": reason,
         "schema_retry_attempts": attempts,
     }
+    if failure_details:
+        metadata["schema_retry_failure_details"] = _schema_retry_failure_details_dicts(
+            failure_details
+        )
+    return metadata
 
 
 def _attach_schema_retry_metadata(
@@ -1558,6 +1663,7 @@ def _attach_schema_retry_metadata(
     attempted: bool,
     reason: str | None,
     attempts: int,
+    failure_details: tuple[_SchemaRetryFailureDetail, ...] = (),
 ) -> dict[str, Any]:
     """Copy a result envelope and add schema-retry metadata."""
     enriched = dict(result)
@@ -1566,6 +1672,7 @@ def _attach_schema_retry_metadata(
             attempted=attempted,
             reason=reason,
             attempts=attempts,
+            failure_details=failure_details,
         )
     )
     return enriched
@@ -1593,7 +1700,7 @@ def _normalized_failure_result(
     )
 
 
-def _run_compiler_attempt(
+def _run_compiler_attempt(  # noqa: PLR0913
     spec_version: SpecRegistry,
     *,
     spec_content: str,
@@ -1648,6 +1755,12 @@ def _run_compiler_attempt(
             reason=str(exc),
             exception=exc,
         )
+
+
+def _compiler_invocation_returned_no_success_artifact_error() -> RuntimeError:
+    """Return the canonical missing-success-artifact error."""
+    error_message = "Compiler invocation returned no success artifact"
+    return RuntimeError(error_message)
 
 
 def _render_invariant_summary(invariant: Invariant) -> str:
@@ -2139,7 +2252,13 @@ def _invoke_compiler_for_version(
         )
 
     retry_attempted = True
-    retry_attempts = 1
+    retry_attempts = _SCHEMA_RETRY_MAX_ATTEMPTS
+    first_failure_detail = _schema_retry_failure_detail(
+        attempt=1,
+        reason=retry_reason,
+        raw_output=raw_json,
+    )
+    failure_details = (first_failure_detail,)
     retried = _run_compiler_attempt(
         spec_version,
         spec_content=spec_content,
@@ -2155,14 +2274,22 @@ def _invoke_compiler_for_version(
                 attempted=retry_attempted,
                 reason=retry_reason,
                 attempts=retry_attempts,
+                failure_details=failure_details,
             ),
             schema_retry_attempted=retry_attempted,
             schema_retry_reason=retry_reason,
             schema_retry_attempts=retry_attempts,
+            schema_retry_failure_details=failure_details,
         )
 
     retried_output = retried.output
     if isinstance(retried_output.root, SpecAuthorityCompilationFailure):
+        retry_failure_detail = _schema_retry_failure_detail(
+            attempt=_SCHEMA_RETRY_TOTAL_ATTEMPTS,
+            reason=retried_output.root.reason,
+            raw_output=retried.raw_json,
+        )
+        failure_details += (retry_failure_detail,)
         return _CompilerInvocationResult(
             failure=_attach_schema_retry_metadata(
                 _normalized_failure_result(
@@ -2173,10 +2300,12 @@ def _invoke_compiler_for_version(
                 attempted=retry_attempted,
                 reason=retry_reason,
                 attempts=retry_attempts,
+                failure_details=failure_details,
             ),
             schema_retry_attempted=retry_attempted,
             schema_retry_reason=retry_reason,
             schema_retry_attempts=retry_attempts,
+            schema_retry_failure_details=failure_details,
         )
 
     return _CompilerInvocationResult(
@@ -2315,7 +2444,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         return invocation.failure
     compiled = invocation.success
     if compiled is None:
-        raise RuntimeError("Compiler invocation returned no success artifact")
+        raise _compiler_invocation_returned_no_success_artifact_error()
 
     persisted_result = _persist_compiled_authority(
         session,

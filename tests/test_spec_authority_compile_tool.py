@@ -58,6 +58,33 @@ from utils.spec_schemas import (
     SpecAuthorityCompilerOutput,
 )
 
+_INSTRUCTION_REQUIRED_TERMS = (
+    "agileforge.compiled_authority.v2",
+    "source_map.location",
+    "source_map.excerpt",
+    "semantic fields only",
+    "Do not put source_item_id or source_level inside parameters.",
+)
+_INSTRUCTION_FORBIDDEN_TERMS = (
+    'USER_INTERACTION => parameters: {"source_item_id"',
+    'STATE_TRANSITION => parameters: {"source_item_id"',
+    'DATA_CONTRACT => parameters: {"source_item_id"',
+    'ROUTE_CONTRACT => parameters: {"source_item_id"',
+    'VISIBILITY_RULE => parameters: {"source_item_id"',
+)
+
+
+def _assert_v2_instruction_contract(instructions: str) -> None:
+    """Assert the durable v2 instruction contract without prose-coupling."""
+    for required_term in _INSTRUCTION_REQUIRED_TERMS:
+        assert required_term in instructions
+
+    assert '"schema_version": "agileforge.compiled_authority.v2"' in instructions
+    assert 'USER_INTERACTION => invariant: {"type": "USER_INTERACTION"' in instructions
+
+    for forbidden_term in _INSTRUCTION_FORBIDDEN_TERMS:
+        assert forbidden_term not in instructions
+
 
 @pytest.fixture
 def sample_product(session: Session, engine: Engine) -> Product:
@@ -321,30 +348,7 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
 
 def test_compiler_instructions_require_v2_provenance_contract() -> None:
     """Compiler instructions must require the v2 provenance layout."""
-    assert (
-        'Output schema_version MUST be "agileforge.compiled_authority.v2".'
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
-    assert (
-        "Invariant parameters MUST contain semantic fields only."
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
-    assert (
-        "Do not put source_item_id or source_level inside parameters."
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
-    assert (
-        "source_map.location MUST be the structured source item id."
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
-    assert (
-        "source_map.excerpt MUST be copied from the real source item text."
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
-    assert (
-        'USER_INTERACTION => invariant: {"type": "USER_INTERACTION"'
-        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
-    )
+    _assert_v2_instruction_contract(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
 
 
 def test_compile_tool_compiles_and_returns_summary(

@@ -41,6 +41,10 @@ from utils.spec_schemas import (
     UserInteractionParams,
 )
 
+_SCHEMA_RETRY_ATTEMPTS = 1
+_TOTAL_BLOCKED_MUST_ITEMS = 2
+_EXPECTED_FOCUSED_RETRY_CALLS = 2
+
 
 def _compiled_success_json() -> str:
     success = SpecAuthorityCompilationSuccess(
@@ -203,6 +207,18 @@ def _structured_retry_success_payload() -> dict[str, object]:
         "compiler_version": "2.0.0",
         "prompt_hash": "a" * 64,
     }
+
+
+def _structured_retry_invalid_payload() -> dict[str, object]:
+    """Return schema-invalid structured retry output for retry tests."""
+    payload = _structured_retry_success_payload()
+    payload["invariants"] = [
+        {
+            **cast("dict[str, object]", payload["invariants"][0]),
+            "parameters": {"unexpected": "value"},
+        }
+    ]
+    return payload
 
 
 def _agileforge_spec_profile_payload() -> dict[str, object]:
@@ -1006,7 +1022,7 @@ def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
 def test_preview_spec_authority_retries_transient_focused_item_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient focused item failure should not abort structured compilation."""
+    """A transient focused-item schema failure should not abort compilation."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     calls: list[list[str]] = []
@@ -1026,7 +1042,7 @@ def test_preview_spec_authority_retries_transient_focused_item_failure(
         item_id = item_ids[0]
         focused_attempts[item_id] = focused_attempts.get(item_id, 0) + 1
         if item_id == "REQ.todo-create" and focused_attempts[item_id] == 1:
-            return _vacant_success_json()
+            return "{"
 
         first_item = items[0]
         assert isinstance(first_item, dict)
@@ -1060,7 +1076,7 @@ def test_preview_spec_authority_retries_transient_focused_item_failure(
         and invariant.source_item_id is not None
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
-    assert focused_attempts["REQ.todo-create"] == 2  # noqa: PLR2004
+    assert focused_attempts["REQ.todo-create"] == _EXPECTED_FOCUSED_RETRY_CALLS
 
 
 def test_preview_spec_authority_reports_persistent_focused_item_failure(
@@ -1110,6 +1126,184 @@ def test_preview_spec_authority_reports_persistent_focused_item_failure(
         "REQ.todo-create: SPEC_AUTHORITY_VACANT - "
         "NO_INVARIANTS_EXTRACTED: No invariants extracted from spec",
     ]
+
+
+def test_preview_spec_authority_schema_retry_adds_feedback_for_focused_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Focused item schema retry should add bounded schema feedback."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    focused_domain_hints: list[str | None] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        domain_hint = kwargs.get("domain_hint")
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        item_id = first_item["id"]
+        if item_id == "REQ.todo-create":
+            focused_domain_hints.append(cast("str | None", domain_hint))
+            if len(focused_domain_hints) == _SCHEMA_RETRY_ATTEMPTS:
+                return "{"
+
+        source_level = first_item["level"]
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=cast("str", item_id),
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert focused_domain_hints == [
+        None,
+        compiler_service._SCHEMA_RETRY_FEEDBACK,
+    ]
+
+
+def test_preview_spec_authority_does_not_retry_semantic_focused_item_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Focused item semantic/source failures must not get a schema retry."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    focused_attempts: dict[str, int] = {}
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        item_id = cast("str", first_item["id"])
+        focused_attempts[item_id] = focused_attempts.get(item_id, 0) + 1
+        if item_id == "REQ.todo-create":
+            invalid_payload = {
+                "schema_version": "agileforge.compiled_authority.v2",
+                "scope_themes": ["Audit"],
+                "domain": "todo",
+                "invariants": [
+                    {
+                        "id": "INV-0123456789abcdef",
+                        "type": "DATA_CONTRACT",
+                        "source_item_id": item_id,
+                        "source_level": "MUST_NOT",
+                        "parameters": {
+                            "subject": "todo",
+                            "fields": ["id"],
+                            "rule": "create a todo",
+                        },
+                    }
+                ],
+                "eligible_feature_rules": [],
+                "rejected_features": [],
+                "gaps": [],
+                "assumptions": [],
+                "source_map": [
+                    {
+                        "invariant_id": "INV-0123456789abcdef",
+                        "excerpt": "The app MUST create a todo when Enter is pressed.",
+                        "location": item_id,
+                    }
+                ],
+                "compiler_version": "2.0.0",
+                "prompt_hash": "a" * 64,
+            }
+            return json.dumps(invalid_payload)
+
+        source_level = first_item["level"]
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert focused_attempts["REQ.todo-create"] == _SCHEMA_RETRY_ATTEMPTS
+
+
+def test_preview_spec_authority_preserves_focused_schema_retry_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Focused failure details should retain both schema-retry attempts."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        payload = json.loads(spec_content)
+        items = payload["items"]
+        assert isinstance(items, list)
+        if len(items) > 1:
+            return _raw_compiler_failure_json()
+
+        first_item = items[0]
+        assert isinstance(first_item, dict)
+        item_id = cast("str", first_item["id"])
+        if item_id == "REQ.todo-create":
+            if kwargs.get("domain_hint") is None:
+                return "{"
+            return json.dumps(_structured_retry_invalid_payload())
+
+        source_level = first_item["level"]
+        assert source_level in {"MUST", "MUST_NOT"}
+        return _behavioral_payload_json(
+            source_item_id=item_id,
+            source_level=cast("SpecAuthoritySourceLevel", source_level),
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    blocking_gaps = result["details"]["blocking_gaps"]
+    assert any("attempt_1" in gap and "INVALID_JSON" in gap for gap in blocking_gaps)
+    assert any(
+        "attempt_2" in gap and "JSON_VALIDATION_FAILED" in gap
+        for gap in blocking_gaps
+    )
 
 
 def test_preview_spec_authority_returns_failure_envelope(
@@ -2000,7 +2194,7 @@ def test_invalid_json_gets_one_schema_retry(
     )
 
     assert result["success"] is True
-    assert len(payloads) == 2
+    assert len(payloads) == _EXPECTED_FOCUSED_RETRY_CALLS
     assert payloads[0]["domain_hint"] is None
     retry_hint = payloads[1]["domain_hint"]
     assert isinstance(retry_hint, str)
@@ -2051,7 +2245,7 @@ def test_json_validation_failed_gets_one_schema_retry(
     )
 
     assert result["success"] is True
-    assert len(attempts) == 2
+    assert len(attempts) == _EXPECTED_FOCUSED_RETRY_CALLS
     assert result["schema_retry_attempted"] is True
     assert result["schema_retry_reason"] == "JSON_VALIDATION_FAILED"
     assert result["schema_retry_attempts"] == 1
@@ -2074,9 +2268,7 @@ def test_schema_retry_stops_after_one_retry(
         payload = json.loads(payload_json)
         assert isinstance(payload, dict)
         attempts.append(payload)
-        invalid_payload = _structured_retry_success_payload()
-        invalid_payload["invariants"][0]["parameters"] = {"unexpected": "value"}  # type: ignore[index]
-        return json.dumps(invalid_payload)
+        return json.dumps(_structured_retry_invalid_payload())
 
     monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
     monkeypatch.setattr(
@@ -2096,10 +2288,22 @@ def test_schema_retry_stops_after_one_retry(
 
     assert result["success"] is False
     assert result["failure_stage"] == "output_validation"
-    assert len(attempts) == 2
+    assert len(attempts) == _EXPECTED_FOCUSED_RETRY_CALLS
     assert result["schema_retry_attempted"] is True
     assert result["schema_retry_reason"] == "JSON_VALIDATION_FAILED"
-    assert result["schema_retry_attempts"] == 1
+    assert result["schema_retry_attempts"] == _SCHEMA_RETRY_ATTEMPTS
+    assert result["schema_retry_failure_details"] == [
+        {
+            "attempt": 1,
+            "reason": "JSON_VALIDATION_FAILED",
+            "raw_output": json.dumps(_structured_retry_invalid_payload()),
+        },
+        {
+            "attempt": 2,
+            "reason": "JSON_VALIDATION_FAILED",
+            "raw_output": json.dumps(_structured_retry_invalid_payload()),
+        },
+    ]
 
 
 def test_semantic_source_mismatch_does_not_trigger_schema_retry(
