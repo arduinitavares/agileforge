@@ -1216,8 +1216,11 @@ def _matching_invariants(
         if not isinstance(invariant, dict):
             continue
         invariant_id = _str_or_none(invariant.get("id"))
-        parameters = _dict_or_empty(invariant.get("parameters"))
-        source_id = _str_or_none(parameters.get("source_item_id"))
+        source_id = _authority_ref_for_invariant(
+            compiled=compiled,
+            invariant=invariant,
+            invariant_id=invariant_id,
+        )
         if (
             invariant_id in invariant_refs
             or invariant_id in target_refs
@@ -1239,7 +1242,7 @@ def _matching_source_map(
     for entry in source_map:
         if not isinstance(entry, dict):
             continue
-        source_id = _str_or_none(entry.get("source_item_id"))
+        source_id = _str_or_none(entry.get("location"))
         if source_id in target_refs:
             result.append(dict(entry))
     return result
@@ -1992,9 +1995,11 @@ def _targets_from_invariants(compiled: dict[str, Any]) -> list[AuthorityTarget]:
             continue
         invariant_type = _str_or_none(invariant.get("type"))
         parameters = _dict_or_empty(invariant.get("parameters"))
-        source_requirement_id = _str_or_none(
-            invariant.get("source_item_id")
-        ) or _str_or_none(parameters.get("source_item_id"))
+        source_requirement_id = _authority_ref_for_invariant(
+            compiled=compiled,
+            invariant=invariant,
+            invariant_id=invariant_id,
+        )
         authority_ref = source_requirement_id or invariant_id
         terms = _unique_terms(
             [
@@ -2017,6 +2022,42 @@ def _targets_from_invariants(compiled: dict[str, Any]) -> list[AuthorityTarget]:
             )
         )
     return targets
+
+
+def _authority_ref_for_invariant(
+    *,
+    compiled: dict[str, Any],
+    invariant: dict[str, Any],
+    invariant_id: str | None,
+) -> str | None:
+    source_item_id = _str_or_none(invariant.get("source_item_id"))
+    if source_item_id:
+        return source_item_id
+    if not invariant_id:
+        return None
+    return _source_map_location_for_invariant(
+        compiled=compiled,
+        invariant_id=invariant_id,
+    )
+
+
+def _source_map_location_for_invariant(
+    *,
+    compiled: dict[str, Any],
+    invariant_id: str,
+) -> str | None:
+    source_map = compiled.get("source_map")
+    if not isinstance(source_map, list):
+        return None
+    for entry in source_map:
+        if not isinstance(entry, dict):
+            continue
+        if _str_or_none(entry.get("invariant_id")) != invariant_id:
+            continue
+        location = _str_or_none(entry.get("location"))
+        if location:
+            return location
+    return None
 
 
 def _targets_from_items(compiled: dict[str, Any]) -> list[AuthorityTarget]:
@@ -2053,10 +2094,13 @@ def _source_map_terms(compiled: dict[str, Any]) -> dict[str, list[str]]:
     for entry in source_map:
         if not isinstance(entry, dict):
             continue
-        source_id = _str_or_none(entry.get("source_item_id"))
+        source_id = _str_or_none(entry.get("location"))
         if not source_id:
             continue
-        result.setdefault(source_id, []).extend(_flatten_terms(entry))
+        term_entry = {
+            key: value for key, value in entry.items() if key != "source_item_id"
+        }
+        result.setdefault(source_id, []).extend(_flatten_terms(term_entry))
     return result
 
 

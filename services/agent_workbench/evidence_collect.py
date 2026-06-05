@@ -333,17 +333,14 @@ def _targets_from_compiled_invariants(
         invariant_id = str(invariant.get("id") or "").strip()
         if not invariant_id:
             continue
-        parameters = invariant.get("parameters")
-        parameter_map = (
-            cast("Mapping[str, object]", parameters)
-            if isinstance(parameters, Mapping)
-            else {}
-        )
-        source_item_id = str(
-            invariant.get("source_item_id")
-            or parameter_map.get("source_item_id")
+        source_item_id = (
+            _source_item_id_for_invariant(
+                compiled_authority=compiled_authority,
+                invariant=invariant,
+                invariant_id=invariant_id,
+            )
             or invariant_id
-        ).strip()
+        )
         item_type = source_item_id.split(".", 1)[0]
         if item_type not in NORMATIVE_ITEM_TYPES:
             item_type = "REQ"
@@ -356,6 +353,41 @@ def _targets_from_compiled_invariants(
             )
         )
     return targets
+
+
+def _source_item_id_for_invariant(
+    *,
+    compiled_authority: dict[str, Any],
+    invariant: Mapping[str, object],
+    invariant_id: str,
+) -> str | None:
+    source_item_id = str(invariant.get("source_item_id") or "").strip()
+    if source_item_id:
+        return source_item_id
+    return _source_map_location_for_invariant(
+        compiled_authority=compiled_authority,
+        invariant_id=invariant_id,
+    )
+
+
+def _source_map_location_for_invariant(
+    *,
+    compiled_authority: dict[str, Any],
+    invariant_id: str,
+) -> str | None:
+    source_map = compiled_authority.get("source_map")
+    if not isinstance(source_map, list):
+        return None
+    for raw_entry in source_map:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = cast("Mapping[str, object]", raw_entry)
+        if str(entry.get("invariant_id") or "").strip() != invariant_id:
+            continue
+        location = str(entry.get("location") or "").strip()
+        if location:
+            return location
+    return None
 
 
 def targets_from_compiled_authority(

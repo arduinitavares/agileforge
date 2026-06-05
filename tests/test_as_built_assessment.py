@@ -68,9 +68,9 @@ CARTOLA_AUTHORITY: dict[str, Any] = {
         {
             "id": "INV-a4b296c058e88663",
             "type": "STATE_TRANSITION",
+            "source_item_id": "REQ.live-squad-recommendation",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.live-squad-recommendation",
-                "source_level": "MUST",
                 "state": "live recommendation run",
                 "trigger": "market is open",
                 "outcome": "exactly one operator-facing recommended squad",
@@ -79,8 +79,9 @@ CARTOLA_AUTHORITY: dict[str, Any] = {
         {
             "id": "INV-ffe2e17832c41874",
             "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.legal-roster",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.legal-roster",
                 "subject": "selected live squad",
                 "fields": ["roster_size_12", "one_tecnico", "eleven_non_tecnico"],
                 "rule": "must satisfy Cartola roster rules",
@@ -89,7 +90,8 @@ CARTOLA_AUTHORITY: dict[str, Any] = {
     ],
     "source_map": [
         {
-            "source_item_id": "REQ.live-squad-recommendation",
+            "invariant_id": "INV-a4b296c058e88663",
+            "location": "REQ.live-squad-recommendation",
             "excerpt": "Recommend a live squad while the market is open.",
         }
     ],
@@ -102,16 +104,18 @@ GROUPED_INVARIANT_AUTHORITY: dict[str, Any] = {
         {
             "id": "INV-aaaaaaaaaaaaaaaa",
             "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.grouped-capability",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.grouped-capability",
                 "rule": "first grouped rule",
             },
         },
         {
             "id": "INV-bbbbbbbbbbbbbbbb",
             "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.grouped-capability",
+            "source_level": "MUST",
             "parameters": {
-                "source_item_id": "REQ.grouped-capability",
                 "rule": "second grouped rule",
             },
         },
@@ -261,9 +265,7 @@ def _compiled_authority_v2_invariant(
 ) -> dict[str, object]:
     """Normalize legacy test invariant dictionaries into the v2 closed schema."""
     parameters = cast("dict[str, object]", invariant.get("parameters") or {})
-    source_item_id = str(
-        invariant.get("source_item_id") or parameters.get("source_item_id") or ""
-    )
+    source_item_id = str(invariant.get("source_item_id") or "")
     invariant_type = str(invariant["type"])
     if invariant_type == "STATE_TRANSITION":
         normalized_parameters = {
@@ -361,13 +363,11 @@ class _CrossBatchCoverageInvoker:
     def __call__(self, payload: AsBuiltAssessorInput) -> AsBuiltAssessment:
         wrong_target = CARTOLA_AUTHORITY["invariants"][1]
         assert isinstance(wrong_target, dict)
-        parameters = wrong_target["parameters"]
-        assert isinstance(parameters, dict)
         return _fake_assessment(payload).model_copy(
             update={
                 "capability_assessments": [
                     CapabilityAssessment(
-                        authority_ref=str(parameters["source_item_id"]),
+                        authority_ref=str(wrong_target["source_item_id"]),
                         invariant_refs=[str(wrong_target["id"])],
                         capability_title="Wrong Batch Capability",
                         status="observed",
@@ -473,6 +473,82 @@ def test_build_authority_targets_extracts_cartola_invariants_without_items() -> 
     assert "Recommend a live squad while the market is open." in first.terms
 
 
+def test_build_authority_targets_reads_v2_top_level_provenance() -> None:
+    """v2 invariant provenance comes from top-level source fields."""
+    compiled = _compiled_authority_v2(
+        {
+            "invariants": [
+                {
+                    "id": "INV-a4b296c058e88663",
+                    "type": "STATE_TRANSITION",
+                    "source_item_id": "REQ.live-squad-recommendation",
+                    "source_level": "MUST",
+                    "parameters": {
+                        "source_item_id": "REQ.legacy-parameter-source",
+                        "state": "live recommendation run",
+                        "trigger": "market is open",
+                        "outcome": "exactly one operator-facing recommended squad",
+                    },
+                }
+            ]
+        }
+    )
+
+    targets, warnings, limitations = build_authority_targets(compiled)
+
+    assert warnings == []
+    assert limitations == []
+    assert len(targets) == 1
+    assert targets[0].authority_ref == "REQ.live-squad-recommendation"
+    assert targets[0].source_requirement_id == "REQ.live-squad-recommendation"
+    assert targets[0].invariant_refs == ["INV-a4b296c058e88663"]
+
+
+def test_build_authority_targets_falls_back_to_source_map_location() -> None:
+    """v2 invariant provenance falls back to matching source_map location."""
+    compiled = {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["As-Built"],
+        "domain": "as-built",
+        "invariants": [
+            {
+                "id": "INV-a4b296c058e88663",
+                "type": "STATE_TRANSITION",
+                "source_level": "MUST",
+                "parameters": {
+                    "source_item_id": "REQ.legacy-parameter-source",
+                    "state": "live recommendation run",
+                    "trigger": "market is open",
+                    "outcome": "exactly one operator-facing recommended squad",
+                },
+            }
+        ],
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-a4b296c058e88663",
+                "location": "REQ.live-squad-recommendation",
+                "source_item_id": "REQ.legacy-source-map-source",
+                "excerpt": "Recommend a live squad while the market is open.",
+            }
+        ],
+        "compiler_version": "1",
+        "prompt_hash": "0" * 64,
+    }
+
+    targets, warnings, limitations = build_authority_targets(compiled)
+
+    assert warnings == []
+    assert limitations == []
+    assert len(targets) == 1
+    assert targets[0].authority_ref == "REQ.live-squad-recommendation"
+    assert targets[0].source_requirement_id == "REQ.live-squad-recommendation"
+    assert targets[0].invariant_refs == ["INV-a4b296c058e88663"]
+
+
 def test_build_authority_targets_empty_authority_records_limitation() -> None:
     """No targets is an explicit limitation, not a silent success."""
     targets, warnings, limitations = build_authority_targets({"invariants": []})
@@ -489,7 +565,9 @@ def test_build_authority_targets_caps_large_target_sets() -> None:
             {
                 "id": f"INV-{index:04d}",
                 "type": "DATA_CONTRACT",
-                "parameters": {"source_item_id": f"REQ.item-{index}"},
+                "source_item_id": f"REQ.item-{index}",
+                "source_level": "MUST",
+                "parameters": {},
             }
             for index in range(MAX_AUTHORITY_TARGETS + 3)
         ]
@@ -750,16 +828,20 @@ def test_split_evidence_pack_filters_snippets_to_batch_paths(
     repo.mkdir()
     authority = {
         "invariants": [
-            {
-                "id": "INV-batch-a",
-                "type": "DATA_CONTRACT",
-                "parameters": {"source_item_id": "REQ.batch-a"},
-            },
-            {
-                "id": "INV-batch-b",
-                "type": "DATA_CONTRACT",
-                "parameters": {"source_item_id": "REQ.batch-b"},
-            },
+                {
+                    "id": "INV-batch-a",
+                    "type": "DATA_CONTRACT",
+                    "source_item_id": "REQ.batch-a",
+                    "source_level": "MUST",
+                    "parameters": {},
+                },
+                {
+                    "id": "INV-batch-b",
+                    "type": "DATA_CONTRACT",
+                    "source_item_id": "REQ.batch-b",
+                    "source_level": "MUST",
+                    "parameters": {},
+                },
         ]
     }
     (repo / "a.py").write_text("# INV-batch-a\n", encoding="utf-8")
