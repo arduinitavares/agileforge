@@ -194,6 +194,26 @@ class MutationLedgerRepository:
             mutation_event_id=mutation_event_id,
             now=now,
         )
+        with Session(self._engine) as session:
+            row = session.get(CliMutationLedger, mutation_event_id)
+            if row is None:
+                return _error_result(
+                    code=MUTATION_NOT_FOUND,
+                    details={"mutation_event_id": mutation_event_id},
+                    remediation=["Re-read mutation state before retrying recovery."],
+                )
+            if (
+                row.command == "agileforge project create"
+                and row.status == MutationStatus.RECOVERY_REQUIRED.value
+            ):
+                data = _row_payload(row)
+                data["recovery"] = {
+                    "acquired": False,
+                    "domain_resume_required": False,
+                    "handoff_command": "agileforge project setup retry",
+                    "reason": "Project creation recovery is resumed by setup retry.",
+                }
+                return _success_result(data)
         result = self.acquire_resume_lease(
             mutation_event_id=mutation_event_id,
             lease_owner=_resume_lease_owner(correlation_id),
@@ -379,6 +399,59 @@ class MutationLedgerRepository:
             ledger=refreshed,
             error_code=MUTATION_RECOVERY_REQUIRED,
         )
+
+    def repair_setup_recovery_target(
+        self,
+        *,
+        mutation_event_id: int,
+        expected_command: str,
+        expected_project_id: int,
+        now: datetime,
+    ) -> LedgerLoadResult:
+        """Repair a project setup recovery target before setup retry validation."""
+        db_now = _db_datetime(now)
+        with Session(self._engine) as session:
+            row = session.get(CliMutationLedger, mutation_event_id)
+            if row is None:
+                message = f"Mutation event {mutation_event_id} not found."
+                raise ValueError(message)
+            if row.command != expected_command or row.project_id != expected_project_id:
+                return LedgerLoadResult(ledger=row, error_code=MUTATION_RESUME_CONFLICT)
+            if row.status == MutationStatus.RECOVERY_REQUIRED.value:
+                return LedgerLoadResult(ledger=row)
+            if row.status != MutationStatus.PENDING.value:
+                return LedgerLoadResult(ledger=row, error_code=MUTATION_RESUME_CONFLICT)
+            if row.lease_expires_at is None or row.lease_expires_at > db_now:
+                return LedgerLoadResult(ledger=row, error_code=MUTATION_IN_PROGRESS)
+
+            result = session.exec(
+                update(CliMutationLedger)
+                .where(_MUTATION_EVENT_ID == mutation_event_id)
+                .where(_STATUS == MutationStatus.PENDING.value)
+                .where(_LEASE_EXPIRES_AT <= db_now)
+                .values(
+                    status=MutationStatus.RECOVERY_REQUIRED.value,
+                    recovery_action=RecoveryAction.RECONCILE_THEN_RESUME.value,
+                    recovery_safe_to_auto_resume=False,
+                    lease_owner=None,
+                    lease_acquired_at=None,
+                    last_heartbeat_at=None,
+                    lease_expires_at=None,
+                    last_error_json=_json_dump(_stale_pending_error(row=row, now=now)),
+                    updated_at=db_now,
+                )
+            )
+            session.commit()
+            repaired = session.get(CliMutationLedger, mutation_event_id)
+            if repaired is None:
+                message = f"Mutation event {mutation_event_id} not found."
+                raise ValueError(message)
+            if result.rowcount != 1:
+                return LedgerLoadResult(
+                    ledger=repaired,
+                    error_code=MUTATION_RESUME_CONFLICT,
+                )
+            return LedgerLoadResult(ledger=repaired)
 
     def transition_status(
         self,

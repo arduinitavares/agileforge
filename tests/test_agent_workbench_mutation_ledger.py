@@ -387,6 +387,72 @@ def test_stale_pending_error_timestamp_uses_utc_instant_for_offset_now(
     assert last_error["recorded_at"] == "2026-05-15T12:00:45+00:00"
 
 
+def test_repair_setup_recovery_target_repairs_expired_pending_create(
+    engine: Engine,
+) -> None:
+    """Verify setup retry can repair an expired project-create row."""
+    repo = _repo(engine)
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-project-001",
+        request_hash="sha256:req",
+        project_id=PROJECT_ID,
+        correlation_id="corr-1",
+        changed_by="cli-agent",
+        lease_owner="worker-1",
+        now=now,
+        lease_seconds=1,
+    ).ledger
+    assert row.mutation_event_id is not None
+
+    repaired = repo.repair_setup_recovery_target(
+        mutation_event_id=row.mutation_event_id,
+        expected_command="agileforge project create",
+        expected_project_id=PROJECT_ID,
+        now=now + timedelta(seconds=1),
+    )
+
+    assert repaired.error_code is None
+    assert repaired.ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+    assert repaired.ledger.recovery_action == RecoveryAction.RECONCILE_THEN_RESUME.value
+    assert repaired.ledger.recovery_safe_to_auto_resume is False
+    assert repaired.ledger.lease_owner is None
+    assert repaired.ledger.lease_expires_at is None
+    assert repaired.ledger.last_error_json is not None
+    assert json.loads(repaired.ledger.last_error_json)["code"] == "STALE_PENDING"
+
+
+def test_repair_setup_recovery_target_rejects_active_pending_create(
+    engine: Engine,
+) -> None:
+    """Verify setup retry leaves active project-create rows in progress."""
+    repo = _repo(engine)
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-project-001",
+        request_hash="sha256:req",
+        project_id=PROJECT_ID,
+        correlation_id="corr-1",
+        changed_by="cli-agent",
+        lease_owner="worker-1",
+        now=now,
+        lease_seconds=300,
+    ).ledger
+    assert row.mutation_event_id is not None
+
+    result = repo.repair_setup_recovery_target(
+        mutation_event_id=row.mutation_event_id,
+        expected_command="agileforge project create",
+        expected_project_id=PROJECT_ID,
+        now=now,
+    )
+
+    assert result.error_code == MUTATION_IN_PROGRESS
+    assert result.ledger.status == MutationStatus.PENDING.value
+
+
 def test_stale_recovery_loses_race_when_same_owner_refreshes_lease(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -734,6 +800,53 @@ def test_resume_event_returns_structured_conflict_error(engine: Engine) -> None:
             "retryable": True,
         }
     ]
+
+
+def test_mutation_resume_hands_project_create_recovery_to_setup_retry(
+    engine: Engine,
+) -> None:
+    """Verify project-create recovery is handed to setup retry."""
+    repo = _repo(engine)
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-project-001",
+        request_hash="sha256:req",
+        project_id=PROJECT_ID,
+        correlation_id="corr-1",
+        changed_by="cli-agent",
+        lease_owner="worker-1",
+        now=now,
+        lease_seconds=1,
+    ).ledger
+    assert row.mutation_event_id is not None
+    repo._force_recovery_required_for_test(
+        mutation_event_id=row.mutation_event_id,
+        recovery_action=RecoveryAction.RESUME_FROM_STEP,
+        safe_to_auto_resume=True,
+        last_error={"code": "MUTATION_RECOVERY_REQUIRED"},
+        now=now + timedelta(seconds=2),
+    )
+
+    result = repo.resume_event(
+        mutation_event_id=row.mutation_event_id,
+        correlation_id="corr-resume",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == MutationStatus.RECOVERY_REQUIRED.value
+    assert result["data"]["lease_owner"] is None
+    assert result["data"]["recovery"] == {
+        "acquired": False,
+        "domain_resume_required": False,
+        "handoff_command": "agileforge project setup retry",
+        "reason": "Project creation recovery is resumed by setup retry.",
+    }
+    with Session(engine) as session:
+        stored = session.get(CliMutationLedger, row.mutation_event_id)
+    assert stored is not None
+    assert stored.status == MutationStatus.RECOVERY_REQUIRED.value
+    assert stored.lease_owner is None
 
 
 def test_resume_event_repairs_expired_resume_lease_before_reacquiring(
