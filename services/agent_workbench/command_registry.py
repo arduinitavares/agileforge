@@ -350,6 +350,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
             ErrorCode.MUTATION_IN_PROGRESS.value,
             ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+            ErrorCode.MUTATION_RESUME_CONFLICT.value,
         ),
     ),
 )

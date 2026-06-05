@@ -308,6 +308,43 @@ def test_authority_regenerate_cli_invokes_application(
     ]
 
 
+def test_authority_regenerate_cli_defaults_changed_by(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority regenerate defaults changed_by for CLI agents."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "regenerate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            "3",
+            "--idempotency-key",
+            "regen-cli-002",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls == [
+        (
+            "authority_regenerate",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": 3,
+                "idempotency_key": "regen-cli-002",
+                "changed_by": "cli-agent",
+                "dry_run": False,
+            },
+        )
+    ]
+
+
 def test_authority_accept_with_review_token_does_not_require_idempotency_key(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

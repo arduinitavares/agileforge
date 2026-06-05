@@ -1893,6 +1893,7 @@ def test_authority_regenerate_is_registered_command() -> None:
         "IDEMPOTENCY_KEY_REUSED",
         "MUTATION_IN_PROGRESS",
         "MUTATION_RECOVERY_REQUIRED",
+        "MUTATION_RESUME_CONFLICT",
     }
 
 
