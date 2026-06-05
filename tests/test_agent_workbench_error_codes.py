@@ -89,10 +89,11 @@ def test_registry_covers_authority_review_decision_error_codes() -> None:
 
 def test_compiled_authority_schema_unsupported_error_is_registered() -> None:
     """Expose stable metadata for unsupported compiled-authority artifacts."""
+    expected_exit_code = 4
     metadata = error_metadata(ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED)
 
     assert metadata.code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
-    assert metadata.default_exit_code == 4
+    assert metadata.default_exit_code == expected_exit_code
     assert metadata.retryable is False
     assert metadata.description == "Compiled authority artifact schema is unsupported."
 

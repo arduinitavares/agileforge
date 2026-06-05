@@ -88,6 +88,13 @@ _FOCUSED_ITEM_COMPILER_ATTEMPTS: int = 2
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
+_COMPILED_AUTHORITY_PAYLOAD_OBJECT_ERROR = (
+    "Compiled authority payload must serialize to an object."
+)
+_UNREADABLE_COMPILED_AUTHORITY_REMEDIATION = (
+    "Recompile the latest approved spec authority to persist a supported "
+    "compiled artifact."
+)
 CompiledAuthorityLoadStatus = Literal[
     "success",
     "missing",
@@ -331,6 +338,11 @@ class GetCompiledAuthorityInput(BaseModel):
     spec_version_id: int = Field(description="Spec version ID to retrieve")
 
 
+def _compiled_authority_payload_object_type_error() -> TypeError:
+    """Build the canonical stored-artifact serialization type error."""
+    return TypeError(_COMPILED_AUTHORITY_PAYLOAD_OBJECT_ERROR)
+
+
 @dataclass(frozen=True)
 class CompiledArtifactLoadResult:
     """Typed result for stored compiled-authority artifact loading."""
@@ -393,7 +405,7 @@ def _normalize_input_params(params: object) -> dict[str, Any]:
     return {}
 
 
-def load_compiled_artifact(
+def load_compiled_artifact(  # noqa: PLR0911
     authority: object,
 ) -> CompiledArtifactLoadResult:
     """Load stored compiled artifact JSON with raw schema-version sniffing."""
@@ -461,7 +473,7 @@ def _compiled_authority_artifact_json(
     """Serialize a stored compiled-authority artifact with the v2 envelope."""
     payload = success.model_dump(mode="json")
     if not isinstance(payload, dict):
-        raise TypeError("Compiled authority payload must serialize to an object.")
+        raise _compiled_authority_payload_object_type_error()
     payload["schema_version"] = COMPILED_AUTHORITY_SCHEMA_VERSION
     return json.dumps(payload)
 
@@ -491,10 +503,8 @@ def _load_acceptance_context(
         raise SpecAuthorityAcceptanceError.not_compiled(spec_version_id)
 
     load_result = load_compiled_artifact(authority)
-    if not load_result.ok:
+    if not load_result.ok or load_result.artifact is None:
         raise SpecAuthorityAcceptanceError.invalid_artifact(spec_version_id)
-    artifact = load_result.artifact
-    assert artifact is not None
     return spec_version, authority
 
 
@@ -548,8 +558,6 @@ def _lookup_reusable_accepted_authority(
             compiled_row_found=True,
             compiled_artifact_success=False,
         )
-    artifact = load_result.artifact
-    assert artifact is not None
 
     return _AcceptedAuthorityLookup(
         reusable_spec_version_id=existing_acceptance.spec_version_id,
@@ -1869,14 +1877,13 @@ def _cached_compilation_result(
         return None
 
     load_result = load_compiled_artifact(existing_authority)
-    if load_result.ok:
-        artifact = load_result.artifact
-        assert artifact is not None
+    artifact = load_result.artifact
+    if load_result.ok and artifact is not None:
         scope_themes_count = len(artifact.scope_themes)
         invariants_count = len(artifact.invariants)
     else:
-        scope_themes_count = len(json.loads(existing_authority.scope_themes))
-        invariants_count = len(json.loads(existing_authority.invariants))
+        scope_themes_count = len(json.loads(existing_authority.scope_themes or "[]"))
+        invariants_count = len(json.loads(existing_authority.invariants or "[]"))
 
     cache_error = _update_product_compiled_authority_cache(
         session,
@@ -2397,9 +2404,8 @@ def _compiled_authority_metrics(
 ) -> tuple[int, int, int]:
     """Return counts used by the update+compile success payload."""
     load_result = load_compiled_artifact(authority)
-    if load_result.ok:
-        artifact = load_result.artifact
-        assert artifact is not None
+    artifact = load_result.artifact
+    if load_result.ok and artifact is not None:
         return (
             len(artifact.scope_themes),
             len(artifact.invariants),
@@ -2509,7 +2515,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
     }
 
 
-def check_spec_authority_status(
+def check_spec_authority_status(  # noqa: PLR0911
     params: dict[str, Any] | CheckSpecAuthorityStatusInput | None = None,
     *,
     tool_context: ToolContext | None = None,  # pylint: disable=unused-argument
@@ -2586,6 +2592,22 @@ def check_spec_authority_status(
                 "message": "Status: STALE (compiled for older spec)",
             }
 
+        latest_load_result = load_compiled_artifact(latest_authority)
+        if not latest_load_result.ok:
+            return {
+                "success": True,
+                "status": SpecAuthorityStatus.NOT_COMPILED.value,
+                "status_details": (
+                    f"Latest approved spec version {latest_approved_spec_version_id} "
+                    "has an unreadable compiled artifact "
+                    f"({latest_load_result.status})."
+                ),
+                "latest_approved_spec_version_id": latest_approved_spec_version_id,
+                "authority_id": latest_authority.authority_id,
+                "remediation": _UNREADABLE_COMPILED_AUTHORITY_REMEDIATION,
+                "message": "Status: NOT_COMPILED (compiled artifact unreadable)",
+            }
+
         return {
             "success": True,
             "status": SpecAuthorityStatus.CURRENT.value,
@@ -2644,15 +2666,14 @@ def get_compiled_authority_by_version(
             }
 
         load_result = load_compiled_artifact(authority)
-        if load_result.ok:
-            artifact = load_result.artifact
-            assert artifact is not None
+        artifact = load_result.artifact
+        if load_result.ok and artifact is not None:
             scope_themes = artifact.scope_themes
             invariants = [_render_invariant_summary(inv) for inv in artifact.invariants]
             spec_gaps = artifact.gaps
         else:
-            scope_themes = json.loads(authority.scope_themes)
-            invariants = json.loads(authority.invariants)
+            scope_themes = json.loads(authority.scope_themes or "[]")
+            invariants = json.loads(authority.invariants or "[]")
             spec_gaps = json.loads(authority.spec_gaps) if authority.spec_gaps else []
 
         eligible_feature_ids = json.loads(authority.eligible_feature_ids)

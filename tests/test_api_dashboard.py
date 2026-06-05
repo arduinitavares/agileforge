@@ -1399,7 +1399,12 @@ def test_load_packet_story_context_marks_unreadable_authority_missing(
         def exec(self, _query: object) -> _ExecResult:
             return _ExecResult(self._values.pop(0))
 
-    product = SimpleNamespace(product_id=1, updated_at=None, name="Product", vision=None)
+    product = SimpleNamespace(
+        product_id=1,
+        updated_at=None,
+        name="Product",
+        vision=None,
+    )
     story = SimpleNamespace(
         story_id=7,
         product_id=1,

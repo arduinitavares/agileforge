@@ -48,18 +48,18 @@ from utils.spec_authority_ir import (
 from utils.spec_authority_ir import (
     parse_markdown_sections as _parse_markdown_sections,
 )
-from utils.spec_schemas import (
-    SpecAuthorityCompilationSuccess,
-    SpecAuthorityMapping,
-    SpecAuthorityRequirementCandidate,
-    SpecAuthoritySourceUnit,
-)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from models.specs import CompiledSpecAuthority, SpecRegistry
-    from utils.spec_schemas import Invariant
+    from utils.spec_schemas import (
+        Invariant,
+        SpecAuthorityCompilationSuccess,
+        SpecAuthorityMapping,
+        SpecAuthorityRequirementCandidate,
+        SpecAuthoritySourceUnit,
+    )
 
 JsonDict = dict[str, Any]
 

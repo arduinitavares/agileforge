@@ -428,7 +428,9 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
 
 def test_run_deterministic_alignment_checks_unwraps_loader_result_success() -> None:
     """Deterministic checks should inspect invariants from loader success results."""
-    from services.specs.compiler_service import CompiledArtifactLoadResult  # noqa: PLC0415
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        CompiledArtifactLoadResult,
+    )
     from services.specs.story_validation_service import (  # noqa: PLC0415
         run_deterministic_alignment_checks,
     )

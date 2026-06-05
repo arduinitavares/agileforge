@@ -1028,13 +1028,19 @@ def _collect_finding_invariant_ids(
     return finding_invariant_ids
 
 
-def _resolve_loaded_artifact(loaded: object | None) -> SpecAuthorityCompilationSuccess | None:
+def _resolve_loaded_artifact(
+    loaded: object | None,
+) -> SpecAuthorityCompilationSuccess | None:
     """Normalize either a loader result or legacy raw artifact to an artifact."""
     if getattr(loaded, "ok", False):
         artifact = getattr(loaded, "artifact", None)
-        return artifact if isinstance(artifact, SpecAuthorityCompilationSuccess) else None
+        if isinstance(artifact, SpecAuthorityCompilationSuccess):
+            return artifact
+        return None
     if getattr(loaded, "invariants", None) is not None:
-        return loaded if isinstance(loaded, SpecAuthorityCompilationSuccess) else None
+        if isinstance(loaded, SpecAuthorityCompilationSuccess):
+            return loaded
+        return None
     return None
 
 

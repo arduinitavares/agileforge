@@ -1,8 +1,8 @@
 """Tests for specs compiler service."""
 
-from dataclasses import FrozenInstanceError, fields, is_dataclass
 import json
 import time
+from dataclasses import FrozenInstanceError, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +68,7 @@ def _stored_compiled_success_json() -> str:
 
 
 def v2_compiled_authority_payload() -> dict[str, object]:
+    """Return a stored v2 compiled-authority payload fixture."""
     return {
         "schema_version": "agileforge.compiled_authority.v2",
         "scope_themes": ["Payments"],
@@ -96,6 +97,7 @@ def v2_compiled_authority_payload() -> dict[str, object]:
 
 
 def legacy_compiled_authority_payload() -> dict[str, object]:
+    """Return a legacy stored payload fixture without schema_version."""
     payload = v2_compiled_authority_payload()
     payload.pop("schema_version")
     payload["compiler_version"] = "1.0.0"
@@ -496,7 +498,8 @@ def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
     assert result.validation_error is None
 
 
-def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload() -> None:
+def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload(
+) -> None:
     """Verify invalid v2 payloads expose schema-invalid result details."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
@@ -1966,6 +1969,51 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
         ),
         "latest_spec_version_id": draft_spec_version_id,
         "message": "Status: PENDING_REVIEW (latest spec not approved)",
+    }
+
+
+def test_check_spec_authority_status_does_not_report_legacy_artifact_current(
+    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy stored artifacts without schema_version are not CURRENT."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "get_engine",
+        session.get_bind,
+    )
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+    authority = _create_compiled_authority(
+        session,
+        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+
+    result = compiler_service.check_spec_authority_status(
+        {"product_id": require_id(sample_product.product_id, "product_id")},
+        tool_context=None,
+    )
+
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    assert result == {
+        "success": True,
+        "status": SpecAuthorityStatus.NOT_COMPILED.value,
+        "status_details": (
+            f"Latest approved spec version {spec_version_id} has an unreadable "
+            "compiled artifact (schema_unsupported)."
+        ),
+        "latest_approved_spec_version_id": spec_version_id,
+        "authority_id": require_id(authority.authority_id, "authority_id"),
+        "remediation": (
+            "Recompile the latest approved spec authority to persist a supported "
+            "compiled artifact."
+        ),
+        "message": "Status: NOT_COMPILED (compiled artifact unreadable)",
     }
 
 
