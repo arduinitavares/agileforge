@@ -386,6 +386,14 @@ class ProjectSetupMutationRunner:
                 },
             )
         if request.dry_run:
+            if (
+                original is not None
+                and _active_recovery_lease_blocks_retry(original, now=_now())
+            ):
+                return _mutation_resume_conflict(
+                    retry_mutation_event_id=None,
+                    original_mutation_event_id=request.recovery_mutation_event_id,
+                )
             return _success(
                 {
                     "preview_available": True,
@@ -1524,7 +1532,7 @@ def _authority_status_action(project_id: int) -> dict[str, Any]:
 
 def _mutation_resume_conflict(
     *,
-    retry_mutation_event_id: int,
+    retry_mutation_event_id: int | None,
     original_mutation_event_id: int | None,
 ) -> dict[str, Any]:
     return _error(
@@ -1534,6 +1542,16 @@ def _mutation_resume_conflict(
             "original_mutation_event_id": original_mutation_event_id,
         },
         remediation=["Re-read mutation state before retrying recovery."],
+    )
+
+
+def _active_recovery_lease_blocks_retry(row: CliMutationLedger, *, now: datetime) -> bool:
+    """Return whether another worker currently owns the recovery row."""
+    return (
+        row.status == MutationStatus.RECOVERY_REQUIRED.value
+        and row.lease_owner is not None
+        and row.lease_expires_at is not None
+        and row.lease_expires_at > _db_datetime(now)
     )
 
 

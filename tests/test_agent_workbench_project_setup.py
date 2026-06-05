@@ -1371,6 +1371,59 @@ def test_linked_setup_retry_dry_run_leaves_original_recovery_row_unchanged(
     assert len(rows) == 1
 
 
+def test_linked_setup_retry_dry_run_rejects_active_recovery_lease(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery, spec_file, workflow = _create_recovery_row(
+        engine=engine,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    original_event_id = recovery["data"]["mutation_event_id"]
+    project_id = recovery["data"]["project_id"]
+    repo = MutationLedgerRepository(engine=engine)
+    assert repo.acquire_recovery_lease(
+        mutation_event_id=original_event_id,
+        expected_project_id=project_id,
+        recovery_lease_owner="project-setup-retry:other:recovers:original",
+        now=datetime.now(UTC),
+    )
+    with Session(engine) as session:
+        original_row = session.get(CliMutationLedger, original_event_id)
+        assert original_row is not None
+        original_before = _row_payload(original_row)
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state=workflow.sessions.get(str(project_id), {}),
+    )
+
+    result = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint=expected_fingerprint,
+            recovery_mutation_event_id=original_event_id,
+            dry_run=True,
+            dry_run_id="retry-preview-conflict-001",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == MUTATION_RESUME_CONFLICT
+    with Session(engine) as session:
+        original_row = session.get(CliMutationLedger, original_event_id)
+        assert original_row is not None
+        original_after = _row_payload(original_row)
+        rows = session.exec(select(CliMutationLedger)).all()
+    assert original_after == original_before
+    assert len(rows) == 1
+
+
 def test_linked_retry_pre_side_effect_failure_preserves_original_and_replays_retry(
     engine: Engine,
     tmp_path: Path,
