@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 
 def _python_files_importing_compat_schemes() -> list[str]:
     root = Path(__file__).resolve().parents[1]
@@ -91,3 +94,64 @@ def test_services_and_agents_import_spec_schema_module_boundary() -> None:
 def test_python_modules_do_not_import_compat_schemes_directly() -> None:
     """Verify python modules do not import compat schemes directly."""
     assert _python_files_importing_compat_schemes() == []
+
+
+def test_spec_authority_success_defaults_v2_schema_version() -> None:
+    """Compiled authority success artifacts default to the v2 schema version."""
+    from utils.spec_schemas import (  # noqa: PLC0415
+        SpecAuthorityCompilationSuccess,
+    )
+
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Payments"],
+        domain=None,
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+    )
+
+    assert success.schema_version == "agileforge.compiled_authority.v2"
+    assert (
+        success.model_dump()["schema_version"]
+        == "agileforge.compiled_authority.v2"
+    )
+
+
+def test_behavioral_invariants_keep_provenance_top_level() -> None:
+    """Behavioral params stay semantic-only while invariants carry provenance."""
+    from utils.spec_schemas import (  # noqa: PLC0415
+        Invariant,
+        InvariantType,
+        UserInteractionParams,
+    )
+
+    invariant = Invariant(
+        id="INV-0123456789abcdef",
+        type=InvariantType.USER_INTERACTION,
+        source_item_id="REQ.todo-create",
+        source_level="MUST",
+        parameters=UserInteractionParams(
+            trigger="user presses Enter",
+            target="todo input",
+            expected_response="create a todo item",
+        ),
+    )
+
+    assert invariant.source_item_id == "REQ.todo-create"
+    assert invariant.source_level == "MUST"
+    assert invariant.parameters.trigger == "user presses Enter"
+
+    with pytest.raises(ValidationError):
+        UserInteractionParams.model_validate(
+            {
+                "source_item_id": "REQ.todo-create",
+                "source_level": "MUST",
+                "trigger": "user presses Enter",
+                "target": "todo input",
+                "expected_response": "create a todo item",
+            }
+        )

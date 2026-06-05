@@ -253,21 +253,9 @@ SpecAuthoritySourceLevel = Literal["MUST", "SHOULD", "MAY", "MUST_NOT"]
 
 
 class BehavioralAuthorityParams(BaseModel):
-    """Common source metadata for behavioral authority invariants."""
+    """Strict base class for behavioral authority parameter payloads."""
 
     model_config = ConfigDict(extra="forbid")
-
-    source_item_id: Annotated[
-        str,
-        Field(
-            min_length=1,
-            description="Structured spec item ID that authorizes this invariant.",
-        ),
-    ]
-    source_level: Annotated[
-        SpecAuthoritySourceLevel,
-        Field(description="Normative level of the source item."),
-    ]
 
 
 class ForbiddenCapabilityParams(BaseModel):
@@ -323,8 +311,10 @@ class RelationConstraintParams(BaseModel):
     ]
 
 
-class UserInteractionParams(BehavioralAuthorityParams):
+class UserInteractionParams(BaseModel):
     """Parameters for user-triggered interaction contracts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     trigger: Annotated[
         str,
@@ -343,8 +333,10 @@ class UserInteractionParams(BehavioralAuthorityParams):
     ]
 
 
-class StateTransitionParams(BehavioralAuthorityParams):
+class StateTransitionParams(BaseModel):
     """Parameters for state transition contracts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     state: Annotated[
         str,
@@ -360,8 +352,10 @@ class StateTransitionParams(BehavioralAuthorityParams):
     ]
 
 
-class DataContractParams(BehavioralAuthorityParams):
+class DataContractParams(BaseModel):
     """Parameters for persisted or exchanged data contracts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     subject: Annotated[
         str,
@@ -377,8 +371,10 @@ class DataContractParams(BehavioralAuthorityParams):
     ]
 
 
-class RouteContractParams(BehavioralAuthorityParams):
+class RouteContractParams(BaseModel):
     """Parameters for routing contracts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     route: Annotated[
         str,
@@ -394,8 +390,10 @@ class RouteContractParams(BehavioralAuthorityParams):
     ]
 
 
-class VisibilityRuleParams(BehavioralAuthorityParams):
+class VisibilityRuleParams(BaseModel):
     """Parameters for UI visibility contracts."""
+
+    model_config = ConfigDict(extra="forbid")
 
     target: Annotated[
         str,
@@ -437,6 +435,21 @@ class Invariant(BaseModel):
         ),
     ]
     type: Annotated[InvariantType, Field(description="Invariant type enum.")]
+    source_item_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            min_length=1,
+            description="Structured spec item ID that authorizes this invariant.",
+        ),
+    ]
+    source_level: Annotated[
+        SpecAuthoritySourceLevel | None,
+        Field(
+            default=None,
+            description="Normative level of the source item.",
+        ),
+    ]
     parameters: Annotated[
         InvariantParameters,
         Field(description="Typed parameters for the invariant."),
@@ -667,6 +680,10 @@ class SpecAuthorityCompilationSuccess(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: Annotated[
+        Literal["agileforge.compiled_authority.v2"],
+        Field(description="Stored compiled-authority schema version."),
+    ] = "agileforge.compiled_authority.v2"
     scope_themes: Annotated[
         list[str],
         Field(description="Top-level scope themes extracted from the spec."),
@@ -893,6 +910,10 @@ class SpecAuthorityCompilationFailure(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: Annotated[
+        Literal["agileforge.compiled_authority.v2"],
+        Field(description="Stored compiled-authority schema version."),
+    ] = "agileforge.compiled_authority.v2"
     error: Annotated[
         str,
         Field(description="Error code for compilation failure."),

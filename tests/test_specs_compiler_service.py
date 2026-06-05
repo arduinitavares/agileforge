@@ -77,6 +77,8 @@ def v2_compiled_authority_payload() -> dict[str, object]:
             {
                 "id": "INV-0123456789abcdef",
                 "type": "REQUIRED_FIELD",
+                "source_item_id": "REQ.payments.email",
+                "source_level": "MUST",
                 "parameters": {"field_name": "email"},
             }
         ],
@@ -100,6 +102,12 @@ def legacy_compiled_authority_payload() -> dict[str, object]:
     """Return a legacy stored payload fixture without schema_version."""
     payload = v2_compiled_authority_payload()
     payload.pop("schema_version")
+    invariant = payload["invariants"][0]
+    assert isinstance(invariant, dict)
+    parameters = invariant["parameters"]
+    assert isinstance(parameters, dict)
+    parameters["source_item_id"] = invariant.pop("source_item_id")
+    parameters["source_level"] = invariant.pop("source_level")
     payload["compiler_version"] = "1.0.0"
     return payload
 
@@ -260,9 +268,9 @@ def _behavioral_payload_json(
             Invariant(
                 id="INV-0123456789abcdef",
                 type=InvariantType.USER_INTERACTION,
+                source_item_id=source_item_id,
+                source_level=source_level,
                 parameters=UserInteractionParams(
-                    source_item_id=source_item_id,
-                    source_level=source_level,
                     trigger="user action",
                     target=source_item_id,
                     expected_response=f"Honor {source_item_id}.",
@@ -431,6 +439,9 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     assert result.validation_error is None
     assert result.artifact.scope_themes == ["Payments"]
     assert result.artifact.invariants[0].id == "INV-0123456789abcdef"
+    assert result.artifact.schema_version == "agileforge.compiled_authority.v2"
+    assert result.artifact.invariants[0].source_item_id == "REQ.payments.email"
+    assert result.artifact.invariants[0].source_level == "MUST"
     with pytest.raises(FrozenInstanceError):
         result.status = "missing"  # type: ignore[misc]
 
@@ -455,6 +466,7 @@ def test_compiled_authority_artifact_json_round_trips_through_loader() -> None:
     assert payload["schema_version"] == "agileforge.compiled_authority.v2"
     assert result.status == "success"
     assert result.artifact is not None
+    assert result.artifact.schema_version == "agileforge.compiled_authority.v2"
     assert result.artifact.scope_themes == success.scope_themes
 
 
@@ -823,9 +835,10 @@ def test_preview_spec_authority_iteratively_covers_accepted_must_items(
     )
     assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
     covered_item_ids = {
-        invariant.parameters.source_item_id
+        invariant.source_item_id
         for invariant in compiled.root.invariants
         if isinstance(invariant.parameters, UserInteractionParams)
+        and invariant.source_item_id is not None
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
     assert ["REQ.todo-create"] in calls
@@ -928,9 +941,10 @@ def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
     )
     assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
     covered_item_ids = {
-        invariant.parameters.source_item_id
+        invariant.source_item_id
         for invariant in compiled.root.invariants
         if isinstance(invariant.parameters, UserInteractionParams)
+        and invariant.source_item_id is not None
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
     assert calls[0] == ["REQ.todo-create", "REQ.todo-toggle", "REQ.todo-color"]
@@ -987,9 +1001,10 @@ def test_preview_spec_authority_retries_transient_focused_item_failure(
     )
     assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
     covered_item_ids = {
-        invariant.parameters.source_item_id
+        invariant.source_item_id
         for invariant in compiled.root.invariants
         if isinstance(invariant.parameters, UserInteractionParams)
+        and invariant.source_item_id is not None
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
     assert focused_attempts["REQ.todo-create"] == 2  # noqa: PLR2004
@@ -1325,9 +1340,10 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     assert load_result.status == "success"
     assert load_result.artifact is not None
     covered_item_ids = {
-        invariant.parameters.source_item_id
+        invariant.source_item_id
         for invariant in load_result.artifact.invariants
         if isinstance(invariant.parameters, UserInteractionParams)
+        and invariant.source_item_id is not None
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
     assert ["REQ.todo-create"] in calls

@@ -443,10 +443,8 @@ def load_compiled_artifact(  # noqa: PLR0911
             ),
         )
 
-    payload = dict(parsed)
-    payload.pop("schema_version", None)
     try:
-        parsed_output = SpecAuthorityCompilerOutput.model_validate(payload)
+        parsed_output = SpecAuthorityCompilerOutput.model_validate(parsed)
     except ValidationError as exc:
         return CompiledArtifactLoadResult(
             status="schema_invalid",
@@ -474,7 +472,6 @@ def _compiled_authority_artifact_json(
     payload = success.model_dump(mode="json")
     if not isinstance(payload, dict):
         raise _compiled_authority_payload_object_type_error()
-    payload["schema_version"] = COMPILED_AUTHORITY_SCHEMA_VERSION
     return json.dumps(payload)
 
 
@@ -1064,7 +1061,7 @@ def _accounted_iterative_authority_item_ids(
     candidate_item_ids = set(item_ids)
     accounted: set[str] = set()
     for invariant in success.invariants:
-        source_item_id = getattr(invariant.parameters, "source_item_id", None)
+        source_item_id = invariant.source_item_id
         if isinstance(source_item_id, str) and source_item_id in candidate_item_ids:
             accounted.add(source_item_id)
 
