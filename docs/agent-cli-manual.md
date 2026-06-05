@@ -147,6 +147,86 @@ Do not copy `.env` into temporary worktrees or source relative SQLite URLs from
 the root `.env` without `AGILEFORGE_CONFIG_ROOT`. Both patterns can validate the
 wrong checkout or database.
 
+### Disposable New-Project Smoke Test
+
+Use this when validating a branch or a fresh agent workflow from scratch. The
+smoke test must use an isolated caller repository and isolated SQLite files so it
+does not touch the user's normal AgileForge state.
+
+Before the branch is merged, use the worktree CLI form shown here. After merge,
+replace the `uv run --project ... python -m cli.main` prefix with `agileforge`.
+
+```sh
+SCRATCH_ROOT="$(mktemp -d /tmp/agileforge-bootstrap-smoke.XXXXXX)"
+CALLER_REPO="$SCRATCH_ROOT/caller"
+mkdir -p "$CALLER_REPO/specs" "$SCRATCH_ROOT/db"
+
+export AGILEFORGE_DB_URL="sqlite:///$SCRATCH_ROOT/db/business.sqlite3"
+export AGILEFORGE_SESSION_DB_URL="sqlite:///$SCRATCH_ROOT/db/sessions.sqlite3"
+
+cd "$CALLER_REPO"
+```
+
+Create `specs/spec.json` and `specs/spec.md` with `writing-technical-specs` in
+AgileForge profile mode. For a CLI-runtime-only smoke, a known-good
+`agileforge.spec.v1` fixture may be copied into `specs/spec.json`, but that does
+not validate the spec-writing agent workflow.
+
+Validate and preview:
+
+```sh
+uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+  python -m cli.main spec profile validate \
+  --spec-file specs/spec.json \
+  --render-md specs/spec.md
+
+uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+  python -m cli.main project create \
+  --dry-run \
+  --dry-run-id preview-bootstrap-smoke-001 \
+  --name "Bootstrap Smoke" \
+  --spec-file specs/spec.json > "$SCRATCH_ROOT/project-create-dry-run.json"
+```
+
+Run the guarded mutation only after the dry-run succeeds:
+
+```sh
+uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+  python -m cli.main project create \
+  --name "Bootstrap Smoke" \
+  --spec-file specs/spec.json \
+  --idempotency-key create-bootstrap-smoke-001 \
+  --changed-by codex > "$SCRATCH_ROOT/project-create.json"
+```
+
+Summarize the result without printing raw JSON:
+
+```sh
+uv run --project /Users/aaat/projects/agileforge/.worktrees/<branch-worktree> \
+  python - "$SCRATCH_ROOT/project-create.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+data = payload.get("data", {})
+errors = payload.get("errors") or []
+print("ok", payload.get("ok"))
+print("project_id", data.get("project_id") if isinstance(data, dict) else None)
+print("mutation_event_id", data.get("mutation_event_id") if isinstance(data, dict) else None)
+print("status", data.get("status") if isinstance(data, dict) else None)
+if errors:
+    first = errors[0]
+    print("error_code", first.get("code") if isinstance(first, dict) else type(first).__name__)
+    print("error_message", first.get("message") if isinstance(first, dict) else None)
+PY
+```
+
+Expected success is `ok True` with a `project_id`. Then run bounded
+`authority status` and `workflow next` summaries. A new project should stop at
+authority review/accept; it should not automatically continue to Vision,
+Backlog, Roadmap, Story, or Sprint.
+
 ## Environment Expectations
 
 The CLI reads AgileForge configuration from the central repo runtime. The usual
@@ -1817,7 +1897,15 @@ Dry-run rules:
   State may change between preview and execution.
 - A dry-run does not consume an idempotency key.
 - A dry-run does not acquire recovery leases.
-- A dry-run does not update existing recovery ledger rows.
+- `project create --dry-run` does not update existing ledger rows.
+- `project setup retry --dry-run` validates the same stale guards and recovery
+  row rules as real retry. It may perform only the narrow ledger repair from an
+  expired pending `agileforge project create` row to `recovery_required`, because
+  that repair is required to preview the real retry truthfully. It must not write
+  product, spec, compiled authority, authority acceptance, workflow setup, or
+  retry mutation rows.
+- If another worker owns an active recovery lease, `project setup retry
+  --dry-run` returns the same recovery conflict as the real retry.
 
 ## Creating a Project
 
