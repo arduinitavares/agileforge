@@ -472,6 +472,93 @@ def test_normalizer_repairs_fresh_behavioral_provenance_before_validation() -> N
     }
 
 
+def test_saved_failure_placeholder_invariant_ids_repair_to_v2() -> None:
+    """Saved project-create placeholder IDs are repaired before validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"][0]["id"] = "INV-xxxxxxxxxxxxxxxx"
+    payload["source_map"][0]["invariant_id"] = "INV-xxxxxxxxxxxxxxxx"
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant = normalized.root.invariants[0]
+    assert isinstance(invariant.parameters, RequiredFieldParams)
+    expected_id = compute_invariant_id_from_payload(
+        InvariantType.REQUIRED_FIELD,
+        invariant.parameters,
+    )
+    assert invariant.id == expected_id
+    assert re.fullmatch(r"INV-[0-9a-f]{16}", invariant.id)
+    assert normalized.root.source_map[0].invariant_id == expected_id
+
+
+def test_saved_failure_invalid_prompt_hash_repairs_to_compiler_prompt_hash() -> None:
+    """Saved project-create prompt_hash failures are repaired before validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["prompt_hash"] = "not-a-valid-hash"
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+
+
+def test_saved_failure_param_level_source_item_repairs_to_top_level() -> None:
+    """Saved project-create param-level source metadata is lifted off params."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-xxxxxxxxxxxxxxxx",
+            "type": "USER_INTERACTION",
+            "parameters": {
+                "source_item_id": "REQ.item-interactions",
+                "source_level": "MUST",
+                "trigger": "checkbox click",
+                "target": "todo checkbox",
+                "expected_response": "todo completed value toggles",
+            },
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-xxxxxxxxxxxxxxxx",
+            "excerpt": "Clicking a todo checkbox updates the todo completed value.",
+            "location": "REQ.item-interactions.acceptance[0]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant = normalized.root.invariants[0]
+    assert isinstance(invariant.parameters, UserInteractionParams)
+    assert invariant.source_item_id == "REQ.item-interactions"
+    assert invariant.source_level == "MUST"
+    assert invariant.parameters.model_dump(mode="json") == {
+        "trigger": "checkbox click",
+        "target": "todo checkbox",
+        "expected_response": "todo completed value toggles",
+    }
+    assert normalized.root.source_map[0].invariant_id == invariant.id
+
+
 def test_normalizer_semantic_ids_ignore_provenance_fields() -> None:
     """Top-level provenance must not affect deterministic invariant IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
