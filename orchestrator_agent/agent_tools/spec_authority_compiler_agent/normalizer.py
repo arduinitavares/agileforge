@@ -107,6 +107,7 @@ _STRUCTURED_ITEM_ID_RE = re.compile(
     r"ASSUMPTION|RISK|EXAMPLE|OPEN_QUESTION)\.[A-Za-z0-9_-]+"
 )
 _STRICT_INVARIANT_ID_RE = re.compile(r"^INV-[0-9a-f]{16}$")
+_PROMPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
     {
         "scope_themes",
@@ -117,6 +118,9 @@ _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
         "compiler_version",
         "prompt_hash",
     }
+)
+_SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP_AND_PROMPT_HASH = (
+    _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP - {"prompt_hash"}
 )
 _DEPRECATED_COMPACT_IR_KEYS = frozenset(
     {
@@ -241,6 +245,32 @@ def _drop_deprecated_compact_ir_for_success_payload(payload: object) -> None:
 
     for key in _DEPRECATED_COMPACT_IR_KEYS:
         payload_dict.pop(key, None)
+
+
+def _repair_invalid_prompt_hash_for_validation(payload: object) -> None:
+    """Repair invalid prompt_hash before strict success schema validation."""
+    if not isinstance(payload, dict):
+        return
+
+    payload_dict = cast("dict[str, Any]", payload)
+    result = payload_dict.get("result")
+    if isinstance(result, dict):
+        _repair_invalid_prompt_hash_for_validation(result)
+
+    if "error" in payload_dict:
+        return
+    if not _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP_AND_PROMPT_HASH.issubset(
+        payload_dict
+    ):
+        return
+
+    prompt_hash = payload_dict.get("prompt_hash")
+    if isinstance(prompt_hash, str) and _PROMPT_HASH_RE.fullmatch(prompt_hash):
+        return
+
+    payload_dict["prompt_hash"] = compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
 
 
 def _temporary_invariant_id(index: int) -> str:
@@ -1443,6 +1473,7 @@ def normalize_compiler_output(
     parsed: SpecAuthorityCompilerOutput | None = None
     validation_gaps: list[str] = []
     _drop_deprecated_compact_ir_for_success_payload(payload)
+    _repair_invalid_prompt_hash_for_validation(payload)
     _default_missing_source_map_for_success_payload(payload)
     _repair_invalid_invariant_ids_for_validation(payload)
 
@@ -1452,7 +1483,7 @@ def normalize_compiler_output(
     except ValidationError as output_exc:
         validation_gaps.append(_summarize_validation_error("output", output_exc))
 
-        if isinstance(payload, dict) and "result" in payload:
+        if isinstance(payload, dict) and "result" in payload and "error" not in payload:
             try:
                 envelope = SpecAuthorityCompilerEnvelope.model_validate(payload)
                 parsed = SpecAuthorityCompilerOutput(root=envelope.result)

@@ -1189,6 +1189,178 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
 
 
+def test_normalizer_repairs_invalid_prompt_hash_before_validation() -> None:
+    """Invalid prompt_hash should be repaired before strict schema validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "not-a-valid-hash",
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+
+
+def test_normalizer_repairs_missing_prompt_hash_before_validation() -> None:
+    """Missing prompt_hash should be repaired before strict schema validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [],
+        "compiler_version": "1.0.0",
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+
+
+def test_normalizer_repairs_missing_hash_and_source_map_before_validation() -> None:
+    """Missing prompt_hash plus source_map should still normalize as success."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw: dict[str, Any] = {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "compiler_version": "1.0.0",
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert normalized.root.source_map == []
+
+
+def test_normalizer_repairs_invalid_envelope_prompt_hash_before_validation() -> None:
+    """Envelope result prompt_hash should be repaired before validation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    result_payload: dict[str, Any] = {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "",
+    }
+
+    normalized = normalize_compiler_output(json.dumps({"result": result_payload}))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+
+
+def test_normalizer_repairs_missing_envelope_hash_and_source_map() -> None:
+    """Envelope result with missing prompt_hash and source_map should normalize."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (  # noqa: E501, PLC0415
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    )
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    result_payload: dict[str, Any] = {
+        "scope_themes": ["payload validation"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "user_id"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "compiler_version": "1.0.0",
+    }
+
+    normalized = normalize_compiler_output(json.dumps({"result": result_payload}))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.prompt_hash == compute_prompt_hash(
+        SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert normalized.root.source_map == []
+
+
 def test_exact_legacy_source_map_quote_preserves_review_evidence_only() -> None:
     """Legacy source_map quotes do not synthesize deprecated compact IR."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
@@ -3208,6 +3380,42 @@ def test_normalizer_accepts_enveloped_result_payload() -> None:
     normalized = normalize_compiler_output(json.dumps({"result": result_payload}))
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     assert len(normalized.root.source_map) == 1
+
+
+def test_normalizer_does_not_convert_failure_wrapper_result_to_success() -> None:
+    """Top-level error wrapper must stay failure even with nested result."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    result_payload: dict[str, Any] = {
+        "scope_themes": ["ui policy"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-0000000000000000",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {"capability": "provider selection"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "compiler_version": "1.0.0",
+    }
+    raw: dict[str, Any] = {
+        "error": "SPEC_COMPILATION_FAILED",
+        "reason": "MODEL_REFUSED",
+        "blocking_gaps": ["model refused"],
+        "result": result_payload,
+    }
+
+    normalized = normalize_compiler_output(json.dumps(raw))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.error == "SPEC_COMPILATION_FAILED"
+    assert normalized.root.reason == "JSON_VALIDATION_FAILED"
+    assert "scope_themes" in normalized.root.blocking_gaps[0]
 
 
 def test_normalizer_filters_meta_policy_invariant_from_plagiarism_section() -> None:
