@@ -94,6 +94,8 @@ class VisionPhaseRunner:
                 run_vision_agent=run_vision_agent_from_state,
                 user_input=user_input,
             )
+        except _ProjectHydrationError as exc:
+            return _project_hydration_error(exc.error)
         except VisionPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
@@ -137,6 +139,8 @@ class VisionPhaseRunner:
                 build_tool_context=_build_tool_context,
                 save_vision_tool=save_vision_tool,
             )
+        except _ProjectHydrationError as exc:
+            return _project_hydration_error(exc.error)
         except VisionPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
@@ -177,7 +181,11 @@ class VisionPhaseRunner:
     ) -> SimpleNamespace:
         state = await self._ensure_session(session_id)
         context = SimpleNamespace(state=dict(state), session_id=session_id)
-        select_project(project_id, _build_tool_context(context))
+        result = select_project(project_id, _build_tool_context(context))
+        if not result.get("success"):
+            raise _ProjectHydrationError(
+                result.get("error", "Project hydration failed")
+            )
         return context
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
@@ -229,6 +237,39 @@ def _error_envelope(
             ).to_dict()
         ],
     }
+
+
+class _ProjectHydrationError(RuntimeError):
+    """Raised when active project hydration fails before Vision execution."""
+
+    def __init__(self, error: object) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+def _project_hydration_error(error: object) -> dict[str, Any]:
+    """Map select_project failures onto the workbench error envelope."""
+    if not isinstance(error, dict):
+        return _error_envelope(ErrorCode.INVALID_COMMAND, str(error))
+
+    try:
+        code = ErrorCode(str(error.get("code", ErrorCode.INVALID_COMMAND.value)))
+    except ValueError:
+        code = ErrorCode.INVALID_COMMAND
+    message = str(error.get("message") or error)
+    details = error.get("details")
+    remediation = error.get("remediation")
+    return _error_envelope(
+        code,
+        message,
+        details=details if isinstance(details, dict) else {},
+        remediation=remediation if _is_string_list(remediation) else [],
+    )
+
+
+def _is_string_list(value: object) -> bool:
+    """Return whether a value can be passed as remediation text."""
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _phase_error(exc: VisionPhaseError) -> dict[str, Any]:

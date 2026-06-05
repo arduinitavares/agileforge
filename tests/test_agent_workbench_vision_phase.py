@@ -184,3 +184,81 @@ def test_vision_generate_returns_failure_envelope_for_runtime_failure(
         "model_class": "LiteLlm",
         "model_id": "openrouter/openai/gpt-5.4-mini",
     }
+
+
+def test_vision_generate_blocks_unsupported_authority_before_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported compiled authority must fail closed before Vision generation."""
+    agent_calls: list[dict[str, Any]] = []
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {
+            "success": False,
+            "error": {
+                "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+                "message": "Compiled authority artifact schema is unsupported.",
+                "details": {
+                    "project_id": product_id,
+                    "spec_version_id": 12,
+                    "observed_schema_version": None,
+                    "required_schema_version": "agileforge.compiled_authority.v2",
+                },
+                "remediation": [
+                    "Run agileforge authority regenerate --project-id 2 "
+                    "--spec-version-id 12 --idempotency-key <new-key>."
+                ],
+            },
+        }
+
+    async def fake_run_vision_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        agent_calls.append(
+            {"state": state, "project_id": project_id, "user_input": user_input}
+        )
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {"is_complete": False},
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.vision_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.vision_phase.run_vision_agent_from_state",
+        fake_run_vision_agent_from_state,
+    )
+    runner = VisionPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(project_id=2)
+
+    assert result["ok"] is False
+    assert agent_calls == []
+    assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result["errors"][0]["message"] == (
+        "Compiled authority artifact schema is unsupported."
+    )
+    assert result["errors"][0]["details"] == {
+        "project_id": 2,
+        "spec_version_id": 12,
+        "observed_schema_version": None,
+        "required_schema_version": "agileforge.compiled_authority.v2",
+    }
+    assert result["errors"][0]["remediation"] == [
+        "Run agileforge authority regenerate --project-id 2 "
+        "--spec-version-id 12 --idempotency-key <new-key>."
+    ]
