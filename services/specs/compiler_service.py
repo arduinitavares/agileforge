@@ -85,6 +85,17 @@ _ITERATIVE_AUTHORITY_LEVELS: frozenset[RequirementLevel] = frozenset(
 )
 _NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
 _FOCUSED_ITEM_COMPILER_ATTEMPTS: int = 2
+_SCHEMA_RETRY_FAILURES: frozenset[str] = frozenset(
+    {"INVALID_JSON", "JSON_VALIDATION_FAILED"}
+)
+_SCHEMA_RETRY_FEEDBACK = (
+    "Your previous output failed the compiled authority v2 schema.\n"
+    "Return only valid JSON.\n"
+    "Do not put source_item_id or source_level inside parameters.\n"
+    "Place provenance at invariant.source_item_id and "
+    "invariant.source_level.\n"
+    'schema_version must be "agileforge.compiled_authority.v2".'
+)
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
@@ -261,6 +272,17 @@ class _NormalizedCompilerInvocation:
 
     raw_json: str
     output: SpecAuthorityCompilerOutput
+
+
+@dataclass(frozen=True)
+class _CompilerInvocationResult:
+    """Compile attempt result plus schema-retry metadata."""
+
+    success: SpecAuthorityCompilationSuccess | None = None
+    failure: dict[str, Any] | None = None
+    schema_retry_attempted: bool = False
+    schema_retry_reason: str | None = None
+    schema_retry_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -886,6 +908,7 @@ def _default_invoke_spec_authority_compiler(
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
+    domain_hint: str | None = None,
 ) -> str:
     """Invoke the compiler agent from sync code and return raw JSON text."""
     del content_ref
@@ -893,7 +916,7 @@ def _default_invoke_spec_authority_compiler(
     input_payload = SpecAuthorityCompilerInput(
         spec_source=spec_content,
         spec_content_ref=None,
-        domain_hint=None,
+        domain_hint=domain_hint,
         product_id=product_id,
         spec_version_id=spec_version_id,
         spec_source_format=cast(
@@ -932,6 +955,7 @@ def _invoke_spec_authority_compiler(
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
+    domain_hint: str | None = None,
 ) -> str:
     """Invoke the effective compiler seam, honoring legacy monkeypatch overrides."""
     compiler_invoke = _resolve_compiler_invoker()
@@ -940,6 +964,7 @@ def _invoke_spec_authority_compiler(
         content_ref=content_ref,
         product_id=product_id,
         spec_version_id=spec_version_id,
+        domain_hint=domain_hint,
     )
 
 
@@ -1292,6 +1317,7 @@ def _invoke_and_normalize_spec_authority(
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
+    domain_hint: str | None = None,
 ) -> _NormalizedCompilerInvocation:
     """Invoke the compiler once and normalize the result."""
     raw_json = _invoke_spec_authority_compiler(
@@ -1299,6 +1325,7 @@ def _invoke_and_normalize_spec_authority(
         content_ref=content_ref,
         product_id=product_id,
         spec_version_id=spec_version_id,
+        domain_hint=domain_hint,
     )
     normalized = normalize_compiler_output(
         raw_json,
@@ -1318,6 +1345,7 @@ def _compile_spec_authority_output(
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
+    domain_hint: str | None = None,
 ) -> _NormalizedCompilerInvocation:
     """Compile authority, adding focused item passes for structured specs."""
     artifact = _structured_spec_artifact_or_none(spec_content)
@@ -1326,6 +1354,7 @@ def _compile_spec_authority_output(
         content_ref=content_ref,
         product_id=product_id,
         spec_version_id=spec_version_id,
+        domain_hint=domain_hint,
     )
     if artifact is None:
         return full_invocation
@@ -1507,6 +1536,118 @@ def _compiler_failure_result(
         "blocking_gaps": details.blocking_gaps or [],
         **metadata,
     }
+
+
+def _schema_retry_metadata_dict(
+    *,
+    attempted: bool,
+    reason: str | None,
+    attempts: int,
+) -> dict[str, Any]:
+    """Return stable compile-result fields for schema-retry metadata."""
+    return {
+        "schema_retry_attempted": attempted,
+        "schema_retry_reason": reason,
+        "schema_retry_attempts": attempts,
+    }
+
+
+def _attach_schema_retry_metadata(
+    result: dict[str, Any],
+    *,
+    attempted: bool,
+    reason: str | None,
+    attempts: int,
+) -> dict[str, Any]:
+    """Copy a result envelope and add schema-retry metadata."""
+    enriched = dict(result)
+    enriched.update(
+        _schema_retry_metadata_dict(
+            attempted=attempted,
+            reason=reason,
+            attempts=attempts,
+        )
+    )
+    return enriched
+
+
+def _normalized_failure_result(
+    spec_version: SpecRegistry,
+    *,
+    raw_json: str,
+    failure: SpecAuthorityCompilationFailure,
+) -> dict[str, Any]:
+    """Build the persisted failure envelope for normalized compiler failures."""
+    failure_stage = (
+        "invalid_json" if failure.reason == "INVALID_JSON" else "output_validation"
+    )
+    return _compiler_failure_result(
+        product_id=spec_version.product_id,
+        spec_version_id=spec_version.spec_version_id,
+        content_ref=spec_version.content_ref,
+        failure_stage=failure_stage,
+        error=failure.error,
+        reason=failure.reason,
+        raw_output=raw_json,
+        blocking_gaps=failure.blocking_gaps,
+    )
+
+
+def _run_compiler_attempt(
+    spec_version: SpecRegistry,
+    *,
+    spec_content: str,
+    lease_guard: Callable[[str], bool] | None,
+    heartbeat_interval_seconds: float,
+    timeout_seconds: float,
+    domain_hint: str | None = None,
+) -> _NormalizedCompilerInvocation | dict[str, Any]:
+    """Run one guarded compiler attempt and return raw normalized output."""
+    try:
+        return _run_compiler_invocation_with_guards(
+            invoke=lambda: _compile_spec_authority_output(
+                spec_content=spec_content,
+                content_ref=spec_version.content_ref,
+                product_id=spec_version.product_id,
+                spec_version_id=spec_version.spec_version_id,
+                domain_hint=domain_hint,
+            ),
+            lease_guard=lease_guard,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            timeout_result=lambda: _compiler_failure_result(
+                product_id=spec_version.product_id,
+                spec_version_id=spec_version.spec_version_id,
+                content_ref=spec_version.content_ref,
+                failure_stage="invocation_timeout",
+                error="SPEC_COMPILER_INVOCATION_TIMEOUT",
+                reason=(
+                    "Spec authority compiler exceeded "
+                    f"{timeout_seconds:.0f} seconds."
+                ),
+            ),
+        )
+    except AgentInvocationError as exc:
+        return _compiler_failure_result(
+            product_id=spec_version.product_id,
+            spec_version_id=spec_version.spec_version_id,
+            content_ref=spec_version.content_ref,
+            failure_stage="invocation_exception",
+            error="SPEC_COMPILER_INVOCATION_FAILED",
+            reason=str(exc),
+            raw_output=exc.partial_output,
+            exception=exc,
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        return _compiler_failure_result(
+            product_id=spec_version.product_id,
+            spec_version_id=spec_version.spec_version_id,
+            content_ref=spec_version.content_ref,
+            failure_stage="invocation_exception",
+            error="SPEC_COMPILER_INVOCATION_FAILED",
+            reason=str(exc),
+            exception=exc,
+        )
 
 
 def _render_invariant_summary(invariant: Invariant) -> str:
@@ -1911,6 +2052,11 @@ def _cached_compilation_result(
             f"Spec version {context.spec_version.spec_version_id} is already compiled "
             f"(authority ID: {existing_authority.authority_id})."
         ),
+        **_schema_retry_metadata_dict(
+            attempted=False,
+            reason=None,
+            attempts=0,
+        ),
     }
 
 
@@ -1953,74 +2099,92 @@ def _invoke_compiler_for_version(
     lease_guard: Callable[[str], bool] | None = None,
     heartbeat_interval_seconds: float = DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS,
     timeout_seconds: float = DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS,
-) -> SpecAuthorityCompilationSuccess | dict[str, Any]:
+) -> _CompilerInvocationResult:
     """Invoke the compiler and normalize either a success artifact or failure result."""
-    try:
-        compiled = _run_compiler_invocation_with_guards(
-            invoke=lambda: _compile_spec_authority_output(
-                spec_content=spec_content,
-                content_ref=spec_version.content_ref,
-                product_id=spec_version.product_id,
-                spec_version_id=spec_version.spec_version_id,
-            ),
-            lease_guard=lease_guard,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-            timeout_seconds=timeout_seconds,
-            timeout_result=lambda: _compiler_failure_result(
-                product_id=spec_version.product_id,
-                spec_version_id=spec_version.spec_version_id,
-                content_ref=spec_version.content_ref,
-                failure_stage="invocation_timeout",
-                error="SPEC_COMPILER_INVOCATION_TIMEOUT",
-                reason=(
-                    "Spec authority compiler exceeded "
-                    f"{timeout_seconds:.0f} seconds."
-                ),
-            ),
-        )
-    except AgentInvocationError as exc:
-        return _compiler_failure_result(
-            product_id=spec_version.product_id,
-            spec_version_id=spec_version.spec_version_id,
-            content_ref=spec_version.content_ref,
-            failure_stage="invocation_exception",
-            error="SPEC_COMPILER_INVOCATION_FAILED",
-            reason=str(exc),
-            raw_output=exc.partial_output,
-            exception=exc,
-        )
-    except (RuntimeError, TypeError, ValueError) as exc:
-        return _compiler_failure_result(
-            product_id=spec_version.product_id,
-            spec_version_id=spec_version.spec_version_id,
-            content_ref=spec_version.content_ref,
-            failure_stage="invocation_exception",
-            error="SPEC_COMPILER_INVOCATION_FAILED",
-            reason=str(exc),
-            exception=exc,
-        )
+    compiled = _run_compiler_attempt(
+        spec_version,
+        spec_content=spec_content,
+        lease_guard=lease_guard,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        timeout_seconds=timeout_seconds,
+    )
 
     if isinstance(compiled, dict):
-        return compiled
+        return _CompilerInvocationResult(
+            failure=_attach_schema_retry_metadata(
+                compiled,
+                attempted=False,
+                reason=None,
+                attempts=0,
+            )
+        )
     raw_json = compiled.raw_json
     normalized = compiled.output
-    if isinstance(normalized.root, SpecAuthorityCompilationFailure):
-        failure_stage = (
-            "invalid_json"
-            if normalized.root.reason == "INVALID_JSON"
-            else "output_validation"
+    if not isinstance(normalized.root, SpecAuthorityCompilationFailure):
+        return _CompilerInvocationResult(success=normalized.root)
+
+    retry_reason = normalized.root.reason
+    if retry_reason not in _SCHEMA_RETRY_FAILURES:
+        return _CompilerInvocationResult(
+            failure=_attach_schema_retry_metadata(
+                _normalized_failure_result(
+                    spec_version,
+                    raw_json=raw_json,
+                    failure=normalized.root,
+                ),
+                attempted=False,
+                reason=None,
+                attempts=0,
+            ),
         )
-        return _compiler_failure_result(
-            product_id=spec_version.product_id,
-            spec_version_id=spec_version.spec_version_id,
-            content_ref=spec_version.content_ref,
-            failure_stage=failure_stage,
-            error=normalized.root.error,
-            reason=normalized.root.reason,
-            raw_output=raw_json,
-            blocking_gaps=normalized.root.blocking_gaps,
+
+    retry_attempted = True
+    retry_attempts = 1
+    retried = _run_compiler_attempt(
+        spec_version,
+        spec_content=spec_content,
+        lease_guard=lease_guard,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        domain_hint=_SCHEMA_RETRY_FEEDBACK,
+    )
+    if isinstance(retried, dict):
+        return _CompilerInvocationResult(
+            failure=_attach_schema_retry_metadata(
+                retried,
+                attempted=retry_attempted,
+                reason=retry_reason,
+                attempts=retry_attempts,
+            ),
+            schema_retry_attempted=retry_attempted,
+            schema_retry_reason=retry_reason,
+            schema_retry_attempts=retry_attempts,
         )
-    return normalized.root
+
+    retried_output = retried.output
+    if isinstance(retried_output.root, SpecAuthorityCompilationFailure):
+        return _CompilerInvocationResult(
+            failure=_attach_schema_retry_metadata(
+                _normalized_failure_result(
+                    spec_version,
+                    raw_json=retried.raw_json,
+                    failure=retried_output.root,
+                ),
+                attempted=retry_attempted,
+                reason=retry_reason,
+                attempts=retry_attempts,
+            ),
+            schema_retry_attempted=retry_attempted,
+            schema_retry_reason=retry_reason,
+            schema_retry_attempts=retry_attempts,
+        )
+
+    return _CompilerInvocationResult(
+        success=retried_output.root,
+        schema_retry_attempted=retry_attempted,
+        schema_retry_reason=retry_reason,
+        schema_retry_attempts=retry_attempts,
+    )
 
 
 def _persist_compiled_authority(  # noqa: PLR0913
@@ -2142,13 +2306,16 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         return spec_content_result
     spec_content, content_source = spec_content_result
 
-    compiled = _invoke_compiler_for_version(
+    invocation = _invoke_compiler_for_version(
         context.spec_version,
         spec_content=spec_content,
         lease_guard=lease_guard,
     )
-    if isinstance(compiled, dict):
-        return compiled
+    if invocation.failure is not None:
+        return invocation.failure
+    compiled = invocation.success
+    if compiled is None:
+        raise RuntimeError("Compiler invocation returned no success artifact")
 
     persisted_result = _persist_compiled_authority(
         session,
@@ -2182,6 +2349,11 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         "message": (
             f"Compiled spec version {parsed.spec_version_id} "
             f"(authority ID: {persisted.authority_id})"
+        ),
+        **_schema_retry_metadata_dict(
+            attempted=invocation.schema_retry_attempted,
+            reason=invocation.schema_retry_reason,
+            attempts=invocation.schema_retry_attempts,
         ),
     }
 

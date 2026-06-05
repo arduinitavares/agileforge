@@ -69,12 +69,15 @@ Return ONLY one of the following JSON objects:
 
 SUCCESS OBJECT:
 {
+  "schema_version": "agileforge.compiled_authority.v2",
   "scope_themes": ["..."],
   "domain": "<optional primary domain>",
   "invariants": [
     {
       "id": "INV-xxxxxxxxxxxxxxxx",
       "type": "FORBIDDEN_CAPABILITY" | "REQUIRED_FIELD" | "MAX_VALUE" | "RELATION_CONSTRAINT" | "USER_INTERACTION" | "STATE_TRANSITION" | "DATA_CONTRACT" | "ROUTE_CONTRACT" | "VISIBILITY_RULE",
+      "source_item_id": "<typed item id>" OR null,
+      "source_level": "MUST|SHOULD|MAY|MUST_NOT" OR null,
       "parameters": { ... }
     }
   ],
@@ -88,7 +91,7 @@ SUCCESS OBJECT:
       "location": "<optional location>"
     }
   ],
-  "compiler_version": "1.0.0",
+  "compiler_version": "2.0.0",
   "prompt_hash": "<64 lowercase hex characters>"
 }
 
@@ -98,6 +101,12 @@ FAILURE OBJECT (ONLY if you cannot comply):
   "reason": "<short reason>",
   "blocking_gaps": ["..."]
 }
+
+Output schema_version MUST be "agileforge.compiled_authority.v2".
+Invariant parameters MUST contain semantic fields only.
+Do not put source_item_id or source_level inside parameters.
+source_map.location MUST be the structured source item id.
+source_map.excerpt MUST be copied from the real source item text.
 
 NO keys outside the success/failure schemas above. NO missing required keys.
 NO free text.
@@ -109,11 +118,11 @@ INVARIANT PARAMETER RULES:
 - REQUIRED_FIELD => parameters: {"field_name": "<token>"}
 - MAX_VALUE => parameters: {"field_name": "<token>", "max_value": <number>}
 - RELATION_CONSTRAINT => parameters: {"expression": "<field_or_metric> <= <dynamic_field_or_metric>"}
-- USER_INTERACTION => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "trigger": "<user event>", "target": "<ui target>", "expected_response": "<required response>"}
-- STATE_TRANSITION => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "state": "<state>", "trigger": "<event or condition>", "outcome": "<resulting state or side effect>"}
-- DATA_CONTRACT => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "subject": "<record/key/payload>", "fields": ["<field>"], "rule": "<shape, naming, or persistence rule>"}
-- ROUTE_CONTRACT => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "route": "<route pattern>", "route_name": "<purpose>", "behavior": "<route behavior>"}
-- VISIBILITY_RULE => parameters: {"source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "target": "<ui element>", "condition": "<condition>", "visibility": "visible|hidden|shown|removed"}
+- USER_INTERACTION => invariant: {"type": "USER_INTERACTION", "source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "parameters": {"trigger": "<user event>", "target": "<ui target>", "expected_response": "<required response>"}}
+- STATE_TRANSITION => invariant: {"type": "STATE_TRANSITION", "source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "parameters": {"state": "<state>", "trigger": "<event or condition>", "outcome": "<resulting state or side effect>"}}
+- DATA_CONTRACT => invariant: {"type": "DATA_CONTRACT", "source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "parameters": {"subject": "<record/key/payload>", "fields": ["<field>"], "rule": "<shape, naming, or persistence rule>"}}
+- ROUTE_CONTRACT => invariant: {"type": "ROUTE_CONTRACT", "source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "parameters": {"route": "<route pattern>", "route_name": "<purpose>", "behavior": "<route behavior>"}}
+- VISIBILITY_RULE => invariant: {"type": "VISIBILITY_RULE", "source_item_id": "<typed item id>", "source_level": "MUST|SHOULD|MAY|MUST_NOT", "parameters": {"target": "<ui element>", "condition": "<condition>", "visibility": "visible|hidden|shown|removed"}}
 - Use REQUIRED_FIELD only for explicit required artifacts, fields, records, or evidence.
 - Do not compress event-driven behavior into REQUIRED_FIELD.
 - Do not compress state lifecycle rules, keyboard/mouse interactions, route behavior, persistence shape, or visibility rules into REQUIRED_FIELD.

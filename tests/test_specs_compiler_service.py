@@ -174,6 +174,37 @@ def _raw_compiler_output_json() -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
+def _structured_retry_success_payload() -> dict[str, object]:
+    """Return a compile-success payload valid against structured source checks."""
+    return {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["Audit"],
+        "domain": "operations",
+        "invariants": [
+            {
+                "id": "INV-0123456789abcdef",
+                "type": "REQUIRED_FIELD",
+                "source_item_id": "REQ.test.audit",
+                "source_level": "MUST",
+                "parameters": {"field_name": "audit evidence"},
+            }
+        ],
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-0123456789abcdef",
+                "excerpt": "The system MUST record audit evidence.",
+                "location": "REQ.test.audit",
+            }
+        ],
+        "compiler_version": "2.0.0",
+        "prompt_hash": "a" * 64,
+    }
+
+
 def _agileforge_spec_profile_payload() -> dict[str, object]:
     return {
         "schema_version": "agileforge.spec.v1",
@@ -261,6 +292,22 @@ def _canonical_agileforge_spec_profile_json() -> str:
 def _behavioral_payload_json(
     source_item_id: str, source_level: SpecAuthoritySourceLevel
 ) -> str:
+    if source_item_id == "REQ.todo-create":
+        trigger = "Enter is pressed"
+        target = "todo"
+        expected_response = "create a todo"
+        excerpt = "The app MUST create a todo when Enter is pressed."
+    elif source_item_id == "REQ.todo-toggle":
+        trigger = "todo is toggled"
+        target = "todo"
+        expected_response = "do not delete a todo"
+        excerpt = "The app MUST_NOT delete a todo when it is toggled."
+    else:
+        trigger = "user action"
+        target = source_item_id
+        expected_response = f"Honor {source_item_id}."
+        excerpt = f"{source_item_id}."
+
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["TodoMVC"],
         domain="todo",
@@ -271,16 +318,22 @@ def _behavioral_payload_json(
                 source_item_id=source_item_id,
                 source_level=source_level,
                 parameters=UserInteractionParams(
-                    trigger="user action",
-                    target=source_item_id,
-                    expected_response=f"Honor {source_item_id}.",
+                    trigger=trigger,
+                    target=target,
+                    expected_response=expected_response,
                 ),
             )
         ],
         eligible_feature_rules=[],
         gaps=[],
         assumptions=[],
-        source_map=[],
+        source_map=[
+            SourceMapEntry(
+                invariant_id="INV-0123456789abcdef",
+                excerpt=excerpt,
+                location=source_item_id,
+            )
+        ],
         compiler_version="1.0.0",
         prompt_hash="a" * 64,
     )
@@ -1907,6 +1960,220 @@ def test_compile_spec_authority_for_version_persists_invocation_failure_artifact
     assert artifact is not None
     assert artifact["phase"] == "spec_authority"
     assert artifact["raw_output"] == '{"partial": true}'
+
+
+def test_invalid_json_gets_one_schema_retry(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid JSON should trigger exactly one schema-feedback retry."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    payloads: list[dict[str, object]] = []
+
+    async def fake_invoke_agent_to_text(*args: object, **kwargs: object) -> str:
+        del args
+        payload_json = kwargs.get("payload_json")
+        assert isinstance(payload_json, str)
+        payload = json.loads(payload_json)
+        assert isinstance(payload, dict)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return "{"
+        return json.dumps(_structured_retry_success_payload())
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "invoke_agent_to_text",
+        fake_invoke_agent_to_text,
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert len(payloads) == 2
+    assert payloads[0]["domain_hint"] is None
+    retry_hint = payloads[1]["domain_hint"]
+    assert isinstance(retry_hint, str)
+    assert 'schema_version must be "agileforge.compiled_authority.v2".' in retry_hint
+    assert "Do not put source_item_id or source_level inside parameters." in retry_hint
+    assert result["schema_retry_attempted"] is True
+    assert result["schema_retry_reason"] == "INVALID_JSON"
+    assert result["schema_retry_attempts"] == 1
+
+
+def test_json_validation_failed_gets_one_schema_retry(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema-shaped output drift should get one bounded retry."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    attempts: list[dict[str, object]] = []
+
+    async def fake_invoke_agent_to_text(*args: object, **kwargs: object) -> str:
+        del args
+        payload_json = kwargs.get("payload_json")
+        assert isinstance(payload_json, str)
+        payload = json.loads(payload_json)
+        assert isinstance(payload, dict)
+        attempts.append(payload)
+        if len(attempts) == 1:
+            invalid_payload = _structured_retry_success_payload()
+            invalid_payload["invariants"][0]["parameters"] = {"unexpected": "value"}  # type: ignore[index]
+            return json.dumps(invalid_payload)
+        return json.dumps(_structured_retry_success_payload())
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "invoke_agent_to_text",
+        fake_invoke_agent_to_text,
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert len(attempts) == 2
+    assert result["schema_retry_attempted"] is True
+    assert result["schema_retry_reason"] == "JSON_VALIDATION_FAILED"
+    assert result["schema_retry_attempts"] == 1
+
+
+def test_schema_retry_stops_after_one_retry(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema retry should stop after one additional attempt."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    attempts: list[dict[str, object]] = []
+
+    async def fake_invoke_agent_to_text(*args: object, **kwargs: object) -> str:
+        del args
+        payload_json = kwargs.get("payload_json")
+        assert isinstance(payload_json, str)
+        payload = json.loads(payload_json)
+        assert isinstance(payload, dict)
+        attempts.append(payload)
+        invalid_payload = _structured_retry_success_payload()
+        invalid_payload["invariants"][0]["parameters"] = {"unexpected": "value"}  # type: ignore[index]
+        return json.dumps(invalid_payload)
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "invoke_agent_to_text",
+        fake_invoke_agent_to_text,
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert len(attempts) == 2
+    assert result["schema_retry_attempted"] is True
+    assert result["schema_retry_reason"] == "JSON_VALIDATION_FAILED"
+    assert result["schema_retry_attempts"] == 1
+
+
+def test_semantic_source_mismatch_does_not_trigger_schema_retry(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Semantic/source failures must fail closed without schema retry."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    attempts: list[dict[str, object]] = []
+
+    async def fake_invoke_agent_to_text(*args: object, **kwargs: object) -> str:
+        del args
+        payload_json = kwargs.get("payload_json")
+        assert isinstance(payload_json, str)
+        payload = json.loads(payload_json)
+        assert isinstance(payload, dict)
+        attempts.append(payload)
+        invalid_payload = {
+            "schema_version": "agileforge.compiled_authority.v2",
+            "scope_themes": ["Audit"],
+            "domain": "operations",
+            "invariants": [
+                {
+                    "id": "INV-0123456789abcdef",
+                    "type": "DATA_CONTRACT",
+                    "source_item_id": "REQ.test.audit",
+                    "source_level": "MUST_NOT",
+                    "parameters": {
+                        "subject": "audit evidence",
+                        "fields": ["operation"],
+                        "rule": "record audit evidence for each operation",
+                    },
+                }
+            ],
+            "eligible_feature_rules": [],
+            "rejected_features": [],
+            "gaps": [],
+            "assumptions": [],
+            "source_map": [
+                {
+                    "invariant_id": "INV-0123456789abcdef",
+                    "excerpt": "The system MUST record audit evidence.",
+                    "location": "REQ.test.audit",
+                }
+            ],
+            "compiler_version": "2.0.0",
+            "prompt_hash": "a" * 64,
+        }
+        return json.dumps(invalid_payload)
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "invoke_agent_to_text",
+        fake_invoke_agent_to_text,
+    )
+
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "output_validation"
+    assert len(attempts) == 1
+    assert result["schema_retry_attempted"] is False
+    assert result["schema_retry_reason"] is None
+    assert result["schema_retry_attempts"] == 0
 
 
 def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(

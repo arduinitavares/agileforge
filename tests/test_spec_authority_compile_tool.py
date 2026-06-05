@@ -319,6 +319,34 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
     }
 
 
+def test_compiler_instructions_require_v2_provenance_contract() -> None:
+    """Compiler instructions must require the v2 provenance layout."""
+    assert (
+        'Output schema_version MUST be "agileforge.compiled_authority.v2".'
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert (
+        "Invariant parameters MUST contain semantic fields only."
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert (
+        "Do not put source_item_id or source_level inside parameters."
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert (
+        "source_map.location MUST be the structured source item id."
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert (
+        "source_map.excerpt MUST be copied from the real source item text."
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+    assert (
+        'USER_INTERACTION => invariant: {"type": "USER_INTERACTION"'
+        in SPEC_AUTHORITY_COMPILER_INSTRUCTIONS
+    )
+
+
 def test_compile_tool_compiles_and_returns_summary(
     session: Session,
     sample_product: Product,
