@@ -2001,13 +2001,14 @@ def _targets_from_invariants(compiled: dict[str, Any]) -> list[AuthorityTarget]:
             invariant_id=invariant_id,
         )
         authority_ref = source_requirement_id or invariant_id
+        semantic_parameters = _semantic_parameter_terms(parameters)
         terms = _unique_terms(
             [
                 invariant_id,
                 authority_ref,
                 invariant_type,
                 *source_terms.get(authority_ref, []),
-                *_flatten_terms(parameters),
+                *_flatten_terms(semantic_parameters),
             ]
         )
         targets.append(
@@ -2102,6 +2103,15 @@ def _source_map_terms(compiled: dict[str, Any]) -> dict[str, list[str]]:
         }
         result.setdefault(source_id, []).extend(_flatten_terms(term_entry))
     return result
+
+
+def _semantic_parameter_terms(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Return semantic invariant parameters without legacy provenance drift."""
+    return {
+        key: value
+        for key, value in parameters.items()
+        if key not in {"source_item_id", "source_level"}
+    }
 
 
 def _flatten_terms(value: object) -> list[str]:

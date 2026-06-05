@@ -547,6 +547,7 @@ def test_build_authority_targets_falls_back_to_source_map_location() -> None:
     assert targets[0].authority_ref == "REQ.live-squad-recommendation"
     assert targets[0].source_requirement_id == "REQ.live-squad-recommendation"
     assert targets[0].invariant_refs == ["INV-a4b296c058e88663"]
+    assert "REQ.legacy-parameter-source" not in targets[0].terms
 
 
 def test_build_authority_targets_empty_authority_records_limitation() -> None:
