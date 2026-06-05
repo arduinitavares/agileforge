@@ -89,7 +89,7 @@ DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
 CompiledAuthorityLoadStatus = Literal[
-    "ok",
+    "success",
     "missing",
     "invalid_json",
     "schema_invalid",
@@ -337,13 +337,15 @@ class GetCompiledAuthorityInput(BaseModel):
 class CompiledAuthorityLoadResult(BaseModel):
     """Typed result for stored compiled-authority artifact loading."""
 
-    ok: bool
     status: CompiledAuthorityLoadStatus
     artifact: SpecAuthorityCompilationSuccess | None = None
     error_code: str | None = None
     message: str | None = None
-    remediation: list[str] = Field(default_factory=list)
     observed_schema_version: str | None = None
+    validation_error: str | None = None
+    ok: bool
+    unsupported: bool = False
+    remediation: list[str] = Field(default_factory=list)
     spec_version_id: int | None = None
     authority_id: int | None = None
 
@@ -397,27 +399,29 @@ def load_compiled_artifact(
     authority_id = getattr(authority, "authority_id", None)
     if not artifact_json:
         return CompiledAuthorityLoadResult(
-            ok=False,
             status="missing",
+            ok=False,
             message="Compiled authority artifact is missing.",
             spec_version_id=spec_version_id,
             authority_id=authority_id,
         )
     try:
         parsed = json.loads(artifact_json)
-    except ValueError:
+    except ValueError as exc:
         return CompiledAuthorityLoadResult(
-            ok=False,
             status="invalid_json",
+            ok=False,
             message="Compiled authority artifact JSON is invalid.",
+            validation_error=str(exc),
             spec_version_id=spec_version_id,
             authority_id=authority_id,
         )
     if not isinstance(parsed, dict):
         return CompiledAuthorityLoadResult(
-            ok=False,
             status="schema_invalid",
-            message="Compiled authority artifact must be a JSON object.",
+            ok=False,
+            message="Compiled authority artifact failed schema validation.",
+            validation_error="Compiled authority artifact must be a JSON object.",
             spec_version_id=spec_version_id,
             authority_id=authority_id,
         )
@@ -425,8 +429,8 @@ def load_compiled_artifact(
     observed_schema_version = parsed.get("schema_version")
     if observed_schema_version != COMPILED_AUTHORITY_SCHEMA_VERSION:
         return CompiledAuthorityLoadResult(
-            ok=False,
             status="schema_unsupported",
+            ok=False,
             error_code=ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
             message="Compiled authority artifact schema is unsupported.",
             remediation=[_COMPILED_AUTHORITY_UNSUPPORTED_REMEDIATION],
@@ -435,6 +439,7 @@ def load_compiled_artifact(
                 if isinstance(observed_schema_version, str)
                 else None
             ),
+            unsupported=True,
             spec_version_id=spec_version_id,
             authority_id=authority_id,
         )
@@ -445,16 +450,17 @@ def load_compiled_artifact(
         artifact = SpecAuthorityCompilationSuccess.model_validate(payload)
     except ValidationError as exc:
         return CompiledAuthorityLoadResult(
-            ok=False,
             status="schema_invalid",
-            message=str(exc),
+            ok=False,
+            message="Compiled authority artifact failed schema validation.",
             observed_schema_version=COMPILED_AUTHORITY_SCHEMA_VERSION,
+            validation_error=str(exc),
             spec_version_id=spec_version_id,
             authority_id=authority_id,
         )
     return CompiledAuthorityLoadResult(
+        status="success",
         ok=True,
-        status="ok",
         artifact=artifact,
         observed_schema_version=COMPILED_AUTHORITY_SCHEMA_VERSION,
         spec_version_id=spec_version_id,
@@ -2392,8 +2398,10 @@ def _compiled_authority_metrics(
     authority: CompiledSpecAuthority,
 ) -> tuple[int, int, int]:
     """Return counts used by the update+compile success payload."""
-    artifact = load_compiled_artifact(authority)
-    if artifact:
+    load_result = load_compiled_artifact(authority)
+    if load_result.ok:
+        artifact = load_result.artifact
+        assert artifact is not None
         return (
             len(artifact.scope_themes),
             len(artifact.invariants),
@@ -2637,8 +2645,10 @@ def get_compiled_authority_by_version(
                 ),
             }
 
-        artifact = load_compiled_artifact(authority)
-        if artifact:
+        load_result = load_compiled_artifact(authority)
+        if load_result.ok:
+            artifact = load_result.artifact
+            assert artifact is not None
             scope_themes = artifact.scope_themes
             invariants = [_render_invariant_summary(inv) for inv in artifact.invariants]
             spec_gaps = artifact.gaps

@@ -42,6 +42,27 @@ from utils.spec_schemas import (
 
 
 def _compiled_success_json() -> str:
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Payments"],
+        domain=None,
+        invariants=[
+            Invariant(
+                id="INV-0123456789abcdef",
+                type=InvariantType.REQUIRED_FIELD,
+                parameters=RequiredFieldParams(field_name="email"),
+            )
+        ],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+
+
+def _stored_compiled_success_json() -> str:
     return json.dumps(v2_compiled_authority_payload())
 
 
@@ -374,10 +395,13 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     result = load_compiled_artifact(authority)
 
     assert result.ok is True
-    assert result.status == "ok"
+    assert result.status == "success"
+    assert result.unsupported is False
     assert result.artifact is not None
     assert result.error_code is None
+    assert result.message is None
     assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.validation_error is None
     assert result.artifact.scope_themes == ["Payments"]
     assert result.artifact.invariants[0].id == "INV-0123456789abcdef"
 
@@ -394,9 +418,12 @@ def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
 
     assert result.ok is False
     assert result.status == "schema_unsupported"
+    assert result.unsupported is True
     assert result.artifact is None
     assert result.error_code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result.message == "Compiled authority artifact schema is unsupported."
     assert result.observed_schema_version is None
+    assert result.validation_error is None
 
 
 def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
@@ -411,9 +438,32 @@ def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
 
     assert result.ok is False
     assert result.status == "schema_unsupported"
+    assert result.unsupported is True
     assert result.artifact is None
     assert result.error_code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result.message == "Compiled authority artifact schema is unsupported."
     assert result.observed_schema_version == "agileforge.compiled_authority.v1"
+    assert result.validation_error is None
+
+
+def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload() -> None:
+    """Verify invalid v2 payloads expose schema-invalid result details."""
+    from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
+
+    payload = v2_compiled_authority_payload()
+    payload["invariants"] = "bad"
+    authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
+
+    result = load_compiled_artifact(authority)
+
+    assert result.ok is False
+    assert result.status == "schema_invalid"
+    assert result.unsupported is False
+    assert result.artifact is None
+    assert result.error_code is None
+    assert result.message == "Compiled authority artifact failed schema validation."
+    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.validation_error is not None
 
 
 def test_services_package_exports_ensure_accepted_spec_authority() -> None:
@@ -442,7 +492,7 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
     acceptance = SpecAuthorityAcceptance(
         product_id=require_id(sample_product.product_id, "product_id"),
@@ -527,7 +577,7 @@ def test_ensure_spec_authority_accepted_inserts_new_acceptance(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
 
     acceptance = compiler_service.ensure_spec_authority_accepted(
@@ -569,7 +619,7 @@ def test_ensure_spec_authority_accepted_returns_existing_acceptance(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
     existing = SpecAuthorityAcceptance(
         product_id=require_id(sample_product.product_id, "product_id"),
@@ -1612,7 +1662,7 @@ def test_compile_spec_authority_returns_error_when_already_compiled(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
 
     result = compiler_service.compile_spec_authority(
@@ -1652,7 +1702,7 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
     existing = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
     tool_context = make_tool_context()
 
@@ -1810,7 +1860,7 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
     _create_compiled_authority(
         session,
         spec_version_id=require_id(approved_spec.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
 
     draft_spec = SpecRegistry(
@@ -1862,7 +1912,7 @@ def test_get_compiled_authority_by_version_returns_expected_envelope(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_success_json(),
+        artifact_json=_stored_compiled_success_json(),
     )
 
     result = compiler_service.get_compiled_authority_by_version(
@@ -2046,7 +2096,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
             compiler_version="1.2.3",
             prompt_hash="b" * 64,
             compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_compiled_success_json(),
+        compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
@@ -2155,7 +2205,7 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
             compiler_version="1.2.3",
             prompt_hash="f" * 64,
             compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_compiled_success_json(),
+            compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
@@ -2231,7 +2281,7 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
             compiler_version="1.2.3",
             prompt_hash="a" * 64,
             compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_compiled_success_json(),
+            compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
@@ -2325,7 +2375,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
             compiler_version="1.2.3",
             prompt_hash="c" * 64,
             compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_compiled_success_json(),
+            compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
@@ -2412,7 +2462,7 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
                 compiler_version="1.2.3",
                 prompt_hash=f"{authority_counter['value']:064d}"[-64:],
                 compiled_at=datetime.now(UTC),
-                compiled_artifact_json=_compiled_success_json(),
+                compiled_artifact_json=_stored_compiled_success_json(),
                 scope_themes='["Payments"]',
                 invariants='["REQUIRED_FIELD:email"]',
                 eligible_feature_ids="[]",
@@ -2507,7 +2557,7 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
             compiler_version="1.2.3",
             prompt_hash="d" * 64,
             compiled_at=datetime.now(UTC),
-            compiled_artifact_json=_compiled_success_json(),
+            compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
