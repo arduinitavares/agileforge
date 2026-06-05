@@ -254,6 +254,18 @@ class _Application(Protocol):
         """Reject pending authority from a guarded request."""
         ...
 
+    def authority_regenerate(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        idempotency_key: str | None = None,
+        changed_by: str = "cli-agent",
+        dry_run: bool = False,
+    ) -> JsonObject:
+        """Regenerate compiled authority for an approved spec version."""
+        ...
+
     def vision_generate(
         self,
         *,
@@ -1137,6 +1149,16 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_reject.add_argument("--idempotency-key")
     authority_reject.add_argument("--changed-by")
     authority_reject.set_defaults(command_handler=_authority_reject)
+    authority_regenerate = authority_sub.add_parser(
+        "regenerate",
+        help="Regenerate v2 compiled authority for an approved spec.",
+    )
+    authority_regenerate.add_argument("--project-id", type=int, required=True)
+    authority_regenerate.add_argument("--spec-version-id", type=int, required=True)
+    authority_regenerate.add_argument("--idempotency-key")
+    authority_regenerate.add_argument("--changed-by", default="cli-agent")
+    authority_regenerate.add_argument("--dry-run", action="store_true")
+    authority_regenerate.set_defaults(command_handler=_authority_regenerate)
 
     vision = subparsers.add_parser("vision", help="Run Vision phase commands.")
     vision_sub = vision.add_subparsers(
@@ -1922,6 +1944,20 @@ def _authority_review(
         project_id=args.project_id,
         include_spec=args.include_spec,
         output_format=args.format,
+    )
+
+
+def _authority_regenerate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority regenerate to the application facade."""
+    return "agileforge authority regenerate", application.authority_regenerate(
+        project_id=args.project_id,
+        spec_version_id=args.spec_version_id,
+        idempotency_key=args.idempotency_key,
+        changed_by=args.changed_by,
+        dry_run=args.dry_run,
     )
 
 

@@ -148,6 +148,12 @@ _AUTHORITY_DECISION_IDEMPOTENCY_POLICY: dict[str, str] = {
     "dry_run_trace_field": "none",
 }
 
+_AUTHORITY_REGENERATE_IDEMPOTENCY_POLICY: dict[str, str] = {
+    "non_dry_run": "required",
+    "dry_run": "not_required_no_ledger",
+    "dry_run_trace_field": "none",
+}
+
 _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge project create",
@@ -319,6 +325,31 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.MUTATION_IN_PROGRESS.value,
             ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
             ErrorCode.MUTATION_RESUME_CONFLICT.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge authority regenerate",
+        mutates=True,
+        phase="phase_2c",
+        requires_idempotency_key=True,
+        idempotency_policy=_AUTHORITY_REGENERATE_IDEMPOTENCY_POLICY,
+        input_required=("project_id", "spec_version_id"),
+        input_optional=(
+            "idempotency_key",
+            "changed_by",
+            "dry_run",
+        ),
+        errors=(
+            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_REVIEW_REQUIRED.value,
+            ErrorCode.SPEC_COMPILE_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
         ),
     ),
 )

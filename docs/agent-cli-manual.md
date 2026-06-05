@@ -1596,6 +1596,7 @@ agileforge authority review --project-id 1
 agileforge authority review --project-id 1 --include-spec full
 agileforge authority accept --project-id 1
 agileforge authority reject --project-id 1 --review-token <review_token> --reason "..." --idempotency-key reject-001
+agileforge authority regenerate --project-id 1 --spec-version-id 3 --idempotency-key authority-regenerate-001
 agileforge authority invariants --project-id 1
 agileforge authority invariants --project-id 1 --spec-version-id 3
 ```
@@ -1603,6 +1604,12 @@ agileforge authority invariants --project-id 1 --spec-version-id 3
 Use `authority review` before any decision. The normal accept path uses the
 reviewed pending authority for the project and does not require agents to pass
 review tokens or idempotency keys in the command text.
+
+Use `authority regenerate` only for an approved spec version that needs fresh v2
+compiled authority, including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`.
+It saves v2 compiled authority and stops at pending authority review. It does
+not accept or reject authority and does not advance Vision, Backlog, Roadmap,
+Story, or Sprint.
 
 ### Vision Commands
 
@@ -2145,6 +2152,20 @@ print("status", data.get("status"))
 print("decision_id", data.get("decision_id"))
 PY
 ```
+
+Regenerate when an approved spec version needs fresh v2 compiled authority,
+including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`:
+
+```sh
+agileforge authority regenerate \
+  --project-id "$PROJECT_ID" \
+  --spec-version-id "$SPEC_VERSION_ID" \
+  --idempotency-key "authority-regenerate-$PROJECT_ID-$SPEC_VERSION_ID-001"
+```
+
+This command saves v2 compiled authority and stops at pending authority review.
+It performs no accept/reject decision and does not advance Vision, Backlog,
+Roadmap, Story, or Sprint. Review the regenerated packet before deciding.
 
 If the source spec is missing or unreadable at decision time, accept/reject
 fails closed before writing a decision row. `AUTHORITY_SOURCE_UNAVAILABLE`

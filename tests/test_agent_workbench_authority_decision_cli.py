@@ -87,6 +87,35 @@ class _AuthorityDecisionCliApplication:
         self.calls.append(("authority_reject", _request_payload(request)))
         return {"ok": True, "data": {"rejected": True}, "warnings": [], "errors": []}
 
+    def authority_regenerate(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        idempotency_key: str | None = None,
+        changed_by: str = "cli-agent",
+        dry_run: bool = False,
+    ) -> JsonObject:
+        """Record authority regenerate request arguments."""
+        self.calls.append(
+            (
+                "authority_regenerate",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "dry_run": dry_run,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"regenerated": True},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 def _request_payload(request: object) -> dict[str, object]:
     """Return a JSON-like request payload from a pydantic model."""
@@ -231,6 +260,49 @@ def test_authority_review_parser_passes_text_format_to_application(
                 "project_id": PROJECT_ID,
                 "include_spec": "auto",
                 "output_format": "text",
+            },
+        )
+    ]
+
+
+def test_authority_regenerate_cli_invokes_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority regenerate routes parser args to the application."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "regenerate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            "3",
+            "--idempotency-key",
+            "regen-cli-001",
+            "--changed-by",
+            "test-agent",
+            "--dry-run",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert cast("JsonObject", payload["meta"])["command"] == (
+        "agileforge authority regenerate"
+    )
+    assert app.calls == [
+        (
+            "authority_regenerate",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": 3,
+                "idempotency_key": "regen-cli-001",
+                "changed_by": "test-agent",
+                "dry_run": True,
             },
         )
     ]

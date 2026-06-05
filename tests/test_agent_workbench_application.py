@@ -18,6 +18,7 @@ from services.agent_workbench.authority_decision import (
     AuthorityRejectRequest,
 )
 from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
+from services.agent_workbench.command_registry import command_contracts
 from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
@@ -1859,6 +1860,40 @@ def test_application_authority_regenerate_delegates_to_runner() -> None:
             dry_run=True,
         )
     ]
+
+
+def test_authority_regenerate_is_registered_command() -> None:
+    """Verify authority regenerate is discoverable with mutation metadata."""
+    contracts = {command.name: command for command in command_contracts()}
+
+    metadata = contracts["agileforge authority regenerate"]
+
+    assert metadata.mutates is True
+    assert metadata.phase == "phase_2c"
+    assert metadata.requires_idempotency_key is True
+    assert metadata.idempotency_policy == {
+        "non_dry_run": "required",
+        "dry_run": "not_required_no_ledger",
+        "dry_run_trace_field": "none",
+    }
+    assert metadata.input_required == ("project_id", "spec_version_id")
+    assert metadata.input_optional == (
+        "idempotency_key",
+        "changed_by",
+        "dry_run",
+    )
+    assert set(metadata.errors) == {
+        "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+        "SCHEMA_NOT_READY",
+        "PROJECT_NOT_FOUND",
+        "SPEC_VERSION_NOT_FOUND",
+        "AUTHORITY_REVIEW_REQUIRED",
+        "SPEC_COMPILE_FAILED",
+        "MUTATION_FAILED",
+        "IDEMPOTENCY_KEY_REUSED",
+        "MUTATION_IN_PROGRESS",
+        "MUTATION_RECOVERY_REQUIRED",
+    }
 
 
 def test_application_routes_vision_commands_to_runner() -> None:
