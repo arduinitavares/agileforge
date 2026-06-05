@@ -94,11 +94,8 @@ CompiledAuthorityLoadStatus = Literal[
     "invalid_json",
     "schema_invalid",
     "schema_unsupported",
+    "compiler_failure",
 ]
-_COMPILED_AUTHORITY_UNSUPPORTED_REMEDIATION = (
-    "Run agileforge authority regenerate --project-id <project_id> "
-    "--spec-version-id <spec_version_id> --idempotency-key <key>."
-)
 
 
 class SpecAuthorityAcceptanceError(ValueError):
@@ -334,7 +331,8 @@ class GetCompiledAuthorityInput(BaseModel):
     spec_version_id: int = Field(description="Spec version ID to retrieve")
 
 
-class CompiledAuthorityLoadResult(BaseModel):
+@dataclass(frozen=True)
+class CompiledArtifactLoadResult:
     """Typed result for stored compiled-authority artifact loading."""
 
     status: CompiledAuthorityLoadStatus
@@ -343,11 +341,16 @@ class CompiledAuthorityLoadResult(BaseModel):
     message: str | None = None
     observed_schema_version: str | None = None
     validation_error: str | None = None
-    ok: bool
-    unsupported: bool = False
-    remediation: list[str] = Field(default_factory=list)
-    spec_version_id: int | None = None
-    authority_id: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether the loader produced a valid compiled-success artifact."""
+        return self.status == "success"
+
+    @property
+    def unsupported(self) -> bool:
+        """Whether the stored artifact schema version is unsupported."""
+        return self.status == "schema_unsupported"
 
 
 def _resolve_tool_module() -> object | None:
@@ -392,79 +395,63 @@ def _normalize_input_params(params: object) -> dict[str, Any]:
 
 def load_compiled_artifact(
     authority: object,
-) -> CompiledAuthorityLoadResult:
+) -> CompiledArtifactLoadResult:
     """Load stored compiled artifact JSON with raw schema-version sniffing."""
     artifact_json = getattr(authority, "compiled_artifact_json", None)
-    spec_version_id = getattr(authority, "spec_version_id", None)
-    authority_id = getattr(authority, "authority_id", None)
     if not artifact_json:
-        return CompiledAuthorityLoadResult(
+        return CompiledArtifactLoadResult(
             status="missing",
-            ok=False,
             message="Compiled authority artifact is missing.",
-            spec_version_id=spec_version_id,
-            authority_id=authority_id,
         )
     try:
         parsed = json.loads(artifact_json)
     except ValueError as exc:
-        return CompiledAuthorityLoadResult(
+        return CompiledArtifactLoadResult(
             status="invalid_json",
-            ok=False,
             message="Compiled authority artifact JSON is invalid.",
             validation_error=str(exc),
-            spec_version_id=spec_version_id,
-            authority_id=authority_id,
         )
     if not isinstance(parsed, dict):
-        return CompiledAuthorityLoadResult(
+        return CompiledArtifactLoadResult(
             status="schema_invalid",
-            ok=False,
             message="Compiled authority artifact failed schema validation.",
             validation_error="Compiled authority artifact must be a JSON object.",
-            spec_version_id=spec_version_id,
-            authority_id=authority_id,
         )
 
     observed_schema_version = parsed.get("schema_version")
     if observed_schema_version != COMPILED_AUTHORITY_SCHEMA_VERSION:
-        return CompiledAuthorityLoadResult(
+        return CompiledArtifactLoadResult(
             status="schema_unsupported",
-            ok=False,
             error_code=ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
             message="Compiled authority artifact schema is unsupported.",
-            remediation=[_COMPILED_AUTHORITY_UNSUPPORTED_REMEDIATION],
             observed_schema_version=(
                 observed_schema_version
                 if isinstance(observed_schema_version, str)
                 else None
             ),
-            unsupported=True,
-            spec_version_id=spec_version_id,
-            authority_id=authority_id,
         )
 
     payload = dict(parsed)
     payload.pop("schema_version", None)
     try:
-        artifact = SpecAuthorityCompilationSuccess.model_validate(payload)
+        parsed_output = SpecAuthorityCompilerOutput.model_validate(payload)
     except ValidationError as exc:
-        return CompiledAuthorityLoadResult(
+        return CompiledArtifactLoadResult(
             status="schema_invalid",
-            ok=False,
             message="Compiled authority artifact failed schema validation.",
             observed_schema_version=COMPILED_AUTHORITY_SCHEMA_VERSION,
             validation_error=str(exc),
-            spec_version_id=spec_version_id,
-            authority_id=authority_id,
         )
-    return CompiledAuthorityLoadResult(
+    if isinstance(parsed_output.root, SpecAuthorityCompilationFailure):
+        return CompiledArtifactLoadResult(
+            status="compiler_failure",
+            message="Compiled authority artifact is a compiler failure.",
+            observed_schema_version=COMPILED_AUTHORITY_SCHEMA_VERSION,
+        )
+    return CompiledArtifactLoadResult(
         status="success",
-        ok=True,
-        artifact=artifact,
+        artifact=parsed_output.root,
         observed_schema_version=COMPILED_AUTHORITY_SCHEMA_VERSION,
-        spec_version_id=spec_version_id,
-        authority_id=authority_id,
     )
 
 
@@ -540,7 +527,7 @@ def _lookup_reusable_accepted_authority(
     load_result = (
         load_compiled_artifact(compiled)
         if compiled.compiled_artifact_json
-        else CompiledAuthorityLoadResult(ok=False, status="missing")
+        else CompiledArtifactLoadResult(status="missing")
     )
     if not load_result.ok:
         return _AcceptedAuthorityLookup(

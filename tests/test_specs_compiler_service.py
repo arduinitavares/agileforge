@@ -1,5 +1,6 @@
 """Tests for specs compiler service."""
 
+from dataclasses import FrozenInstanceError, fields, is_dataclass
 import json
 import time
 from datetime import UTC, datetime
@@ -108,6 +109,17 @@ def _compiled_failure_json() -> str:
         blocking_gaps=["scope"],
     )
     return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
+
+
+def _stored_compiler_failure_json() -> str:
+    return json.dumps(
+        {
+            "schema_version": "agileforge.compiled_authority.v2",
+            "error": "COMPILATION_FAILED",
+            "reason": "Missing scope",
+            "blocking_gaps": ["scope"],
+        }
+    )
 
 
 def _vacant_success_json() -> str:
@@ -386,7 +398,10 @@ def _create_compiled_authority(
 
 def test_load_compiled_artifact_returns_success_payload() -> None:
     """Verify load compiled artifact returns success result for v2 payloads."""
-    from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        CompiledArtifactLoadResult,
+        load_compiled_artifact,
+    )
 
     authority = SimpleNamespace(
         compiled_artifact_json=json.dumps(v2_compiled_authority_payload())
@@ -394,6 +409,16 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
 
     result = load_compiled_artifact(authority)
 
+    assert type(result) is CompiledArtifactLoadResult
+    assert is_dataclass(result) is True
+    assert [field.name for field in fields(result)] == [
+        "status",
+        "artifact",
+        "error_code",
+        "message",
+        "observed_schema_version",
+        "validation_error",
+    ]
     assert result.ok is True
     assert result.status == "success"
     assert result.unsupported is False
@@ -404,6 +429,8 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     assert result.validation_error is None
     assert result.artifact.scope_themes == ["Payments"]
     assert result.artifact.invariants[0].id == "INV-0123456789abcdef"
+    with pytest.raises(FrozenInstanceError):
+        result.status = "missing"  # type: ignore[misc]
 
 
 def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
@@ -464,6 +491,24 @@ def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload(
     assert result.message == "Compiled authority artifact failed schema validation."
     assert result.observed_schema_version == "agileforge.compiled_authority.v2"
     assert result.validation_error is not None
+
+
+def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
+    """Verify compiler failure payloads are distinguished after schema sniffing."""
+    from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
+
+    authority = SimpleNamespace(compiled_artifact_json=_stored_compiler_failure_json())
+
+    result = load_compiled_artifact(authority)
+
+    assert result.ok is False
+    assert result.status == "compiler_failure"
+    assert result.unsupported is False
+    assert result.artifact is None
+    assert result.error_code is None
+    assert result.message == "Compiled authority artifact is a compiler failure."
+    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.validation_error is None
 
 
 def test_services_package_exports_ensure_accepted_spec_authority() -> None:
