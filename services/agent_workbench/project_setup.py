@@ -340,15 +340,6 @@ class ProjectSetupMutationRunner:
         spec_hash_result = _spec_hash_or_error(resolved_spec_path)
         if not isinstance(spec_hash_result, str):
             return spec_hash_result
-        if request.dry_run:
-            return _success(
-                {
-                    "preview_available": True,
-                    "project_id": request.project_id,
-                    "resolved_spec_path": str(resolved_spec_path),
-                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
-                }
-            )
 
         original = self._validate_original_recovery_row(request)
         if isinstance(original, dict):
@@ -356,6 +347,15 @@ class ProjectSetupMutationRunner:
         workflow_state = self._workflow.get_session_status(str(request.project_id))
         current_state = str(workflow_state.get("fsm_state") or "SETUP_REQUIRED")
         if current_state != request.expected_state:
+            if request.dry_run:
+                return _error(
+                    ErrorCode.STALE_STATE.value,
+                    details={
+                        "expected_state": request.expected_state,
+                        "actual_state": current_state,
+                    },
+                    remediation=["Refresh setup retry stale guards before retrying."],
+                )
             return self._guard_rejected_retry(
                 request=request,
                 code=ErrorCode.STALE_STATE.value,
@@ -368,6 +368,15 @@ class ProjectSetupMutationRunner:
             workflow_state=workflow_state,
         )
         if current_fingerprint != request.expected_context_fingerprint:
+            if request.dry_run:
+                return _error(
+                    ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
+                    details={
+                        "expected_context_fingerprint": request.expected_context_fingerprint,
+                        "actual_context_fingerprint": current_fingerprint,
+                    },
+                    remediation=["Refresh setup retry stale guards before retrying."],
+                )
             return self._guard_rejected_retry(
                 request=request,
                 code=ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
@@ -375,6 +384,19 @@ class ProjectSetupMutationRunner:
                     "expected_context_fingerprint": request.expected_context_fingerprint,
                     "actual_context_fingerprint": current_fingerprint,
                 },
+            )
+        if request.dry_run:
+            return _success(
+                {
+                    "preview_available": True,
+                    "project_id": request.project_id,
+                    "resolved_spec_path": str(resolved_spec_path),
+                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
+                    "recovery_status": original.status if original is not None else None,
+                    "next_actions": [
+                        _retry_action(request, request.recovery_mutation_event_id)
+                    ],
+                }
             )
 
         original_event_id = request.recovery_mutation_event_id
@@ -844,7 +866,6 @@ class ProjectSetupMutationRunner:
         if (
             row is None
             or row.command != PROJECT_CREATE_COMMAND
-            or row.status != MutationStatus.RECOVERY_REQUIRED.value
             or row.project_id != request.project_id
         ):
             return _error(
@@ -855,7 +876,28 @@ class ProjectSetupMutationRunner:
                 },
                 remediation=["Re-read mutation state before retrying recovery."],
             )
-        return row
+        repaired = self._ledger.repair_setup_recovery_target(
+            mutation_event_id=request.recovery_mutation_event_id,
+            expected_command=PROJECT_CREATE_COMMAND,
+            expected_project_id=request.project_id,
+            now=_now(),
+        )
+        if repaired.error_code == MUTATION_IN_PROGRESS:
+            return _error_for_ledger(MUTATION_IN_PROGRESS, repaired.ledger)
+        if (
+            repaired.error_code is not None
+            or repaired.ledger.status != MutationStatus.RECOVERY_REQUIRED.value
+        ):
+            return _error(
+                MUTATION_RECOVERY_INVALID,
+                details={
+                    "project_id": request.project_id,
+                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
+                    "status": repaired.ledger.status,
+                },
+                remediation=["Re-read mutation state before retrying recovery."],
+            )
+        return repaired.ledger
 
     def _guard_rejected_retry(
         self,

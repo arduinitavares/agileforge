@@ -328,6 +328,75 @@ def _create_recovery_row(
     return result, spec_file, fake_workflow
 
 
+def _seed_expired_pending_create_after_spec_approval(
+    *,
+    engine: Engine,
+    spec_file: Path,
+    project_name: str = "Interrupted Project",
+) -> tuple[int, int]:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    repo = MutationLedgerRepository(engine=engine)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-interrupted-001",
+        request_hash="sha256:create-interrupted",
+        project_id=None,
+        correlation_id="corr-create",
+        changed_by="agent",
+        lease_owner="create-owner",
+        now=now,
+        lease_seconds=300,
+    ).ledger
+    assert row.mutation_event_id is not None
+    with Session(engine) as session:
+        product = Product(name=project_name)
+        session.add(product)
+        session.flush()
+        project_id = product.product_id
+        assert project_id is not None
+        assert MutationLedgerRepository.set_project_id_in_session(
+            session,
+            mutation_event_id=row.mutation_event_id,
+            lease_owner="create-owner",
+            project_id=project_id,
+            now=now,
+        )
+        product.spec_file_path = str(spec_file.resolve())
+        product.spec_loaded_at = now
+        session.add(product)
+        spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash="sha256:seeded-spec",
+            content=spec_file.read_text(encoding="utf-8"),
+            content_ref=str(spec_file.resolve()),
+            status="approved",
+            approved_at=now,
+            approved_by="cli-project-create",
+            approval_notes="Seeded setup state before pending authority.",
+        )
+        session.add(spec)
+        for step in (
+            "product_created",
+            "product_spec_linked",
+            "spec_registry_written",
+            "spec_marked_approved",
+        ):
+            assert MutationLedgerRepository.mark_step_complete_in_session(
+                session,
+                mutation_event_id=row.mutation_event_id,
+                lease_owner="create-owner",
+                step=step,
+                next_step=step,
+                now=now,
+            )
+        ledger = session.get(CliMutationLedger, row.mutation_event_id)
+        assert ledger is not None
+        ledger.lease_expires_at = now
+        session.add(ledger)
+        session.commit()
+    return project_id, row.mutation_event_id
+
+
 def test_project_create_dry_run_resolves_spec_from_caller_cwd_without_writes(
     engine: Engine,
     tmp_path: Path,
@@ -783,6 +852,145 @@ def test_setup_retry_rejects_stale_state_and_context(
     assert _error_code(stale_context) == "STALE_CONTEXT_FINGERPRINT"
 
 
+def test_project_setup_retry_repairs_expired_pending_create_recovery_event(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    project_id, original_event_id = _seed_expired_pending_create_after_spec_approval(
+        engine=engine,
+        spec_file=spec_file,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state={},
+    )
+
+    retried = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint=expected_fingerprint,
+            recovery_mutation_event_id=original_event_id,
+            idempotency_key="retry-interrupted-001",
+            changed_by="agent",
+        )
+    )
+
+    assert retried["ok"] is True
+    assert retried["data"]["project_id"] == project_id
+    assert retried["data"]["recovery_mutation_event_id"] == original_event_id
+    with Session(engine) as session:
+        original = session.get(CliMutationLedger, original_event_id)
+        retry = session.get(CliMutationLedger, retried["data"]["mutation_event_id"])
+        assert original is not None
+        assert retry is not None
+        assert original.status == MutationStatus.SUPERSEDED.value
+        assert retry.status == MutationStatus.SUCCEEDED.value
+        assert session.exec(select(CompiledSpecAuthority)).first() is not None
+
+
+def test_project_setup_retry_dry_run_repairs_only_expired_pending_create(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    project_id, original_event_id = _seed_expired_pending_create_after_spec_approval(
+        engine=engine,
+        spec_file=spec_file,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state={},
+    )
+
+    preview = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint=expected_fingerprint,
+            recovery_mutation_event_id=original_event_id,
+            dry_run=True,
+            dry_run_id="retry-preview-interrupted-001",
+            changed_by="agent",
+        )
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["preview_available"] is True
+    assert preview["data"]["project_id"] == project_id
+    assert preview["data"]["recovery_mutation_event_id"] == original_event_id
+    assert preview["data"]["recovery_status"] == MutationStatus.RECOVERY_REQUIRED.value
+    with Session(engine) as session:
+        original = session.get(CliMutationLedger, original_event_id)
+        assert original is not None
+        assert original.status == MutationStatus.RECOVERY_REQUIRED.value
+        rows = session.exec(select(CliMutationLedger)).all()
+        assert len(rows) == 1
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+        assert workflow.sessions == {}
+
+
+def test_project_setup_retry_active_pending_create_recovery_event_in_progress(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    project_id, original_event_id = _seed_expired_pending_create_after_spec_approval(
+        engine=engine,
+        spec_file=spec_file,
+    )
+    with Session(engine) as session:
+        original = session.get(CliMutationLedger, original_event_id)
+        assert original is not None
+        original.lease_expires_at = datetime(2099, 1, 1, tzinfo=UTC)
+        session.add(original)
+        session.commit()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state={},
+    )
+
+    result = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint=expected_fingerprint,
+            recovery_mutation_event_id=original_event_id,
+            idempotency_key="retry-active-pending-001",
+            changed_by="agent",
+        )
+    )
+
+    assert _error_code(result) == "MUTATION_IN_PROGRESS"
+    with Session(engine) as session:
+        original = session.get(CliMutationLedger, original_event_id)
+        assert original is not None
+        assert original.status == MutationStatus.PENDING.value
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
 def test_linked_setup_retry_success_supersedes_original_and_replays(
     engine: Engine,
     tmp_path: Path,
@@ -859,13 +1067,18 @@ def test_linked_setup_retry_dry_run_leaves_original_recovery_row_unchanged(
         assert original_row is not None
         original_before = _row_payload(original_row)
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    expected_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state=workflow.sessions.get(str(project_id), {}),
+    )
 
     result = runner.retry_setup(
         ProjectSetupRetryRequest(
             project_id=project_id,
             spec_file=str(spec_file),
             expected_state="SETUP_REQUIRED",
-            expected_context_fingerprint="sha256:" + "0" * 64,
+            expected_context_fingerprint=expected_fingerprint,
             recovery_mutation_event_id=original_event_id,
             dry_run=True,
             dry_run_id="retry-preview-001",
