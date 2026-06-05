@@ -575,6 +575,82 @@ def test_project_create_success_creates_authority_without_acceptance(
     )
 
 
+def test_event_159_style_long_compile_survives_past_original_lease(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+
+    def compile_with_many_heartbeats(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del force_recompile, tool_context
+        assert lease_guard is not None
+        for index in range(6):
+            assert lease_guard(f"authority_compile_invocation_heartbeat_{index}")
+        with Session(engine) as session:
+            authority = CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version="test-long-compiler",
+                prompt_hash="sha256:test-long",
+                compiled_artifact_json='{"ok":true}',
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+            session.add(authority)
+            session.commit()
+            session.refresh(authority)
+            authority_id = authority.authority_id
+        if record_progress is not None:
+            assert record_progress("compiled_authority_persisted")
+            assert record_progress("product_authority_cache_persisted")
+        return {
+            "success": True,
+            "authority_id": authority_id,
+            "spec_version_id": spec_version_id,
+            "compiler_version": "test-long-compiler",
+            "prompt_hash": "sha256:test-long",
+        }
+
+    from services.agent_workbench import project_setup
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_with_many_heartbeats,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Event 159 Regression Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-event-159-regression-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is True
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.SUCCEEDED.value
+        assert "pending_authority_compiled" in _row_payload(ledger)["completed_steps"]
+        assert session.exec(select(CompiledSpecAuthority)).first() is not None
+
+
 def test_project_create_compile_failure_records_failed_setup_not_recovery(
     engine: Engine,
     tmp_path: Path,
