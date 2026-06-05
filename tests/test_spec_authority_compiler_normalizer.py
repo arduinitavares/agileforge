@@ -537,6 +537,79 @@ def test_normalizer_rejects_behavioral_source_level_mismatch() -> None:
     assert "source_level SHOULD does not match MUST" in normalized.root.blocking_gaps[0]
 
 
+def test_normalizer_rejects_behavioral_invariant_without_real_source_text() -> None:
+    """Top-level provenance alone is not enough without real structured evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "USER_INTERACTION",
+            "source_item_id": "REQ.review-token",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "checkbox click",
+                "target": "todo checkbox",
+                "expected_response": "todo completed value toggles",
+            },
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": "fake excerpt",
+            "location": "REQ.review-token.statement",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_normalizer_rejects_structured_item_id_embedded_only_in_excerpt() -> None:
+    """Structured proof cannot come from an item ID typed into excerpt text."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "Sass"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "REQ.item-interactions: Each todo item must support checkbox "
+                "completion and label double-click editing activation."
+            ),
+            "location": "architecture notes",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
 def test_normalizer_rejects_forbidden_capability_from_should_source() -> None:
     """SHOULD guidance cannot become a hard forbidden capability."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415

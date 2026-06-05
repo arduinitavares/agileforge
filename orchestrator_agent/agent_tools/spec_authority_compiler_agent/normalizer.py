@@ -651,6 +651,15 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
             )
         return None
 
+    if _is_behavioral_invariant(inv):
+        support_tokens = _behavioral_support_tokens(parameters)
+        if _support_overlap_ratio(support_tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
+            return (
+                "source_map excerpt does not support behavioral invariant "
+                f"{inv.id}"
+            )
+        return None
+
     return None
 
 
@@ -824,6 +833,30 @@ def _structured_profile_items_by_id(
     return result
 
 
+def _structured_item_real_texts(source_item: Mapping[str, Any]) -> set[str]:
+    """Return canonical real-text evidence fields for one structured spec item."""
+    texts: set[str] = set()
+
+    def append(value: object) -> None:
+        if not isinstance(value, str):
+            return
+        compact = _compact_whitespace(value)
+        if compact:
+            texts.add(compact)
+
+    for field_name in ("statement", "title", "rationale"):
+        append(source_item.get(field_name))
+
+    for list_field_name in ("acceptance", "source_notes"):
+        values = source_item.get(list_field_name)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            append(value)
+
+    return texts
+
+
 def _structured_item_id_from_reference(reference: str | None) -> str | None:
     """Extract a structured spec item ID from a source reference string."""
     if not reference:
@@ -847,10 +880,7 @@ def _source_map_item_ids_by_invariant(
 
 def _source_map_entry_item_id(entry: SourceMapEntry) -> str | None:
     """Return the structured source item ID referenced by one source_map entry."""
-    source_item_id = _structured_item_id_from_reference(entry.location)
-    if source_item_id is None:
-        source_item_id = _structured_item_id_from_reference(entry.excerpt)
-    return source_item_id
+    return _structured_item_id_from_reference(entry.location)
 
 
 def _source_map_entries_by_invariant(
@@ -955,11 +985,13 @@ def _structured_authority_metadata_errors(
 
     errors: list[str] = []
     source_map_ids = _source_map_item_ids_by_invariant(success)
+    source_map_entries = _source_map_entries_by_invariant(success.source_map)
     for invariant in success.invariants:
         errors.extend(
             _behavioral_source_metadata_errors(
                 invariant,
                 source_items=source_items,
+                source_entries=source_map_entries.get(invariant.id, []),
             )
         )
         errors.extend(
@@ -983,6 +1015,7 @@ def _behavioral_source_metadata_errors(
     invariant: Invariant,
     *,
     source_items: Mapping[str, Mapping[str, Any]],
+    source_entries: list[SourceMapEntry],
 ) -> list[str]:
     """Return behavioral source metadata mismatch errors for an invariant."""
     if not _is_behavioral_invariant(invariant):
@@ -1012,7 +1045,24 @@ def _behavioral_source_metadata_errors(
                 f"source_level {source_level} does not match {actual_level}."
             )
         ]
-    return []
+
+    real_texts = _structured_item_real_texts(source_item)
+    for entry in source_entries:
+        entry_item_id = _source_map_entry_item_id(entry)
+        if entry_item_id is not None and entry_item_id != source_item_id:
+            continue
+        compact_excerpt = _compact_whitespace(entry.excerpt)
+        if compact_excerpt not in real_texts:
+            continue
+        if _source_map_support_error(invariant, compact_excerpt) is None:
+            return []
+
+    return [
+        (
+            f"{invariant.id} source_item_id {source_item_id} lacks supporting "
+            "real source_map evidence."
+        )
+    ]
 
 
 def _legacy_modality_promotion_errors(
