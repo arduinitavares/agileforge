@@ -29,6 +29,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
 )
 from utils.spec_schemas import (
     Invariant,
+    InvariantParameters,
     InvariantType,
     SourceMapEntry,
     SpecAuthorityCompilationFailure,
@@ -529,7 +530,7 @@ def _support_overlap_ratio(expected: list[str], excerpt: str) -> float:
     return matched / len(expected_unique)
 
 
-def _behavioral_support_tokens(parameters: Any) -> list[str]:
+def _behavioral_support_tokens(parameters: InvariantParameters) -> list[str]:
     """Return semantic tokens from behavioral parameters for evidence ranking."""
     dumped = parameters.model_dump(mode="json")
     text_parts: list[str] = []
@@ -1172,7 +1173,6 @@ def _best_supported_source_candidate(
     candidates: list[_SourceEvidenceCandidate],
 ) -> _SourceEvidenceCandidate | None:
     """Select the most specific source-text candidate supporting an invariant."""
-    parameters = invariant.parameters
     if _is_behavioral_invariant(invariant) and invariant.source_item_id:
         item_candidates = [
             candidate
