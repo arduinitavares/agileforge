@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from google.adk import sessions as adk_sessions
+from google.adk.sessions import DatabaseSessionService
 
 from orchestrator_agent.fsm.controller import FSMController
 from orchestrator_agent.fsm.states import OrchestratorState
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from orchestrator_agent.fsm.definitions import StateDefinition
 
 logger: logging.Logger = logging.getLogger(__name__)
-DatabaseSessionService = adk_sessions.__dict__["DatabaseSessionService"]
 
 
 class WorkflowService:

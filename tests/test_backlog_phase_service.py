@@ -6,6 +6,7 @@ from typing import Any, Never
 
 import pytest
 
+from orchestrator_agent.agent_tools.backlog_primer.schemes import BacklogItem
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetRequest,
@@ -17,6 +18,7 @@ from services.agent_workbench.backlog_refinement_events import (
 from services.phases.backlog_service import (
     BacklogPhaseError,
     _backlog_artifact_fingerprint,
+    _backlog_items_for_persistence,
     backlog_state_from_complete,
     ensure_backlog_attempts,
     generate_backlog_draft,
@@ -2462,6 +2464,87 @@ async def test_save_backlog_draft_allows_nonblocking_brownfield_warnings() -> No
 
     assert payload["save_result"]["success"] is True
     assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_strips_host_annotations_before_tool() -> None:
+    """Host-derived annotations must not reach BacklogItem persistence validation."""
+    artifact: JsonDict = {
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Harden captain-aware optimizer contract",
+                "authority_ref": "REQ.captain-aware-optimization",
+                "capability_hint": "Captain-Aware Squad Optimizer",
+                "as_built_annotation": {
+                    "schema_version": "agileforge.brownfield_annotation.v1",
+                    "source": "host_derived",
+                    "match_tier": "exact",
+                    "match_basis": ["authority_ref"],
+                },
+                "value_driver": "Strategic",
+                "justification": "As-Built evidence indicates existing behavior.",
+                "estimated_effort": "M",
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+        "brownfield_warnings": [],
+    }
+    state = _review_state_for_artifact(artifact)
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        del tool_context
+        captured["backlog_input"] = backlog_input
+        return {"success": True, "product_id": backlog_input.product_id}
+
+    await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=state["product_backlog_assessment"][
+            "artifact_fingerprint"
+        ],
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-backlog-1",
+        save_state=lambda _state: None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    saved_items = captured["backlog_input"].backlog_items
+    assert len(saved_items) == 1
+    assert "as_built_annotation" not in saved_items[0]
+    assert saved_items[0]["authority_ref"] == "REQ.captain-aware-optimization"
+    BacklogItem.model_validate(saved_items[0])
+
+
+def test_backlog_items_for_persistence_validates_against_backlog_item_schema() -> None:
+    """Stripped brownfield items must satisfy the persistence BacklogItem contract."""
+    annotated_item: JsonDict = {
+        "priority": 1,
+        "requirement": "Harden captain-aware optimizer contract",
+        "authority_ref": "REQ.captain-aware-optimization",
+        "capability_hint": "Captain-Aware Squad Optimizer",
+        "as_built_annotation": {
+            "schema_version": "agileforge.brownfield_annotation.v1",
+            "source": "host_derived",
+        },
+        "value_driver": "Strategic",
+        "justification": "As-Built evidence indicates existing behavior.",
+        "estimated_effort": "M",
+    }
+    persisted = _backlog_items_for_persistence([annotated_item])
+    BacklogItem.model_validate(persisted[0])
 
 
 @pytest.mark.asyncio

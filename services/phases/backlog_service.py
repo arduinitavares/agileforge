@@ -88,6 +88,15 @@ COMPILED_AUTHORITY_REF_KEYS = (
     "target_id",
 )
 
+_HOST_OWNED_BACKLOG_ITEM_KEYS: frozenset[str] = frozenset(
+    {
+        "as_built_annotation",
+        "capability_name",
+        "as_built_status",
+        "recommended_backlog_treatment",
+    }
+)
+
 
 class BacklogPhaseError(Exception):
     """Domain-level backlog phase error for router translation."""
@@ -609,7 +618,7 @@ async def save_backlog_draft(
     result = save_backlog_tool(
         SaveBacklogInput(
             product_id=project_id,
-            backlog_items=items,
+            backlog_items=_backlog_items_for_persistence(items),
             idempotency_key=idempotency_key,
         ),
         build_tool_context(context),
@@ -1433,6 +1442,22 @@ def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
     return isinstance(questions, list) and any(
         isinstance(question, str) and bool(question.strip()) for question in questions
     )
+
+
+def _backlog_items_for_persistence(items: list[Any]) -> list[dict[str, Any]]:
+    """Return backlog items stripped of host-owned review metadata for save."""
+    persisted: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise BacklogPhaseError("Backlog items must be objects")
+        persisted.append(
+            {
+                key: value
+                for key, value in item.items()
+                if key not in _HOST_OWNED_BACKLOG_ITEM_KEYS
+            }
+        )
+    return persisted
 
 
 def _backlog_artifact_fingerprint(output_artifact: dict[str, Any]) -> str:
