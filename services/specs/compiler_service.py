@@ -455,6 +455,17 @@ def load_compiled_artifact(
     )
 
 
+def _compiled_authority_artifact_json(
+    success: SpecAuthorityCompilationSuccess,
+) -> str:
+    """Serialize a stored compiled-authority artifact with the v2 envelope."""
+    payload = success.model_dump(mode="json")
+    if not isinstance(payload, dict):
+        raise TypeError("Compiled authority payload must serialize to an object.")
+    payload["schema_version"] = COMPILED_AUTHORITY_SCHEMA_VERSION
+    return json.dumps(payload)
+
+
 def _load_acceptance_context(
     session: Session,
     *,
@@ -1642,7 +1653,7 @@ def compile_spec_authority(
             _render_invariant_summary(inv) for inv in success_artifact.invariants
         ]
         spec_gaps = success_artifact.gaps
-        compiled_artifact_json = success_artifact.model_dump_json()
+        compiled_artifact_json = _compiled_authority_artifact_json(success_artifact)
 
         authority = CompiledSpecAuthority(
             spec_version_id=parsed.spec_version_id,
@@ -2019,7 +2030,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     record_progress: Callable[[str], bool] | None = None,
 ) -> _PersistedCompilation | dict[str, Any]:
     """Persist a compiled artifact, either by updating or inserting a row."""
-    compiled_artifact_json = success.model_dump_json()
+    compiled_artifact_json = _compiled_authority_artifact_json(success)
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
     compiler_version = SPEC_AUTHORITY_COMPILER_VERSION
     scope_themes = success.scope_themes

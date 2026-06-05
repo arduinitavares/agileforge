@@ -433,6 +433,29 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
         result.status = "missing"  # type: ignore[misc]
 
 
+def test_compiled_authority_artifact_json_round_trips_through_loader() -> None:
+    """Stored-artifact serializer should emit a v2 envelope the loader accepts."""
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        _compiled_authority_artifact_json,
+        load_compiled_artifact,
+    )
+
+    success = SpecAuthorityCompilationSuccess.model_validate_json(
+        _raw_compiler_output_json()
+    )
+
+    artifact_json = _compiled_authority_artifact_json(success)
+    payload = json.loads(artifact_json)
+    result = load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=artifact_json)
+    )
+
+    assert payload["schema_version"] == "agileforge.compiled_authority.v2"
+    assert result.status == "success"
+    assert result.artifact is not None
+    assert result.artifact.scope_themes == success.scope_themes
+
+
 def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
     """Verify stored artifacts without schema_version fail closed as unsupported."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
@@ -1242,6 +1265,9 @@ def test_compile_spec_authority_for_version_persists_authority(
     ).first()
     assert authority is not None
     assert authority.compiled_artifact_json == sample_product.compiled_authority_json
+    load_result = compiler_service.load_compiled_artifact(authority)
+    assert load_result.status == "success"
+    assert load_result.artifact is not None
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
@@ -1290,13 +1316,14 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
 
     assert result["success"] is True
     assert sample_product.compiled_authority_json is not None
-    compiled = SpecAuthorityCompilerOutput.model_validate_json(
-        sample_product.compiled_authority_json
+    load_result = compiler_service.load_compiled_artifact(
+        SimpleNamespace(compiled_artifact_json=sample_product.compiled_authority_json)
     )
-    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    assert load_result.status == "success"
+    assert load_result.artifact is not None
     covered_item_ids = {
         invariant.parameters.source_item_id
-        for invariant in compiled.root.invariants
+        for invariant in load_result.artifact.invariants
         if isinstance(invariant.parameters, UserInteractionParams)
     }
     assert covered_item_ids == {"REQ.todo-create", "REQ.todo-toggle"}
@@ -1680,6 +1707,9 @@ def test_compile_spec_authority_persists_authority_with_legacy_envelope(
         )
     ).first()
     assert authority is not None
+    load_result = compiler_service.load_compiled_artifact(authority)
+    assert load_result.status == "success"
+    assert load_result.artifact is not None
 
 
 def test_compile_spec_authority_returns_error_when_already_compiled(
