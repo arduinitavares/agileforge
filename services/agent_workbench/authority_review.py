@@ -27,6 +27,9 @@ from services.agent_workbench.authority_projection import (
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
+from services.specs.compiler_service import (
+    load_compiled_artifact as load_stored_compiled_artifact,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -46,9 +49,7 @@ from utils.spec_authority_ir import (
     parse_markdown_sections as _parse_markdown_sections,
 )
 from utils.spec_schemas import (
-    SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
     SpecAuthorityMapping,
     SpecAuthorityRequirementCandidate,
     SpecAuthoritySourceUnit,
@@ -1163,16 +1164,8 @@ def _load_compiled_artifact(
     authority: CompiledSpecAuthority,
 ) -> SpecAuthorityCompilationSuccess | None:
     """Load normalized compiled artifact JSON if present and valid."""
-    artifact_json = getattr(authority, "compiled_artifact_json", None)
-    if not artifact_json:
-        return None
-    try:
-        parsed = SpecAuthorityCompilerOutput.model_validate_json(artifact_json)
-    except (ValidationError, ValueError):
-        return None
-    if isinstance(parsed.root, SpecAuthorityCompilationFailure):
-        return None
-    return parsed.root
+    load_result = load_stored_compiled_artifact(authority)
+    return load_result.artifact if load_result.ok else None
 
 
 def _compiled_artifact_shape_findings(
@@ -1184,13 +1177,16 @@ def _compiled_artifact_shape_findings(
     if not artifact_json:
         reason = "compiled_artifact_json is missing."
     else:
-        try:
-            parsed = SpecAuthorityCompilerOutput.model_validate_json(artifact_json)
-        except (ValidationError, ValueError):
-            reason = "compiled_artifact_json failed schema validation."
+        load_result = load_stored_compiled_artifact(authority)
+        if load_result.ok:
+            return []
+        if load_result.status == "compiler_failure":
+            reason = "compiled_artifact_json contains a compiler failure object."
         else:
-            if isinstance(parsed.root, SpecAuthorityCompilationFailure):
-                reason = "compiled_artifact_json contains a compiler failure object."
+            reason = (
+                load_result.message
+                or "compiled_artifact_json failed schema validation."
+            )
 
     if not reason:
         return []

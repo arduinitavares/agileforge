@@ -29,7 +29,6 @@ from utils.spec_schemas import (
     RequiredFieldParams,
     SourceMapEntry,
     SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
 )
 
 if TYPE_CHECKING:
@@ -80,7 +79,28 @@ def _compiled_success_json(
         ir_schema_version=None,
         ir_provenance=None,
     )
-    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+    return _stored_compiled_success_json_from_success(success)
+
+
+def _stored_compiled_success_json_from_success(
+    success: SpecAuthorityCompilationSuccess,
+) -> str:
+    from services.specs.compiler_service import (  # noqa: PLC0415
+        _compiled_authority_artifact_json,
+    )
+
+    return _compiled_authority_artifact_json(success)
+
+
+def _stored_compiled_success_json(
+    *,
+    source_excerpt: str,
+    source_location: str | None = "REQ.guard-tokens.statement",
+) -> str:
+    return _compiled_success_json(
+        source_excerpt=source_excerpt,
+        source_location=source_location,
+    )
 
 
 def _seed_pending_review_project(  # noqa: PLR0913
@@ -408,6 +428,36 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
             "source_refs": [],
             "source_excerpt": None,
         }
+    ]
+
+
+def test_review_accepts_v2_stored_compiled_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Authority review should accept the compiler-service stored v2 envelope."""
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+            artifact_json=_stored_compiled_success_json(
+                source_excerpt="The review output must include guard tokens."
+            ),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
+    assert "COMPILED_AUTHORITY_INVALID" not in {
+        finding["code"] for finding in result["data"]["review_findings"]
+    }
+    assert result["data"]["pending_authority"]["artifact"]["scope_themes"] == [
+        "Authority review"
     ]
 
 
@@ -1087,9 +1137,7 @@ def test_review_summary_counts_compiler_artifact_evidence(
             session,
             tmp_path=tmp_path,
             spec_content=spec_content,
-            artifact_json=SpecAuthorityCompilerOutput(
-                root=success
-            ).model_dump_json(),
+            artifact_json=_stored_compiled_success_json_from_success(success),
         )
     )
 
