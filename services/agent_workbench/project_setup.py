@@ -625,7 +625,7 @@ class ProjectSetupMutationRunner:
             lease_owner=lease_owner,
         )
         if not workflow_result.get("ok"):
-            self._mark_create_recovery_required(
+            marked = self._mark_create_recovery_required(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
                 project_id=project_id,
@@ -634,10 +634,9 @@ class ProjectSetupMutationRunner:
                 safe_to_auto_resume=True,
                 spec_version_id=authority_result.get("spec_version_id"),
             )
-            return _recovery_required_response(
-                self._must_get_ledger(mutation_event_id),
-                requested_spec_file,
-            )
+            if isinstance(marked, dict):
+                return marked
+            return _recovery_required_response(marked, requested_spec_file)
 
         data = {
             "project_id": project_id,
@@ -1071,7 +1070,7 @@ class ProjectSetupMutationRunner:
             first_error=setup_failure_first_error,
         )
         if not workflow_result.get("ok"):
-            self._mark_create_recovery_required(
+            marked = self._mark_create_recovery_required(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
                 project_id=project_id,
@@ -1080,10 +1079,9 @@ class ProjectSetupMutationRunner:
                 safe_to_auto_resume=True,
                 spec_version_id=_optional_int(spec_version_id),
             )
-            return _recovery_required_response(
-                self._must_get_ledger(mutation_event_id),
-                requested_spec_file,
-            )
+            if isinstance(marked, dict):
+                return marked
+            return _recovery_required_response(marked, requested_spec_file)
 
         data = {
             "project_id": project_id,

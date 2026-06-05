@@ -713,6 +713,80 @@ def test_create_recovery_mark_failure_does_not_claim_recovery_required(
         assert ledger.status == MutationStatus.PENDING.value
 
 
+def test_workflow_setup_recovery_mark_failure_does_not_claim_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    workflow.fail_after_session_create = True
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    monkeypatch.setattr(
+        MutationLedgerRepository,
+        "mark_recovery_required",
+        lambda *args, **kwargs: False,
+    )
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Workflow Recovery Mark Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-workflow-recovery-mark-fails-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_IN_PROGRESS"
+    assert result["data"]["status"] == MutationStatus.PENDING.value
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.PENDING.value
+
+
+def test_failed_workflow_setup_recovery_mark_failure_does_not_claim_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    monkeypatch.setattr(
+        workflow,
+        "update_session_status",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
+    )
+    monkeypatch.setattr(
+        MutationLedgerRepository,
+        "mark_recovery_required",
+        lambda *args, **kwargs: False,
+    )
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Failed Workflow Recovery Mark Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-failed-workflow-recovery-mark-fails-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_IN_PROGRESS"
+    assert result["data"]["status"] == MutationStatus.PENDING.value
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.status == MutationStatus.PENDING.value
+
+
 def test_project_setup_retry_without_recovery_link_recovers_failed_setup(
     engine: Engine,
     tmp_path: Path,
