@@ -16,31 +16,31 @@
 
 ## Files To Modify
 
-- `/Users/aaat/projects/agileforge/models/core.py`  
+- `/Users/aaat/projects/agileforge/models/core.py`
   Add nullable archive columns to `UserStory`.
-- `/Users/aaat/projects/agileforge/db/migrations.py`  
+- `/Users/aaat/projects/agileforge/db/migrations.py`
   Add additive migration for archive columns and call it from `ensure_schema_current`.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/read_projection.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/read_projection.py`
   Add archive columns to schema readiness and story payload projection where story data is exposed.
-- `/Users/aaat/projects/agileforge/orchestrator_agent/agent_tools/backlog_primer/tools.py`  
+- `/Users/aaat/projects/agileforge/orchestrator_agent/agent_tools/backlog_primer/tools.py`
   Tighten backlog-save idempotency replay to only replay `action == "backlog_saved"`.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_reconciliation.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_reconciliation.py`
   Tighten `_latest_saved_count` to count only `action == "backlog_saved"` and keep reconcile replay action-specific.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_active_reset.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_active_reset.py`
   Create reset DB mutation service with request fingerprint, replay/conflict, archive, create, and history-preservation checks.
-- `/Users/aaat/projects/agileforge/services/phases/backlog_service.py`  
+- `/Users/aaat/projects/agileforge/services/phases/backlog_service.py`
   Add phase-level reset guard that validates workflow state, attempt/fingerprint/approval, completeness, and replacement-blocked precondition.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_phase.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/backlog_phase.py`
   Add `BacklogPhaseRunner.reset_active`.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/application.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/application.py`
   Add facade method and `workflow next` reset-aware guidance.
-- `/Users/aaat/projects/agileforge/cli/main.py`  
+- `/Users/aaat/projects/agileforge/cli/main.py`
   Add `agileforge backlog reset-active` parser and handler.
-- `/Users/aaat/projects/agileforge/services/agent_workbench/command_registry.py`  
+- `/Users/aaat/projects/agileforge/services/agent_workbench/command_registry.py`
   Register command contract.
-- `/Users/aaat/projects/agileforge/services/phases/workflow_state.py`  
+- `/Users/aaat/projects/agileforge/services/phases/workflow_state.py`
   Add reset-aware roadmap stale exception helper.
-- `/Users/aaat/projects/agileforge/services/phases/roadmap_service.py`  
+- `/Users/aaat/projects/agileforge/services/phases/roadmap_service.py`
   Use roadmap-only stale exception.
 
 ## Files To Create
