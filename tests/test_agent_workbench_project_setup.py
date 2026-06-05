@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -164,6 +164,27 @@ def _write_spec(
         encoding="utf-8",
     )
     return spec_file
+
+
+def _assert_create_lease_extended(
+    *,
+    engine: Engine,
+    idempotency_key: str,
+    expected_last_heartbeat_at: datetime,
+    expected_lease_expires_at: datetime,
+) -> tuple[datetime, datetime]:
+    with Session(engine) as session:
+        ledger = session.exec(
+            select(CliMutationLedger).where(
+                CliMutationLedger.idempotency_key == idempotency_key
+            )
+        ).first()
+        assert ledger is not None
+        assert ledger.last_heartbeat_at == expected_last_heartbeat_at
+        assert ledger.lease_expires_at == expected_lease_expires_at
+        assert ledger.last_heartbeat_at is not None
+        assert ledger.lease_expires_at is not None
+        return ledger.last_heartbeat_at, ledger.lease_expires_at
 
 
 def _install_fast_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -583,6 +604,17 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
     workflow = FakeWorkflowPort()
+    lease_seconds = 3
+    heartbeat_count = 6
+    clock_now = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+    initial_lease_deadline = clock_now.replace(tzinfo=None) + timedelta(
+        seconds=lease_seconds
+    )
+    heartbeat_snapshots: list[tuple[datetime, datetime]] = []
+    guarded_after_initial_deadline = False
+
+    def controlled_now() -> datetime:
+        return clock_now
 
     def compile_with_many_heartbeats(
         *,
@@ -593,10 +625,28 @@ def test_event_159_style_long_compile_survives_past_original_lease(
         lease_guard: Any | None = None,
         record_progress: Any | None = None,
     ) -> dict[str, Any]:
+        nonlocal clock_now, guarded_after_initial_deadline
+
         del force_recompile, tool_context
         assert lease_guard is not None
-        for index in range(6):
+        for index in range(heartbeat_count):
+            clock_now += timedelta(seconds=1)
+            current_db_now = clock_now.replace(tzinfo=None)
             assert lease_guard(f"authority_compile_invocation_heartbeat_{index}")
+            heartbeat_snapshots.append(
+                _assert_create_lease_extended(
+                    engine=engine,
+                    idempotency_key="create-event-159-regression-001",
+                    expected_last_heartbeat_at=current_db_now,
+                    expected_lease_expires_at=current_db_now
+                    + timedelta(seconds=lease_seconds),
+                )
+            )
+            if current_db_now > initial_lease_deadline:
+                guarded_after_initial_deadline = True
+
+        assert guarded_after_initial_deadline
+
         with Session(engine) as session:
             authority = CompiledSpecAuthority(
                 spec_version_id=spec_version_id,
@@ -626,12 +676,14 @@ def test_event_159_style_long_compile_survives_past_original_lease(
 
     from services.agent_workbench import project_setup
 
+    monkeypatch.setattr(project_setup, "_now", controlled_now)
     monkeypatch.setattr(
         project_setup,
         "compile_spec_authority_for_version_with_engine",
         compile_with_many_heartbeats,
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    runner._lease_seconds = lease_seconds
 
     result = runner.create_project(
         ProjectCreateRequest(
@@ -643,6 +695,9 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     )
 
     assert result["ok"] is True
+    assert len(heartbeat_snapshots) == heartbeat_count
+    assert heartbeat_snapshots[-1][0] > initial_lease_deadline
+    assert heartbeat_snapshots[-1][1] > initial_lease_deadline
     with Session(engine) as session:
         ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
         assert ledger is not None
