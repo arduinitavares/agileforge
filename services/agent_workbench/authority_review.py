@@ -30,6 +30,8 @@ from services.agent_workbench.schema_readiness import check_schema_readiness
 from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
+)
+from services.specs.compiler_service import (
     load_compiled_artifact as load_stored_compiled_artifact,
 )
 from services.specs.profile_content import (
@@ -43,7 +45,9 @@ from utils.agileforge_spec_profile import (
     render_markdown,
     rendered_markdown_hash,
 )
-from utils.spec_authority_ir import ContentBlock as _ContentBlock
+from utils.spec_authority_ir import (
+    ContentBlock as _ContentBlock,
+)
 from utils.spec_authority_ir import (
     Section as _Section,
 )

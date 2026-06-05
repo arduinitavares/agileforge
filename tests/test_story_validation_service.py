@@ -62,7 +62,7 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported stored artifacts should block validation with regeneration guidance."""
+    """Unsupported stored artifacts should block validation with regenerate guidance."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
     monkeypatch.setattr(

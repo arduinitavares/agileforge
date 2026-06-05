@@ -890,7 +890,7 @@ def test_ensure_spec_authority_accepted_rejects_unsupported_artifact_with_regene
     with pytest.raises(
         ValueError,
         match=(
-            "Compiled authority artifact schema is unsupported.*"
+            r"Compiled authority artifact schema is unsupported.*"
             "agileforge authority regenerate"
         ),
     ):
