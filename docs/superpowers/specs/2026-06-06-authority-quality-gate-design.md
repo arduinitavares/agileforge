@@ -64,6 +64,14 @@ The normalizer remains responsible for schema repair, deterministic IDs,
 source-map grounding, and semantic source checks. The quality gate is a separate
 post-normalization quality pass.
 
+The implementation must also fix one existing ID/provenance mismatch: current
+compiled invariant IDs are derived from invariant type and parameters only. That
+prevents AgileForge from preserving two same-shaped rules that come from
+different source items or source levels. New compiled authority must derive
+invariant IDs from type, parameters, `source_item_id`, and `source_level`.
+Existing v2 artifacts remain readable; regenerated authority may get different
+IDs because it has more precise provenance-aware identity.
+
 ## Artifact Contract
 
 Add an optional `authority_quality` object to the persisted v2 compiled authority
@@ -108,10 +116,10 @@ Auto-merge invariants only when all identity dimensions match:
 - top-level `source_item_id`
 - top-level `source_level`
 
-This is exact semantic equivalence. It is safe because deterministic invariant
-IDs already derive from invariant type and parameters; the quality gate adds the
-source identity checks that prevent merging the same rule shape from different
-source authority.
+This is exact semantic equivalence. It is safe because the identity dimensions
+include both rule semantics and provenance. Same-shaped rules from different
+source items or source levels remain separate items and are grouped for review
+instead of being silently merged.
 
 When merging:
 
@@ -291,6 +299,8 @@ These are implementation-plan decisions, not design blockers:
 - Only semantically equivalent invariants are auto-merged.
 - Related-but-distinct items are grouped for review and not merged.
 - Source evidence, source levels, invariant type, and traceability are preserved.
+- New compiled invariant IDs include source item and source level when present,
+  so source-distinct same-shaped rules can remain distinct.
 - Review packet/worksheet exposes merge decisions and duplicate groups.
 - Project create and authority regenerate still stop at pending authority review.
 - ASA is covered as a regression fixture with no ASA-specific logic.
