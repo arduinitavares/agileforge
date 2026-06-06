@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -173,6 +174,106 @@ def _structured_behavior_spec_source() -> str:
                         "A package.json may include framework dependencies "
                         "alongside todomvc-app-css and todomvc-common."
                     ),
+                },
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
+
+
+def _asa_like_structured_spec_source() -> str:
+    """Return structured spec JSON reproducing ASA source-evidence shapes."""
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.asa-normalizer",
+            "title": "ASA Normalizer Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-06-06",
+            "updated_at": "2026-06-06",
+            "summary": "Exercise ASA authority source-map evidence.",
+            "problem_statement": "Authority evidence must be real source text.",
+            "items": [
+                {
+                    "id": "REQ.tech-stack-model-research",
+                    "type": "REQ",
+                    "status": "accepted",
+                    "title": "Technology and model research spike",
+                    "statement": (
+                        "The project must include an early research spike that "
+                        "evaluates current technology stack and modeling options "
+                        "before selecting an advisory or reinforcement-learning "
+                        "approach."
+                    ),
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        (
+                            "The research output compares at least a supervised "
+                            "dynamics model, constrained candidate-action search "
+                            "or MPC-style optimization, offline reinforcement "
+                            "learning, and deterministic policy-gradient "
+                            "approaches such as DDPG, TD3, or SAC when relevant."
+                        ),
+                        (
+                            "The research output evaluates Python runtime choice, "
+                            "uv project management, package compatibility, "
+                            "data-processing stack, model-training stack, "
+                            "experiment tracking, validation approach, deployment "
+                            "constraints, and safety-review implications."
+                        ),
+                        (
+                            "The research output records the selected first "
+                            "implementation approach, rejected alternatives, "
+                            "evidence used, unresolved assumptions, and criteria "
+                            "that would trigger revisiting the decision."
+                        ),
+                    ],
+                },
+                {
+                    "id": "CONSTRAINT.uv-managed",
+                    "type": "CONSTRAINT",
+                    "status": "accepted",
+                    "title": "uv-managed Python project",
+                    "statement": (
+                        "The project must use uv as the Python project and "
+                        "dependency manager."
+                    ),
+                    "level": "MUST",
+                    "verification": "inspection",
+                    "acceptance": [
+                        (
+                            "Project dependencies, development dependencies, "
+                            "package metadata, and Python runtime constraints "
+                            "are declared in pyproject.toml."
+                        ),
+                        (
+                            "The repository contains uv.lock and documented setup "
+                            "commands use uv sync or uv run rather than pip, "
+                            "poetry, pipenv, or ad hoc virtual-environment "
+                            "commands."
+                        ),
+                        (
+                            "Quality checks, tests, and project scripts are "
+                            "runnable through uv-managed commands."
+                        ),
+                    ],
+                    "source_notes": [
+                        {
+                            "kind": "external_summary",
+                            "text": (
+                                "Astral uv documentation describes uv init, uv "
+                                "add, uv lock, uv sync, and uv run as the "
+                                "project-management workflow."
+                            ),
+                        }
+                    ],
                 },
             ],
         }
@@ -1865,6 +1966,520 @@ def test_model_emitted_exact_quote_mapping_is_discarded() -> None:
     _assert_semantic_invariant_ids(success)
     assert success.source_map[0].excerpt == source_quote
     assert success.source_map[0].invariant_id == success.invariants[0].id
+
+
+def test_structured_profile_replays_asa_source_metadata_failure_artifact() -> None:
+    """The saved ASA compiler output normalizes against its real structured spec."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    artifact_path = Path(
+        "/Users/aaat/projects/agileforge/logs/failures/spec_authority/"
+        "spec_authority-20260606T134834578097Z-b7257af2fa4a.json"
+    )
+    spec_path = Path(
+        "/Users/aaat/projects/asa-deep-process-control-experiments/specs/spec.json"
+    )
+    if not artifact_path.exists() or not spec_path.exists():
+        pytest.skip("ASA local replay artifact/spec not available on this machine")
+
+    artifact = json.loads(artifact_path.read_text())
+    raw_output = artifact["raw_output"]
+
+    normalized = normalize_compiler_output(
+        raw_output if isinstance(raw_output, str) else json.dumps(raw_output),
+        source_text=spec_path.read_text(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+
+
+def test_structured_profile_replays_asa_ellipsis_source_failure_artifact() -> None:
+    """The ASA compiler output with ellipsis source excerpts normalizes."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    artifact_path = Path(
+        "/Users/aaat/projects/agileforge/logs/failures/spec_authority/"
+        "spec_authority-20260606T161728714864Z-790b52ba55b5.json"
+    )
+    spec_path = Path(
+        "/Users/aaat/projects/asa-deep-process-control-experiments/specs/spec.json"
+    )
+    if not artifact_path.exists() or not spec_path.exists():
+        pytest.skip("ASA local replay artifact/spec not available on this machine")
+
+    artifact = json.loads(artifact_path.read_text())
+    raw_output = artifact["raw_output"]
+
+    normalized = normalize_compiler_output(
+        raw_output if isinstance(raw_output, str) else json.dumps(raw_output),
+        source_text=spec_path.read_text(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+
+
+def test_structured_profile_accepts_faithful_partial_source_excerpt() -> None:
+    """A source_map excerpt may be a faithful case-insensitive source substring."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _asa_like_structured_spec_source()
+    partial_excerpt = (
+        "Documented setup commands use uv sync or uv run rather than pip, "
+        "poetry, pipenv, or ad hoc virtual-environment commands."
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running documented setup commands",
+                "target": "project environment",
+                "expected_response": "commands use uv sync or uv run",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": partial_excerpt,
+            "location": "CONSTRAINT.uv-managed.acceptance[1]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].excerpt == partial_excerpt
+
+
+def test_structured_profile_accepts_controlled_acceptance_concatenation() -> None:
+    """Multiple complete real texts from one item may support one invariant."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _asa_like_structured_spec_source()
+    combined_excerpt = (
+        "The research output compares at least a supervised dynamics model, "
+        "constrained candidate-action search or MPC-style optimization, offline "
+        "reinforcement learning, and deterministic policy-gradient approaches "
+        "such as DDPG, TD3, or SAC when relevant. The research output evaluates "
+        "Python runtime choice, uv project management, package compatibility, "
+        "data-processing stack, model-training stack, experiment tracking, "
+        "validation approach, deployment constraints, and safety-review "
+        "implications."
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-2222222222222222",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.tech-stack-model-research",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "research-spike-output",
+                "fields": [
+                    "selected_first_implementation_approach",
+                    "rejected_alternatives",
+                    "evidence_used",
+                ],
+                "rule": (
+                    "Research output compares model approaches and evaluates "
+                    "Python runtime choice, uv project management, validation "
+                    "approach, deployment constraints, and safety-review "
+                    "implications."
+                ),
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-2222222222222222",
+            "excerpt": combined_excerpt,
+            "location": "REQ.tech-stack-model-research.acceptance[0]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].excerpt == combined_excerpt
+
+
+def test_structured_profile_accepts_faithful_ellipsis_source_excerpt() -> None:
+    """Ellipses may mark omitted real text when fragments stay in order."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _asa_like_structured_spec_source()
+    ellipsis_excerpt = (
+        "The repository contains uv.lock and documented setup commands use "
+        "uv sync or uv run... Quality checks, tests, and project scripts are "
+        "runnable through uv-managed commands."
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-8888888888888888",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "uv-managed commands",
+                "fields": [
+                    "uv sync",
+                    "uv run",
+                    "quality checks",
+                    "tests",
+                    "project scripts",
+                ],
+                "rule": (
+                    "Documented setup must use uv sync or uv run and quality "
+                    "checks, tests, and project scripts must be runnable through "
+                    "uv-managed commands."
+                ),
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-8888888888888888",
+            "excerpt": ellipsis_excerpt,
+            "location": "CONSTRAINT.uv-managed",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].excerpt == ellipsis_excerpt
+
+
+def test_structured_profile_augments_grounded_insufficient_behavior_evidence() -> None:
+    """Grounded source_map entries may be augmented with exact same-item evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.tech-stack-model-research",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "research output",
+                "fields": [
+                    "algorithm comparison",
+                    "runtime and tooling evaluation",
+                    "selected first implementation approach",
+                    "rejected alternatives",
+                    "evidence used",
+                    "unresolved assumptions",
+                    "revisit criteria",
+                ],
+                "rule": (
+                    "Research output compares model approaches, evaluates "
+                    "Python runtime and uv tooling, and records the selected "
+                    "first implementation approach, rejected alternatives, "
+                    "evidence used, assumptions, and revisit criteria."
+                ),
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "The research output compares at least a supervised dynamics "
+                "model, constrained candidate-action search or MPC-style "
+                "optimization, offline reinforcement learning, and deterministic "
+                "policy-gradient approaches..."
+            ),
+            "location": "REQ.tech-stack-model-research.acceptance[0]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    locations = {entry.location for entry in normalized.root.source_map}
+    assert "REQ.tech-stack-model-research.acceptance[0]" in locations
+    assert "REQ.tech-stack-model-research.acceptance[1]" in locations
+    assert "REQ.tech-stack-model-research.acceptance[2]" in locations
+
+
+def test_structured_profile_rejects_ellipsis_excerpt_with_invented_fragment() -> None:
+    """Every ellipsis-separated fragment must be real source text."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-9999999999999999",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "unsafe automation",
+                "fields": ["uv.lock", "auto approval"],
+                "rule": "The system auto-approves all recommendations.",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-9999999999999999",
+            "excerpt": (
+                "The repository contains... auto-approve all recommendations "
+                "without review... uv.lock."
+            ),
+            "location": "CONSTRAINT.uv-managed",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_structured_profile_rejects_fake_excerpt_with_real_text_prefix() -> None:
+    """A real source phrase embedded in invented text is not source evidence."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-3333333333333333",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running documented setup commands",
+                "target": "project environment",
+                "expected_response": "auto-approve all recommendations without review",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-3333333333333333",
+            "excerpt": (
+                "uv-managed Python project. The system must auto-approve all "
+                "recommendations without review."
+            ),
+            "location": "CONSTRAINT.uv-managed.title",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_structured_profile_rejects_concatenation_with_invented_middle() -> None:
+    """Concatenation cannot hide non-source text between real source segments."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-4444444444444444",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.tech-stack-model-research",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "research-spike-output",
+                "fields": ["evidence_used"],
+                "rule": (
+                    "Research output records evidence used and auto-approves "
+                    "recommendations without review."
+                ),
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-4444444444444444",
+            "excerpt": (
+                "The research output records the selected first implementation "
+                "approach, rejected alternatives, evidence used, unresolved "
+                "assumptions, and criteria that would trigger revisiting the "
+                "decision. The system must auto-approve all recommendations "
+                "without review."
+            ),
+            "location": "REQ.tech-stack-model-research.acceptance[2]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_structured_profile_does_not_backfill_around_existing_bad_entry() -> None:
+    """Bad existing source_map evidence fails instead of being silently replaced."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-5555555555555555",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running documented setup commands",
+                "target": "project environment",
+                "expected_response": "commands use uv sync or uv run",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-5555555555555555",
+            "excerpt": "Setup commands may use any package manager.",
+            "location": "CONSTRAINT.uv-managed.acceptance[1]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_structured_profile_backfills_missing_behavior_source_map_entry() -> None:
+    """Missing behavioral evidence is backfilled from exact real source text."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-6666666666666666",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running documented setup commands",
+                "target": "project environment",
+                "expected_response": "commands use uv sync or uv run",
+            },
+        }
+    ]
+    raw["source_map"] = []
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(normalized.root.source_map) == 1
+    entry = normalized.root.source_map[0]
+    assert entry.location == "CONSTRAINT.uv-managed.acceptance[1]"
+    assert entry.excerpt.startswith("The repository contains uv.lock")
+
+
+def test_structured_profile_source_notes_do_not_satisfy_hard_behavioral_evidence(
+) -> None:
+    """source_notes are hints, not normative evidence for hard invariants."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-7777777777777777",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running uv project-management workflow",
+                "target": "project environment",
+                "expected_response": "uv init, uv add, uv lock, uv sync, and uv run",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-7777777777777777",
+            "excerpt": (
+                "Astral uv documentation describes uv init, uv add, uv lock, "
+                "uv sync, and uv run as the project-management workflow."
+            ),
+            "location": "CONSTRAINT.uv-managed.source_notes[0].text",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
 
 
 def test_structured_profile_clears_compact_ir_and_preserves_item_evidence() -> None:

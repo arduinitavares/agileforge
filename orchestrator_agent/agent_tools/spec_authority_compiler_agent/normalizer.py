@@ -83,6 +83,8 @@ _FORBIDDEN_SAFETY_SUPPORT_THRESHOLD = 0.25
 _STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY = 3
 _STRUCTURED_ENTRY_EXCERPT_MATCH_PRIORITY = 4
 _STRUCTURED_ENTRY_LOCATION_MATCH_PRIORITY = 5
+_STRUCTURED_EVIDENCE_MIN_CONCAT_SEGMENTS = 2
+_STRUCTURED_FRAGMENT_MAX_TOKEN_GAP = 2
 _FORBIDDEN_SAFETY_CUE_RE = re.compile(
     r"\b("
     r"must\s+not|do\s+not|never|forbidden|prohibited|disallow|deny|"
@@ -105,6 +107,11 @@ _FORBIDDEN_CAPABILITY_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
 _STRUCTURED_ITEM_ID_RE = re.compile(
     r"\b(?:GOAL|NON_GOAL|REQ|QUALITY|CONSTRAINT|INTERFACE|DATA|DECISION|"
     r"ASSUMPTION|RISK|EXAMPLE|OPEN_QUESTION)\.[A-Za-z0-9_-]+"
+)
+_STRUCTURED_ELLIPSIS_RE = re.compile(r"(?:\.{3,}|…)")
+_STRUCTURED_EVIDENCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STRUCTURED_EVIDENCE_GLUE_CHARS = frozenset(
+    " \t\n\r\f\v.,;:!?()[]{}<>\"'`-"
 )
 _STRICT_INVARIANT_ID_RE = re.compile(r"^INV-[0-9a-f]{16}$")
 _PROMPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -797,11 +804,6 @@ def _structured_profile_source_candidates(
             for index, acceptance in enumerate(acceptance_items):
                 append(acceptance, f"{item_id}.acceptance[{index}]")
 
-        source_notes = item.get("source_notes")
-        if isinstance(source_notes, list):
-            for index, source_note in enumerate(source_notes):
-                append(source_note, f"{item_id}.source_notes[{index}]")
-
     return candidates
 
 
@@ -833,28 +835,219 @@ def _structured_profile_items_by_id(
     return result
 
 
-def _structured_item_real_texts(source_item: Mapping[str, Any]) -> set[str]:
-    """Return canonical real-text evidence fields for one structured spec item."""
-    texts: set[str] = set()
+def _structured_item_real_texts(source_item: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return normative real-text evidence fields for one structured spec item."""
+    texts: list[str] = []
+    seen: set[str] = set()
 
     def append(value: object) -> None:
         if not isinstance(value, str):
             return
         compact = _compact_whitespace(value)
-        if compact:
-            texts.add(compact)
+        if compact and compact not in seen:
+            seen.add(compact)
+            texts.append(compact)
 
     for field_name in ("statement", "title", "rationale"):
         append(source_item.get(field_name))
 
-    for list_field_name in ("acceptance", "source_notes"):
-        values = source_item.get(list_field_name)
-        if not isinstance(values, list):
-            continue
-        for value in values:
+    acceptance = source_item.get("acceptance")
+    if isinstance(acceptance, list):
+        for value in acceptance:
             append(value)
 
-    return texts
+    return tuple(texts)
+
+
+def _normalize_structured_evidence_text(text: str) -> str:
+    """Normalize structured source text for grounding comparisons."""
+    return _compact_whitespace(text).casefold()
+
+
+def _is_structured_evidence_glue(text: str) -> bool:
+    """Return whether text is only separator glue between real source segments."""
+    return bool(text) and all(
+        char in _STRUCTURED_EVIDENCE_GLUE_CHARS for char in text
+    )
+
+
+def _has_structured_segment_conflict(
+    segment: str,
+    *,
+    selected: tuple[str, ...],
+) -> bool:
+    """Return whether selected concat segments contain one another."""
+    return any(
+        segment in selected_segment or selected_segment in segment
+        for selected_segment in selected
+    )
+
+
+def _controlled_structured_concat_match(
+    normalized_excerpt: str,
+    normalized_texts: tuple[str, ...],
+) -> bool:
+    """Return whether excerpt is fully covered by real text plus separator glue."""
+    if not normalized_excerpt:
+        return False
+
+    ordered_texts = tuple(
+        sorted(
+            {text for text in normalized_texts if text},
+            key=lambda value: (-len(value), value),
+        )
+    )
+    memo: set[tuple[int, tuple[str, ...]]] = set()
+
+    def can_cover(position: int, selected: tuple[str, ...]) -> bool:
+        state = (position, selected)
+        if state in memo:
+            return False
+        memo.add(state)
+
+        for real_text in ordered_texts:
+            if real_text in selected:
+                continue
+            if _has_structured_segment_conflict(real_text, selected=selected):
+                continue
+            if not normalized_excerpt.startswith(real_text, position):
+                continue
+
+            next_position = position + len(real_text)
+            next_selected = (*selected, real_text)
+            if next_position == len(normalized_excerpt):
+                return len(next_selected) >= _STRUCTURED_EVIDENCE_MIN_CONCAT_SEGMENTS
+
+            for candidate_position in range(
+                next_position + 1,
+                len(normalized_excerpt) + 1,
+            ):
+                glue = normalized_excerpt[next_position:candidate_position]
+                if not _is_structured_evidence_glue(glue):
+                    break
+                if candidate_position == len(normalized_excerpt):
+                    continue
+                if can_cover(candidate_position, next_selected):
+                    return True
+
+        return False
+
+    return can_cover(0, ())
+
+
+def _strip_structured_fragment_glue(fragment: str) -> str:
+    """Remove only separator characters around an ellipsis fragment."""
+    return fragment.strip("".join(sorted(_STRUCTURED_EVIDENCE_GLUE_CHARS)))
+
+
+def _structured_evidence_token_positions(text: str) -> tuple[tuple[str, int, int], ...]:
+    """Return normalized evidence tokens with character positions."""
+    return tuple(
+        (match.group(0), match.start(), match.end())
+        for match in _STRUCTURED_EVIDENCE_TOKEN_RE.finditer(text)
+    )
+
+
+def _structured_fragment_token_subsequence_end(
+    corpus_tokens: tuple[tuple[str, int, int], ...],
+    fragment_tokens: list[str],
+    *,
+    position: int,
+) -> int | None:
+    """Return end offset for a bounded in-order token match, if any."""
+    if not fragment_tokens:
+        return None
+
+    for start_index, (token, _start, end) in enumerate(corpus_tokens):
+        if end <= position or token != fragment_tokens[0]:
+            continue
+
+        current_index = start_index
+        current_end = end
+        matched = True
+        for fragment_token in fragment_tokens[1:]:
+            next_index: int | None = None
+            max_index = min(
+                len(corpus_tokens),
+                current_index + _STRUCTURED_FRAGMENT_MAX_TOKEN_GAP + 2,
+            )
+            for candidate_index in range(current_index + 1, max_index):
+                if corpus_tokens[candidate_index][0] == fragment_token:
+                    next_index = candidate_index
+                    break
+            if next_index is None:
+                matched = False
+                break
+            current_index = next_index
+            current_end = corpus_tokens[current_index][2]
+
+        if matched:
+            return current_end
+
+    return None
+
+
+def _ellipsis_structured_fragment_match(
+    normalized_excerpt: str,
+    normalized_texts: tuple[str, ...],
+) -> bool:
+    """Return whether ellipses omit only in-order structured source text."""
+    if not _STRUCTURED_ELLIPSIS_RE.search(normalized_excerpt):
+        return False
+
+    fragments = [
+        _strip_structured_fragment_glue(fragment)
+        for fragment in _STRUCTURED_ELLIPSIS_RE.split(normalized_excerpt)
+    ]
+    fragments = [fragment for fragment in fragments if fragment]
+    if not fragments:
+        return False
+
+    ordered_source_corpus = _compact_whitespace(" ".join(normalized_texts))
+    corpus_tokens = _structured_evidence_token_positions(ordered_source_corpus)
+    position = 0
+    for fragment in fragments:
+        match_position = ordered_source_corpus.find(fragment, position)
+        if match_position >= 0:
+            position = match_position + len(fragment)
+            continue
+
+        fragment_tokens = _tokenize_support_text(fragment)
+        token_end = _structured_fragment_token_subsequence_end(
+            corpus_tokens,
+            fragment_tokens,
+            position=position,
+        )
+        if token_end is None:
+            return False
+        position = token_end
+
+    return True
+
+
+def _excerpt_matches_structured_real_text(
+    compact_excerpt: str,
+    real_texts: tuple[str, ...],
+) -> bool:
+    """Return whether a source_map excerpt is grounded in structured source text."""
+    normalized_excerpt = _normalize_structured_evidence_text(compact_excerpt)
+    normalized_texts = tuple(
+        _normalize_structured_evidence_text(real_text)
+        for real_text in real_texts
+        if real_text
+    )
+    if not normalized_excerpt or not normalized_texts:
+        return False
+    if normalized_excerpt in normalized_texts:
+        return True
+    if any(normalized_excerpt in real_text for real_text in normalized_texts):
+        return True
+    if _ellipsis_structured_fragment_match(normalized_excerpt, normalized_texts):
+        return True
+    return _controlled_structured_concat_match(
+        normalized_excerpt,
+        normalized_texts,
+    )
 
 
 def _structured_item_id_from_reference(reference: str | None) -> str | None:
@@ -891,6 +1084,41 @@ def _source_map_entries_by_invariant(
     for entry in entries:
         grouped.setdefault(entry.invariant_id, []).append(entry)
     return grouped
+
+
+def _grounded_structured_entry_excerpts(
+    entries: list[SourceMapEntry],
+    *,
+    source_item_id: str,
+    real_texts: tuple[str, ...],
+) -> list[str] | None:
+    """Return grounded excerpts, or None if any existing entry is not grounded."""
+    grounded_excerpts: list[str] = []
+    for entry in entries:
+        entry_item_id = _source_map_entry_item_id(entry)
+        if entry_item_id != source_item_id:
+            return None
+        compact_excerpt = _compact_whitespace(entry.excerpt)
+        if not _excerpt_matches_structured_real_text(compact_excerpt, real_texts):
+            return None
+        grounded_excerpts.append(compact_excerpt)
+    return grounded_excerpts
+
+
+def _behavioral_source_excerpts_support_invariant(
+    invariant: Invariant,
+    excerpts: list[str],
+) -> bool:
+    """Return whether one or more grounded excerpts support an invariant."""
+    for excerpt in excerpts:
+        if _source_map_support_error(invariant, excerpt) is None:
+            return True
+
+    if len(excerpts) > 1:
+        combined_excerpt = _compact_whitespace(" ".join(excerpts))
+        return _source_map_support_error(invariant, combined_excerpt) is None
+
+    return False
 
 
 def _filter_non_normative_decision_hard_bans(
@@ -1047,15 +1275,16 @@ def _behavioral_source_metadata_errors(
         ]
 
     real_texts = _structured_item_real_texts(source_item)
-    for entry in source_entries:
-        entry_item_id = _source_map_entry_item_id(entry)
-        if entry_item_id is not None and entry_item_id != source_item_id:
-            continue
-        compact_excerpt = _compact_whitespace(entry.excerpt)
-        if compact_excerpt not in real_texts:
-            continue
-        if _source_map_support_error(invariant, compact_excerpt) is None:
-            return []
+    grounded_excerpts = _grounded_structured_entry_excerpts(
+        source_entries,
+        source_item_id=source_item_id,
+        real_texts=real_texts,
+    )
+    if grounded_excerpts is not None and _behavioral_source_excerpts_support_invariant(
+        invariant,
+        grounded_excerpts,
+    ):
+        return []
 
     return [
         (
@@ -1286,6 +1515,101 @@ def _structured_entry_match_candidates(
     return candidates
 
 
+def _repair_structured_behavior_source_map_entries(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> bool:
+    """Add exact entries for missing or insufficient grounded behavioral evidence."""
+    source_items = _structured_profile_items_by_id(source_text)
+    if not source_items:
+        return False
+
+    existing_by_invariant = _source_map_entries_by_invariant(success.source_map)
+    changed = False
+    for invariant in success.invariants:
+        if not _is_behavioral_invariant(invariant) or not invariant.source_item_id:
+            continue
+        source_item = source_items.get(invariant.source_item_id)
+        if source_item is None:
+            continue
+
+        entries = existing_by_invariant.get(invariant.id, [])
+        candidates = [
+            candidate
+            for candidate in _structured_profile_source_candidates(
+                source_text,
+                location_hint=invariant.source_item_id,
+            )
+            if (
+                _structured_item_id_from_reference(candidate.location)
+                == invariant.source_item_id
+            )
+        ]
+        if not entries:
+            matched = _best_supported_source_candidate(invariant, candidates)
+            if matched is None:
+                continue
+            entry = SourceMapEntry(
+                invariant_id=invariant.id,
+                excerpt=matched.excerpt,
+                location=matched.location,
+            )
+            success.source_map.append(entry)
+            existing_by_invariant.setdefault(invariant.id, []).append(entry)
+            changed = True
+            continue
+
+        real_texts = _structured_item_real_texts(source_item)
+        grounded_excerpts = _grounded_structured_entry_excerpts(
+            entries,
+            source_item_id=invariant.source_item_id,
+            real_texts=real_texts,
+        )
+        if grounded_excerpts is None:
+            continue
+        if _behavioral_source_excerpts_support_invariant(
+            invariant,
+            grounded_excerpts,
+        ):
+            continue
+
+        existing_keys = {
+            (_compact_whitespace(entry.excerpt), entry.location)
+            for entry in entries
+        }
+        appended_entries: list[SourceMapEntry] = []
+        draft_excerpts = list(grounded_excerpts)
+        for candidate in candidates:
+            candidate_key = (_compact_whitespace(candidate.excerpt), candidate.location)
+            if candidate_key in existing_keys:
+                continue
+            entry = SourceMapEntry(
+                invariant_id=invariant.id,
+                excerpt=candidate.excerpt,
+                location=candidate.location,
+            )
+            appended_entries.append(entry)
+            draft_excerpts.append(_compact_whitespace(candidate.excerpt))
+            if _behavioral_source_excerpts_support_invariant(
+                invariant,
+                draft_excerpts,
+            ):
+                break
+
+        if not _behavioral_source_excerpts_support_invariant(
+            invariant,
+            draft_excerpts,
+        ):
+            continue
+
+        success.source_map.extend(appended_entries)
+        existing_by_invariant.setdefault(invariant.id, []).extend(appended_entries)
+        changed = changed or bool(appended_entries)
+
+    return changed
+
+
 def _repair_structured_source_map_from_source_text(
     success: SpecAuthorityCompilationSuccess,
     *,
@@ -1296,14 +1620,6 @@ def _repair_structured_source_map_from_source_text(
     changed = False
 
     for index, entry in enumerate(success.source_map):
-        candidates = _candidate_evidence_from_source_text(entry, source_text=source_text)
-        candidates.extend(
-            _structured_profile_source_candidates(
-                source_text,
-                location_hint=entry.location,
-            )
-        )
-        candidates.extend(_source_text_line_candidates(source_text))
         invariant = _entry_invariant_for_source_map(
             success,
             entry,
@@ -1313,6 +1629,21 @@ def _repair_structured_source_map_from_source_text(
                 source_text=source_text,
             ),
         )
+        if invariant is not None and _is_behavioral_invariant(invariant):
+            repaired.append(entry)
+            continue
+
+        candidates = _candidate_evidence_from_source_text(
+            entry,
+            source_text=source_text,
+        )
+        candidates.extend(
+            _structured_profile_source_candidates(
+                source_text,
+                location_hint=entry.location,
+            )
+        )
+        candidates.extend(_source_text_line_candidates(source_text))
         if invariant is None:
             repaired.append(entry)
             continue
@@ -1331,7 +1662,13 @@ def _repair_structured_source_map_from_source_text(
         changed = changed or repaired_entry != entry
 
     success.source_map = repaired
-    return changed
+    return (
+        _repair_structured_behavior_source_map_entries(
+            success,
+            source_text=source_text,
+        )
+        or changed
+    )
 
 
 def _repair_source_map_from_source_text(
@@ -1648,7 +1985,10 @@ def normalize_compiler_output(
         return SpecAuthorityCompilerOutput(root=success)
 
     original_source_map = list(success.source_map)
-    if success.source_map:
+    should_repair_source_map = bool(success.source_map) or (
+        source_format == "agileforge.spec.v1" and bool(source_text)
+    )
+    if should_repair_source_map:
         repaired_source_map = _repair_source_map_from_source_text(
             success,
             source_text=source_text,
