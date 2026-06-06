@@ -14,6 +14,9 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contr
     compute_invariant_id_from_payload,
     compute_prompt_hash,
 )
+from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (
+    normalize_compiler_output,
+)
 from utils.spec_schemas import (
     DataContractParams,
     InvariantType,
@@ -307,6 +310,22 @@ def _legacy_success_payload() -> dict[str, Any]:
     }
 
 
+def _base_success_payload() -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.compiled_authority.v2",
+        "scope_themes": ["Payments"],
+        "domain": None,
+        "invariants": [],
+        "eligible_feature_rules": [],
+        "rejected_features": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [],
+        "compiler_version": "2.0.0",
+        "prompt_hash": "a" * 64,
+    }
+
+
 def _compact_ir_success_payload() -> dict[str, Any]:
     payload = _legacy_success_payload()
     quote_hash = "sha256:" + ("1" * 64)
@@ -422,7 +441,12 @@ def _assert_semantic_invariant_ids(
     success: SpecAuthorityCompilationSuccess,
 ) -> None:
     expected_ids = [
-        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        compute_invariant_id_from_payload(
+            invariant.type,
+            invariant.parameters,
+            source_item_id=invariant.source_item_id,
+            source_level=invariant.source_level,
+        )
         for invariant in success.invariants
     ]
     assert [invariant.id for invariant in success.invariants] == expected_ids
@@ -434,6 +458,129 @@ def test_legacy_success_without_ir_stays_valid() -> None:
 
     assert success.rejected_features == []
     _assert_compact_ir_cleared(success)
+
+
+def test_normalizer_invariant_ids_include_source_provenance() -> None:
+    """Same rule shape from different source items keeps distinct IDs."""
+    payload = _base_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-0000000000000000",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.alpha",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+        {
+            "id": "INV-0000000000000001",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.beta",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-0000000000000000",
+            "excerpt": "Alpha requires email.",
+            "location": "REQ.alpha.statement",
+        },
+        {
+            "invariant_id": "INV-0000000000000001",
+            "excerpt": "Beta requires email.",
+            "location": "REQ.beta.statement",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    ids = [invariant.id for invariant in normalized.root.invariants]
+    assert len(ids) == 2
+    assert len(set(ids)) == 2
+    assert {
+        entry.invariant_id for entry in normalized.root.source_map
+    } == set(ids)
+
+
+def test_normalizer_merges_only_same_provenance_exact_duplicates() -> None:
+    """Normalizer pre-cleanup does not collapse source-distinct same-shaped rules."""
+    payload = _base_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-0000000000000000",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.alpha",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+        {
+            "id": "INV-0000000000000001",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.alpha",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+        {
+            "id": "INV-0000000000000002",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.beta",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+    ]
+    payload["source_map"] = []
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(normalized.root.invariants) == 2
+    assert {
+        invariant.source_item_id for invariant in normalized.root.invariants
+    } == {"REQ.alpha", "REQ.beta"}
+
+
+def test_normalizer_exact_duplicate_cleanup_preserves_source_map_entries() -> None:
+    """Exact duplicate cleanup keeps every supporting source-map entry."""
+    payload = _base_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-0000000000000000",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.alpha",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+        {
+            "id": "INV-0000000000000001",
+            "type": "REQUIRED_FIELD",
+            "source_item_id": "REQ.alpha",
+            "source_level": "MUST",
+            "parameters": {"field_name": "email"},
+        },
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-0000000000000000",
+            "excerpt": "Alpha requires email.",
+            "location": "REQ.alpha.statement",
+        },
+        {
+            "invariant_id": "INV-0000000000000001",
+            "excerpt": "Email is required for alpha.",
+            "location": "REQ.alpha.acceptance[0]",
+        },
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(normalized.root.invariants) == 1
+    kept_id = normalized.root.invariants[0].id
+    assert [entry.invariant_id for entry in normalized.root.source_map] == [
+        kept_id,
+        kept_id,
+    ]
 
 
 def test_behavioral_invariants_accept_top_level_source_metadata() -> None:
@@ -563,6 +710,8 @@ def test_normalizer_repairs_fresh_behavioral_provenance_before_validation() -> N
             target="todo checkbox",
             expected_response="todo completed value toggles",
         ),
+        source_item_id="REQ.item-interactions",
+        source_level="MUST",
     )
     assert invariant.source_item_id == "REQ.item-interactions"
     assert invariant.source_level == "MUST"
@@ -591,6 +740,8 @@ def test_saved_failure_placeholder_invariant_ids_repair_to_v2() -> None:
     expected_id = compute_invariant_id_from_payload(
         InvariantType.REQUIRED_FIELD,
         invariant.parameters,
+        source_item_id=invariant.source_item_id,
+        source_level=invariant.source_level,
     )
     assert invariant.id == expected_id
     assert re.fullmatch(r"INV-[0-9a-f]{16}", invariant.id)
@@ -660,8 +811,8 @@ def test_saved_failure_param_level_source_item_repairs_to_top_level() -> None:
     assert normalized.root.source_map[0].invariant_id == invariant.id
 
 
-def test_normalizer_semantic_ids_ignore_provenance_fields() -> None:
-    """Top-level provenance must not affect deterministic invariant IDs."""
+def test_normalizer_semantic_ids_include_provenance_fields() -> None:
+    """Top-level provenance affects deterministic invariant IDs."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -689,7 +840,7 @@ def test_normalizer_semantic_ids_ignore_provenance_fields() -> None:
 
     assert isinstance(normalized_a.root, SpecAuthorityCompilationSuccess)
     assert isinstance(normalized_b.root, SpecAuthorityCompilationSuccess)
-    assert normalized_a.root.invariants[0].id == normalized_b.root.invariants[0].id
+    assert normalized_a.root.invariants[0].id != normalized_b.root.invariants[0].id
 
 
 def test_normalizer_rejects_behavioral_source_level_mismatch() -> None:
@@ -1483,10 +1634,15 @@ def test_normalizer_rewrites_bad_ids_from_llm() -> None:
     assert isinstance(inv.parameters, RequiredFieldParams)
     assert inv.parameters.field_name == "user_id"
 
-    # ID must be derived from invariant semantics only
+    # ID must be derived from invariant semantics and provenance
     assert len(normalized.root.source_map) == 1
     sm = normalized.root.source_map[0]
-    expected_id = compute_invariant_id_from_payload(inv.type, inv.parameters)
+    expected_id = compute_invariant_id_from_payload(
+        inv.type,
+        inv.parameters,
+        source_item_id=inv.source_item_id,
+        source_level=inv.source_level,
+    )
     assert inv.id == expected_id
     assert sm.invariant_id == expected_id
     assert re.match(r"^INV-[0-9a-f]{16}$", inv.id)
@@ -3382,6 +3538,8 @@ def test_normalizer_allows_missing_source_map_with_semantic_ids() -> None:
     assert normalized.root.invariants[0].id == compute_invariant_id_from_payload(
         normalized.root.invariants[0].type,
         normalized.root.invariants[0].parameters,
+        source_item_id=normalized.root.invariants[0].source_item_id,
+        source_level=normalized.root.invariants[0].source_level,
     )
 
 
@@ -3514,7 +3672,12 @@ def test_normalizer_repairs_invalid_placeholder_ids_before_validation() -> None:
     assert len(set(invariant_ids)) == len(invariant_ids)
     assert all(re.match(r"^INV-[0-9a-f]{16}$", item_id) for item_id in invariant_ids)
     assert invariant_ids == [
-        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        compute_invariant_id_from_payload(
+            invariant.type,
+            invariant.parameters,
+            source_item_id=invariant.source_item_id,
+            source_level=invariant.source_level,
+        )
         for invariant in normalized.root.invariants
     ]
     assert {entry.invariant_id for entry in normalized.root.source_map} == set(
@@ -3577,7 +3740,12 @@ def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> Non
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     invariant_ids = [invariant.id for invariant in normalized.root.invariants]
     expected_ids = [
-        compute_invariant_id_from_payload(invariant.type, invariant.parameters)
+        compute_invariant_id_from_payload(
+            invariant.type,
+            invariant.parameters,
+            source_item_id=invariant.source_item_id,
+            source_level=invariant.source_level,
+        )
         for invariant in normalized.root.invariants
     ]
     assert invariant_ids == expected_ids

@@ -489,28 +489,36 @@ def _filter_meta_policy_invariants(success: SpecAuthorityCompilationSuccess) -> 
     return filtered_count
 
 
-def _invariant_semantic_key(inv: Invariant) -> tuple[str, str]:
+def _invariant_semantic_key(inv: Invariant) -> tuple[str, str, str, str]:
     """Return stable semantic identity for duplicate invariant removal."""
+    level_value = getattr(inv.source_level, "value", inv.source_level)
     return (
         inv.type.value,
         json.dumps(inv.parameters.model_dump(mode="json"), sort_keys=True),
+        inv.source_item_id or "",
+        str(level_value or ""),
     )
 
 
 def _deduplicate_semantic_invariants(success: SpecAuthorityCompilationSuccess) -> int:
     """Remove exact duplicate invariant objects before deterministic ID assignment."""
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str, str, str], str] = {}
+    removed_to_kept: dict[str, str] = {}
     kept: list[Invariant] = []
     removed = 0
     for inv in success.invariants:
         key = _invariant_semantic_key(inv)
         if key in seen:
+            removed_to_kept[inv.id] = seen[key]
             removed += 1
             continue
-        seen.add(key)
+        seen[key] = inv.id
         kept.append(inv)
     if not removed:
         return 0
+    for entry in success.source_map:
+        if entry.invariant_id in removed_to_kept:
+            entry.invariant_id = removed_to_kept[entry.invariant_id]
     success.invariants = kept
     if _DUPLICATE_INVARIANT_ASSUMPTION not in success.assumptions:
         success.assumptions.append(_DUPLICATE_INVARIANT_ASSUMPTION)
@@ -2002,7 +2010,12 @@ def normalize_compiler_output(
     ]
 
     for inv in success.invariants:
-        inv.id = compute_invariant_id_from_payload(inv.type, inv.parameters)
+        inv.id = compute_invariant_id_from_payload(
+            inv.type,
+            inv.parameters,
+            source_item_id=inv.source_item_id,
+            source_level=inv.source_level,
+        )
 
     normalized_ids = [inv.id for inv in success.invariants]
     if len(set(normalized_ids)) != len(normalized_ids):

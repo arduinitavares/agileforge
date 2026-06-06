@@ -63,10 +63,17 @@ def compute_invariant_id(
 def compute_invariant_id_from_payload(
     invariant_type: InvariantType,
     parameters: InvariantParameters | None = None,
+    *,
+    source_item_id: str | None = None,
+    source_level: object | None = None,
 ) -> str:
-    """Compute deterministic invariant ID from invariant semantics only."""
+    """Compute deterministic invariant ID from invariant semantics and provenance."""
     parameter_seed = _canonical_parameter_seed(parameters)
-    seed = f"{invariant_type.value}|{parameter_seed}"
+    level_value = getattr(source_level, "value", source_level)
+    seed = (
+        f"{invariant_type.value}|{parameter_seed}|"
+        f"{source_item_id or ''}|{level_value or ''}"
+    )
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return f"INV-{digest[:16]}"
 
