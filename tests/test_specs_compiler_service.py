@@ -1602,6 +1602,98 @@ def test_compile_spec_authority_for_version_persists_authority(
     assert load_result.artifact is not None
 
 
+def test_compile_spec_authority_for_version_persists_quality_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Compilation applies authority quality gate before persistence."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'business.sqlite3'}",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    ensure_schema_current(engine)
+    with Session(engine) as session:
+        product = Product(name="Quality Gate Project")
+        session.add(product)
+        session.commit()
+        session.refresh(product)
+        spec = SpecRegistry(
+            product_id=require_id(product.product_id, "product_id"),
+            spec_hash="sha256:" + "1" * 64,
+            content=_agileforge_spec_profile_json(),
+            content_ref="specs/spec.json",
+            status="approved",
+            approved_at=datetime.now(UTC),
+            approved_by="test",
+        )
+        session.add(spec)
+        session.commit()
+        session.refresh(spec)
+        spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+
+    def fake_compile(**_: object) -> object:
+        success = SpecAuthorityCompilationSuccess(
+            scope_themes=["Quality"],
+            domain=None,
+            invariants=[
+                Invariant(
+                    id="INV-1111111111111111",
+                    type=InvariantType.REQUIRED_FIELD,
+                    source_item_id="REQ.test.audit",
+                    source_level="MUST",
+                    parameters=RequiredFieldParams(field_name="email"),
+                ),
+                Invariant(
+                    id="INV-2222222222222222",
+                    type=InvariantType.REQUIRED_FIELD,
+                    source_item_id="REQ.test.audit",
+                    source_level="MUST",
+                    parameters=RequiredFieldParams(field_name="email"),
+                ),
+            ],
+            eligible_feature_rules=[],
+            rejected_features=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version="2.0.0",
+            prompt_hash="a" * 64,
+        )
+        output = SpecAuthorityCompilerOutput(root=success)
+        return compiler_service._NormalizedCompilerInvocation(
+            raw_json=output.model_dump_json(),
+            output=output,
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_compile_spec_authority_output",
+        fake_compile,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        spec_version_id=spec_version_id,
+        force_recompile=False,
+        engine=engine,
+    )
+
+    assert result["success"] is True
+    with Session(engine) as session:
+        authority = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == spec_version_id
+            )
+        ).one()
+        assert authority.compiled_artifact_json is not None
+        artifact = json.loads(authority.compiled_artifact_json)
+    assert artifact["authority_quality"]["summary"]["merged_invariant_count"] == 1
+    assert len(artifact["invariants"]) == 1
+
+
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:

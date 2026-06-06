@@ -38,6 +38,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer imp
 )
 from services.agent_workbench.error_codes import ErrorCode
 from services.specs._engine_resolution import resolve_spec_engine
+from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.profile_content import (
     STRUCTURED_SPEC_FORMAT,
     SpecContentNormalizationError,
@@ -1968,6 +1969,7 @@ def compile_spec_authority(
                 "error": str(exc),
             }
 
+        success_artifact = apply_authority_quality_gate(success_artifact)
         prompt_hash: str = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
         scope_themes: list[str] = success_artifact.scope_themes
         invariants: list[str] = [
@@ -2408,6 +2410,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     record_progress: Callable[[str], bool] | None = None,
 ) -> _PersistedCompilation | dict[str, Any]:
     """Persist a compiled artifact, either by updating or inserting a row."""
+    success = apply_authority_quality_gate(success)
     compiled_artifact_json = _compiled_authority_artifact_json(success)
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
     compiler_version = SPEC_AUTHORITY_COMPILER_VERSION
