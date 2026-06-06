@@ -177,3 +177,27 @@ def test_quality_gate_merges_exact_duplicate_assumptions_and_groups_noisy() -> N
         group.group_type == "noisy_assumptions"
         for group in gated.authority_quality.review_groups
     )
+
+
+def test_quality_gate_keeps_non_identical_noisy_assumptions_unmerged() -> None:
+    """High-overlap but non-identical assumptions are review-only."""
+    gated = apply_authority_quality_gate(
+        _success(
+            invariants=[],
+            assumptions=[
+                "API is stable.",
+                "API stable",
+            ],
+        )
+    )
+
+    assert gated.assumptions == [
+        "API is stable.",
+        "API stable",
+    ]
+    assert gated.authority_quality is not None
+    assert gated.authority_quality.summary.merged_assumption_count == 0
+    assert any(
+        group.group_type == "noisy_assumptions"
+        for group in gated.authority_quality.review_groups
+    )

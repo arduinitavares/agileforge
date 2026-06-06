@@ -45,6 +45,8 @@ _STOPWORDS = frozenset(
     }
 )
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_WHITESPACE_RE = re.compile(r"\s+")
+_TERMINAL_PUNCTUATION_RE = re.compile(r"[\s.,;:!?]+$")
 
 
 def apply_authority_quality_gate(
@@ -153,7 +155,7 @@ def _merge_exact_assumptions(
     kept: list[str] = []
     removed_indexes_by_kept: dict[int, list[str]] = defaultdict(list)
     for index, assumption in enumerate(success.assumptions, start=1):
-        key = _normalize_phrase(assumption)
+        key = _normalize_exact_assumption(assumption)
         kept_index = seen.get(key)
         if kept_index is None:
             seen[key] = len(kept) + 1
@@ -401,6 +403,11 @@ def _invariant_text(invariant: Invariant) -> str:
 
 def _normalize_phrase(text: str) -> str:
     return " ".join(_tokens(text))
+
+
+def _normalize_exact_assumption(text: str) -> str:
+    compacted = _WHITESPACE_RE.sub(" ", text.casefold().strip())
+    return _TERMINAL_PUNCTUATION_RE.sub("", compacted)
 
 
 def _tokens(text: str) -> list[str]:
