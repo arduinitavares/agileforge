@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 from utils.spec_schemas import (
     AuthorityQualityMergedItem,
@@ -17,12 +17,16 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 NEAR_DUPLICATE_INVARIANT_THRESHOLD: float = 0.72
 NOISY_ASSUMPTION_THRESHOLD: float = 0.82
 OVER_SPLIT_SOURCE_ITEM_THRESHOLD: int = 5
 OVER_SPLIT_SUBJECT_THRESHOLD: int = 3
 MAX_REVIEW_GROUPS: int = 40
 MAX_GROUP_MEMBERS: int = 12
+MIN_REVIEW_GROUP_MEMBERS: int = 2
 
 _STOPWORDS = frozenset(
     {
@@ -250,7 +254,7 @@ def _near_duplicate_invariant_groups(
         buckets[_near_duplicate_bucket(invariant)].append(invariant)
     groups: list[AuthorityQualityReviewGroup] = []
     for members in buckets.values():
-        if len(members) < 2:
+        if len(members) < MIN_REVIEW_GROUP_MEMBERS:
             continue
         member_texts = {member.id: _invariant_text(member) for member in members}
         near_members: set[str] = set()
@@ -283,8 +287,9 @@ def _near_duplicate_bucket(invariant: Invariant) -> tuple[str, str, str, str]:
     )
 
 
-def _over_split_groups(invariants: list[Invariant]) -> list[AuthorityQualityReviewGroup]:
-    groups: list[AuthorityQualityReviewGroup] = []
+def _over_split_groups(
+    invariants: list[Invariant],
+) -> list[AuthorityQualityReviewGroup]:
     by_source: dict[str, list[Invariant]] = defaultdict(list)
     by_subject: dict[tuple[str, str, str], list[Invariant]] = defaultdict(list)
     for invariant in invariants:
@@ -298,28 +303,30 @@ def _over_split_groups(invariants: list[Invariant]) -> list[AuthorityQualityRevi
                 _subject_like_parameter(invariant),
             )
         ].append(invariant)
-    for members in by_source.values():
-        if len(members) >= OVER_SPLIT_SOURCE_ITEM_THRESHOLD:
-            groups.append(
-                _group(
-                    "over_split_invariants",
-                    members,
-                    "one source item produced many invariants",
-                )
-            )
-    for members in by_subject.values():
-        if len(members) >= OVER_SPLIT_SUBJECT_THRESHOLD:
-            groups.append(
-                _group(
-                    "over_split_invariants",
-                    members,
-                    "same source/type/subject cluster produced many invariants",
-                )
-            )
+    groups: list[AuthorityQualityReviewGroup] = [
+        _group(
+            "over_split_invariants",
+            members,
+            "one source item produced many invariants",
+        )
+        for members in by_source.values()
+        if len(members) >= OVER_SPLIT_SOURCE_ITEM_THRESHOLD
+    ]
+    groups.extend(
+        _group(
+            "over_split_invariants",
+            members,
+            "same source/type/subject cluster produced many invariants",
+        )
+        for members in by_subject.values()
+        if len(members) >= OVER_SPLIT_SUBJECT_THRESHOLD
+    )
     return groups
 
 
-def _noisy_assumption_groups(assumptions: list[str]) -> list[AuthorityQualityReviewGroup]:
+def _noisy_assumption_groups(
+    assumptions: list[str],
+) -> list[AuthorityQualityReviewGroup]:
     members = [f"ASM-{index}" for index in range(1, len(assumptions) + 1)]
     selected: set[str] = set()
     for left_index, left in enumerate(assumptions):
@@ -329,7 +336,7 @@ def _noisy_assumption_groups(assumptions: list[str]) -> list[AuthorityQualityRev
         ):
             if _jaccard(left, right) >= NOISY_ASSUMPTION_THRESHOLD:
                 selected.update({f"ASM-{left_index + 1}", f"ASM-{right_index}"})
-    if len(selected) < 2:
+    if len(selected) < MIN_REVIEW_GROUP_MEMBERS:
         return []
     ordered = [member for member in members if member in selected]
     return [

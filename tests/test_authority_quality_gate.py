@@ -13,6 +13,10 @@ from utils.spec_schemas import (
     StateTransitionParams,
 )
 
+EXPECTED_SOURCE_EVIDENCE_COUNT: int = 2
+EXPECTED_NEAR_DUPLICATE_INVARIANT_COUNT: int = 2
+EXPECTED_OVER_SPLIT_INVARIANT_COUNT: int = 5
+
 
 def _success(
     *,
@@ -77,7 +81,10 @@ def test_quality_gate_merges_exact_duplicate_invariants_and_preserves_sources() 
     assert gated.authority_quality is not None
     assert gated.authority_quality.summary.merged_invariant_count == 1
     assert gated.authority_quality.merged_items[0].removed_ids == [duplicate.id]
-    assert gated.authority_quality.merged_items[0].source_evidence_count == 2
+    assert (
+        gated.authority_quality.merged_items[0].source_evidence_count
+        == EXPECTED_SOURCE_EVIDENCE_COUNT
+    )
 
 
 def test_quality_gate_groups_same_shape_different_source_without_merging() -> None:
@@ -119,7 +126,7 @@ def test_quality_gate_groups_near_duplicate_invariants_without_merging() -> None
 
     gated = apply_authority_quality_gate(_success(invariants=[first, second]))
 
-    assert len(gated.invariants) == 2
+    assert len(gated.invariants) == EXPECTED_NEAR_DUPLICATE_INVARIANT_COUNT
     assert gated.authority_quality is not None
     assert any(
         group.group_type == "near_duplicate_invariants"
@@ -146,7 +153,7 @@ def test_quality_gate_groups_over_split_source_item() -> None:
 
     gated = apply_authority_quality_gate(_success(invariants=invariants))
 
-    assert len(gated.invariants) == 5
+    assert len(gated.invariants) == EXPECTED_OVER_SPLIT_INVARIANT_COUNT
     assert gated.authority_quality is not None
     assert any(
         group.group_type == "over_split_invariants"
