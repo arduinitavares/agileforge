@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess  # nosec B404
 from pathlib import Path
+from shutil import which
 
 import pytest
 from pydantic import ValidationError
@@ -13,12 +15,22 @@ def _python_files_importing_compat_schemes() -> list[str]:
     current_file = Path(__file__).resolve()
     compat_import = "from utils.schemes import"
     offenders: list[str] = []
-    for path in sorted(root.rglob("*.py")):
+    git = which("git")
+    assert git is not None
+    tracked = subprocess.run(  # noqa: S603  # nosec B603
+        [git, "ls-files", "*.py"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for relative_path in sorted(tracked.stdout.splitlines()):
+        path = root / relative_path
         if path == root / "utils" / "schemes.py" or path.resolve() == current_file:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if compat_import in text:
-            offenders.append(str(path.relative_to(root)))
+            offenders.append(relative_path)
     return offenders
 
 
