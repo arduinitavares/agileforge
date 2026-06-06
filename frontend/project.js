@@ -839,6 +839,48 @@ function createEmptyState(text) {
     return empty;
 }
 
+function renderAuthorityQuality(artifact) {
+    const summary = document.getElementById('authority-quality-summary');
+    const groupsList = document.getElementById('authority-quality-groups-list');
+    if (!summary || !groupsList) return;
+
+    const quality = artifact?.authority_quality;
+    const qualitySummary = quality?.summary || {};
+    const mergedInvariants = Number(qualitySummary.merged_invariant_count || 0);
+    const mergedAssumptions = Number(qualitySummary.merged_assumption_count || 0);
+    const groupCount = Number(qualitySummary.review_group_count || 0);
+    const invariantLabel = mergedInvariants === 1 ? 'invariant' : 'invariants';
+    const assumptionLabel = mergedAssumptions === 1 ? 'assumption' : 'assumptions';
+    const groupLabel = groupCount === 1 ? 'group' : 'groups';
+    summary.textContent = `${mergedInvariants} merged ${invariantLabel}, ${mergedAssumptions} merged ${assumptionLabel}, ${groupCount} review ${groupLabel}`;
+
+    const groups = safeArray(quality?.review_groups);
+    if (!groups.length) {
+        groupsList.replaceChildren(createEmptyState('No authority quality groups.'));
+        return;
+    }
+
+    groupsList.replaceChildren(...groups.map((group) => {
+        const card = document.createElement('div');
+        card.className = 'rounded-lg border border-cyan-200 bg-cyan-50/70 p-3 text-xs text-cyan-950 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-100';
+
+        const title = document.createElement('div');
+        title.className = 'font-bold';
+        title.textContent = `${group.group_id || 'AQ-GROUP'} ${group.group_type || 'quality_group'}`;
+
+        const reason = document.createElement('div');
+        reason.className = 'mt-1 text-cyan-800 dark:text-cyan-200';
+        reason.textContent = group.reason || '';
+
+        const members = document.createElement('div');
+        members.className = 'mt-2 font-mono text-[11px] text-cyan-700 dark:text-cyan-300';
+        members.textContent = safeArray(group.member_ids).join(', ');
+
+        card.replaceChildren(title, reason, members);
+        return card;
+    }));
+}
+
 function createFindingCard(finding) {
     const card = document.createElement('div');
     card.className = 'p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-slate-900/30 text-xs shadow-sm space-y-2';
@@ -901,6 +943,7 @@ function renderAuthorityOverview(review) {
     const pending = review?.pending_authority || {};
     const artifact = pending.artifact || {};
 
+    renderAuthorityQuality(artifact);
     renderListSection(
         'overview-findings-list',
         pending.review_findings,

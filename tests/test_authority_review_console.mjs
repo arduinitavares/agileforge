@@ -12,6 +12,8 @@ test('authority review console exposes summary, tabs, filters, and decision rail
     const expectedIds = [
         'authority-review-state-badge',
         'authority-review-metrics',
+        'authority-quality-summary',
+        'authority-quality-groups-list',
         'authority-spec-location',
         'authority-spec-hash',
         'authority-fingerprint',
@@ -530,6 +532,7 @@ test('renderAuthorityOverview renders findings and assumptions as literal text w
             'createEmptyState',
             'createSimpleCard',
             'createFindingCard',
+            'renderAuthorityQuality',
             'renderListSection',
             'renderAuthorityOverview',
         ],
@@ -568,6 +571,63 @@ test('renderAuthorityOverview renders findings and assumptions as literal text w
     assert.equal(assumptionsList.innerHTML, '');
 });
 
+test('renderAuthorityOverview renders authority quality summary and groups safely', () => {
+    assert.match(projectHtmlSource, /Authority Quality/i);
+
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityOverview = loadAuthorityConsoleFunction(
+        'renderAuthorityOverview',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createSimpleCard',
+            'createFindingCard',
+            'renderAuthorityQuality',
+            'renderListSection',
+            'renderAuthorityOverview',
+        ],
+    );
+
+    renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                authority_quality: {
+                    summary: {
+                        merged_invariant_count: 1,
+                        merged_assumption_count: 2,
+                        review_group_count: 1,
+                    },
+                    review_groups: [
+                        {
+                            group_id: 'AQ-001',
+                            group_type: 'over_split_invariants',
+                            reason: '<b>duplicate requirements</b>',
+                            member_ids: ['REQ.one', 'REQ.two'],
+                        },
+                    ],
+                },
+                gaps: [],
+                assumptions: [],
+                rejected_features: [],
+                eligible_feature_rules: [],
+            },
+        },
+    });
+
+    const summary = documentStub.getElementById('authority-quality-summary');
+    const groupsList = documentStub.getElementById('authority-quality-groups-list');
+
+    assert.equal(summary.textContent.includes('1 merged invariant'), true);
+    assert.match(summary.textContent, /2 merged assumptions/);
+    assert.match(summary.textContent, /1 review group/);
+    assert.equal(groupsList.textContent.includes('over_split_invariants'), true);
+    assert.match(groupsList.textContent, /<b>duplicate requirements<\/b>/);
+    assert.equal(groupsList.innerHTML, '');
+});
+
 test('renderAuthorityOverview renders finding candidate IDs as literal provenance text', () => {
     const { documentStub } = createDocumentStub();
     globalThis.document = documentStub;
@@ -579,6 +639,7 @@ test('renderAuthorityOverview renders finding candidate IDs as literal provenanc
             'createEmptyState',
             'createSimpleCard',
             'createFindingCard',
+            'renderAuthorityQuality',
             'renderListSection',
             'renderAuthorityOverview',
         ],
@@ -615,6 +676,7 @@ test('renderAuthorityOverview renders explicit empty states without innerHTML', 
             'createEmptyState',
             'createSimpleCard',
             'createFindingCard',
+            'renderAuthorityQuality',
             'renderListSection',
             'renderAuthorityOverview',
         ],
