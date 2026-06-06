@@ -628,6 +628,83 @@ test('renderAuthorityOverview renders authority quality summary and groups safel
     assert.equal(groupsList.innerHTML, '');
 });
 
+test('renderAuthorityOverview ignores malformed authority quality groups', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const renderAuthorityOverview = loadAuthorityConsoleFunction(
+        'renderAuthorityOverview',
+        [
+            'safeArray',
+            'createEmptyState',
+            'createSimpleCard',
+            'createFindingCard',
+            'renderAuthorityQuality',
+            'renderListSection',
+            'renderAuthorityOverview',
+        ],
+    );
+
+    assert.doesNotThrow(() => renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                authority_quality: {
+                    summary: {
+                        review_group_count: 4,
+                    },
+                    review_groups: [
+                        null,
+                        'not-a-group',
+                        7,
+                        {
+                            group_id: 'AQ-valid',
+                            group_type: 'merged_requirements',
+                            reason: 'Valid quality group',
+                            member_ids: ['REQ.valid'],
+                        },
+                    ],
+                },
+                gaps: [],
+                assumptions: [],
+                rejected_features: [],
+                eligible_feature_rules: [],
+            },
+        },
+    }));
+
+    const groupsList = documentStub.getElementById('authority-quality-groups-list');
+    assert.match(groupsList.textContent, /AQ-valid/);
+    assert.match(groupsList.textContent, /merged_requirements/);
+    assert.doesNotMatch(groupsList.textContent, /not-a-group/);
+    assert.equal(groupsList.innerHTML, '');
+
+    assert.doesNotThrow(() => renderAuthorityOverview({
+        pending_authority: {
+            review_findings: [],
+            artifact: {
+                authority_quality: {
+                    summary: {
+                        review_group_count: 3,
+                    },
+                    review_groups: [
+                        null,
+                        'not-a-group',
+                        7,
+                    ],
+                },
+                gaps: [],
+                assumptions: [],
+                rejected_features: [],
+                eligible_feature_rules: [],
+            },
+        },
+    }));
+
+    assert.equal(groupsList.textContent, 'No authority quality groups.');
+    assert.equal(groupsList.innerHTML, '');
+});
+
 test('renderAuthorityOverview renders finding candidate IDs as literal provenance text', () => {
     const { documentStub } = createDocumentStub();
     globalThis.document = documentStub;

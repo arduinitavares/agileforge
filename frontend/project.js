@@ -854,7 +854,9 @@ function renderAuthorityQuality(artifact) {
     const groupLabel = groupCount === 1 ? 'group' : 'groups';
     summary.textContent = `${mergedInvariants} merged ${invariantLabel}, ${mergedAssumptions} merged ${assumptionLabel}, ${groupCount} review ${groupLabel}`;
 
-    const groups = safeArray(quality?.review_groups);
+    const groups = safeArray(quality?.review_groups).filter((group) => (
+        group && typeof group === 'object'
+    ));
     if (!groups.length) {
         groupsList.replaceChildren(createEmptyState('No authority quality groups.'));
         return;
