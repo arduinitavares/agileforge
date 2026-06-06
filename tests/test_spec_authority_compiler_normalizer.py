@@ -29,6 +29,8 @@ from utils.spec_schemas import (
     VisibilityRuleParams,
 )
 
+EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT: int = 2
+
 
 def _structured_spec_source() -> str:
     """Return canonical AgileForge profile JSON with two normative items."""
@@ -496,8 +498,8 @@ def test_normalizer_invariant_ids_include_source_provenance() -> None:
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
     ids = [invariant.id for invariant in normalized.root.invariants]
-    assert len(ids) == 2
-    assert len(set(ids)) == 2
+    assert len(ids) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
+    assert len(set(ids)) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
     assert {
         entry.invariant_id for entry in normalized.root.source_map
     } == set(ids)
@@ -534,7 +536,9 @@ def test_normalizer_merges_only_same_provenance_exact_duplicates() -> None:
     normalized = normalize_compiler_output(json.dumps(payload))
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert len(normalized.root.invariants) == 2
+    assert (
+        len(normalized.root.invariants) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
+    )
     assert {
         invariant.source_item_id for invariant in normalized.root.invariants
     } == {"REQ.alpha", "REQ.beta"}

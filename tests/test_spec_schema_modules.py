@@ -171,7 +171,6 @@ def test_behavioral_invariants_keep_provenance_top_level() -> None:
 
 def test_authority_quality_report_schema_is_optional_and_strict() -> None:
     """Compiled authority v2 supports optional quality report metadata."""
-    from pydantic import ValidationError  # noqa: PLC0415
     from utils.spec_schemas import (  # noqa: PLC0415
         AuthorityQualityMergedItem,
         AuthorityQualityReport,

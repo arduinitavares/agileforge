@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from services.specs.authority_quality import apply_authority_quality_gate
 from utils.spec_schemas import (
     DataContractParams,
@@ -208,3 +210,21 @@ def test_quality_gate_keeps_non_identical_noisy_assumptions_unmerged() -> None:
         group.group_type == "noisy_assumptions"
         for group in gated.authority_quality.review_groups
     )
+
+
+def test_authority_quality_gate_has_no_project_specific_terms() -> None:
+    """Gate implementation must stay project-agnostic."""
+    implementation = Path("services/specs/authority_quality.py").read_text()
+    forbidden_terms = [
+        "ASA",
+        "Deep Process",
+        "REQ.project-scaffold",
+        "DDPG",
+        "pyrometer",
+        "TemperatureTargets",
+        "stainless",
+        "annealing",
+        "pickling",
+    ]
+    offenders = [term for term in forbidden_terms if term in implementation]
+    assert offenders == []
