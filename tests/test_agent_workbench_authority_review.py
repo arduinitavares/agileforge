@@ -1200,18 +1200,19 @@ def test_authority_review_packet_exposes_authority_quality(
     authority = session.get(CompiledSpecAuthority, authority_id)
     assert authority is not None
     artifact = json.loads(authority.compiled_artifact_json or "{}")
+    quality_summary = {
+        "original_invariant_count": 8,
+        "final_invariant_count": 6,
+        "merged_invariant_count": 2,
+        "merged_assumption_count": 3,
+        "review_group_count": 4,
+        "near_duplicate_group_count": 5,
+        "over_split_group_count": 6,
+        "noisy_assumption_group_count": 7,
+    }
     artifact["authority_quality"] = {
         "schema_version": "agileforge.authority_quality.v1",
-        "summary": {
-            "original_invariant_count": 2,
-            "final_invariant_count": 1,
-            "merged_invariant_count": 1,
-            "merged_assumption_count": 0,
-            "review_group_count": 1,
-            "near_duplicate_group_count": 0,
-            "over_split_group_count": 1,
-            "noisy_assumption_group_count": 0,
-        },
+        "summary": quality_summary,
         "merged_items": [
             {
                 "merge_id": "AQ-MERGE-001",
@@ -1244,10 +1245,39 @@ def test_authority_review_packet_exposes_authority_quality(
     assert result["ok"] is True
     pending = result["data"]["pending_authority"]
     quality = pending["artifact"]["authority_quality"]
-    assert quality["summary"]["merged_invariant_count"] == 1
+    assert quality["summary"] == quality_summary
     assert quality["review_groups"][0]["group_type"] == "over_split_invariants"
-    assert pending["review_summary"]["quality_review_group_count"] == 1
-    assert pending["review_summary"]["quality_merged_invariant_count"] == 1
+    assert {
+        "quality_merged_invariant_count": pending["review_summary"][
+            "quality_merged_invariant_count"
+        ],
+        "quality_merged_assumption_count": pending["review_summary"][
+            "quality_merged_assumption_count"
+        ],
+        "quality_review_group_count": pending["review_summary"][
+            "quality_review_group_count"
+        ],
+        "quality_near_duplicate_group_count": pending["review_summary"][
+            "quality_near_duplicate_group_count"
+        ],
+        "quality_over_split_group_count": pending["review_summary"][
+            "quality_over_split_group_count"
+        ],
+        "quality_noisy_assumption_group_count": pending["review_summary"][
+            "quality_noisy_assumption_group_count"
+        ],
+    } == {
+        "quality_merged_invariant_count": quality_summary["merged_invariant_count"],
+        "quality_merged_assumption_count": quality_summary["merged_assumption_count"],
+        "quality_review_group_count": quality_summary["review_group_count"],
+        "quality_near_duplicate_group_count": quality_summary[
+            "near_duplicate_group_count"
+        ],
+        "quality_over_split_group_count": quality_summary["over_split_group_count"],
+        "quality_noisy_assumption_group_count": quality_summary[
+            "noisy_assumption_group_count"
+        ],
+    }
 
 
 def test_review_full_include_spec_includes_large_structured_source(
