@@ -1185,6 +1185,71 @@ def test_review_summary_counts_compiler_artifact_evidence(
     assert summary["compiler_invariant_count"] == 1
 
 
+def test_authority_review_packet_exposes_authority_quality(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review packet includes persisted authority quality report."""
+    project_id, _spec_version_id, authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    assert authority is not None
+    artifact = json.loads(authority.compiled_artifact_json or "{}")
+    artifact["authority_quality"] = {
+        "schema_version": "agileforge.authority_quality.v1",
+        "summary": {
+            "original_invariant_count": 2,
+            "final_invariant_count": 1,
+            "merged_invariant_count": 1,
+            "merged_assumption_count": 0,
+            "review_group_count": 1,
+            "near_duplicate_group_count": 0,
+            "over_split_group_count": 1,
+            "noisy_assumption_group_count": 0,
+        },
+        "merged_items": [
+            {
+                "merge_id": "AQ-MERGE-001",
+                "item_kind": "invariant",
+                "kept_id": "INV-0123456789abcdef",
+                "removed_ids": ["INV-2222222222222222"],
+                "reason": "exact_semantic_duplicate",
+                "source_evidence_count": 2,
+            }
+        ],
+        "review_groups": [
+            {
+                "group_id": "AQ-GROUP-001",
+                "group_type": "over_split_invariants",
+                "severity": "warning",
+                "member_ids": ["INV-0123456789abcdef"],
+                "reason": "one source item produced many invariants",
+                "merge_allowed": False,
+                "truncated": False,
+            }
+        ],
+    }
+    authority.compiled_artifact_json = json.dumps(artifact)
+    session.add(authority)
+    session.commit()
+
+    service = AuthorityReviewService(engine=_engine(session))
+    result = service.review(project_id=project_id)
+
+    assert result["ok"] is True
+    pending = result["data"]["pending_authority"]
+    quality = pending["artifact"]["authority_quality"]
+    assert quality["summary"]["merged_invariant_count"] == 1
+    assert quality["review_groups"][0]["group_type"] == "over_split_invariants"
+    assert pending["review_summary"]["quality_review_group_count"] == 1
+    assert pending["review_summary"]["quality_merged_invariant_count"] == 1
+
+
 def test_review_full_include_spec_includes_large_structured_source(
     session: Session,
     tmp_path: Path,

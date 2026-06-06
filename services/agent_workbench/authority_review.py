@@ -1058,6 +1058,12 @@ def _review_summary(
     non_overrideable = [
         finding for finding in blocking if finding.get("override_allowed") is False
     ]
+    quality = artifact.get("authority_quality")
+    quality_summary = (
+        quality.get("summary")
+        if isinstance(quality, Mapping) and isinstance(quality.get("summary"), Mapping)
+        else {}
+    )
     return {
         "acceptance_status": "blocked" if blocking else "accept_ready",
         "blocking_finding_count": len(blocking),
@@ -1075,6 +1081,24 @@ def _review_summary(
         ),
         "compiler_rejected_feature_count": _artifact_item_count(
             artifact.get("rejected_features")
+        ),
+        "quality_merged_invariant_count": int(
+            quality_summary.get("merged_invariant_count") or 0
+        ),
+        "quality_merged_assumption_count": int(
+            quality_summary.get("merged_assumption_count") or 0
+        ),
+        "quality_review_group_count": int(
+            quality_summary.get("review_group_count") or 0
+        ),
+        "quality_near_duplicate_group_count": int(
+            quality_summary.get("near_duplicate_group_count") or 0
+        ),
+        "quality_over_split_group_count": int(
+            quality_summary.get("over_split_group_count") or 0
+        ),
+        "quality_noisy_assumption_group_count": int(
+            quality_summary.get("noisy_assumption_group_count") or 0
         ),
     }
 
@@ -1282,6 +1306,11 @@ def _authority_artifact_payload(
     source_map_by_id: dict[str, list[Any]] = {}
     for entry in artifact.source_map:
         source_map_by_id.setdefault(entry.invariant_id, []).append(entry)
+    authority_quality = (
+        artifact.authority_quality.model_dump(mode="json")
+        if artifact.authority_quality is not None
+        else None
+    )
 
     invariants: list[JsonDict] = []
     evidence: list[_AuthorityEvidence] = []
@@ -1364,6 +1393,7 @@ def _authority_artifact_payload(
             "rejected_features": rejected_features,
             "gaps": gaps,
             "assumptions": assumptions,
+            "authority_quality": authority_quality,
             "source_map": {
                 key: [
                     {
@@ -1405,6 +1435,7 @@ def _fallback_authority_artifact(authority: CompiledSpecAuthority) -> JsonDict:
             prefix="GAP",
         ),
         "assumptions": assumptions,
+        "authority_quality": None,
         "source_map": {},
     }
 
