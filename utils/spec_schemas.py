@@ -675,6 +675,71 @@ class SpecAuthorityMapping(BaseModel):
     mapping_provenance: MappingProvenance
 
 
+AuthorityQualityGroupType = Literal[
+    "near_duplicate_invariants",
+    "over_split_invariants",
+    "related_source_variants",
+    "noisy_assumptions",
+]
+AuthorityQualitySeverity = Literal["info", "warning"]
+AuthorityQualityItemKind = Literal["invariant", "assumption"]
+
+
+class AuthorityQualitySummary(BaseModel):
+    """Compact counts produced by the authority quality gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_invariant_count: Annotated[int, Field(ge=0)]
+    final_invariant_count: Annotated[int, Field(ge=0)]
+    merged_invariant_count: Annotated[int, Field(ge=0)]
+    merged_assumption_count: Annotated[int, Field(ge=0)]
+    review_group_count: Annotated[int, Field(ge=0)]
+    near_duplicate_group_count: Annotated[int, Field(ge=0)]
+    over_split_group_count: Annotated[int, Field(ge=0)]
+    noisy_assumption_group_count: Annotated[int, Field(ge=0)]
+
+
+class AuthorityQualityMergedItem(BaseModel):
+    """One auto-merge decision made by the quality gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    merge_id: Annotated[str, Field(min_length=1)]
+    item_kind: AuthorityQualityItemKind
+    kept_id: Annotated[str, Field(min_length=1)]
+    removed_ids: Annotated[list[str], Field(min_length=1)]
+    reason: Annotated[str, Field(min_length=1)]
+    source_evidence_count: Annotated[int, Field(ge=0)] = 0
+
+
+class AuthorityQualityReviewGroup(BaseModel):
+    """Related authority items that need human review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: Annotated[str, Field(min_length=1)]
+    group_type: AuthorityQualityGroupType
+    severity: AuthorityQualitySeverity = "warning"
+    member_ids: Annotated[list[str], Field(min_length=1)]
+    reason: Annotated[str, Field(min_length=1)]
+    merge_allowed: bool = False
+    truncated: bool = False
+
+
+class AuthorityQualityReport(BaseModel):
+    """Persisted authority quality gate report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["agileforge.authority_quality.v1"] = (
+        "agileforge.authority_quality.v1"
+    )
+    summary: AuthorityQualitySummary
+    merged_items: list[AuthorityQualityMergedItem] = Field(default_factory=list)
+    review_groups: list[AuthorityQualityReviewGroup] = Field(default_factory=list)
+
+
 class SpecAuthorityCompilationSuccess(BaseModel):
     """Successful spec authority compilation output."""
 
@@ -716,6 +781,10 @@ class SpecAuthorityCompilationSuccess(BaseModel):
         list[SourceMapEntry],
         Field(description="Mapping of invariants to source excerpts."),
     ]
+    authority_quality: AuthorityQualityReport | None = Field(
+        default=None,
+        description="Optional host-derived quality report for review.",
+    )
     compiler_version: Annotated[
         str,
         Field(description="Compiler version identifier."),

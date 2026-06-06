@@ -16,6 +16,10 @@ from .api_schemas import (
 )
 from .spec_schemas import (
     AlignmentFinding,
+    AuthorityQualityMergedItem,
+    AuthorityQualityReport,
+    AuthorityQualityReviewGroup,
+    AuthorityQualitySummary,
     DataContractParams,
     EligibleFeatureRule,
     ForbiddenCapabilityParams,
@@ -46,6 +50,10 @@ from .spec_schemas import (
 
 __all__ = [
     "AlignmentFinding",
+    "AuthorityQualityMergedItem",
+    "AuthorityQualityReport",
+    "AuthorityQualityReviewGroup",
+    "AuthorityQualitySummary",
     "DataContractParams",
     "EligibleFeatureRule",
     "ForbiddenCapabilityParams",

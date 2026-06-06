@@ -167,3 +167,91 @@ def test_behavioral_invariants_keep_provenance_top_level() -> None:
                 "expected_response": "create a todo item",
             }
         )
+
+
+def test_authority_quality_report_schema_is_optional_and_strict() -> None:
+    """Compiled authority v2 supports optional quality report metadata."""
+    from pydantic import ValidationError  # noqa: PLC0415
+    from utils.spec_schemas import (  # noqa: PLC0415
+        AuthorityQualityMergedItem,
+        AuthorityQualityReport,
+        AuthorityQualityReviewGroup,
+        AuthorityQualitySummary,
+        SpecAuthorityCompilationSuccess,
+    )
+
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Payments"],
+        domain=None,
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+    )
+    assert success.authority_quality is None
+
+    report = AuthorityQualityReport(
+        summary=AuthorityQualitySummary(
+            original_invariant_count=2,
+            final_invariant_count=1,
+            merged_invariant_count=1,
+            merged_assumption_count=0,
+            review_group_count=1,
+            near_duplicate_group_count=0,
+            over_split_group_count=1,
+            noisy_assumption_group_count=0,
+        ),
+        merged_items=[
+            AuthorityQualityMergedItem(
+                merge_id="AQ-MERGE-001",
+                item_kind="invariant",
+                kept_id="INV-1111111111111111",
+                removed_ids=["INV-2222222222222222"],
+                reason="exact_semantic_duplicate",
+                source_evidence_count=2,
+            )
+        ],
+        review_groups=[
+            AuthorityQualityReviewGroup(
+                group_id="AQ-GROUP-001",
+                group_type="over_split_invariants",
+                severity="warning",
+                member_ids=["INV-1111111111111111"],
+                reason="same source item produced many invariants",
+                merge_allowed=False,
+            )
+        ],
+    )
+    success.authority_quality = report
+
+    dumped = success.model_dump(mode="json")
+    assert dumped["authority_quality"]["schema_version"] == (
+        "agileforge.authority_quality.v1"
+    )
+    assert dumped["authority_quality"]["summary"]["merged_invariant_count"] == 1
+
+    with pytest.raises(ValidationError):
+        AuthorityQualityReviewGroup(
+            group_id="AQ-GROUP-002",
+            group_type="unsupported",
+            severity="warning",
+            member_ids=[],
+            reason="bad type",
+            merge_allowed=False,
+        )
+
+
+def test_compat_schemes_reexports_authority_quality_models() -> None:
+    """Compatibility schema module re-exports authority quality models."""
+    from utils import schemes, spec_schemas  # noqa: PLC0415
+
+    assert schemes.AuthorityQualityReport is spec_schemas.AuthorityQualityReport
+    assert schemes.AuthorityQualitySummary is spec_schemas.AuthorityQualitySummary
+    assert (
+        schemes.AuthorityQualityReviewGroup
+        is spec_schemas.AuthorityQualityReviewGroup
+    )
+    assert schemes.AuthorityQualityMergedItem is spec_schemas.AuthorityQualityMergedItem
