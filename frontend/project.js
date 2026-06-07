@@ -841,8 +841,9 @@ function createEmptyState(text) {
 
 function renderAuthorityQuality(artifact) {
     const summary = document.getElementById('authority-quality-summary');
+    const mergeList = document.getElementById('authority-quality-merge-list');
     const groupsList = document.getElementById('authority-quality-groups-list');
-    if (!summary || !groupsList) return;
+    if (!summary || !mergeList || !groupsList) return;
 
     const quality = artifact?.authority_quality;
     const qualitySummary = quality?.summary || {};
@@ -853,6 +854,34 @@ function renderAuthorityQuality(artifact) {
     const assumptionLabel = mergedAssumptions === 1 ? 'assumption' : 'assumptions';
     const groupLabel = groupCount === 1 ? 'group' : 'groups';
     summary.textContent = `${mergedInvariants} merged ${invariantLabel}, ${mergedAssumptions} merged ${assumptionLabel}, ${groupCount} review ${groupLabel}`;
+
+    const mergedItems = safeArray(quality?.merged_items).filter((item) => (
+        item && typeof item === 'object'
+    ));
+    if (!mergedItems.length) {
+        mergeList.replaceChildren(createEmptyState('No authority quality merges.'));
+    } else {
+        mergeList.replaceChildren(...mergedItems.map((item) => {
+            const card = document.createElement('div');
+            card.className = 'rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-xs text-emerald-950 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100';
+
+            const title = document.createElement('div');
+            title.className = 'font-bold';
+            title.textContent = `${item.merge_id || 'AQ-MERGE'} ${item.item_kind || 'authority item'}`;
+
+            const reason = document.createElement('div');
+            reason.className = 'mt-1 text-emerald-800 dark:text-emerald-200';
+            reason.textContent = item.reason || '';
+
+            const details = document.createElement('div');
+            details.className = 'mt-2 font-mono text-[11px] text-emerald-700 dark:text-emerald-300';
+            const removedIds = safeArray(item.removed_ids).join(', ');
+            details.textContent = `kept ${item.kept_id || 'unknown'}; removed ${removedIds || 'none'}; evidence ${Number(item.source_evidence_count || 0)}`;
+
+            card.replaceChildren(title, reason, details);
+            return card;
+        }));
+    }
 
     const groups = safeArray(quality?.review_groups).filter((group) => (
         group && typeof group === 'object'

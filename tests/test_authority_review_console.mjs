@@ -600,6 +600,16 @@ test('renderAuthorityOverview renders authority quality summary and groups safel
                         merged_assumption_count: 2,
                         review_group_count: 1,
                     },
+                    merged_items: [
+                        {
+                            merge_id: 'AQ-MERGE-001',
+                            item_kind: 'invariant',
+                            kept_id: 'INV-kept',
+                            removed_ids: ['INV-removed'],
+                            reason: '<i>same authority</i>',
+                            source_evidence_count: 3,
+                        },
+                    ],
                     review_groups: [
                         {
                             group_id: 'AQ-001',
@@ -618,11 +628,18 @@ test('renderAuthorityOverview renders authority quality summary and groups safel
     });
 
     const summary = documentStub.getElementById('authority-quality-summary');
+    const mergeList = documentStub.getElementById('authority-quality-merge-list');
     const groupsList = documentStub.getElementById('authority-quality-groups-list');
 
     assert.equal(summary.textContent.includes('1 merged invariant'), true);
     assert.match(summary.textContent, /2 merged assumptions/);
     assert.match(summary.textContent, /1 review group/);
+    assert.match(mergeList.textContent, /AQ-MERGE-001/);
+    assert.match(mergeList.textContent, /INV-kept/);
+    assert.match(mergeList.textContent, /INV-removed/);
+    assert.match(mergeList.textContent, /<i>same authority<\/i>/);
+    assert.match(mergeList.textContent, /evidence 3/);
+    assert.equal(mergeList.innerHTML, '');
     assert.equal(groupsList.textContent.includes('over_split_invariants'), true);
     assert.match(groupsList.textContent, /<b>duplicate requirements<\/b>/);
     assert.equal(groupsList.innerHTML, '');
