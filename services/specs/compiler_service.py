@@ -58,6 +58,8 @@ from utils.failure_artifacts import (
 )
 from utils.runtime_config import SPEC_AUTHORITY_COMPILER_IDENTITY
 from utils.spec_schemas import (
+    AuthorityQualityReport,
+    AuthorityQualitySummary,
     EligibleFeatureRule,
     Invariant,
     InvariantType,
@@ -1414,9 +1416,78 @@ def _merge_compilation_successes(
                 entry.model_dump(mode="json")
                 for entry in _dedupe_source_map_entries(successes)
             ],
+            "authority_quality": _merge_authority_quality_reports(successes),
         }
     )
     return SpecAuthorityCompilationSuccess.model_validate(merged_payload)
+
+
+def _merge_authority_quality_reports(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> dict[str, object] | None:
+    """Merge host-derived quality metadata from all normalized outputs."""
+    reports = [
+        success.authority_quality
+        for success in successes
+        if success.authority_quality is not None
+    ]
+    if not reports:
+        return None
+
+    merged_items = [
+        item
+        for report in reports
+        for item in report.merged_items
+    ]
+    review_groups = [
+        group
+        for report in reports
+        for group in report.review_groups
+    ]
+    final_invariant_count = len(_dedupe_invariants(successes))
+    merged_invariant_count = sum(
+        len(item.removed_ids)
+        for item in merged_items
+        if item.item_kind == "invariant"
+    )
+    merged_assumption_count = sum(
+        len(item.removed_ids)
+        for item in merged_items
+        if item.item_kind == "assumption"
+    )
+    report = AuthorityQualityReport(
+        summary=AuthorityQualitySummary(
+            original_invariant_count=final_invariant_count + merged_invariant_count,
+            final_invariant_count=final_invariant_count,
+            merged_invariant_count=merged_invariant_count,
+            merged_assumption_count=merged_assumption_count,
+            review_group_count=len(review_groups),
+            near_duplicate_group_count=sum(
+                1
+                for group in review_groups
+                if group.group_type == "near_duplicate_invariants"
+            ),
+            over_split_group_count=sum(
+                1
+                for group in review_groups
+                if group.group_type == "over_split_invariants"
+            ),
+            noisy_assumption_group_count=sum(
+                1
+                for group in review_groups
+                if group.group_type == "noisy_assumptions"
+            ),
+        ),
+        merged_items=[
+            item.model_copy(update={"merge_id": f"AQ-MERGE-{index:03d}"})
+            for index, item in enumerate(merged_items, start=1)
+        ],
+        review_groups=[
+            group.model_copy(update={"group_id": f"AQ-GROUP-{index:03d}"})
+            for index, group in enumerate(review_groups, start=1)
+        ],
+    )
+    return report.model_dump(mode="json")
 
 
 def _invoke_and_normalize_spec_authority(

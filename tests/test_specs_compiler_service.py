@@ -1763,6 +1763,40 @@ def test_compile_spec_authority_for_version_reports_normalized_duplicate_merges(
     assert len(artifact["authority_quality"]["merged_items"]) == 1
 
 
+def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
+    """Focused pass quality metadata survives multi-success merge."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    first = SpecAuthorityCompilationSuccess(
+        scope_themes=["Quality"],
+        domain=None,
+        invariants=[],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+    )
+    second_output = compiler_service.normalize_compiler_output(
+        _duplicate_required_field_compiler_output_json()
+    )
+    assert isinstance(second_output.root, SpecAuthorityCompilationSuccess)
+    assert second_output.root.authority_quality is not None
+    assert (
+        second_output.root.authority_quality.summary.merged_invariant_count == 1
+    )
+
+    merged = compiler_service._merge_compilation_successes(
+        [first, second_output.root]
+    )
+
+    assert merged.authority_quality is not None
+    assert merged.authority_quality.summary.merged_invariant_count == 1
+    assert len(merged.authority_quality.merged_items) == 1
+
+
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
