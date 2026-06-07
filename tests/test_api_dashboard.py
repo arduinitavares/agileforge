@@ -1407,6 +1407,77 @@ def test_phase_generate_blocks_legacy_cached_authority(
     ]
 
 
+INVALID_V2_COMPILED_AUTHORITY_JSON = (
+    '{"schema_version":"agileforge.compiled_authority.v2","invariants":"bad"}'
+)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "service_attr", "body"),
+    [
+        (
+            "/api/projects/{project_id}/vision/generate",
+            "generate_vision_draft_service",
+            {"user_input": "draft vision"},
+        ),
+        (
+            "/api/projects/{project_id}/backlog/generate",
+            "generate_backlog_draft_service",
+            {"user_input": "draft backlog"},
+        ),
+    ],
+)
+def test_phase_generate_blocks_invalid_v2_cached_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    service_attr: str,
+    body: dict[str, object],
+) -> None:
+    """Phase generation must not start from an invalid v2 cached authority artifact."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Invalid V2 Phase Project")
+    product.spec_file_path = __file__
+    product.compiled_authority_json = INVALID_V2_COMPILED_AUTHORITY_JSON
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": 9,
+        "compiled_authority_cached": INVALID_V2_COMPILED_AUTHORITY_JSON,
+    }
+    service_calls: list[str] = []
+
+    async def unexpected_service_call(*_args: object, **_kwargs: object) -> object:
+        service_calls.append(service_attr)
+        msg = f"{service_attr} should not run with unreadable authority"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, service_attr, unexpected_service_call)
+
+    response = client.post(
+        endpoint.format(project_id=product.product_id),
+        json=body,
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert (
+        error["message"]
+        == "Compiled authority artifact failed schema validation."
+    )
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["project_id"] == product.product_id
+    assert error["details"]["spec_version_id"] == 9
+    assert error["remediation"] == [
+        (
+            "Run agileforge authority regenerate "
+            f"--project-id {product.product_id} "
+            "--spec-version-id 9 "
+            "--idempotency-key <new-key>."
+        )
+    ]
+
+
 def test_retry_setup_nonexistent_or_invalid_spec_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
