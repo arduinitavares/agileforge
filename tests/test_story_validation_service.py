@@ -1,5 +1,6 @@
 """Tests for story validation service."""
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -125,6 +126,79 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
     assert result["success"] is False
     assert result["passed"] is False
     assert "Compiled authority artifact schema is unsupported." in result["error"]
+    assert "agileforge authority regenerate" in result["error"]
+
+
+def test_validate_story_with_spec_authority_fails_closed_for_invalid_v2_artifact(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid v2 stored artifacts should block validation with regenerate guidance."""
+    from services.specs import story_validation_service  # noqa: PLC0415
+    from tests.test_specs_compiler_service import v2_compiled_authority_payload  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        story_validation_service,
+        "_resolve_engine",
+        session.get_bind,
+    )
+
+    product = Product(name="Validation Product", vision="Test")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+
+    story = UserStory(
+        product_id=product_id,
+        title="Story",
+        story_description="Description",
+        acceptance_criteria="Criteria",
+    )
+    session.add(story)
+    session.commit()
+    session.refresh(story)
+
+    spec_version = SpecRegistry(
+        product_id=product_id,
+        content="# Spec",
+        content_ref=None,
+        spec_hash="a" * 64,
+        status="approved",
+        approved_at=datetime.now(UTC),
+        approved_by="tester",
+    )
+    session.add(spec_version)
+    session.commit()
+    session.refresh(spec_version)
+    spec_version_id = require_id(spec_version.spec_version_id, "spec_version_id")
+
+    invalid_payload = v2_compiled_authority_payload()
+    invalid_payload["invariants"] = "bad"
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="1.0.0",
+        prompt_hash="0" * 64,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+        compiled_artifact_json=json.dumps(invalid_payload),
+    )
+    session.add(authority)
+    session.commit()
+
+    result = story_validation_service.validate_story_with_spec_authority(
+        {
+            "story_id": require_id(story.story_id, "story_id"),
+            "spec_version_id": spec_version_id,
+        }
+    )
+
+    assert result["success"] is False
+    assert result["passed"] is False
+    assert "Compiled authority artifact failed schema validation." in result["error"]
     assert "agileforge authority regenerate" in result["error"]
 
 
