@@ -178,6 +178,37 @@ def _raw_compiler_output_json() -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
+def _duplicate_required_field_compiler_output_json() -> str:
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Quality"],
+        domain=None,
+        invariants=[
+            Invariant(
+                id="INV-1111111111111111",
+                type=InvariantType.REQUIRED_FIELD,
+                source_item_id="REQ.test.audit",
+                source_level="MUST",
+                parameters=RequiredFieldParams(field_name="email"),
+            ),
+            Invariant(
+                id="INV-2222222222222222",
+                type=InvariantType.REQUIRED_FIELD,
+                source_item_id="REQ.test.audit",
+                source_level="MUST",
+                parameters=RequiredFieldParams(field_name="email"),
+            ),
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+    )
+    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+
+
 def _structured_retry_success_payload() -> dict[str, object]:
     """Return a compile-success payload valid against structured source checks."""
     return {
@@ -1692,6 +1723,44 @@ def test_compile_spec_authority_for_version_persists_quality_report(
         artifact = json.loads(authority.compiled_artifact_json)
     assert artifact["authority_quality"]["summary"]["merged_invariant_count"] == 1
     assert len(artifact["invariants"]) == 1
+
+
+def test_compile_spec_authority_for_version_reports_normalized_duplicate_merges(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normalizer duplicate cleanup is carried into persisted quality report."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _duplicate_required_field_compiler_output_json(),
+    )
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    authority = session.exec(
+        select(CompiledSpecAuthority).where(
+            CompiledSpecAuthority.spec_version_id
+            == require_id(spec_row.spec_version_id, "spec_version_id")
+        )
+    ).one()
+    assert authority.compiled_artifact_json is not None
+    artifact = json.loads(authority.compiled_artifact_json)
+    assert len(artifact["invariants"]) == 1
+    assert artifact["authority_quality"]["summary"]["merged_invariant_count"] == 1
+    assert len(artifact["authority_quality"]["merged_items"]) == 1
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(

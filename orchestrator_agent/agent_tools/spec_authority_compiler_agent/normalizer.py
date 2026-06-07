@@ -28,6 +28,9 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from utils.spec_schemas import (
+    AuthorityQualityMergedItem,
+    AuthorityQualityReport,
+    AuthorityQualitySummary,
     Invariant,
     InvariantParameters,
     InvariantType,
@@ -502,17 +505,21 @@ def _invariant_semantic_key(inv: Invariant) -> tuple[str, str, str, str]:
 
 def _deduplicate_semantic_invariants(success: SpecAuthorityCompilationSuccess) -> int:
     """Remove exact duplicate invariant objects before deterministic ID assignment."""
-    seen: dict[tuple[str, str, str, str], str] = {}
+    original_count = len(success.invariants)
+    seen: dict[tuple[str, str, str, str], Invariant] = {}
     removed_to_kept: dict[str, str] = {}
+    removed_by_kept: dict[str, list[str]] = {}
     kept: list[Invariant] = []
     removed = 0
     for inv in success.invariants:
         key = _invariant_semantic_key(inv)
-        if key in seen:
-            removed_to_kept[inv.id] = seen[key]
+        existing = seen.get(key)
+        if existing is not None:
+            removed_to_kept[inv.id] = existing.id
+            removed_by_kept.setdefault(existing.id, []).append(inv.id)
             removed += 1
             continue
-        seen[key] = inv.id
+        seen[key] = inv
         kept.append(inv)
     if not removed:
         return 0
@@ -520,10 +527,88 @@ def _deduplicate_semantic_invariants(success: SpecAuthorityCompilationSuccess) -
         if entry.invariant_id in removed_to_kept:
             entry.invariant_id = removed_to_kept[entry.invariant_id]
     success.invariants = kept
+    _record_duplicate_invariant_quality_report(
+        success,
+        original_count=original_count,
+        removed_by_kept=removed_by_kept,
+    )
     if _DUPLICATE_INVARIANT_ASSUMPTION not in success.assumptions:
         success.assumptions.append(_DUPLICATE_INVARIANT_ASSUMPTION)
     logger.info("Removed %s duplicate semantic invariant(s)", removed)
     return removed
+
+
+def _record_duplicate_invariant_quality_report(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    original_count: int,
+    removed_by_kept: dict[str, list[str]],
+) -> None:
+    """Carry normalizer duplicate merge decisions into host quality metadata."""
+    source_counts: dict[str, int] = {}
+    for entry in success.source_map:
+        source_counts[entry.invariant_id] = source_counts.get(entry.invariant_id, 0) + 1
+
+    merged_items = [
+        AuthorityQualityMergedItem(
+            merge_id=f"AQ-MERGE-{index:03d}",
+            item_kind="invariant",
+            kept_id=kept_id,
+            removed_ids=removed_ids,
+            reason="exact_semantic_duplicate",
+            source_evidence_count=source_counts.get(kept_id, 0),
+        )
+        for index, (kept_id, removed_ids) in enumerate(
+            removed_by_kept.items(),
+            start=1,
+        )
+    ]
+    success.authority_quality = AuthorityQualityReport(
+        summary=AuthorityQualitySummary(
+            original_invariant_count=original_count,
+            final_invariant_count=len(success.invariants),
+            merged_invariant_count=sum(
+                len(item.removed_ids) for item in merged_items
+            ),
+            merged_assumption_count=0,
+            review_group_count=0,
+            near_duplicate_group_count=0,
+            over_split_group_count=0,
+            noisy_assumption_group_count=0,
+        ),
+        merged_items=merged_items,
+        review_groups=[],
+    )
+
+
+def _rewrite_quality_report_invariant_ids(
+    success: SpecAuthorityCompilationSuccess,
+    original_invariants: list[Invariant],
+) -> None:
+    """Rewrite kept quality merge IDs after deterministic invariant ID assignment."""
+    if success.authority_quality is None:
+        return
+    original_id_to_new_id = {
+        original.id: normalized.id
+        for original, normalized in zip(
+            original_invariants,
+            success.invariants,
+            strict=False,
+        )
+    }
+    merged_items = [
+        item.model_copy(
+            update={
+                "kept_id": original_id_to_new_id.get(item.kept_id, item.kept_id),
+            }
+        )
+        if item.item_kind == "invariant"
+        else item
+        for item in success.authority_quality.merged_items
+    ]
+    success.authority_quality = success.authority_quality.model_copy(
+        update={"merged_items": merged_items}
+    )
 
 
 def _tokenize_support_text(text: str) -> list[str]:
@@ -2016,6 +2101,7 @@ def normalize_compiler_output(
             source_item_id=inv.source_item_id,
             source_level=inv.source_level,
         )
+    _rewrite_quality_report_invariant_ids(success, original_invariants)
 
     normalized_ids = [inv.id for inv in success.invariants]
     if len(set(normalized_ids)) != len(normalized_ids):

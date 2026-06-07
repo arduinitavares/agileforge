@@ -30,6 +30,7 @@ from utils.spec_schemas import (
 )
 
 EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT: int = 2
+EXPECTED_DUPLICATE_SOURCE_EVIDENCE_COUNT: int = 2
 
 
 def _structured_spec_source() -> str:
@@ -585,6 +586,18 @@ def test_normalizer_exact_duplicate_cleanup_preserves_source_map_entries() -> No
         kept_id,
         kept_id,
     ]
+    assert normalized.root.authority_quality is not None
+    assert (
+        normalized.root.authority_quality.summary.merged_invariant_count == 1
+    )
+    assert normalized.root.authority_quality.merged_items[0].kept_id == kept_id
+    assert normalized.root.authority_quality.merged_items[0].removed_ids == [
+        "INV-0000000000000001"
+    ]
+    assert (
+        normalized.root.authority_quality.merged_items[0].source_evidence_count
+        == EXPECTED_DUPLICATE_SOURCE_EVIDENCE_COUNT
+    )
 
 
 def test_behavioral_invariants_accept_top_level_source_metadata() -> None:
