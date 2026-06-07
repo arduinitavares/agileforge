@@ -58,6 +58,7 @@ from utils.failure_artifacts import (
 )
 from utils.runtime_config import SPEC_AUTHORITY_COMPILER_IDENTITY
 from utils.spec_schemas import (
+    AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualitySummary,
     EligibleFeatureRule,
@@ -1119,6 +1120,21 @@ def _dedupe_invariants(
     return deduped
 
 
+def _cross_success_invariant_merges(
+    successes: list[SpecAuthorityCompilationSuccess],
+) -> dict[str, list[str]]:
+    """Return duplicate invariant IDs removed while merging compiler successes."""
+    kept_ids: set[str] = set()
+    removed_by_kept: dict[str, list[str]] = {}
+    for success in successes:
+        for invariant in success.invariants:
+            if invariant.id in kept_ids:
+                removed_by_kept.setdefault(invariant.id, []).append(invariant.id)
+                continue
+            kept_ids.add(invariant.id)
+    return removed_by_kept
+
+
 def _dedupe_eligible_feature_rules(
     successes: list[SpecAuthorityCompilationSuccess],
 ) -> list[EligibleFeatureRule]:
@@ -1377,6 +1393,8 @@ def _merge_compilation_successes(
     if len(successes) == 1:
         return successes[0]
 
+    merged_source_map = _dedupe_source_map_entries(successes)
+    merged_invariants = _dedupe_invariants(successes)
     merged_payload = successes[0].model_dump(mode="json")
     merged_payload.update(
         {
@@ -1389,7 +1407,7 @@ def _merge_compilation_successes(
             ),
             "invariants": [
                 invariant.model_dump(mode="json")
-                for invariant in _dedupe_invariants(successes)
+                for invariant in merged_invariants
             ],
             "eligible_feature_rules": [
                 rule.model_dump(mode="json")
@@ -1414,9 +1432,13 @@ def _merge_compilation_successes(
             ),
             "source_map": [
                 entry.model_dump(mode="json")
-                for entry in _dedupe_source_map_entries(successes)
+                for entry in merged_source_map
             ],
-            "authority_quality": _merge_authority_quality_reports(successes),
+            "authority_quality": _merge_authority_quality_reports(
+                successes,
+                final_invariant_count=len(merged_invariants),
+                merged_source_map=merged_source_map,
+            ),
         }
     )
     return SpecAuthorityCompilationSuccess.model_validate(merged_payload)
@@ -1424,14 +1446,18 @@ def _merge_compilation_successes(
 
 def _merge_authority_quality_reports(
     successes: list[SpecAuthorityCompilationSuccess],
+    *,
+    final_invariant_count: int,
+    merged_source_map: list[SourceMapEntry],
 ) -> dict[str, object] | None:
     """Merge host-derived quality metadata from all normalized outputs."""
+    cross_success_merges = _cross_success_invariant_merges(successes)
     reports = [
         success.authority_quality
         for success in successes
         if success.authority_quality is not None
     ]
-    if not reports:
+    if not reports and not cross_success_merges:
         return None
 
     merged_items = [
@@ -1439,13 +1465,26 @@ def _merge_authority_quality_reports(
         for report in reports
         for item in report.merged_items
     ]
+    source_counts: dict[str, int] = {}
+    for entry in merged_source_map:
+        source_counts[entry.invariant_id] = source_counts.get(entry.invariant_id, 0) + 1
+    merged_items.extend(
+        AuthorityQualityMergedItem(
+            merge_id="AQ-MERGE-000",
+            item_kind="invariant",
+            kept_id=kept_id,
+            removed_ids=removed_ids,
+            reason="exact_semantic_duplicate",
+            source_evidence_count=source_counts.get(kept_id, 0),
+        )
+        for kept_id, removed_ids in cross_success_merges.items()
+    )
     review_groups = [
         group
         for report in reports
         for group in report.review_groups
     ]
-    final_invariant_count = len(_dedupe_invariants(successes))
-    merged_invariant_count = sum(
+    merged_invariant_removed_count = sum(
         len(item.removed_ids)
         for item in merged_items
         if item.item_kind == "invariant"
@@ -1457,9 +1496,11 @@ def _merge_authority_quality_reports(
     )
     report = AuthorityQualityReport(
         summary=AuthorityQualitySummary(
-            original_invariant_count=final_invariant_count + merged_invariant_count,
+            original_invariant_count=(
+                final_invariant_count + merged_invariant_removed_count
+            ),
             final_invariant_count=final_invariant_count,
-            merged_invariant_count=merged_invariant_count,
+            merged_invariant_count=merged_invariant_removed_count,
             merged_assumption_count=merged_assumption_count,
             review_group_count=len(review_groups),
             near_duplicate_group_count=sum(

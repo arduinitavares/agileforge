@@ -44,6 +44,7 @@ from utils.spec_schemas import (
 _SCHEMA_RETRY_ATTEMPTS = 1
 _TOTAL_BLOCKED_MUST_ITEMS = 2
 _EXPECTED_FOCUSED_RETRY_CALLS = 2
+_EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT = 2
 
 
 def _compiled_success_json() -> str:
@@ -1795,6 +1796,69 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
     assert merged.authority_quality is not None
     assert merged.authority_quality.summary.merged_invariant_count == 1
     assert len(merged.authority_quality.merged_items) == 1
+
+
+def test_merge_compilation_successes_reports_cross_success_duplicate_merges() -> None:
+    """Cross-success invariant dedupe is visible in quality metadata."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    first = SpecAuthorityCompilationSuccess(
+        scope_themes=["Quality"],
+        domain=None,
+        invariants=[
+            Invariant(
+                id="INV-1111111111111111",
+                type=InvariantType.REQUIRED_FIELD,
+                source_item_id="REQ.test.audit",
+                source_level="MUST",
+                parameters=RequiredFieldParams(field_name="email"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[
+            SourceMapEntry(
+                invariant_id="INV-1111111111111111",
+                excerpt="Email is required.",
+                location="REQ.test.audit.acceptance[0]",
+            )
+        ],
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+    )
+    second = first.model_copy(
+        deep=True,
+        update={
+            "source_map": [
+                SourceMapEntry(
+                    invariant_id="INV-1111111111111111",
+                    excerpt="Audit output includes email.",
+                    location="REQ.test.audit.acceptance[1]",
+                )
+            ]
+        },
+    )
+
+    merged = compiler_service._merge_compilation_successes([first, second])
+
+    assert len(merged.invariants) == 1
+    assert len(merged.source_map) == _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT
+    assert merged.authority_quality is not None
+    assert merged.authority_quality.summary.merged_invariant_count == 1
+    assert len(merged.authority_quality.merged_items) == 1
+    assert (
+        merged.authority_quality.merged_items[0].kept_id
+        == "INV-1111111111111111"
+    )
+    assert merged.authority_quality.merged_items[0].removed_ids == [
+        "INV-1111111111111111"
+    ]
+    assert (
+        merged.authority_quality.merged_items[0].source_evidence_count
+        == _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT
+    )
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
