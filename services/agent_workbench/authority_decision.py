@@ -21,6 +21,7 @@ from sqlmodel import Session, select
 from models import db as model_db
 from models.agent_workbench import CliMutationLedger
 from models.specs import SpecAuthorityAcceptance
+from services.agent_workbench.authority_regenerate import AUTHORITY_REGENERATE_COMMAND
 from services.agent_workbench.authority_review import (
     AuthorityReviewSnapshot,
     build_authority_review_snapshot,
@@ -619,9 +620,10 @@ class AuthorityDecisionRunner:
             return None
         actual_fsm_state = state.get("fsm_state")
         actual_setup_status = state.get("setup_status")
-        if (
-            actual_fsm_state in {None, snapshot.fsm_state}
-            and actual_setup_status in {None, snapshot.setup_status}
+        if self._workflow_state_matches_snapshot(
+            snapshot=snapshot,
+            actual_fsm_state=actual_fsm_state,
+            actual_setup_status=actual_setup_status,
         ):
             return None
         return _error(
@@ -634,6 +636,26 @@ class AuthorityDecisionRunner:
                 "actual_setup_status": actual_setup_status,
             },
             remediation=["Run authority review again from the current workflow state."],
+        )
+
+    @staticmethod
+    def _workflow_state_matches_snapshot(
+        *,
+        snapshot: ReviewedAuthoritySnapshot,
+        actual_fsm_state: object,
+        actual_setup_status: object,
+    ) -> bool:
+        if (
+            actual_fsm_state in {None, snapshot.fsm_state}
+            and actual_setup_status in {None, snapshot.setup_status}
+        ):
+            return True
+        return (
+            snapshot.fsm_state == "SETUP_REQUIRED"
+            and snapshot.setup_status == "authority_pending_review"
+            and snapshot.pending_authority_id is not None
+            and actual_fsm_state in {None, "SETUP_REQUIRED"}
+            and actual_setup_status == "authority_rejected"
         )
 
     def _terminal_conflict_before_snapshot(
@@ -1410,28 +1432,43 @@ def _response_data(
         "setup_status": "authority_rejected",
         "fsm_state": "SETUP_REQUIRED",
         "reason": row.rationale,
-        "next_actions": [],
-        "blocked_future_commands": [
-            {
-                "command": (
-                    "agileforge project spec update "
-                    f"--project-id {row.product_id} "
-                    f"--spec-file {row.resolved_spec_path}"
-                ),
-                "installed": False,
-                "reason": (
-                    "Spec update/recompile is required after rejection, but this "
-                    "command is not installed yet."
-                ),
-            }
+        "next_actions": [
+            _authority_regenerate_next_action(
+                _authority_regenerate_command(
+                    project_id=row.product_id,
+                    spec_version_id=row.spec_version_id,
+                )
+            )
         ],
-        "manual_remediation": [
-            "No installed CLI command can recompile a rejected authority yet.",
-            (
-                "Revise the spec or compiler, then run the future project spec "
-                "update command when installed."
-            ),
-        ],
+        "blocked_future_commands": [],
+        "manual_remediation": [],
+    }
+
+
+def _authority_regenerate_command(
+    *,
+    project_id: int,
+    spec_version_id: int,
+) -> str:
+    """Return the installed authority regeneration command after rejection."""
+    return (
+        f"{AUTHORITY_REGENERATE_COMMAND} --project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _authority_regenerate_next_action(command: str) -> JsonDict:
+    """Return the installed next action for rejected authority repair."""
+    return {
+        "command": command,
+        "installed": True,
+        "requires_cli_installation": False,
+        "reason": (
+            "Regenerate compiled authority after rejection, then review the "
+            "regenerated pending authority before acceptance."
+        ),
+        "requires": ["idempotency_key"],
     }
 
 

@@ -659,11 +659,22 @@ class EvidenceCollectionRunner:
                     error=_authority_not_accepted(project_id),
                 )
 
-            authority = session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == accepted.spec_version_id
-                )
-            ).first()
+            authority = (
+                session.get(CompiledSpecAuthority, accepted.pending_authority_id)
+                if accepted.pending_authority_id is not None
+                else None
+            )
+            if authority is None:
+                authority = session.exec(
+                    select(CompiledSpecAuthority)
+                    .where(
+                        CompiledSpecAuthority.spec_version_id
+                        == accepted.spec_version_id
+                    )
+                    .order_by(
+                        cast("Any", CompiledSpecAuthority.authority_id).desc()
+                    )
+                ).first()
             if authority is None or not authority.compiled_artifact_json:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,

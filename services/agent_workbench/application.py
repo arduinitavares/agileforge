@@ -15,6 +15,7 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_projection import AuthorityProjectionService
 from services.agent_workbench.authority_regenerate import (
+    AUTHORITY_REGENERATE_COMMAND,
     AuthorityRegenerateRequest,
     default_authority_regenerate_runner,
 )
@@ -736,19 +737,24 @@ class AgentWorkbenchApplication:
                 if setup_status != "failed"
                 else None
             )
+            effective_setup_status = (
+                "authority_pending_review"
+                if _authority_has_pending_review(authority)
+                else setup_status
+            )
             review = (
                 self.authority_review(
                     project_id=project_id,
                     include_spec="summary",
                     output_format="json",
                 )
-                if setup_status == "authority_pending_review"
+                if effective_setup_status == "authority_pending_review"
                 and (authority is None or authority.get("ok") is True)
                 else None
             )
             return _setup_workflow_next(
                 project_id=project_id,
-                setup_status=setup_status,
+                setup_status=effective_setup_status,
                 workflow=workflow,
                 authority=authority,
                 review=review,
@@ -1775,6 +1781,16 @@ def _setup_status(envelope: dict[str, Any]) -> str | None:
     return str(setup_status).strip().lower() if setup_status is not None else None
 
 
+def _authority_has_pending_review(authority: dict[str, Any] | None) -> bool:
+    """Return whether authority status exposes a pending candidate."""
+    if authority is None or authority.get("ok") is not True:
+        return False
+    data = authority.get("data")
+    if not isinstance(data, dict):
+        return False
+    return data.get("pending_authority_id") is not None
+
+
 def _non_empty_string(value: object) -> str | None:
     """Return stripped string values only when non-empty."""
     if not isinstance(value, str):
@@ -1910,28 +1926,30 @@ def _setup_workflow_next(
             },
         ]
     elif setup_status == "authority_rejected":
-        data["next_actions"] = []
-        data["blocked_future_commands"] = [
-            {
-                "command": (
-                    "agileforge project spec update "
-                    f"--project-id {project_id} --spec-file "
-                    f"{_authority_spec_file_template(authority)}"
-                ),
-                "installed": False,
-                "reason": (
-                    "Spec update/recompile is required after authority rejection, "
-                    "but this command is not installed yet."
-                ),
-            }
-        ]
-        data["manual_remediation"] = [
-            "No installed CLI command can recompile a rejected authority yet.",
-            (
-                "Revise the spec or compiler, then run the future project spec "
-                "update command when installed."
-            ),
-        ]
+        spec_version_id = _rejected_spec_version_id(authority)
+        if spec_version_id is not None:
+            command = _authority_regenerate_command(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+            )
+            data["next_valid_commands"] = [command]
+            data["next_actions"] = [_authority_regenerate_next_action(command)]
+            data["manual_remediation"] = []
+        else:
+            data["next_actions"] = []
+            data["blocked_commands"] = [
+                {
+                    "command": AUTHORITY_REGENERATE_COMMAND,
+                    "installed": True,
+                    "reason": (
+                        "Authority rejection requires regeneration, but the "
+                        "rejected spec version could not be determined."
+                    ),
+                }
+            ]
+            data["manual_remediation"] = [
+                "Inspect authority status for rejected_spec_version_id.",
+            ]
     elif setup_status == "failed":
         data["next_valid_commands"] = [
             (
@@ -3115,17 +3133,47 @@ def _as_list(value: object) -> list[object]:
     return [value]
 
 
-def _authority_spec_file_template(authority: dict[str, Any] | None) -> str:
-    """Return a concrete disk spec path when available, else a template token."""
+def _rejected_spec_version_id(authority: dict[str, Any] | None) -> int | None:
+    """Return the spec version to regenerate after authority rejection."""
     if authority is None:
-        return "<spec-file>"
+        return None
     authority_data = _envelope_data(authority)
-    disk_spec = authority_data.get("disk_spec")
-    if isinstance(disk_spec, dict):
-        resolved_path = disk_spec.get("resolved_path")
-        if isinstance(resolved_path, str) and resolved_path:
-            return resolved_path
-    return "<updated-spec-file>"
+    for key in (
+        "rejected_spec_version_id",
+        "pending_compiled_spec_version_id",
+        "latest_spec_version_id",
+    ):
+        value = authority_data.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _authority_regenerate_command(
+    *,
+    project_id: int,
+    spec_version_id: int,
+) -> str:
+    """Return the installed authority regeneration command for a rejected spec."""
+    return (
+        f"{AUTHORITY_REGENERATE_COMMAND} --project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _authority_regenerate_next_action(command: str) -> dict[str, Any]:
+    """Return the workflow-next action for authority regeneration."""
+    return {
+        "command": command,
+        "installed": True,
+        "requires_cli_installation": False,
+        "reason": (
+            "Regenerate compiled authority after rejection, then review the "
+            "regenerated pending authority before acceptance."
+        ),
+        "requires": ["idempotency_key"],
+    }
 
 
 def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:

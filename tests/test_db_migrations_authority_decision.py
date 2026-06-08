@@ -299,6 +299,104 @@ def test_authority_decision_migration_adds_provenance_columns(
     assert "uq_spec_authority_terminal_decision_key" in indexes
 
 
+def test_spec_authority_migration_removes_unique_compiled_spec_constraint(
+    tmp_path: Path,
+) -> None:
+    """Allow regenerated authority candidates for the same spec version."""
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE spec_registry (spec_version_id INTEGER PRIMARY KEY)"
+            )
+        )
+        conn.execute(text("INSERT INTO spec_registry (spec_version_id) VALUES (11)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE compiled_spec_authority (
+                  authority_id INTEGER PRIMARY KEY,
+                  spec_version_id INTEGER NOT NULL UNIQUE,
+                  compiler_version VARCHAR NOT NULL,
+                  prompt_hash VARCHAR NOT NULL,
+                  compiled_at DATETIME NOT NULL,
+                  compiled_artifact_json TEXT,
+                  scope_themes TEXT NOT NULL,
+                  invariants TEXT NOT NULL,
+                  eligible_feature_ids TEXT NOT NULL,
+                  rejected_features TEXT,
+                  spec_gaps TEXT
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO compiled_spec_authority (
+                  authority_id,
+                  spec_version_id,
+                  compiler_version,
+                  prompt_hash,
+                  compiled_at,
+                  compiled_artifact_json,
+                  scope_themes,
+                  invariants,
+                  eligible_feature_ids,
+                  rejected_features,
+                  spec_gaps
+                )
+                VALUES (1, 11, '2.0.0', 'a', '2026-05-17 09:00:00',
+                        '{}', '[]', '[]', '[]', '[]', '[]')
+                """
+            )
+        )
+
+    actions = migrate_spec_authority_tables(engine)
+
+    with engine.begin() as conn:
+        unique_spec_indexes = []
+        for index_row in conn.execute(
+            text("PRAGMA index_list('compiled_spec_authority')")
+        ):
+            row = index_row._mapping
+            columns = [
+                column_row._mapping["name"]
+                for column_row in conn.execute(
+                    text(f"PRAGMA index_info('{row['name']}')")
+                )
+            ]
+            if int(row["unique"]) == 1 and columns == ["spec_version_id"]:
+                unique_spec_indexes.append(row["name"])
+        conn.execute(
+            text(
+                """
+                INSERT INTO compiled_spec_authority (
+                  authority_id,
+                  spec_version_id,
+                  compiler_version,
+                  prompt_hash,
+                  compiled_at,
+                  compiled_artifact_json,
+                  scope_themes,
+                  invariants,
+                  eligible_feature_ids,
+                  rejected_features,
+                  spec_gaps
+                )
+                VALUES (2, 11, '2.0.0', 'b', '2026-05-17 10:00:00',
+                        '{}', '[]', '[]', '[]', '[]', '[]')
+                """
+            )
+        )
+
+    assert (
+        "rebuilt table: compiled_spec_authority removed unique spec_version_id"
+        in actions
+    )
+    assert unique_spec_indexes == []
+
+
 def test_authority_decision_migration_backfills_unambiguous_legacy_acceptance(
     tmp_path: Path,
 ) -> None:

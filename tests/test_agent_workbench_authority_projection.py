@@ -360,6 +360,131 @@ def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
     assert result["data"]["pending_authority_fingerprint"].startswith("sha256:")
 
 
+def test_authority_status_treats_new_candidate_after_rejection_as_pending(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A rejected candidate must not reject a newer same-spec regeneration."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    old_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        prompt_hash="a" * 64,
+    )
+    old_authority_id = require_id(old_authority.authority_id, "authority_id")
+    rejection = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="rejected",
+        policy="manual",
+        decided_by="reviewer",
+        decided_at=datetime(2026, 5, 14, 13, tzinfo=UTC),
+        rationale="Needs refinement.",
+        compiler_version=old_authority.compiler_version,
+        prompt_hash=old_authority.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=old_authority_id,
+        terminal_decision_key=f"{product_id}:{spec_version_id}:{old_authority_id}",
+    )
+    session.add(rejection)
+    session.commit()
+    new_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        prompt_hash="b" * 64,
+    )
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "pending_acceptance"
+    assert result["data"]["latest_rejected_decision_id"] == rejection.id
+    assert result["data"]["rejected_pending_authority_id"] == old_authority_id
+    assert result["data"]["pending_authority_id"] == new_authority.authority_id
+    assert result["data"]["pending_prompt_hash"] == "b" * 64
+
+
+def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A newer accepted same-spec regeneration supersedes the rejected candidate."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    rejected_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        prompt_hash="a" * 64,
+    )
+    rejected_authority_id = require_id(
+        rejected_authority.authority_id,
+        "authority_id",
+    )
+    rejection = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="rejected",
+        policy="manual",
+        decided_by="reviewer",
+        decided_at=datetime(2026, 5, 14, 13, tzinfo=UTC),
+        rationale="Needs refinement.",
+        compiler_version=rejected_authority.compiler_version,
+        prompt_hash=rejected_authority.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=rejected_authority_id,
+        terminal_decision_key=(
+            f"{product_id}:{spec_version_id}:{rejected_authority_id}"
+        ),
+    )
+    session.add(rejection)
+    session.commit()
+    accepted_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        prompt_hash="b" * 64,
+    )
+    accepted_authority_id = require_id(
+        accepted_authority.authority_id,
+        "authority_id",
+    )
+    acceptance = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="accepted",
+        policy="manual",
+        decided_by="reviewer",
+        decided_at=datetime(2026, 5, 14, 13, 30, tzinfo=UTC),
+        rationale="Accepted regenerated authority.",
+        compiler_version=accepted_authority.compiler_version,
+        prompt_hash=accepted_authority.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=accepted_authority_id,
+        terminal_decision_key=(
+            f"{product_id}:{spec_version_id}:{accepted_authority_id}"
+        ),
+    )
+    session.add(acceptance)
+    session.commit()
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "current"
+    assert result["data"]["reason"] == "accepted_authority_current"
+    assert result["data"]["accepted_decision_id"] == acceptance.id
+    assert result["data"]["latest_rejected_decision_id"] == rejection.id
+    assert result["data"]["rejected_pending_authority_id"] == rejected_authority_id
+    assert result["data"]["authority_id"] == accepted_authority_id
+    assert result["data"]["pending_authority_id"] is None
+
+
 def test_authority_status_reports_current_accepted_authority_from_repo_root(
     session: Session,
     tmp_path: Path,

@@ -1118,6 +1118,84 @@ def test_preview_spec_authority_recovers_when_structured_full_pass_fails(
     assert calls[0] == ["REQ.todo-create", "REQ.todo-toggle", "REQ.todo-color"]
 
 
+def test_preview_spec_authority_repairs_merged_structured_source_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merged focused successes are re-normalized against structured spec text."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    def focused_success(item_id: str) -> SpecAuthorityCompilationSuccess:
+        trigger = "Enter is pressed" if item_id == "REQ.todo-create" else "todo"
+        target = "todo"
+        expected_response = (
+            "create a todo"
+            if item_id == "REQ.todo-create"
+            else "change completion state without deletion"
+        )
+        source_level: SpecAuthoritySourceLevel = (
+            "MUST" if item_id == "REQ.todo-create" else "MUST_NOT"
+        )
+        return SpecAuthorityCompilationSuccess(
+            scope_themes=["TodoMVC"],
+            domain="todo",
+            invariants=[
+                Invariant(
+                    id=(
+                        "INV-1111111111111111"
+                        if item_id == "REQ.todo-create"
+                        else "INV-2222222222222222"
+                    ),
+                    type=InvariantType.USER_INTERACTION,
+                    source_item_id=item_id,
+                    source_level=source_level,
+                    parameters=UserInteractionParams(
+                        trigger=trigger,
+                        target=target,
+                        expected_response=expected_response,
+                    ),
+                )
+            ],
+            eligible_feature_rules=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version="1.0.0",
+            prompt_hash="a" * 64,
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_and_normalize_spec_authority",
+        lambda **_: compiler_service._NormalizedCompilerInvocation(
+            raw_json=_raw_compiler_failure_json(),
+            output=SpecAuthorityCompilerOutput.model_validate_json(
+                _raw_compiler_failure_json()
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_focused_structured_item_authority",
+        lambda _artifact, *, item_id, **_kwargs: focused_success(cast("str", item_id)),
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    compiled = SpecAuthorityCompilerOutput.model_validate_json(
+        result["compiled_authority"]
+    )
+    assert isinstance(compiled.root, SpecAuthorityCompilationSuccess)
+    source_locations = {entry.location for entry in compiled.root.source_map}
+    assert "REQ.todo-create.statement" in source_locations
+    assert "REQ.todo-toggle.acceptance[0]" in source_locations
+    assert "REQ.todo-create" not in source_locations
+    assert "REQ.todo-toggle" not in source_locations
+
+
 def test_preview_spec_authority_retries_transient_focused_item_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

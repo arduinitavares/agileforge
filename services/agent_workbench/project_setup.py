@@ -1278,9 +1278,9 @@ class ProjectSetupMutationRunner:
             if spec is None or spec.spec_version_id is None:
                 return None
             authority = session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == spec.spec_version_id
-                )
+                select(CompiledSpecAuthority)
+                .where(CompiledSpecAuthority.spec_version_id == spec.spec_version_id)
+                .order_by(CompiledSpecAuthority.authority_id.desc())
             ).first()
             if authority is None:
                 return None

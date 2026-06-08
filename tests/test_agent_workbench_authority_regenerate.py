@@ -226,6 +226,107 @@ def test_regenerate_persists_pending_v2_authority_and_does_not_accept(
     assert acceptance_rows == []
 
 
+def test_regenerate_rejected_authority_creates_new_pending_authority(
+    authority_regenerate_runner: AuthorityRegenerateRunner,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    product_id: int,
+    approved_spec_version_id: int,
+) -> None:
+    """Regenerating rejected authority must not reuse the rejected authority id."""
+    old_authority = CompiledSpecAuthority(
+        spec_version_id=approved_spec_version_id,
+        compiler_version="2.0.0",
+        prompt_hash="a" * 64,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json=_compiled_authority_json("a" * 64),
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(old_authority)
+    session.commit()
+    session.refresh(old_authority)
+    old_authority_id = require_id(old_authority.authority_id, "authority_id")
+    rejected = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=approved_spec_version_id,
+        status="rejected",
+        policy="human",
+        decided_by="reviewer",
+        decided_at=datetime.now(UTC),
+        rationale="Needs refinement.",
+        compiler_version=old_authority.compiler_version,
+        prompt_hash=old_authority.prompt_hash,
+        spec_hash="sha256:approved-spec",
+        pending_authority_id=old_authority_id,
+    )
+    session.add(rejected)
+    session.commit()
+
+    def fake_compile(  # noqa: PLR0913
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: object | None = None,
+        record_progress: object | None = None,
+    ) -> dict[str, object]:
+        del tool_context, lease_guard, record_progress
+        assert force_recompile is True
+        with Session(engine) as compile_session:
+            authority = compile_session.get(CompiledSpecAuthority, old_authority_id)
+            assert authority is not None
+            authority.prompt_hash = "b" * 64
+            authority.compiled_at = datetime.now(UTC)
+            authority.compiled_artifact_json = _compiled_authority_json("b" * 64)
+            compile_session.add(authority)
+            compile_session.commit()
+        return {
+            "success": True,
+            "authority_id": old_authority_id,
+            "spec_version_id": spec_version_id,
+            "compiler_version": "2.0.0",
+            "prompt_hash": ("b" * 64)[:8],
+            "cached": False,
+        }
+
+    monkeypatch.setattr(
+        authority_regenerate_mod,
+        "compile_spec_authority_for_version_with_engine",
+        fake_compile,
+    )
+
+    result = authority_regenerate_runner.regenerate(
+        AuthorityRegenerateRequest(
+            project_id=product_id,
+            spec_version_id=approved_spec_version_id,
+            idempotency_key="regen-rejected-001",
+            changed_by="test",
+        )
+    )
+
+    session.expire_all()
+    authority_rows = session.exec(
+        select(CompiledSpecAuthority).where(
+            CompiledSpecAuthority.spec_version_id == approved_spec_version_id
+        )
+    ).all()
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "authority_pending_review"
+    assert result["data"]["authority_id"] != old_authority_id
+    assert result["data"]["pending_authority_id"] == result["data"]["authority_id"]
+    assert len(authority_rows) == 2  # noqa: PLR2004
+    assert {row.authority_id for row in authority_rows} == {
+        old_authority_id,
+        result["data"]["authority_id"],
+    }
+
+
 def test_regenerate_idempotency_replays_completed_mutation(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     monkeypatch: pytest.MonkeyPatch,

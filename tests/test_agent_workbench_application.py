@@ -616,6 +616,36 @@ class _CurrentAuthorityProjection(_FakeAuthorityProjection):
         return result
 
 
+class _RejectedAuthorityProjection(_FakeAuthorityProjection):
+    """Fake authority projection for rejected authority regeneration."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return rejected authority status with a concrete spec version."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "status": "rejected",
+                "rejected_spec_version_id": SPEC_VERSION_ID,
+            }
+        )
+        return result
+
+
+class _RejectedWithPendingAuthorityProjection(_RejectedAuthorityProjection):
+    """Fake authority projection after rejected authority was regenerated."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return rejected history plus a newer pending authority candidate."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "pending_authority_id": 4,
+                "pending_compiled_spec_version_id": SPEC_VERSION_ID,
+            }
+        )
+        return result
+
+
 class _FalseyAuthorityProjection(_FakeAuthorityProjection):
     """Falsey authority projection used to verify explicit dependency checks."""
 
@@ -3375,13 +3405,53 @@ def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() 
     assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]
 
 
-def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation() -> (
+def test_workflow_next_routes_rejected_authority_to_installed_regenerate() -> (
     None
 ):
-    """Do not publish an uninstalled recompile command as an actionable next step."""
+    """Rejected authority must expose the installed regenerate repair path."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityRejectedReadProjection(),
-        authority_projection=_FakeAuthorityProjection(),
+        authority_projection=_RejectedAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            f"agileforge authority regenerate --project-id {PROJECT_ID} "
+            f"--spec-version-id {SPEC_VERSION_ID} "
+            "--idempotency-key <idempotency_key>"
+        )
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["next_actions"] == [
+        {
+            "command": (
+                f"agileforge authority regenerate --project-id {PROJECT_ID} "
+                f"--spec-version-id {SPEC_VERSION_ID} "
+                "--idempotency-key <idempotency_key>"
+            ),
+            "installed": True,
+            "requires_cli_installation": False,
+            "reason": (
+                "Regenerate compiled authority after rejection, then review "
+                "the regenerated pending authority before acceptance."
+            ),
+            "requires": ["idempotency_key"],
+        }
+    ]
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["manual_remediation"] == []
+
+
+def test_workflow_next_routes_regenerated_rejected_authority_to_review() -> None:
+    """A newer pending candidate wins over stale rejected setup state."""
+    review = _FakeAuthorityReview()
+    app = AgentWorkbenchApplication(
+        read_projection=_AuthorityRejectedReadProjection(),
+        authority_projection=_RejectedWithPendingAuthorityProjection(),
+        authority_review=review,
     )
 
     result = app.workflow_next(project_id=PROJECT_ID)
@@ -3389,26 +3459,21 @@ def test_workflow_next_routes_rejected_authority_to_manual_recompile_remediation
     assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == []
     assert result["data"]["blocked_commands"] == []
-    assert result["data"]["next_actions"] == []
-    assert result["data"]["blocked_future_commands"] == [
+    assert result["data"]["blocked_future_commands"] == []
+    assert len(result["data"]["next_actions"]) == 1
+    assert result["data"]["next_actions"][0]["command"] == (
+        f"agileforge authority review --project-id {PROJECT_ID} --open"
+    )
+    assert result["data"]["next_actions"][0]["installed"] is True
+    assert result["data"]["decision_actions_after_review"][0]["command"] == (
+        f"agileforge authority accept --project-id {PROJECT_ID}"
+    )
+    assert review.calls == [
         {
-            "command": (
-                "agileforge project spec update --project-id 7 "
-                "--spec-file <updated-spec-file>"
-            ),
-            "installed": False,
-            "reason": (
-                "Spec update/recompile is required after authority rejection, "
-                "but this command is not installed yet."
-            ),
+            "project_id": PROJECT_ID,
+            "include_spec": "summary",
+            "output_format": "json",
         }
-    ]
-    assert result["data"]["manual_remediation"] == [
-        "No installed CLI command can recompile a rejected authority yet.",
-        (
-            "Revise the spec or compiler, then run the future project spec "
-            "update command when installed."
-        ),
     ]
 
 
@@ -3462,7 +3527,7 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_authority_reject
     """Keep rejected authority setup routing independent from sprint context packs."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityRejectedReadProjection(),
-        authority_projection=_FakeAuthorityProjection(),
+        authority_projection=_RejectedAuthorityProjection(),
     )
 
     def forbidden_context_pack(
@@ -3479,8 +3544,18 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_authority_reject
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_actions"] == []
-    assert result["data"]["blocked_future_commands"][0]["installed"] is False
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge authority regenerate --project-id 7 "
+            "--spec-version-id 3 --idempotency-key <idempotency_key>"
+        )
+    ]
+    assert result["data"]["next_actions"][0]["command"] == (
+        "agileforge authority regenerate --project-id 7 "
+        "--spec-version-id 3 --idempotency-key <idempotency_key>"
+    )
+    assert result["data"]["next_actions"][0]["installed"] is True
 
 
 def test_workflow_next_routes_failed_setup_to_retry_action() -> None:

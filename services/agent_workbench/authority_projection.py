@@ -557,6 +557,8 @@ def _classify_status(
         selection.rejected is not None
         and selection.latest_spec is not None
         and selection.rejected.spec_version_id == selection.latest_spec.spec_version_id
+        and selection.pending_authority is None
+        and _rejection_supersedes_acceptance(selection)
     ):
         status = "rejected"
         reason = "latest_authority_rejected"
@@ -602,6 +604,25 @@ def _classify_status(
         reason=reason,
         stale_reason=stale_reason,
     )
+
+
+def _rejection_supersedes_acceptance(selection: _AuthoritySelection) -> bool:
+    """Return whether the latest rejection remains terminal for current status."""
+    rejected = selection.rejected
+    accepted = selection.accepted
+    if rejected is None or accepted is None:
+        return True
+    if accepted.spec_version_id != rejected.spec_version_id:
+        return True
+    return _decision_sort_key(rejected) > _decision_sort_key(accepted)
+
+
+def _decision_sort_key(decision: SpecAuthorityAcceptance) -> tuple[datetime, int]:
+    """Return the same stable decision ordering used by latest-decision queries."""
+    decided_at = decision.decided_at
+    if decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=UTC)
+    return decided_at, decision.id or 0
 
 
 def _disk_stale_classification(disk_spec: JsonDict) -> _StatusClassification | None:
@@ -760,12 +781,30 @@ def _compiled_authority(
     session: Session,
     spec_version_id: int,
 ) -> CompiledSpecAuthority | None:
-    """Return compiled authority for a spec version."""
+    """Return the latest compiled authority for a spec version."""
     return session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
     ).first()
+
+
+def _compiled_authority_for_acceptance(
+    session: Session,
+    acceptance: SpecAuthorityAcceptance,
+) -> CompiledSpecAuthority | None:
+    """Return the authority candidate recorded by a terminal decision."""
+    if acceptance.pending_authority_id is not None:
+        authority = session.get(
+            CompiledSpecAuthority,
+            acceptance.pending_authority_id,
+        )
+        if (
+            authority is not None
+            and authority.spec_version_id == acceptance.spec_version_id
+        ):
+            return authority
+    return _compiled_authority(session, acceptance.spec_version_id)
 
 
 def _authority_matches_acceptance(
@@ -795,7 +834,7 @@ def _load_authority_selection(
         else None
     )
     authority = (
-        _compiled_authority(session, accepted.spec_version_id)
+        _compiled_authority_for_acceptance(session, accepted)
         if accepted is not None
         else None
     )
@@ -827,11 +866,28 @@ def _pending_authority(
     """Return the latest compiled authority awaiting acceptance, if any."""
     if latest_spec is None or latest_spec.spec_version_id is None:
         return None
-    if accepted is not None and accepted.spec_version_id == latest_spec.spec_version_id:
+    candidate = _compiled_authority(session, latest_spec.spec_version_id)
+    if candidate is None or candidate.authority_id is None:
         return None
-    if rejected is not None and rejected.spec_version_id == latest_spec.spec_version_id:
+    if (
+        accepted is not None
+        and accepted.spec_version_id == latest_spec.spec_version_id
+        and (
+            accepted.pending_authority_id is None
+            or accepted.pending_authority_id == candidate.authority_id
+        )
+    ):
         return None
-    return _compiled_authority(session, latest_spec.spec_version_id)
+    if (
+        rejected is not None
+        and rejected.spec_version_id == latest_spec.spec_version_id
+        and (
+            rejected.pending_authority_id is None
+            or rejected.pending_authority_id == candidate.authority_id
+        )
+    ):
+        return None
+    return candidate
 
 
 class AuthorityProjectionService:

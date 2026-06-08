@@ -589,9 +589,9 @@ def _load_acceptance_context(
         )
 
     authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
     ).first()
     if not authority:
         raise SpecAuthorityAcceptanceError.not_compiled(spec_version_id)
@@ -631,11 +631,25 @@ def _lookup_reusable_accepted_authority(
             compiled_artifact_success=False,
         )
 
-    compiled = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == existing_acceptance.spec_version_id
-        )
-    ).first()
+    compiled = (
+        session.get(CompiledSpecAuthority, existing_acceptance.pending_authority_id)
+        if existing_acceptance.pending_authority_id is not None
+        else None
+    )
+    if (
+        compiled is not None
+        and compiled.spec_version_id != existing_acceptance.spec_version_id
+    ):
+        compiled = None
+    if compiled is None:
+        compiled = session.exec(
+            select(CompiledSpecAuthority)
+            .where(
+                CompiledSpecAuthority.spec_version_id
+                == existing_acceptance.spec_version_id
+            )
+            .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
+        ).first()
     if compiled is None:
         return _AcceptedAuthorityLookup(
             reusable_spec_version_id=None,
@@ -1559,7 +1573,7 @@ def _invoke_and_normalize_spec_authority(
     return _NormalizedCompilerInvocation(raw_json=raw_json, output=normalized)
 
 
-def _compile_spec_authority_output(
+def _compile_spec_authority_output(  # noqa: C901, PLR0911
     *,
     spec_content: str,
     content_ref: str | None,
@@ -1622,7 +1636,23 @@ def _compile_spec_authority_output(
             output=output,
         )
 
-    merged_success = _merge_compilation_successes(successes)
+    merged_output = normalize_compiler_output(
+        SpecAuthorityCompilerOutput(
+            root=_merge_compilation_successes(successes)
+        ).model_dump_json(),
+        source_text=spec_content,
+        source_format=_detect_spec_source_format(spec_content),
+    )
+    if isinstance(merged_output.root, SpecAuthorityCompilationSuccess):
+        postcondition_failure = _authority_postcondition_failure(merged_output.root)
+        if postcondition_failure is not None:
+            merged_output = postcondition_failure
+    if isinstance(merged_output.root, SpecAuthorityCompilationFailure):
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=merged_output,
+        )
+    merged_success = merged_output.root
     missing_item_ids = _missing_iterative_authority_item_ids(
         merged_success,
         item_ids=item_ids,
@@ -1639,7 +1669,7 @@ def _compile_spec_authority_output(
 
     return _NormalizedCompilerInvocation(
         raw_json=full_invocation.raw_json,
-        output=SpecAuthorityCompilerOutput(root=merged_success),
+        output=merged_output,
     )
 
 
@@ -2160,9 +2190,9 @@ def _load_compile_version_context(
 
     product = session.get(Product, spec_version.product_id)
     existing_authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
     ).first()
     return _CompilerVersionContext(
         spec_version=spec_version,
@@ -2881,9 +2911,9 @@ def _load_compiled_authority_or_error(
 ) -> CompiledSpecAuthority | dict[str, Any]:
     """Load the compiled authority row created for the given spec version."""
     authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
     ).first()
     if authority is None:
         return {
@@ -3059,7 +3089,10 @@ def check_spec_authority_status(  # noqa: PLR0911
             select(CompiledSpecAuthority)
             .join(SpecRegistry)
             .where(SpecRegistry.product_id == parsed.product_id)
-            .order_by(cast("Any", CompiledSpecAuthority.spec_version_id).desc())
+            .order_by(
+                cast("Any", CompiledSpecAuthority.spec_version_id).desc(),
+                cast("Any", CompiledSpecAuthority.authority_id).desc(),
+            )
         ).first()
 
         if not latest_authority:
@@ -3145,9 +3178,9 @@ def get_compiled_authority_by_version(
             }
 
         authority = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == parsed.spec_version_id
-            )
+            select(CompiledSpecAuthority)
+            .where(CompiledSpecAuthority.spec_version_id == parsed.spec_version_id)
+            .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
         ).first()
 
         if not authority:

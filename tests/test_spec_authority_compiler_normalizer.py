@@ -1107,7 +1107,116 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
         for entry in normalized.root.source_map
     )
     assert normalized.root.assumptions.count(
-        "Excluded non-normative DECISION item from hard forbidden authority."
+        "Excluded non-normative source item from hard forbidden authority."
+    ) == 1
+
+
+def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
+    """OPEN_QUESTION guidance must not become a hard forbidden invariant."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.open-question-filter",
+                "title": "Open Question Filter Spec",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-05",
+                "updated_at": "2026-06-05",
+                "summary": "Exercise open-question filtering.",
+                "problem_statement": "Open questions are not terminal authority.",
+                "items": [
+                    {
+                        "id": "OPEN_QUESTION.production-action-boundary",
+                        "type": "OPEN_QUESTION",
+                        "status": "proposed",
+                        "title": "Production action boundary",
+                        "statement": (
+                            "Which setpoints are truly controllable, advisory-only, "
+                            "or forbidden in the real production line must be "
+                            "confirmed before any future automation phase."
+                        ),
+                    },
+                    {
+                        "id": "REQ.review-packet",
+                        "type": "REQ",
+                        "status": "accepted",
+                        "title": "Review packet",
+                        "statement": "The system MUST store review packet evidence.",
+                        "level": "MUST",
+                        "verification": "inspection",
+                        "acceptance": ["Review packets include evidence refs."],
+                    },
+                ],
+            }
+        )
+    )
+    raw: dict[str, Any] = {
+        "scope_themes": ["production safety"],
+        "domain": None,
+        "invariants": [
+            {
+                "id": "INV-1111111111111111",
+                "type": "FORBIDDEN_CAPABILITY",
+                "parameters": {
+                    "capability": (
+                        "future production automation before boundary confirmation"
+                    )
+                },
+            },
+            {
+                "id": "INV-2222222222222222",
+                "type": "REQUIRED_FIELD",
+                "parameters": {"field_name": "review packet evidence"},
+            },
+        ],
+        "eligible_feature_rules": [],
+        "gaps": [],
+        "assumptions": [],
+        "source_map": [
+            {
+                "invariant_id": "INV-1111111111111111",
+                "excerpt": (
+                    "Which setpoints are truly controllable, advisory-only, "
+                    "or forbidden in the real production line must be confirmed "
+                    "before any future automation phase."
+                ),
+                "location": "OPEN_QUESTION.production-action-boundary.statement",
+            },
+            {
+                "invariant_id": "INV-2222222222222222",
+                "excerpt": "The system MUST store review packet evidence.",
+                "location": "REQ.review-packet.statement",
+            },
+        ],
+        "compiler_version": "1.0.0",
+        "prompt_hash": "0" * 64,
+    }
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert [invariant.type for invariant in normalized.root.invariants] == [
+        InvariantType.REQUIRED_FIELD
+    ]
+    assert all(
+        "OPEN_QUESTION.production-action-boundary" not in (entry.location or "")
+        for entry in normalized.root.source_map
+    )
+    assert normalized.root.assumptions.count(
+        "Excluded non-normative source item from hard forbidden authority."
     ) == 1
 
 
@@ -2298,6 +2407,76 @@ def test_structured_profile_accepts_controlled_acceptance_concatenation() -> Non
     assert normalized.root.source_map[0].excerpt == combined_excerpt
 
 
+def test_structured_profile_minified_json_repairs_bare_acceptance_location() -> None:
+    """Bare item refs in minified profile JSON must repair to real item fields."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_text = _asa_like_structured_spec_source()
+    first_acceptance = (
+        "The research output compares at least a supervised dynamics model, "
+        "constrained candidate-action search or MPC-style optimization, offline "
+        "reinforcement learning, and deterministic policy-gradient approaches "
+        "such as DDPG, TD3, or SAC when relevant."
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-2323232323232323",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "REQ.tech-stack-model-research",
+            "source_level": "MUST",
+            "parameters": {
+                "subject": "research_spike_output",
+                "fields": [
+                    "compared_approaches",
+                    "evaluated_stack",
+                    "selected_approach",
+                    "rejected_alternatives_with_evidence",
+                    "unresolved_assumptions",
+                    "revisiting_criteria",
+                ],
+                "rule": (
+                    "Research spike compares modeling approaches, evaluates "
+                    "runtime and package choices, and records the selected "
+                    "approach, rejected alternatives, evidence, unresolved "
+                    "assumptions, and revisiting criteria."
+                ),
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-2323232323232323",
+            "excerpt": first_acceptance,
+            "location": "REQ.tech-stack-model-research",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    invariant_id = normalized.root.invariants[0].id
+    entries = [
+        entry
+        for entry in normalized.root.source_map
+        if entry.invariant_id == invariant_id
+    ]
+    locations = {entry.location for entry in entries}
+    assert any(
+        location and location.startswith("REQ.tech-stack-model-research.")
+        for location in locations
+    )
+    assert "REQ.tech-stack-model-research" not in locations
+    assert all(not entry.excerpt.startswith('{"artifact_id"') for entry in entries)
+    assert all(entry.location != "line 1" for entry in entries)
+
+
 def test_structured_profile_accepts_faithful_ellipsis_source_excerpt() -> None:
     """Ellipses may mark omitted real text when fragments stay in order."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
@@ -2680,6 +2859,93 @@ def test_structured_profile_clears_compact_ir_and_preserves_item_evidence() -> N
     _assert_semantic_invariant_ids(success)
     assert success.source_map[0].excerpt == source_quote
     assert success.source_map[0].location == "REQ.audit-evidence.statement"
+
+
+def test_structured_profile_repairs_malformed_acceptance_location() -> None:
+    """Malformed item refs are canonicalized to real profile locations."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    source_text = canonical_spec_json(
+        TechnicalSpecArtifact.model_validate(
+            {
+                "schema_version": "agileforge.spec.v1",
+                "artifact_id": "SPEC.safe-action-test",
+                "title": "Safe Action Test",
+                "status": "draft",
+                "version": "0.1",
+                "created_at": "2026-06-08",
+                "updated_at": "2026-06-08",
+                "summary": "Exercise canonical structured source refs.",
+                "problem_statement": "Safety evidence must cite real item IDs.",
+                "items": [
+                    {
+                        "id": "CONSTRAINT.safe-action-envelope",
+                        "type": "CONSTRAINT",
+                        "status": "accepted",
+                        "title": "Safe action envelope",
+                        "statement": (
+                            "The advisory system must keep recommendations "
+                            "inside an expert-reviewed safe action envelope."
+                        ),
+                        "level": "MUST",
+                        "verification": "inspection",
+                        "acceptance": [
+                            (
+                                "Recommendations stay inside the safe action "
+                                "envelope before operators receive them."
+                            ),
+                            (
+                                "Unsafe candidate actions are rejected before "
+                                "operator recommendation."
+                            ),
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-1111111111111111",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.safe-action-envelope",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "unsafe candidate action",
+                "target": "operator recommendation",
+                "expected_response": "candidate action is rejected",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-1111111111111111",
+            "excerpt": (
+                "Unsafe candidate actions are rejected before operator "
+                "recommendation."
+            ),
+            "location": "CONSTRAINT.safe-action-envelope: acceptance[1]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=source_text,
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.source_map[0].location == (
+        "CONSTRAINT.safe-action-envelope.acceptance[1]"
+    )
+    assert ": acceptance[" not in normalized.root.source_map[0].location
 
 
 def test_structured_profile_json_blob_source_map_repairs_to_item_quote() -> None:

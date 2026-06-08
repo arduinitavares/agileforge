@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -13,8 +13,13 @@ from sqlalchemy import update
 from sqlmodel import Session, select
 
 from models.agent_workbench import CliMutationLedger
+from models.core import Product
 from models.db import get_engine
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.specs import (
+    CompiledSpecAuthority,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import error_envelope, success_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
@@ -87,7 +92,7 @@ class AuthorityRegenerateRunner:
                 compile_result=compile_result,
             )
 
-        authority = self._load_compiled_authority(request.spec_version_id)
+        authority = self._publish_pending_authority_candidate(request)
         if authority is None or authority.authority_id is None:
             return self._missing_authority_response(
                 request=request,
@@ -391,16 +396,78 @@ class AuthorityRegenerateRunner:
                 )
         return None
 
-    def _load_compiled_authority(
-        self, spec_version_id: int
+    def _publish_pending_authority_candidate(
+        self, request: AuthorityRegenerateRequest
     ) -> CompiledSpecAuthority | None:
-        """Load the persisted compiled authority for a spec version."""
+        """Return a pending authority candidate not bound to a terminal decision."""
         with Session(self.engine) as session:
-            return session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == spec_version_id
-                )
-            ).first()
+            authority = _latest_compiled_authority(
+                session,
+                spec_version_id=request.spec_version_id,
+            )
+            if authority is None or authority.authority_id is None:
+                return None
+            if not _has_terminal_decision_for_authority(
+                session=session,
+                request=request,
+                authority_id=authority.authority_id,
+            ):
+                return authority
+            clone = CompiledSpecAuthority(
+                spec_version_id=authority.spec_version_id,
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                compiled_at=datetime.now(UTC),
+                compiled_artifact_json=authority.compiled_artifact_json,
+                scope_themes=authority.scope_themes,
+                invariants=authority.invariants,
+                eligible_feature_ids=authority.eligible_feature_ids,
+                rejected_features=authority.rejected_features,
+                spec_gaps=authority.spec_gaps,
+            )
+            session.add(clone)
+            product = session.get(Product, request.project_id)
+            if product is not None:
+                product.compiled_authority_json = clone.compiled_artifact_json
+                session.add(product)
+            session.commit()
+            session.refresh(clone)
+            return clone
+
+
+def _latest_compiled_authority(
+    session: Session,
+    *,
+    spec_version_id: int,
+) -> CompiledSpecAuthority | None:
+    """Return the newest compiled authority candidate for a spec version."""
+    return session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
+    ).first()
+
+
+def _has_terminal_decision_for_authority(
+    *,
+    session: Session,
+    request: AuthorityRegenerateRequest,
+    authority_id: int,
+) -> bool:
+    """Return whether a compiled authority id was already accepted or rejected."""
+    return (
+        session.exec(
+            select(SpecAuthorityAcceptance)
+            .where(SpecAuthorityAcceptance.product_id == request.project_id)
+            .where(
+                SpecAuthorityAcceptance.spec_version_id
+                == request.spec_version_id
+            )
+            .where(SpecAuthorityAcceptance.pending_authority_id == authority_id)
+            .where(SpecAuthorityAcceptance.status.in_(("accepted", "rejected")))
+        ).first()
+        is not None
+    )
 
 
 def _ledger_error_response(

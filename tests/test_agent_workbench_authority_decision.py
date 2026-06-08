@@ -266,6 +266,32 @@ def _seed_pending_review_project(
     return project_id, spec_version_id, authority_id, spec_path
 
 
+def _seed_regenerated_pending_authority(
+    session: Session,
+    *,
+    spec_version_id: int,
+    source_excerpt: str = "The review output must include guard tokens.",
+) -> int:
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version=COMPILER_VERSION,
+        prompt_hash="b" * 64,
+        compiled_at=datetime(2026, 5, 17, 14, tzinfo=UTC),
+        compiled_artifact_json=_compiled_success_json(source_excerpt=source_excerpt),
+        scope_themes=json.dumps(["Authority review"]),
+        invariants=json.dumps(
+            [{"id": INVARIANT_ID, "text": "guard_tokens are still required"}]
+        ),
+        eligible_feature_ids=json.dumps([]),
+        rejected_features=json.dumps([]),
+        spec_gaps=json.dumps([]),
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    return require_id(authority.authority_id, "authority_id")
+
+
 def _complete_spec() -> str:
     return _agileforge_spec_profile_json()
 
@@ -529,27 +555,25 @@ def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
     assert data["setup_status"] == "authority_rejected"
     assert data["fsm_state"] == "SETUP_REQUIRED"
     assert data["reason"] == "Spec needs revision."
-    assert data["next_actions"] == []
-    assert data["blocked_future_commands"] == [
+    expected_regenerate_command = (
+        f"agileforge authority regenerate --project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["next_actions"] == [
         {
-            "command": (
-                f"agileforge project spec update --project-id {project_id} "
-                f"--spec-file {snapshot.resolved_spec_path}"
-            ),
-            "installed": False,
+            "command": expected_regenerate_command,
+            "installed": True,
+            "requires_cli_installation": False,
             "reason": (
-                "Spec update/recompile is required after rejection, but this "
-                "command is not installed yet."
+                "Regenerate compiled authority after rejection, then review "
+                "the regenerated pending authority before acceptance."
             ),
+            "requires": ["idempotency_key"],
         }
     ]
-    assert data["manual_remediation"] == [
-        "No installed CLI command can recompile a rejected authority yet.",
-        (
-            "Revise the spec or compiler, then run the future project spec "
-            "update command when installed."
-        ),
-    ]
+    assert data["blocked_future_commands"] == []
+    assert data["manual_remediation"] == []
     decision = session.get(SpecAuthorityAcceptance, data["rejected_decision_id"])
     assert decision is not None
     assert decision.status == "rejected"
@@ -563,6 +587,184 @@ def test_reject_with_review_token_records_rejection_and_keeps_setup_required(
     assert state["setup_status"] == "authority_rejected"
     assert state["setup_error_code"] == "AUTHORITY_REJECTED"
     assert state["setup_error"] == "Spec needs revision."
+
+
+def test_reject_regenerated_pending_authority_after_stale_rejected_workflow_state(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, old_authority_id, _path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+        )
+    )
+    workflow = _workflow_for(project_id)
+    runner = _runner(session, workflow)
+    old_snapshot = _snapshot(session, project_id)
+    old_reject = runner.reject(
+        _reject_request(
+            project_id=project_id,
+            review_token=old_snapshot.review_token,
+            idempotency_key="reject-old-authority",
+        )
+    )
+    assert old_reject["ok"] is True
+    assert workflow.get_session_status(str(project_id))["setup_status"] == (
+        "authority_rejected"
+    )
+
+    new_authority_id = _seed_regenerated_pending_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
+    assert new_authority_id != old_authority_id
+    new_snapshot = _snapshot(session, project_id)
+    assert new_snapshot.pending_authority_id == new_authority_id
+    assert new_snapshot.setup_status == "authority_pending_review"
+
+    result = runner.reject(
+        _reject_request(
+            project_id=project_id,
+            review_token=new_snapshot.review_token,
+            idempotency_key="reject-regenerated-authority",
+            reason="Regenerated authority still needs revision.",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["pending_authority_id"] == new_authority_id
+    assert result["data"]["setup_status"] == "authority_rejected"
+    assert result["data"]["reason"] == "Regenerated authority still needs revision."
+    decision = session.get(
+        SpecAuthorityAcceptance,
+        result["data"]["rejected_decision_id"],
+    )
+    assert decision is not None
+    assert decision.pending_authority_id == new_authority_id
+    assert decision.terminal_decision_key == terminal_decision_key(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        pending_authority_id=new_authority_id,
+    )
+    assert {row.pending_authority_id for row in _terminal_rows(session)} == {
+        old_authority_id,
+        new_authority_id,
+    }
+
+
+def test_accept_regenerated_pending_authority_after_stale_rejected_workflow_state(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, old_authority_id, _path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+        )
+    )
+    workflow = _workflow_for(project_id)
+    runner = _runner(session, workflow)
+    old_snapshot = _snapshot(session, project_id)
+    old_reject = runner.reject(
+        _reject_request(
+            project_id=project_id,
+            review_token=old_snapshot.review_token,
+            idempotency_key="accept-path-reject-old-authority",
+        )
+    )
+    assert old_reject["ok"] is True
+
+    new_authority_id = _seed_regenerated_pending_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
+    assert new_authority_id != old_authority_id
+    new_snapshot = _snapshot(session, project_id)
+
+    result = runner.accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=new_snapshot.review_token,
+            idempotency_key="accept-regenerated-authority",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["authority_id"] == new_authority_id
+    assert result["data"]["setup_status"] == "passed"
+    assert result["data"]["fsm_state"] == "VISION_INTERVIEW"
+    decision = session.get(
+        SpecAuthorityAcceptance,
+        result["data"]["accepted_decision_id"],
+    )
+    assert decision is not None
+    assert decision.pending_authority_id == new_authority_id
+    assert decision.terminal_decision_key == terminal_decision_key(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        pending_authority_id=new_authority_id,
+    )
+    assert workflow.get_session_status(str(project_id))["setup_status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("fsm_state", "setup_status"),
+    [
+        ("SETUP_REQUIRED", "failed"),
+        ("SETUP_REQUIRED", "passed"),
+        ("VISION_INTERVIEW", "authority_rejected"),
+    ],
+)
+def test_regenerated_pending_authority_blocks_other_stale_workflow_states(
+    session: Session,
+    tmp_path: Path,
+    fsm_state: str,
+    setup_status: str,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, _old_authority_id, _path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+        )
+    )
+    workflow = _workflow_for(project_id)
+    runner = _runner(session, workflow)
+    old_snapshot = _snapshot(session, project_id)
+    old_reject = runner.reject(
+        _reject_request(
+            project_id=project_id,
+            review_token=old_snapshot.review_token,
+            idempotency_key=f"narrow-guard-reject-old-{fsm_state}-{setup_status}",
+        )
+    )
+    assert old_reject["ok"] is True
+    _seed_regenerated_pending_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
+    new_snapshot = _snapshot(session, project_id)
+    workflow.sessions[str(project_id)] = {
+        **workflow.sessions[str(project_id)],
+        "fsm_state": fsm_state,
+        "setup_status": setup_status,
+    }
+
+    result = runner.reject(
+        _reject_request(
+            project_id=project_id,
+            review_token=new_snapshot.review_token,
+            idempotency_key=f"narrow-guard-reject-new-{fsm_state}-{setup_status}",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "STALE_STATE"
+    assert result["errors"][0]["details"]["actual_state"] == fsm_state
+    assert result["errors"][0]["details"]["actual_setup_status"] == setup_status
 
 
 def test_accept_ignores_removed_candidate_findings(

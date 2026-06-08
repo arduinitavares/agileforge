@@ -51,11 +51,6 @@ class SpecRegistry(SQLModel, table=True):
     )
 
     product: Product = Relationship(back_populates="spec_versions")
-    compiled_authority: CompiledSpecAuthority = Relationship(
-        back_populates="spec_version",
-        sa_relationship_kwargs={"uselist": False},
-    )
-
 
 class CompiledSpecAuthority(SQLModel, table=True):
     """Cached compilation output for an approved spec version."""
@@ -64,7 +59,6 @@ class CompiledSpecAuthority(SQLModel, table=True):
     authority_id: int | None = Field(default=None, primary_key=True)
     spec_version_id: int = Field(
         foreign_key="spec_registry.spec_version_id",
-        unique=True,
         index=True,
     )
     compiler_version: str = Field(
@@ -105,7 +99,7 @@ class CompiledSpecAuthority(SQLModel, table=True):
         description="JSON array of detected spec ambiguities or gaps",
     )
 
-    spec_version: SpecRegistry = Relationship(back_populates="compiled_authority")
+    spec_version: SpecRegistry = Relationship()
 
 
 class SpecAuthorityAcceptance(SQLModel, table=True):

@@ -657,9 +657,9 @@ class ReadProjectionService:
                 )
             if spec_version_id is not None:
                 authority = session.exec(
-                    select(CompiledSpecAuthority).where(
-                        CompiledSpecAuthority.spec_version_id == spec_version_id
-                    )
+                    select(CompiledSpecAuthority)
+                    .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+                    .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
                 ).first()
                 if authority is not None:
                     load_result = load_compiled_artifact(authority)

@@ -7,7 +7,7 @@ and safely handle schema drift without data loss.
 
 Design:
 - All migrations are idempotent (safe to run multiple times).
-- Migrations only ADD columns/tables, never DROP or modify existing data.
+- Migrations preserve existing data while bringing schema contracts forward.
 - Each migration logs its action for observability.
 - Failures are raised as RuntimeError with clear messages.
 
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS spec_registry (
 COMPILED_SPEC_AUTHORITY_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS compiled_spec_authority (
     authority_id INTEGER PRIMARY KEY,
-    spec_version_id INTEGER NOT NULL UNIQUE REFERENCES spec_registry(spec_version_id),
+    spec_version_id INTEGER NOT NULL REFERENCES spec_registry(spec_version_id),
     compiler_version VARCHAR NOT NULL,
     prompt_hash VARCHAR NOT NULL,
     compiled_at DATETIME NOT NULL,
@@ -233,6 +233,7 @@ SPEC_AUTHORITY_ACCEPTANCE_INDEXES: dict[str, list[str]] = {
 
 SPEC_AUTHORITY_TERMINAL_DECISION_INDEX = "uq_spec_authority_terminal_decision_key"
 SPEC_AUTHORITY_TERMINAL_DECISION_INDEX_PREDICATE = "terminal_decision_key IS NOT NULL"
+COMPILED_AUTHORITY_SPEC_VERSION_INDEX = "ix_compiled_spec_authority_spec_version_id"
 
 
 def migrate_spec_authority_tables(engine: Engine) -> list[str]:
@@ -263,6 +264,19 @@ def migrate_spec_authority_tables(engine: Engine) -> list[str]:
         "TEXT",
     ):
         actions.append("added column: compiled_spec_authority.compiled_artifact_json")
+    if _migrate_compiled_authority_candidate_contract(engine):
+        actions.append(
+            "rebuilt table: compiled_spec_authority removed unique spec_version_id"
+        )
+    if _ensure_index_exists(
+        engine,
+        "compiled_spec_authority",
+        COMPILED_AUTHORITY_SPEC_VERSION_INDEX,
+        ["spec_version_id"],
+    ):
+        actions.append(
+            f"created index: {COMPILED_AUTHORITY_SPEC_VERSION_INDEX}"
+        )
 
     # 3. Ensure spec_authority_acceptance table exists
     if _ensure_table_exists(
@@ -273,6 +287,82 @@ def migrate_spec_authority_tables(engine: Engine) -> list[str]:
     actions.extend(_migrate_spec_authority_acceptance_contract(engine))
 
     return actions
+
+
+def _migrate_compiled_authority_candidate_contract(engine: Engine) -> bool:
+    """Allow multiple authority candidates per spec version for regeneration."""
+    if "compiled_spec_authority" not in _get_existing_tables(engine):
+        return False
+    if not _compiled_authority_has_unique_spec_version_id(engine):
+        return False
+
+    existing_columns = _get_existing_columns(engine, "compiled_spec_authority")
+    canonical_columns = [
+        "authority_id",
+        "spec_version_id",
+        "compiler_version",
+        "prompt_hash",
+        "compiled_at",
+        "compiled_artifact_json",
+        "scope_themes",
+        "invariants",
+        "eligible_feature_ids",
+        "rejected_features",
+        "spec_gaps",
+    ]
+    insert_columns = [
+        column for column in canonical_columns if column in existing_columns
+    ]
+    column_sql = ", ".join(insert_columns)
+    logger.info(
+        "db.migration.rebuild_table",
+        extra={"table_name": "compiled_spec_authority"},
+    )
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS compiled_spec_authority__new"))
+        conn.execute(text(COMPILED_SPEC_AUTHORITY_CREATE_SQL.replace(
+            "compiled_spec_authority",
+            "compiled_spec_authority__new",
+            1,
+        )))
+        conn.execute(
+            text(
+                "INSERT INTO compiled_spec_authority__new "  # noqa: S608
+                f"({column_sql}) SELECT {column_sql} FROM compiled_spec_authority"
+            )
+        )
+        conn.execute(text("DROP TABLE compiled_spec_authority"))
+        conn.execute(
+            text(
+                "ALTER TABLE compiled_spec_authority__new "
+                "RENAME TO compiled_spec_authority"
+            )
+        )
+    return True
+
+
+def _compiled_authority_has_unique_spec_version_id(engine: Engine) -> bool:
+    """Return whether spec_version_id is still constrained as unique."""
+    with engine.connect() as conn:
+        index_rows = (
+            conn.execute(text("PRAGMA index_list('compiled_spec_authority')"))
+            .mappings()
+            .all()
+        )
+        for index_row in index_rows:
+            if int(index_row["unique"]) != 1:
+                continue
+            indexed_columns = [
+                row["name"]
+                for row in conn.execute(
+                    text(f"PRAGMA index_info('{index_row['name']}')")
+                )
+                .mappings()
+                .all()
+            ]
+            if indexed_columns == ["spec_version_id"]:
+                return True
+    return False
 
 
 def _migrate_spec_authority_acceptance_contract(engine: Engine) -> list[str]:

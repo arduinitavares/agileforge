@@ -76,8 +76,8 @@ _META_POLICY_ASSUMPTION = (
 _DUPLICATE_INVARIANT_ASSUMPTION = (
     "Removed duplicate compiled invariant entries with identical type and parameters."
 )
-_NON_NORMATIVE_DECISION_ASSUMPTION = (
-    "Excluded non-normative DECISION item from hard forbidden authority."
+_NON_NORMATIVE_SOURCE_ASSUMPTION = (
+    "Excluded non-normative source item from hard forbidden authority."
 )
 _FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
 _RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
@@ -1151,6 +1151,11 @@ def _structured_item_id_from_reference(reference: str | None) -> str | None:
     return match.group(0) if match else None
 
 
+def _structured_reference_is_source_note(reference: str | None) -> bool:
+    """Return whether a structured source reference points at source_notes."""
+    return ".source_notes" in (reference or "")
+
+
 def _source_map_item_ids_by_invariant(
     success: SpecAuthorityCompilationSuccess,
 ) -> dict[str, set[str]]:
@@ -1214,14 +1219,14 @@ def _behavioral_source_excerpts_support_invariant(
     return False
 
 
-def _filter_non_normative_decision_hard_bans(
+def _filter_non_normative_source_hard_bans(
     success: SpecAuthorityCompilationSuccess,
     *,
     source_text: str,
     original_invariants: list[Invariant] | None = None,
     original_source_map: list[SourceMapEntry] | None = None,
 ) -> int:
-    """Remove hard bans sourced only from non-normative DECISION items."""
+    """Remove hard bans sourced only from non-normative source items."""
     source_items = _structured_profile_items_by_id(source_text)
     if not source_items or not success.invariants:
         return 0
@@ -1233,7 +1238,7 @@ def _filter_non_normative_decision_hard_bans(
     removed_ids: set[str] = set()
     kept_invariants: list[Invariant] = []
 
-    def entries_are_only_non_normative_decisions(
+    def entries_are_only_non_normative_sources(
         entries: list[SourceMapEntry],
     ) -> bool:
         if not entries:
@@ -1252,10 +1257,7 @@ def _filter_non_normative_decision_hard_bans(
         ]
         if len(known_items) != len(source_item_ids):
             return False
-        return all(
-            item.get("type") == "DECISION" and item.get("level") is None
-            for item in known_items
-        )
+        return all(_is_non_normative_source_item(item) for item in known_items)
 
     for index, invariant in enumerate(success.invariants):
         if invariant.type != InvariantType.FORBIDDEN_CAPABILITY:
@@ -1263,7 +1265,7 @@ def _filter_non_normative_decision_hard_bans(
             continue
 
         invariant_entries = current_entries.get(invariant.id, [])
-        if not entries_are_only_non_normative_decisions(invariant_entries):
+        if not entries_are_only_non_normative_sources(invariant_entries):
             kept_invariants.append(invariant)
             continue
 
@@ -1276,7 +1278,7 @@ def _filter_non_normative_decision_hard_bans(
             source_entries = original_entries.get(original_id)
             if source_entries is None and index < len(original_source_map):
                 source_entries = [original_source_map[index]]
-            if not entries_are_only_non_normative_decisions(source_entries or []):
+            if not entries_are_only_non_normative_sources(source_entries or []):
                 kept_invariants.append(invariant)
                 continue
 
@@ -1289,9 +1291,16 @@ def _filter_non_normative_decision_hard_bans(
     success.source_map = [
         entry for entry in success.source_map if entry.invariant_id not in removed_ids
     ]
-    if _NON_NORMATIVE_DECISION_ASSUMPTION not in success.assumptions:
-        success.assumptions.append(_NON_NORMATIVE_DECISION_ASSUMPTION)
+    if _NON_NORMATIVE_SOURCE_ASSUMPTION not in success.assumptions:
+        success.assumptions.append(_NON_NORMATIVE_SOURCE_ASSUMPTION)
     return len(removed_ids)
+
+
+def _is_non_normative_source_item(source_item: Mapping[str, Any]) -> bool:
+    """Return whether a profile item is not terminal authority by itself."""
+    return source_item.get("type") in {"DECISION", "OPEN_QUESTION"} and (
+        source_item.get("level") is None
+    )
 
 
 def _structured_authority_metadata_errors(
@@ -1552,6 +1561,7 @@ def _best_supported_source_candidate(
             if (
                 _structured_item_id_from_reference(candidate.location)
                 == invariant.source_item_id
+                and not _structured_reference_is_source_note(candidate.location)
             )
         ]
         if item_candidates:
@@ -1606,6 +1616,75 @@ def _structured_entry_match_candidates(
         if candidate.priority == _STRUCTURED_SOURCE_EXACT_LOCATION_PRIORITY
     )
     return candidates
+
+
+def _structured_source_map_entry_has_valid_location(
+    entry: SourceMapEntry,
+    *,
+    source_text: str,
+) -> bool:
+    """Return whether a structured source_map entry cites a real profile field."""
+    source_item_id = _source_map_entry_item_id(entry)
+    if source_item_id is None:
+        return False
+    source_item = _structured_profile_items_by_id(source_text).get(source_item_id)
+    if source_item is None:
+        return False
+    real_texts = _structured_item_real_texts(source_item)
+    if not _excerpt_matches_structured_real_text(
+        _compact_whitespace(entry.excerpt),
+        real_texts,
+    ):
+        return False
+    return any(
+        candidate.location == entry.location
+        and _structured_item_id_from_reference(candidate.location) == source_item_id
+        for candidate in _structured_profile_source_candidates(
+            source_text,
+            location_hint=entry.location,
+        )
+    )
+
+
+def _structured_source_map_entry_has_grounded_item_ref(
+    entry: SourceMapEntry,
+    invariant: Invariant,
+    *,
+    source_text: str,
+) -> bool:
+    """Return whether a bare item reference has grounded supporting evidence."""
+    source_item_id = _source_map_entry_item_id(entry)
+    if source_item_id is None or entry.location != source_item_id:
+        return False
+    source_item = _structured_profile_items_by_id(source_text).get(source_item_id)
+    if source_item is None:
+        return False
+    compact_excerpt = _compact_whitespace(entry.excerpt)
+    if not _excerpt_matches_structured_real_text(
+        compact_excerpt,
+        _structured_item_real_texts(source_item),
+    ):
+        return False
+    return _source_map_support_error(invariant, compact_excerpt) is None
+
+
+def _structured_source_map_entry_has_canonical_location(
+    entry: SourceMapEntry,
+    *,
+    source_text: str,
+) -> bool:
+    """Return whether a source_map entry already names a structured field."""
+    source_item_id = _source_map_entry_item_id(entry)
+    if source_item_id is None:
+        return False
+    return any(
+        candidate.location == entry.location
+        and _structured_item_id_from_reference(candidate.location) == source_item_id
+        for candidate in _structured_profile_source_candidates(
+            source_text,
+            location_hint=entry.location,
+        )
+    )
 
 
 def _repair_structured_behavior_source_map_entries(
@@ -1722,21 +1801,56 @@ def _repair_structured_source_map_from_source_text(
                 source_text=source_text,
             ),
         )
-        if invariant is not None and _is_behavioral_invariant(invariant):
+        if (
+            invariant is not None
+            and _is_behavioral_invariant(invariant)
+            and _structured_reference_is_source_note(entry.location)
+        ):
+            repaired.append(entry)
+            continue
+        if (
+            invariant is not None
+            and _structured_source_map_entry_has_grounded_item_ref(
+                entry,
+                invariant,
+                source_text=source_text,
+            )
+        ):
+            repaired.append(entry)
+            continue
+        if (
+            invariant is not None
+            and _is_behavioral_invariant(invariant)
+            and _structured_source_map_entry_has_valid_location(
+                entry,
+                source_text=source_text,
+            )
+        ):
+            repaired.append(entry)
+            continue
+        if (
+            invariant is not None
+            and _is_behavioral_invariant(invariant)
+            and _structured_source_map_entry_has_canonical_location(
+                entry,
+                source_text=source_text,
+            )
+        ):
             repaired.append(entry)
             continue
 
-        candidates = _candidate_evidence_from_source_text(
-            entry,
-            source_text=source_text,
-        )
+        candidates = [
+            _SourceEvidenceCandidate(
+                excerpt=_compact_whitespace(entry.excerpt),
+                location=entry.location,
+            )
+        ]
         candidates.extend(
             _structured_profile_source_candidates(
                 source_text,
                 location_hint=entry.location,
             )
         )
-        candidates.extend(_source_text_line_candidates(source_text))
         if invariant is None:
             repaired.append(entry)
             continue
@@ -2115,7 +2229,7 @@ def normalize_compiler_output(
         _rewrite_source_map_invariant_ids(success, original_invariants)
 
     if source_format == "agileforge.spec.v1" and source_text:
-        _filter_non_normative_decision_hard_bans(
+        _filter_non_normative_source_hard_bans(
             success,
             source_text=source_text,
             original_invariants=original_invariants,
