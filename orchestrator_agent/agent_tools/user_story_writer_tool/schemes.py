@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+STORY_QUALITY_SCHEMA_VERSION = "agileforge.story_quality.v1"
+
 _LOW_WARNING_PLACEHOLDER_STRINGS = {
     "only include this key if score is low",
     "only include this key if the score is low",
@@ -12,6 +14,33 @@ _LOW_WARNING_PLACEHOLDER_STRINGS = {
     "none",
     "n/a",
 }
+
+
+class StoryQualityFinding(BaseModel):
+    """Machine-readable Story draft quality finding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Annotated[
+        str,
+        Field(min_length=3, description="Stable quality finding code."),
+    ]
+    severity: Annotated[
+        Literal["blocking", "warning"],
+        Field(description="Whether this finding blocks save/review eligibility."),
+    ]
+    message: Annotated[
+        str,
+        Field(min_length=3, description="Reader-facing finding message."),
+    ]
+    affected_story_indexes: list[int] = Field(
+        default_factory=list,
+        description="1-based indexes of draft stories affected by the finding.",
+    )
+    affected_story_titles: list[str] = Field(
+        default_factory=list,
+        description="Draft story titles affected by the finding.",
+    )
 
 
 class UserStoryItem(BaseModel):
@@ -63,6 +92,13 @@ class UserStoryItem(BaseModel):
         description=(
             "List of specific artifacts, documents, or deliverables this story "
             "produces."
+        ),
+    )
+    research_caveats: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Advisory uncertainty or research risk notes. These do not by "
+            "themselves lower INVEST score."
         ),
     )
     decomposition_warning: str | None = Field(
@@ -246,6 +282,29 @@ class UserStoryWriterOutput(BaseModel):
             description="List of decomposed, INVEST-compliant user stories.",
         ),
     ]
+    quality_schema_version: Literal["agileforge.story_quality.v1"] = Field(
+        default=STORY_QUALITY_SCHEMA_VERSION,
+        description="Version of the Story draft quality contract.",
+    )
+    coverage_status: Literal[
+        "complete",
+        "partial_capacity_limited",
+        "needs_clarification",
+    ] = Field(
+        default="complete",
+        description="Whether this bounded attempt fully covers the request.",
+    )
+    remaining_scope: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concrete uncovered terms, slices, or requested scope items when "
+            "coverage_status is not complete."
+        ),
+    )
+    quality_findings: list[StoryQualityFinding] = Field(
+        default_factory=list,
+        description="Machine-readable draft quality findings.",
+    )
     is_complete: Annotated[
         bool,
         Field(

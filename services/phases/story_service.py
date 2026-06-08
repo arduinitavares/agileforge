@@ -27,6 +27,8 @@ _EFFORT_TO_STORY_POINTS: dict[str, int] = {
     "L": 5,
     "XL": 8,
 }
+_INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
+_STORY_QUALITY_SCHEMA_VERSION = "agileforge.story_quality.v1"
 
 
 class StoryPhaseError(Exception):
@@ -364,7 +366,10 @@ def _attach_story_attempt_guards(
     output_artifact["artifact_fingerprint"] = artifact_fingerprint
 
     draft_projection = runtime.get("draft_projection")
-    if isinstance(draft_projection, dict):
+    if (
+        isinstance(draft_projection, dict)
+        and draft_projection.get("latest_reusable_attempt_id") == attempt_id
+    ):
         draft_projection["artifact_fingerprint"] = artifact_fingerprint
 
 
@@ -435,7 +440,103 @@ def story_save_payload(runtime: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not artifact.get("is_complete"):
         return None
+    if not story_quality_saveable(artifact):
+        return None
     return artifact
+
+
+def _story_counts_from_artifact(artifact: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    stories = artifact.get("user_stories")
+    if not isinstance(stories, list):
+        return 0, _zero_invest_score_counts()
+
+    counts = _zero_invest_score_counts()
+    for story in stories:
+        if not isinstance(story, dict):
+            continue
+        score = story.get("invest_score")
+        if isinstance(score, str):
+            counts[score] = counts.get(score, 0) + 1
+    return len(stories), counts
+
+
+def _zero_invest_score_counts() -> dict[str, int]:
+    return dict.fromkeys(_INVEST_SCORES, 0)
+
+
+def _quality_findings_from_artifact(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    quality = artifact.get("quality")
+    findings = (
+        quality.get("quality_findings")
+        if isinstance(quality, dict)
+        else artifact.get("quality_findings")
+    )
+    if not isinstance(findings, list):
+        return []
+    return [finding for finding in findings if isinstance(finding, dict)]
+
+
+def story_quality_summary(artifact: dict[str, Any] | None) -> dict[str, Any]:
+    """Return save/review quality summary for a Story draft artifact."""
+    if not isinstance(artifact, dict):
+        return {
+            "schema_version": _STORY_QUALITY_SCHEMA_VERSION,
+            "coverage_status": "needs_clarification",
+            "remaining_scope": [],
+            "story_count": 0,
+            "invest_score_counts": _zero_invest_score_counts(),
+            "requested_story_count": None,
+            "quality_findings": [],
+            "blocking_findings": [],
+            "saveable": False,
+        }
+
+    quality = artifact.get("quality")
+    quality = quality if isinstance(quality, dict) else {}
+    story_count, invest_score_counts = _story_counts_from_artifact(artifact)
+    coverage_status = quality.get("coverage_status") or artifact.get(
+        "coverage_status",
+    )
+    if not isinstance(coverage_status, str):
+        coverage_status = (
+            "complete" if artifact.get("is_complete") else "needs_clarification"
+        )
+    remaining_scope = quality.get("remaining_scope") or artifact.get("remaining_scope")
+    if not isinstance(remaining_scope, list):
+        remaining_scope = []
+    remaining_scope = [item for item in remaining_scope if isinstance(item, str)]
+    findings = _quality_findings_from_artifact(artifact)
+    blocking = [
+        finding for finding in findings if finding.get("severity") == "blocking"
+    ]
+    all_low = story_count > 0 and invest_score_counts.get("Low", 0) == story_count
+    computed_saveable = (
+        bool(artifact.get("is_complete"))
+        and coverage_status == "complete"
+        and not blocking
+        and not all_low
+    )
+    if quality.get("saveable") is False:
+        computed_saveable = False
+    return {
+        "schema_version": quality.get(
+            "schema_version",
+            _STORY_QUALITY_SCHEMA_VERSION,
+        ),
+        "coverage_status": coverage_status,
+        "remaining_scope": remaining_scope,
+        "story_count": story_count,
+        "invest_score_counts": invest_score_counts,
+        "requested_story_count": quality.get("requested_story_count"),
+        "quality_findings": findings,
+        "blocking_findings": blocking,
+        "saveable": computed_saveable,
+    }
+
+
+def story_quality_saveable(artifact: dict[str, Any] | None) -> bool:
+    """Return whether a draft artifact passes the Story quality save gate."""
+    return bool(story_quality_summary(artifact)["saveable"])
 
 
 def _validate_story_save_required_guards(
@@ -625,10 +726,27 @@ def story_retry_target_attempt_id(runtime: dict[str, Any]) -> str | None:
     return attempt_id
 
 
+def _latest_story_attempt(runtime: dict[str, Any]) -> dict[str, Any] | None:
+    attempts = runtime.get("attempt_history") or []
+    for attempt in reversed(attempts):
+        if isinstance(attempt, dict):
+            return attempt
+    return None
+
+
+def _attempt_output_artifact(attempt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(attempt, dict):
+        return None
+    artifact = attempt.get("output_artifact")
+    return artifact if isinstance(artifact, dict) else None
+
+
 def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
     draft_projection = runtime.get("draft_projection") or {}
     retry_target_attempt_id = story_retry_target_attempt_id(runtime)
     save_payload = story_save_payload(runtime)
+    latest_attempt = _latest_story_attempt(runtime)
+    latest_artifact = _attempt_output_artifact(latest_attempt)
 
     current_draft = None
     if draft_projection:
@@ -640,6 +758,27 @@ def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
         artifact_fingerprint = draft_projection.get("artifact_fingerprint")
         if isinstance(artifact_fingerprint, str) and artifact_fingerprint:
             current_draft["artifact_fingerprint"] = artifact_fingerprint
+
+    summary_attempt = latest_attempt
+    summary_artifact = latest_artifact
+    if summary_attempt is None and current_draft is not None:
+        summary_attempt = _find_attempt_by_id(
+            runtime,
+            str(current_draft.get("attempt_id")),
+        )
+        summary_artifact = _attempt_output_artifact(summary_attempt)
+    quality = story_quality_summary(summary_artifact)
+    attempt_id = (
+        summary_attempt.get("attempt_id") if isinstance(summary_attempt, dict) else None
+    )
+    artifact_fingerprint = None
+    if isinstance(summary_attempt, dict):
+        artifact_fingerprint = summary_attempt.get("artifact_fingerprint")
+    if not isinstance(artifact_fingerprint, str) and isinstance(
+        summary_artifact,
+        dict,
+    ):
+        artifact_fingerprint = summary_artifact.get("artifact_fingerprint")
 
     save_summary: dict[str, Any] = {
         "available": bool(save_payload),
@@ -662,6 +801,18 @@ def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
         )
 
     return {
+        "attempt_id": attempt_id if isinstance(attempt_id, str) else None,
+        "artifact_fingerprint": (
+            artifact_fingerprint if isinstance(artifact_fingerprint, str) else None
+        ),
+        "story_count": quality["story_count"],
+        "invest_score_counts": quality["invest_score_counts"],
+        "is_reusable": bool(
+            summary_attempt.get("is_reusable")
+            if isinstance(summary_attempt, dict)
+            else False
+        ),
+        "quality": quality,
         "current_draft": current_draft,
         "retry": {
             "available": bool(retry_target_attempt_id),
@@ -1002,11 +1153,11 @@ async def generate_story_draft(
             feedback_ids=included_feedback_ids,
             attempt_id=attempt_id,
         )
-        _attach_story_attempt_guards(
-            runtime,
-            attempt_id=attempt_id,
-            parent_requirement=normalized_parent_requirement,
-        )
+    _attach_story_attempt_guards(
+        runtime,
+        attempt_id=attempt_id,
+        parent_requirement=normalized_parent_requirement,
+    )
 
     sync_story_legacy_mirrors(
         state,
@@ -1114,11 +1265,11 @@ async def retry_story_draft(
             feedback_ids=included_feedback_ids,
             attempt_id=attempt_id,
         )
-        _attach_story_attempt_guards(
-            runtime,
-            attempt_id=attempt_id,
-            parent_requirement=normalized_parent_requirement,
-        )
+    _attach_story_attempt_guards(
+        runtime,
+        attempt_id=attempt_id,
+        parent_requirement=normalized_parent_requirement,
+    )
 
     sync_story_legacy_mirrors(
         state,

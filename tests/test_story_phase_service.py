@@ -112,6 +112,19 @@ def _state_with_complete_story_draft() -> JsonDict:
     }
 
 
+def test_story_save_payload_blocks_complete_all_low_artifact() -> None:
+    """Complete all-Low drafts are not saveable even without quality metadata."""
+    state = _state_with_complete_story_draft()
+    runtime = _story_runtime_for(state, "Requirement A")
+    artifact = runtime["attempt_history"][0]["output_artifact"]
+    artifact["user_stories"][0]["invest_score"] = "Low"
+    artifact["user_stories"][0]["decomposition_warning"] = (
+        "Story is too broad to satisfy INVEST decomposition."
+    )
+
+    assert story_service.story_save_payload(runtime) is None
+
+
 def test_story_artifact_fingerprint_ignores_existing_guard_metadata() -> None:
     """Verify story artifact fingerprint ignores existing guard metadata."""
     parent_requirement = "Requirement A"
@@ -576,6 +589,12 @@ async def test_generate_story_draft_returns_attempt_guards() -> None:
 
     data = payload["data"]
     assert payload["fsm_state"] == "STORY_REVIEW"
+    assert data["attempt_id"] == "attempt-1"
+    assert data["artifact_fingerprint"] == expected_fingerprint
+    assert data["story_count"] == 1
+    assert data["invest_score_counts"] == {"High": 1, "Medium": 0, "Low": 0}
+    assert data["is_reusable"] is True
+    assert data["quality"]["saveable"] is True
     assert data["current_draft"]["attempt_id"] == "attempt-1"
     assert data["current_draft"]["artifact_fingerprint"] == expected_fingerprint
     assert str(data["current_draft"]["artifact_fingerprint"]).startswith("sha256:")
@@ -696,6 +715,139 @@ async def test_generate_story_draft_sets_interview_state_when_incomplete() -> No
     assert "attempt_id" not in data["save"]
     assert state["fsm_state"] == "STORY_INTERVIEW"
     assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_keeps_quality_blocked_in_interview() -> None:
+    """Quality-blocked complete drafts are visible but not reusable/saveable."""
+    parent_requirement = "Requirement A"
+    artifact = _story_artifact(parent_requirement, "Too broad research draft")
+    artifact["user_stories"][0]["invest_score"] = "Low"
+    artifact["user_stories"][0]["decomposition_warning"] = (
+        "Story is too broad to satisfy INVEST decomposition."
+    )
+    artifact["is_complete"] = False
+    artifact["quality"] = {
+        "schema_version": "agileforge.story_quality.v1",
+        "coverage_status": "complete",
+        "story_count": 1,
+        "invest_score_counts": {"High": 0, "Medium": 0, "Low": 1},
+        "requested_story_count": None,
+        "quality_findings": [
+            {
+                "code": "ALL_STORIES_LOW_INVEST",
+                "severity": "blocking",
+                "message": "Every generated story has invest_score Low.",
+                "affected_story_indexes": [1],
+                "affected_story_titles": ["Too broad research draft"],
+            }
+        ],
+        "blocking_findings": [
+            {
+                "code": "ALL_STORIES_LOW_INVEST",
+                "severity": "blocking",
+                "message": "Every generated story has invest_score Low.",
+                "affected_story_indexes": [1],
+                "affected_story_titles": ["Too broad research draft"],
+            }
+        ],
+        "saveable": False,
+    }
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+
+    async def fake_run_story_agent_from_state(
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> JsonDict:
+        del state_arg, project_id, parent_requirement, user_input
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "quality_gate_failed",
+            "draft_kind": "quality_blocked_draft",
+            "is_reusable": False,
+            "is_complete": False,
+            "quality": artifact["quality"],
+            "request_payload": {"parent_requirement": "Requirement A"},
+            "error": None,
+        }
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input=None,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=lambda runtime, text, created_at: runtime[
+            "feedback_projection"
+        ]["items"].append(
+            {
+                "feedback_id": f"feedback-{len(runtime['feedback_projection']['items']) + 1}",  # noqa: E501
+                "text": text,
+                "created_at": created_at,
+                "status": "unabsorbed",
+                "absorbed_by_attempt_id": None,
+            }
+        ),
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda runtime, *, feedback_ids, attempt_id: [
+            item.update({"status": "absorbed", "absorbed_by_attempt_id": attempt_id})
+            for item in runtime["feedback_projection"]["items"]
+            if item["feedback_id"] in set(feedback_ids)
+        ],
+        failure_meta=lambda story_result, fallback_summary: {},  # noqa: ARG005
+    )
+
+    data = payload["data"]
+    assert payload["fsm_state"] == "STORY_INTERVIEW"
+    assert data["attempt_id"] == "attempt-1"
+    assert str(data["artifact_fingerprint"]).startswith("sha256:")
+    assert data["story_count"] == 1
+    assert data["invest_score_counts"] == {"High": 0, "Medium": 0, "Low": 1}
+    assert data["is_reusable"] is False
+    assert data["quality"]["saveable"] is False
+    assert data["quality"]["blocking_findings"][0]["code"] == (
+        "ALL_STORIES_LOW_INVEST"
+    )
+    assert data["current_draft"] is None
+    assert data["save"] == {"available": False}
+    assert state["fsm_state"] == "STORY_INTERVIEW"
 
 
 @pytest.mark.asyncio

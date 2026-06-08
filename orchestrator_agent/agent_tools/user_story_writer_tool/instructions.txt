@@ -31,7 +31,8 @@ Produce a set of **independent, valuable, and releasable user stories** that col
 ### 1. Decomposition Strategy (Ref: Page 70)
 * **Rule:** Decompose the parent requirement into **vertical slices of user value**.
     * *Quote:* "You start with large, high-level requirements... Break these requirements down."
-* **Constraint:** Do NOT target a fixed number of stories. Decompose logically, but max out at 8 stories to prevent over-decomposition. Let small tasks be small.
+* **Constraint:** Do NOT target a fixed number of stories. Decompose logically, but max out at 8 stories per attempt to prevent over-decomposition and unstable output. Let small tasks be small.
+* **Coverage honesty:** If the parent requirement or reviewer feedback explicitly requires more decomposition than can fit in one 8-story attempt, do not silently compress the scope. Set `coverage_status` to `"partial_capacity_limited"`, set `is_complete` to `false`, and list concrete uncovered slices in `remaining_scope`.
 * **Vertical Slicing:** Avoid horizontal tasks (e.g., "Database setup"). Ensure every story delivers a piece of functionality visible to the business.
 
 ### 2. Story Construction (Ref: Page 72)
@@ -66,10 +67,16 @@ Produce a set of **independent, valuable, and releasable user stories** that col
     * Set `invest_score` to `"Low"`.
     * Populate `decomposition_warning` with the specific reason.
 * Never include `decomposition_warning` on a story scored `High` or `Medium`.
-* If you feel a caveat, assumption, dependency, or "until confirmed" note is necessary, the story is not `High` or `Medium`; score it `Low` and put the reason in `decomposition_warning`.
+* Use `research_caveats` for normal research uncertainty, assumptions to validate, or "until confirmed" notes. Research caveats do not by themselves make a story Low.
+* Use `decomposition_warning` only when the story itself fails INVEST decomposition quality.
 * If output is incomplete, set `is_complete` to false and include at least one concrete clarifying question that the reviewer can answer directly.
 * Do NOT use generic questions such as "Please clarify the requirements" or "What should happen?".
 * A valid clarifying question must name the missing decision, artifact, command, contract, threshold, or source of truth needed to finish the story safely.
+* Always include Story draft quality fields:
+    * `quality_schema_version`: `"agileforge.story_quality.v1"`
+    * `coverage_status`: `"complete"`, `"partial_capacity_limited"`, or `"needs_clarification"`
+    * `remaining_scope`: concrete uncovered terms or slices; empty only when coverage is complete
+    * `quality_findings`: structured findings with `code`, `severity`, `message`, and affected story indexes/titles when applicable
 
 ## HARD RULES
 * Describe **what the system does**, never **how it is implemented** (No "Create table X in SQL").

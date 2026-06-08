@@ -41,6 +41,15 @@ def _valid_story(title: str) -> dict[str, Any]:
     }
 
 
+def _low_story(title: str) -> dict[str, Any]:
+    story = _valid_story(title)
+    story["invest_score"] = "Low"
+    story["decomposition_warning"] = (
+        "Story still combines too many uncertain decomposition choices."
+    )
+    return story
+
+
 def _valid_story_output(
     parent_requirement: str,
     *,
@@ -516,6 +525,114 @@ async def test_story_runtime_accepts_concrete_clarifying_question(
     assert result["success"] is True
     assert result["draft_kind"] == "incomplete_draft"
     assert result["is_reusable"] is True
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_blocks_complete_all_low_quality_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Complete drafts with only Low stories are not reusable/saveable."""
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Technology and Model Research Spike",
+                "user_stories": [
+                    _low_story("Research candidate models"),
+                    _low_story("Research validation windows"),
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [
+                {"items": ["Technology and Model Research Spike"]}
+            ],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Technology and Model Research Spike",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert result["classification"] == "quality_gate_failed"
+    assert result["draft_kind"] == "quality_blocked_draft"
+    assert result["is_reusable"] is False
+    assert result["is_complete"] is False
+    assert result["quality"]["saveable"] is False
+    assert result["quality"]["invest_score_counts"] == {
+        "High": 0,
+        "Medium": 0,
+        "Low": 2,
+    }
+    assert result["quality"]["blocking_findings"][0]["code"] == (
+        "ALL_STORIES_LOW_INVEST"
+    )
+    assert result["output_artifact"]["is_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_blocks_silent_completion_when_refinement_exceeds_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request for more than one bounded attempt cannot silently complete."""
+    requested_count = 15
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Technology and Model Research Spike",
+                "user_stories": [
+                    _valid_story(f"Research slice {index}") for index in range(1, 9)
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+                "coverage_status": "complete",
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+    request_payload: story_runtime.StoryInputContext = {
+        "parent_requirement": "Technology and Model Research Spike",
+        "requirement_context": (
+            "Requirement: Technology and Model Research Spike\n\n"
+            "--- USER REFINEMENT FEEDBACK ---\n"
+            f"Please split this into ~{requested_count} smaller stories."
+        ),
+        "technical_spec": "{}",
+        "compiled_authority": "{}",
+        "global_roadmap_context": "",
+        "already_generated_milestone_stories": "",
+        "artifact_registry": {},
+    }
+
+    result = await story_runtime.run_story_agent_request(
+        request_payload,
+        project_id=2,
+        parent_requirement="Technology and Model Research Spike",
+    )
+
+    assert result["success"] is True
+    assert result["classification"] == "quality_gate_failed"
+    assert result["is_reusable"] is False
+    assert result["quality"]["requested_story_count"] == requested_count
+    assert result["quality"]["blocking_findings"][0]["code"] == (
+        "REQUESTED_STORY_COUNT_EXCEEDS_CAP"
+    )
+    assert result["output_artifact"]["quality"]["coverage_status"] == "complete"
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
@@ -13,6 +14,7 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
     root_agent as story_agent,
 )
 from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
+    STORY_QUALITY_SCHEMA_VERSION,
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
@@ -53,6 +55,13 @@ _GENERIC_CLARIFYING_QUESTION_PHRASES: tuple[str, ...] = (
 _MIN_ACTIONABLE_QUESTION_WORDS: int = 5
 MAX_STORY_SCHEMA_REPAIR_ATTEMPTS: int = 2
 MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS: int = 4000
+MAX_STORIES_PER_ATTEMPT: int = 8
+_INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
+_REQUESTED_STORY_COUNT_PATTERN = re.compile(
+    r"(?:~|about|around|approximately|approx\.?)?\s*"
+    r"(\d{1,3})\s+(?:smaller\s+)?(?:sub-?stories|stories|story)",
+    flags=re.IGNORECASE,
+)
 
 
 class StoryInputContext(TypedDict):
@@ -183,6 +192,170 @@ def _actionable_clarifying_questions(questions: list[str]) -> list[str]:
             continue
         actionable.append(stripped)
     return actionable
+
+
+def _story_count(output: UserStoryWriterOutput) -> int:
+    return len(output.user_stories)
+
+
+def _zero_invest_score_counts() -> dict[str, int]:
+    return dict.fromkeys(_INVEST_SCORES, 0)
+
+
+def _invest_score_counts(output: UserStoryWriterOutput) -> dict[str, int]:
+    counts = _zero_invest_score_counts()
+    for story in output.user_stories:
+        counts[story.invest_score] = counts.get(story.invest_score, 0) + 1
+    return counts
+
+
+def _request_text_for_quality(request_payload: StoryInputContext) -> str:
+    return request_payload.get("requirement_context", "")
+
+
+def _requested_story_count(request_payload: StoryInputContext) -> int | None:
+    text = _request_text_for_quality(request_payload)
+    requested_counts: list[int] = []
+    for match in _REQUESTED_STORY_COUNT_PATTERN.finditer(text):
+        try:
+            requested_counts.append(int(match.group(1)))
+        except ValueError:
+            continue
+    return max(requested_counts) if requested_counts else None
+
+
+def _finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    affected_story_indexes: list[int] | None = None,
+    affected_story_titles: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "affected_story_indexes": affected_story_indexes or [],
+        "affected_story_titles": affected_story_titles or [],
+    }
+
+
+def _finding_codes(findings: list[dict[str, Any]]) -> set[str]:
+    return {
+        finding.get("code")
+        for finding in findings
+        if isinstance(finding.get("code"), str)
+    }
+
+
+def _all_story_indexes(output: UserStoryWriterOutput) -> list[int]:
+    return list(range(1, len(output.user_stories) + 1))
+
+
+def _all_story_titles(output: UserStoryWriterOutput) -> list[str]:
+    return [story.story_title for story in output.user_stories]
+
+
+def _evaluate_story_quality(
+    output: UserStoryWriterOutput,
+    *,
+    request_payload: StoryInputContext,
+    has_questions: bool,
+) -> dict[str, Any]:
+    """Return deterministic Story quality metadata for one generated draft."""
+    story_count = _story_count(output)
+    invest_score_counts = _invest_score_counts(output)
+    requested_count = _requested_story_count(request_payload)
+    remaining_scope = [
+        item.strip() for item in output.remaining_scope if isinstance(item, str)
+    ]
+    quality_findings = [
+        finding.model_dump(exclude_none=True) for finding in output.quality_findings
+    ]
+    existing_codes = _finding_codes(quality_findings)
+
+    if (
+        output.is_complete
+        and story_count > 0
+        and invest_score_counts.get("Low", 0) == story_count
+        and "ALL_STORIES_LOW_INVEST" not in existing_codes
+    ):
+        quality_findings.append(
+            _finding(
+                code="ALL_STORIES_LOW_INVEST",
+                severity="blocking",
+                message="Every generated story has invest_score Low.",
+                affected_story_indexes=_all_story_indexes(output),
+                affected_story_titles=_all_story_titles(output),
+            )
+        )
+        existing_codes.add("ALL_STORIES_LOW_INVEST")
+
+    if (
+        output.is_complete
+        and output.coverage_status == "complete"
+        and requested_count is not None
+        and requested_count > MAX_STORIES_PER_ATTEMPT
+        and story_count >= MAX_STORIES_PER_ATTEMPT
+        and "REQUESTED_STORY_COUNT_EXCEEDS_CAP" not in existing_codes
+    ):
+        quality_findings.append(
+            _finding(
+                code="REQUESTED_STORY_COUNT_EXCEEDS_CAP",
+                severity="blocking",
+                message=(
+                    f"Requested about {requested_count} stories, but one "
+                    f"bounded attempt can contain at most {MAX_STORIES_PER_ATTEMPT}."
+                ),
+                affected_story_indexes=_all_story_indexes(output),
+                affected_story_titles=_all_story_titles(output),
+            )
+        )
+        existing_codes.add("REQUESTED_STORY_COUNT_EXCEEDS_CAP")
+
+    if (
+        output.coverage_status != "complete"
+        and not remaining_scope
+        and not has_questions
+        and "REMAINING_SCOPE_REQUIRED" not in existing_codes
+    ):
+        quality_findings.append(
+            _finding(
+                code="REMAINING_SCOPE_REQUIRED",
+                severity="blocking",
+                message=(
+                    "Incomplete coverage must list concrete remaining scope or "
+                    "ask an actionable clarifying question."
+                ),
+            )
+        )
+
+    blocking_findings = [
+        finding
+        for finding in quality_findings
+        if finding.get("severity") == "blocking"
+    ]
+    saveable = (
+        output.is_complete
+        and not has_questions
+        and output.coverage_status == "complete"
+        and not blocking_findings
+        and not (
+            story_count > 0 and invest_score_counts.get("Low", 0) == story_count
+        )
+    )
+    return {
+        "schema_version": STORY_QUALITY_SCHEMA_VERSION,
+        "coverage_status": output.coverage_status,
+        "remaining_scope": remaining_scope,
+        "story_count": story_count,
+        "invest_score_counts": invest_score_counts,
+        "requested_story_count": requested_count,
+        "quality_findings": quality_findings,
+        "blocking_findings": blocking_findings,
+        "saveable": saveable,
+    }
 
 
 def _as_object_dict(value: object) -> dict[str, object] | None:
@@ -467,20 +640,40 @@ def _story_success_result(
         return consistency_failure
 
     output_artifact: dict[str, Any] = output.model_dump(exclude_none=True)
+    has_questions = _has_clarifying_questions(output)
+    quality = _evaluate_story_quality(
+        output,
+        request_payload=request_payload,
+        has_questions=has_questions,
+    )
+    output_artifact["remaining_scope"] = quality["remaining_scope"]
+    output_artifact["quality_findings"] = quality["quality_findings"]
+    output_artifact["quality"] = quality
     effective_is_complete: bool = (
-        output.is_complete and not _has_clarifying_questions(output)
+        output.is_complete
+        and not has_questions
+        and quality["coverage_status"] == "complete"
+        and not quality["blocking_findings"]
     )
     output_artifact["is_complete"] = effective_is_complete
+    quality_blocked = bool(quality["blocking_findings"])
     return {
         "success": True,
         "input_context": request_payload,
         "output_artifact": output_artifact,
-        "classification": "reusable_content_result",
-        "draft_kind": (
-            "complete_draft" if effective_is_complete else "incomplete_draft"
+        "classification": (
+            "quality_gate_failed" if quality_blocked else "reusable_content_result"
         ),
-        "is_reusable": True,
+        "draft_kind": (
+            "quality_blocked_draft"
+            if quality_blocked
+            else "complete_draft"
+            if effective_is_complete
+            else "incomplete_draft"
+        ),
+        "is_reusable": not quality_blocked,
         "is_complete": effective_is_complete,
+        "quality": quality,
         "request_payload": request_payload,
         "error": None,
         "failure_artifact_id": None,

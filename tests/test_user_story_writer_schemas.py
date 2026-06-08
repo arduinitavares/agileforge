@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
     StoryDependencyCandidate,
+    StoryQualityFinding,
     UserStoryItem,
     UserStoryWriterInput,
     UserStoryWriterOutput,
@@ -42,6 +43,30 @@ class TestUserStoryItem:
         )
         assert item.invest_score == "High"
         assert item.decomposition_warning is None
+        assert item.research_caveats == []
+
+    def test_research_caveats_do_not_force_low_invest_score(self) -> None:
+        """Research caveats are advisory, not decomposition warnings."""
+        item = UserStoryItem(
+            story_title="Compare candidate models",
+            statement=(
+                "As a researcher, I want to compare candidate models, "
+                "so that I can choose a validated baseline."
+            ),
+            acceptance_criteria=["Verify that model comparison metrics are recorded."],
+            invest_score="High",
+            estimated_effort="M",
+            produced_artifacts=["model_comparison_report"],
+            research_caveats=[
+                "Final model choice depends on holdout-window performance."
+            ],
+        )
+
+        assert item.invest_score == "High"
+        assert item.decomposition_warning is None
+        assert item.research_caveats == [
+            "Final model choice depends on holdout-window performance."
+        ]
 
     def test_accepts_dependency_candidate(self) -> None:
         """Verify user story items can propose dependency candidates."""
@@ -354,6 +379,36 @@ class TestUserStoryWriterOutput:
         assert out.is_complete is True
         assert len(out.user_stories) == 1
         assert out.clarifying_questions == []
+        assert out.quality_schema_version == "agileforge.story_quality.v1"
+        assert out.coverage_status == "complete"
+        assert out.remaining_scope == []
+        assert out.quality_findings == []
+
+    def test_accepts_quality_contract_fields(self) -> None:
+        """Verify Story output carries machine-readable quality metadata."""
+        finding = StoryQualityFinding(
+            code="REQUESTED_STORY_COUNT_EXCEEDS_CAP",
+            severity="blocking",
+            message="Requested decomposition exceeds one bounded attempt.",
+            affected_story_indexes=[1, 2],
+            affected_story_titles=["Upload CSV file"],
+        )
+        out = UserStoryWriterOutput(
+            parent_requirement="Offline Dataset Ingestion",
+            user_stories=[UserStoryItem(**self._make_valid_story())],
+            is_complete=False,
+            coverage_status="partial_capacity_limited",
+            remaining_scope=["streaming ingestion", "manifest validation"],
+            quality_findings=[finding],
+            clarifying_questions=[
+                "Which remaining ingestion slice should be generated next?"
+            ],
+        )
+
+        assert out.coverage_status == "partial_capacity_limited"
+        assert out.remaining_scope == ["streaming ingestion", "manifest validation"]
+        assert out.quality_findings[0].code == "REQUESTED_STORY_COUNT_EXCEEDS_CAP"
+        assert out.quality_findings[0].severity == "blocking"
 
     def test_valid_incomplete_output_with_questions(self) -> None:
         """Verify valid incomplete output with questions."""
@@ -427,6 +482,10 @@ class TestUserStoryWriterOutput:
         assert set(parsed.keys()) == {
             "parent_requirement",
             "user_stories",
+            "quality_schema_version",
+            "coverage_status",
+            "remaining_scope",
+            "quality_findings",
             "is_complete",
             "clarifying_questions",
         }
