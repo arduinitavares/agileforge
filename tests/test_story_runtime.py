@@ -636,6 +636,65 @@ async def test_story_runtime_blocks_silent_completion_when_refinement_exceeds_ca
 
 
 @pytest.mark.asyncio
+async def test_story_runtime_surfaces_capacity_limited_remaining_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity-limited incomplete drafts are quality-gated, not schema failures."""
+    remaining_scope = [
+        "action-set research across relevant SP/setpoint variables",
+        "reward shaping and delay-horizon validation",
+    ]
+
+    async def fake_invoke_story_agent(_payload: UserStoryWriterInput) -> str:
+        return json.dumps(
+            {
+                "parent_requirement": "Technology and Model Research Spike",
+                "user_stories": [
+                    _valid_story("Define research rubric"),
+                    _valid_story("Compare model families"),
+                ],
+                "is_complete": False,
+                "coverage_status": "partial_capacity_limited",
+                "remaining_scope": remaining_scope,
+                "clarifying_questions": [],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.story_runtime._invoke_story_agent",
+        fake_invoke_story_agent,
+    )
+
+    result = await story_runtime.run_story_agent_from_state(
+        {
+            "roadmap_releases": [
+                {"items": ["Technology and Model Research Spike"]}
+            ],
+            "pending_spec_content": "{}",
+            "compiled_authority_cached": "{}",
+        },
+        project_id=2,
+        parent_requirement="Technology and Model Research Spike",
+        user_input=(
+            "Split this across research rubric, model families, action-set "
+            "research, reward shaping, delay horizon, and validation strategy."
+        ),
+    )
+
+    assert result["success"] is True
+    assert result["classification"] == "quality_gate_failed"
+    assert result["draft_kind"] == "quality_blocked_draft"
+    assert result["is_reusable"] is False
+    assert result["is_complete"] is False
+    assert result["quality"]["coverage_status"] == "partial_capacity_limited"
+    assert result["quality"]["remaining_scope"] == remaining_scope
+    assert result["quality"]["blocking_findings"][0]["code"] == (
+        "PARTIAL_CAPACITY_LIMITED"
+    )
+    assert result["output_artifact"]["remaining_scope"] == remaining_scope
+
+
+@pytest.mark.asyncio
 async def test_story_runtime_invalid_json_is_nonreusable_schema_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

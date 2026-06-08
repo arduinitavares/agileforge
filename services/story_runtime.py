@@ -315,6 +315,25 @@ def _evaluate_story_quality(
         existing_codes.add("REQUESTED_STORY_COUNT_EXCEEDS_CAP")
 
     if (
+        output.coverage_status == "partial_capacity_limited"
+        and "PARTIAL_CAPACITY_LIMITED" not in existing_codes
+    ):
+        quality_findings.append(
+            _finding(
+                code="PARTIAL_CAPACITY_LIMITED",
+                severity="blocking",
+                message=(
+                    "The bounded Story generation attempt did not cover all "
+                    "requested scope. Regenerate with a narrower slice or continue "
+                    "with the listed remaining scope."
+                ),
+                affected_story_indexes=_all_story_indexes(output),
+                affected_story_titles=_all_story_titles(output),
+            )
+        )
+        existing_codes.add("PARTIAL_CAPACITY_LIMITED")
+
+    if (
         output.coverage_status != "complete"
         and not remaining_scope
         and not has_questions
@@ -598,6 +617,11 @@ def _validate_story_output_consistency(
         output.clarifying_questions
     )
     if actionable_questions:
+        return None
+    if (
+        output.coverage_status == "partial_capacity_limited"
+        and any(item.strip() for item in output.remaining_scope)
+    ):
         return None
 
     return _with_failure_metadata(
