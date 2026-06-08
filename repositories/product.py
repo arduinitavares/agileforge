@@ -1,5 +1,7 @@
 import logging
+from typing import Any, cast
 
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from models.core import (
@@ -15,7 +17,7 @@ from models.core import (
     UserStory,
 )
 from models.db import get_engine
-from models.events import StoryCompletionLog, WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 
 logger = logging.getLogger(__name__)
@@ -166,31 +168,62 @@ class ProductRepository:
                     session.delete(epic)
                 session.delete(theme)
 
-            # Handle Sprints (and mappings)
+            story_ids = [
+                story_id
+                for story_id in session.exec(
+                    select(UserStory.story_id).where(
+                        UserStory.product_id == product_id
+                    )
+                ).all()
+                if story_id is not None
+            ]
+            chunk_size = 500
+            if story_ids:
+                for index in range(0, len(story_ids), chunk_size):
+                    story_chunk = story_ids[index : index + chunk_size]
+                    session.exec(
+                        delete(SprintStory).where(
+                            cast("Any", SprintStory.story_id).in_(story_chunk)
+                        )
+                    )
+                    session.exec(
+                        delete(StoryCompletionLog).where(
+                            cast("Any", StoryCompletionLog.story_id).in_(story_chunk)
+                        )
+                    )
+                    task_ids = [
+                        task_id
+                        for task_id in session.exec(
+                            select(Task.task_id).where(
+                                cast("Any", Task.story_id).in_(story_chunk)
+                            )
+                        ).all()
+                        if task_id is not None
+                    ]
+                    for task_index in range(0, len(task_ids), chunk_size):
+                        task_chunk = task_ids[task_index : task_index + chunk_size]
+                        session.exec(
+                            delete(TaskExecutionLog).where(
+                                cast("Any", TaskExecutionLog.task_id).in_(task_chunk)
+                            )
+                        )
+                    session.exec(
+                        delete(Task).where(cast("Any", Task.story_id).in_(story_chunk))
+                    )
+                    session.exec(
+                        delete(UserStory).where(
+                            cast("Any", UserStory.story_id).in_(story_chunk)
+                        )
+                    )
+
             for sprint in session.exec(
                 select(Sprint).where(Sprint.product_id == product_id)
             ).all():
-                for sm in session.exec(
+                for mapping in session.exec(
                     select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
                 ).all():
-                    session.delete(sm)
+                    session.delete(mapping)
                 session.delete(sprint)
-
-            # Handle UserStories (and tasks / logs)
-            for story in session.exec(
-                select(UserStory).where(UserStory.product_id == product_id)
-            ).all():
-                for t in session.exec(
-                    select(Task).where(Task.story_id == story.story_id)
-                ).all():
-                    session.delete(t)
-                for log in session.exec(
-                    select(StoryCompletionLog).where(
-                        StoryCompletionLog.story_id == story.story_id
-                    )
-                ).all():
-                    session.delete(log)
-                session.delete(story)
 
             # Handle Teams Mappings
             for pt in session.exec(
