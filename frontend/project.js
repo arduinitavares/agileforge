@@ -2646,8 +2646,125 @@ async function saveRoadmapDraft() {
 
 let storyGroups = []; // Array of grouped milestone objects
 
+function normalizeStoryFeedbackQualityList(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => normalizeStoryFeedbackQualityItem(item))
+            .filter((item) => item.length > 0);
+    }
+
+    const item = normalizeStoryFeedbackQualityItem(value);
+    return item ? [item] : [];
+}
+
+function normalizeStoryFeedbackQualityItem(item) {
+    if (item === null || item === undefined) return '';
+
+    if (typeof item === 'string') return item.trim();
+    if (typeof item === 'number' || typeof item === 'boolean') return String(item);
+    if (typeof item === 'object') {
+        const code = typeof item.code === 'string' ? item.code.trim() : '';
+        const message = typeof item.message === 'string' ? item.message.trim() : '';
+        if (code && message) return `${code}: ${message}`;
+        if (message) return message;
+        if (code) return code;
+        return JSON.stringify(item);
+    }
+
+    return '';
+}
+
+function appendStoryFeedbackQualityField(panel, label, value, options = {}) {
+    const values = normalizeStoryFeedbackQualityList(value);
+    if (values.length === 0) return false;
+
+    const section = document.createElement('div');
+    section.className = 'space-y-1';
+
+    const heading = document.createElement('div');
+    heading.className = 'text-[10px] font-black uppercase tracking-wide text-amber-700 dark:text-amber-200';
+    heading.textContent = label;
+    section.appendChild(heading);
+
+    if (values.length === 1 && (options.preserveWhitespace || values[0].includes('\n'))) {
+        const block = document.createElement('pre');
+        block.className = 'whitespace-pre-wrap rounded bg-white/60 p-2 font-mono text-[11px] leading-relaxed text-amber-950 dark:bg-black/20 dark:text-amber-100';
+        block.textContent = values[0];
+        section.appendChild(block);
+    } else {
+        const list = document.createElement('ul');
+        list.className = 'list-disc space-y-1 pl-4 leading-relaxed';
+        values.forEach((item) => {
+            const listItem = document.createElement('li');
+            listItem.textContent = item;
+            list.appendChild(listItem);
+        });
+        section.appendChild(list);
+    }
+
+    panel.appendChild(section);
+    return true;
+}
+
+function renderStoryFeedbackQuality(feedbackQuality) {
+    const panel = document.getElementById('story-feedback-quality-panel');
+    if (!panel) return;
+
+    panel.replaceChildren();
+    panel.classList.add('hidden');
+
+    if (!feedbackQuality || typeof feedbackQuality !== 'object') return;
+
+    const missingFields = normalizeStoryFeedbackQualityList(feedbackQuality.missing_fields);
+    const weakFields = normalizeStoryFeedbackQualityList(feedbackQuality.weak_fields);
+    const warnings = normalizeStoryFeedbackQualityList(feedbackQuality.warnings);
+    const status = normalizeStoryFeedbackQualityItem(feedbackQuality.status)
+        || (feedbackQuality.forced === true && feedbackQuality.needs_revision === true
+            ? 'forced'
+            : feedbackQuality.needs_revision === true
+                ? 'needs_revision'
+                : '');
+
+    if (
+        !status
+        && missingFields.length === 0
+        && weakFields.length === 0
+        && warnings.length === 0
+    ) {
+        return;
+    }
+
+    const title = document.createElement('h4');
+    title.className = 'mb-2 text-sm font-black text-amber-950 dark:text-amber-100';
+    title.textContent = 'Feedback needs more structure';
+    panel.appendChild(title);
+
+    const content = document.createElement('div');
+    content.className = 'space-y-3';
+    panel.appendChild(content);
+
+    appendStoryFeedbackQualityField(content, 'status', status);
+    appendStoryFeedbackQualityField(content, 'missing_fields', missingFields);
+    appendStoryFeedbackQualityField(content, 'weak_fields', weakFields);
+    appendStoryFeedbackQualityField(content, 'warnings', warnings);
+
+    const guidance = [
+        ...normalizeStoryFeedbackQualityList(feedbackQuality.guidance),
+        ...normalizeStoryFeedbackQualityList(feedbackQuality.suggested_guidance),
+        ...normalizeStoryFeedbackQualityList(feedbackQuality.suggested_template)
+            .map((item) => `Suggested template:\n${item}`),
+        ...normalizeStoryFeedbackQualityList(feedbackQuality.suggested_example)
+            .map((item) => `Suggested example:\n${item}`),
+    ];
+    appendStoryFeedbackQualityField(content, 'guidance', guidance, { preserveWhitespace: true });
+
+    panel.classList.remove('hidden');
+}
+
 async function loadStoryRequirements() {
     if (!selectedProjectId) return;
+
+    renderStoryFeedbackQuality(null);
 
     try {
         const response = await fetch(`/api/projects/${selectedProjectId}/story/pending`);
@@ -2764,6 +2881,7 @@ async function selectStoryRequirement(reqName) {
     // Clear input
     const input = document.getElementById('story-user-input');
     if (input) input.value = '';
+    renderStoryFeedbackQuality(null);
 
     activeStoryAttemptCount = 0;
     activeStoryLatestClassification = null;
@@ -2811,6 +2929,8 @@ function resolveStoryDisplayAttempt(items, payload) {
 
 async function loadStoryHistory(reqName) {
     if (!reqName || !selectedProjectId) return;
+
+    renderStoryFeedbackQuality(null);
 
     try {
         const response = await fetch(`/api/projects/${selectedProjectId}/story/history?parent_requirement=${encodeURIComponent(reqName)}`);
@@ -3188,6 +3308,12 @@ async function generateStoryDraft() {
         const data = await response.json();
         if (data.status !== 'success') throw new Error('Generation failed');
 
+        const payloadData = data.data || {};
+        renderStoryFeedbackQuality(payloadData.feedback_quality);
+        if (payloadData.generation_ran === false) {
+            return;
+        }
+
         // reload data
         await loadStoryRequirements();
         await loadStoryHistory(activeStoryReq);
@@ -3347,6 +3473,7 @@ async function deleteStoryDraft() {
         // Success - clear active UI state
         const input = document.getElementById('story-user-input');
         if (input) input.value = '';
+        renderStoryFeedbackQuality(null);
 
         // Reload data from backend
         await loadStoryRequirements();
