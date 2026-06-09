@@ -701,7 +701,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
     assert pending["input"]["required"] == ["project_id"]
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id", "parent_requirement"]
-    assert generate["input"]["optional"] == ["input"]
+    assert generate["input"]["optional"] == ["input", "force_feedback"]
     assert retry["mutates"] is True
     assert retry["input"]["required"] == ["project_id", "parent_requirement"]
     assert history["mutates"] is False
