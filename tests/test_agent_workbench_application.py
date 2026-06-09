@@ -1270,6 +1270,7 @@ class _FakeStoryRunner:
         idempotency_key: str,
         scope: str | None = None,
         scope_id: str | None = None,
+        parent_requirements: list[str] | None = None,
     ) -> dict[str, Any]:
         """Record Story completion."""
         call_args: dict[str, object] = {
@@ -1279,8 +1280,11 @@ class _FakeStoryRunner:
         }
         if scope is not None:
             call_args["scope"] = scope
-        if scope_id is not None:
             call_args["scope_id"] = scope_id
+        elif scope_id is not None:
+            call_args["scope_id"] = scope_id
+        if parent_requirements is not None:
+            call_args["parent_requirements"] = parent_requirements
         self.calls.append(
             (
                 "complete",
@@ -2276,6 +2280,19 @@ def test_application_routes_story_commands_to_runner() -> None:
         == "SPRINT_SETUP"
     )
     assert (
+        app.story_complete(
+            project_id=PROJECT_ID,
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-selection",
+            scope="selection",
+            parent_requirements=[
+                "Technology and Model Research Spike",
+                "Python Project Scaffold and uv Management Setup",
+            ],
+        )["data"]["fsm_state"]
+        == "SPRINT_SETUP"
+    )
+    assert (
         app.story_reopen(
             project_id=PROJECT_ID,
             parent_requirement="REQ.checkout",
@@ -2354,6 +2371,20 @@ def test_application_routes_story_commands_to_runner() -> None:
             },
         ),
         (
+            "complete",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "STORY_PERSISTENCE",
+                "idempotency_key": "complete-story-selection",
+                "scope": "selection",
+                "scope_id": None,
+                "parent_requirements": [
+                    "Technology and Model Research Spike",
+                    "Python Project Scaffold and uv Management Setup",
+                ],
+            },
+        ),
+        (
             "reopen",
             {
                 "project_id": PROJECT_ID,
@@ -2370,6 +2401,42 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "idempotency_key": "repair-story-readiness-7",
             },
         ),
+    ]
+
+
+def test_story_complete_facade_routes_selection_scope() -> None:
+    """Story complete facade forwards selected parent requirements."""
+    runner = _FakeStoryRunner()
+    app = AgentWorkbenchApplication(story_runner=cast("Any", runner))
+
+    assert (
+        app.story_complete(
+            project_id=PROJECT_ID,
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-selection",
+            scope="selection",
+            parent_requirements=[
+                "Technology and Model Research Spike",
+                "Python Project Scaffold and uv Management Setup",
+            ],
+        )["data"]["fsm_state"]
+        == "SPRINT_SETUP"
+    )
+    assert runner.calls == [
+        (
+            "complete",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "STORY_PERSISTENCE",
+                "idempotency_key": "complete-story-selection",
+                "scope": "selection",
+                "scope_id": None,
+                "parent_requirements": [
+                    "Technology and Model Research Spike",
+                    "Python Project Scaffold and uv Management Setup",
+                ],
+            },
+        )
     ]
 
 

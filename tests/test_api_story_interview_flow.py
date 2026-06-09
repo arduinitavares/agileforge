@@ -820,8 +820,8 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
     product = repo.create("Story Project")
     workflow.states[str(product.product_id)] = {
         "fsm_state": "STORY_PERSISTENCE",
-        "roadmap_releases": [{"items": ["Requirement A"]}],
-        "story_saved": {"Requirement A": True},
+        "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+        "story_saved": {"Requirement A": True, "Requirement B": True},
     }
 
     missing_body_response = client.post(
@@ -835,20 +835,22 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
         idempotency_key: str,
         scope: str | None,
         scope_id: str | None,
+        parent_requirements: list[str] | None,
         load_state: object,
         save_state: object,
         now_iso: object,
     ) -> dict[str, object]:
         assert expected_state == "STORY_PERSISTENCE"
         assert idempotency_key == "story-complete-api"
-        assert scope == "milestone"
-        assert scope_id == "milestone_0"
+        assert scope == "selection"
+        assert scope_id is None
+        assert parent_requirements == ["Requirement A", "Requirement B"]
         assert load_state is not None
         assert save_state is not None
         assert now_iso is not None
         return {
             "fsm_state": "SPRINT_SETUP",
-            "coverage": {"saved": 1, "merged": 0, "total": 1},
+            "coverage": {"saved": 2, "merged": 0, "total": 2},
             "idempotency_key": "story-complete-api",
         }
 
@@ -863,6 +865,69 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
         json={
             "expected_state": "STORY_PERSISTENCE",
             "idempotency_key": "story-complete-api",
+            "scope": "selection",
+            "parent_requirements": ["Requirement A", "Requirement B"],
+        },
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    assert response.json() == {
+        "status": "success",
+        "data": {
+            "fsm_state": "SPRINT_SETUP",
+            "coverage": {"saved": 2, "merged": 0, "total": 2},
+            "idempotency_key": "story-complete-api",
+        },
+    }
+
+
+def test_story_complete_phase_omits_parent_requirements_for_milestone_body(  # noqa: ANN001, ANN201, D103, E501
+    monkeypatch,
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Requirement A"]}],
+        "story_saved": {"Requirement A": True},
+    }
+
+    async def fake_complete_story_phase_service(  # noqa: PLR0913
+        *,
+        expected_state: str,
+        idempotency_key: str,
+        scope: str | None,
+        scope_id: str | None,
+        parent_requirements: list[str] | None,
+        load_state: object,
+        save_state: object,
+        now_iso: object,
+    ) -> dict[str, object]:
+        assert expected_state == "STORY_PERSISTENCE"
+        assert idempotency_key == "story-complete-api-milestone"
+        assert scope == "milestone"
+        assert scope_id == "milestone_0"
+        assert parent_requirements is None
+        assert load_state is not None
+        assert save_state is not None
+        assert now_iso is not None
+        return {
+            "fsm_state": "SPRINT_SETUP",
+            "coverage": {"saved": 1, "merged": 0, "total": 1},
+            "idempotency_key": "story-complete-api-milestone",
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "complete_story_phase_service",
+        fake_complete_story_phase_service,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/complete_phase",
+        json={
+            "expected_state": "STORY_PERSISTENCE",
+            "idempotency_key": "story-complete-api-milestone",
             "scope": "milestone",
             "scope_id": "milestone_0",
         },
@@ -874,7 +939,7 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
         "data": {
             "fsm_state": "SPRINT_SETUP",
             "coverage": {"saved": 1, "merged": 0, "total": 1},
-            "idempotency_key": "story-complete-api",
+            "idempotency_key": "story-complete-api-milestone",
         },
     }
 

@@ -494,6 +494,7 @@ class _Application(Protocol):
         idempotency_key: str,
         scope: str | None = None,
         scope_id: str | None = None,
+        parent_requirements: list[str] | None = None,
     ) -> JsonObject:
         """Complete the Story phase."""
         ...
@@ -1426,8 +1427,9 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help="Complete the Story phase.",
         description=(
             "Complete Story work and move to Sprint setup. Without --scope, every "
-            "Roadmap requirement must be saved or merged. With --scope milestone, "
-            "only requirements in that milestone are gated."
+            "Roadmap requirement must be saved or merged. With --scope milestone "
+            "or --scope selection, only requirements in that planning scope are "
+            "gated."
         ),
         epilog=(
             "Scoped completion example: --scope milestone --scope-id milestone_0. "
@@ -1443,10 +1445,10 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_complete.add_argument("--idempotency-key", required=True)
     story_complete.add_argument(
         "--scope",
-        choices=["milestone"],
+        choices=["milestone", "selection"],
         help=(
-            "Optionally complete only a planning scope. Currently supported: "
-            "milestone."
+            "Optionally complete only a planning scope. Supported values: "
+            "milestone and selection."
         ),
     )
     story_complete.add_argument(
@@ -1454,6 +1456,14 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help=(
             "Scope identifier from story pending, for example milestone_0. "
             "Use with --scope milestone."
+        ),
+    )
+    story_complete.add_argument(
+        "--parent-requirement",
+        action="append",
+        help=(
+            "Parent requirement to include when --scope selection is used. "
+            "Repeat this flag for multiple saved requirements."
         ),
     )
     story_complete.set_defaults(command_handler=_story_complete)
@@ -2888,6 +2898,7 @@ def _story_complete(
         idempotency_key=args.idempotency_key,
         scope=args.scope,
         scope_id=args.scope_id,
+        parent_requirements=args.parent_requirement,
     )
 
 

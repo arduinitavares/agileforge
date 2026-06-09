@@ -424,6 +424,7 @@ class StoryCompleteRequest(BaseModel):
     idempotency_key: str
     scope: str | None = None
     scope_id: str | None = None
+    parent_requirements: list[str] | None = None
 
 
 class SprintGenerateRequest(BaseModel):
@@ -2852,6 +2853,7 @@ async def complete_story_phase(
             idempotency_key=req.idempotency_key,
             scope=req.scope,
             scope_id=req.scope_id,
+            parent_requirements=req.parent_requirements,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             now_iso=_now_iso,

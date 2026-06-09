@@ -693,6 +693,7 @@ class _FakeApplication:
         idempotency_key: str,
         scope: str | None = None,
         scope_id: str | None = None,
+        parent_requirements: list[str] | None = None,
     ) -> JsonObject:
         """Return a story complete payload."""
         call_args: JsonObject = {
@@ -702,8 +703,11 @@ class _FakeApplication:
         }
         if scope is not None:
             call_args["scope"] = scope
-        if scope_id is not None:
             call_args["scope_id"] = scope_id
+        elif scope_id is not None:
+            call_args["scope_id"] = scope_id
+        if parent_requirements is not None:
+            call_args["parent_requirements"] = parent_requirements
         self.calls.append(
             (
                 "story_complete",
@@ -2588,6 +2592,39 @@ def test_cli_routes_roadmap_commands(
         (
             [
                 "story",
+                "complete",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "STORY_PERSISTENCE",
+                "--idempotency-key",
+                "complete-story-selection",
+                "--scope",
+                "selection",
+                "--parent-requirement",
+                "Technology and Model Research Spike",
+                "--parent-requirement",
+                "Python Project Scaffold and uv Management Setup",
+            ],
+            (
+                "story_complete",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "STORY_PERSISTENCE",
+                    "idempotency_key": "complete-story-selection",
+                    "scope": "selection",
+                    "scope_id": None,
+                    "parent_requirements": [
+                        "Technology and Model Research Spike",
+                        "Python Project Scaffold and uv Management Setup",
+                    ],
+                },
+            ),
+            "agileforge story complete",
+        ),
+        (
+            [
+                "story",
                 "reopen",
                 "--project-id",
                 str(PROJECT_ID),
@@ -2713,6 +2750,53 @@ def test_cli_routes_story_phase_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+def test_cli_routes_story_complete_selection_scope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story complete routes selected parent requirements through the CLI."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "story",
+            "complete",
+            "--project-id",
+            str(PROJECT_ID),
+            "--expected-state",
+            "STORY_PERSISTENCE",
+            "--idempotency-key",
+            "complete-story-selection",
+            "--scope",
+            "selection",
+            "--parent-requirement",
+            "Technology and Model Research Spike",
+            "--parent-requirement",
+            "Python Project Scaffold and uv Management Setup",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge story complete"
+    assert app.calls == [
+        (
+            "story_complete",
+            {
+                "project_id": PROJECT_ID,
+                "expected_state": "STORY_PERSISTENCE",
+                "idempotency_key": "complete-story-selection",
+                "scope": "selection",
+                "scope_id": None,
+                "parent_requirements": [
+                    "Technology and Model Research Spike",
+                    "Python Project Scaffold and uv Management Setup",
+                ],
+            },
+        )
+    ]
 
 
 def test_story_reopen_cli_routes_guard_fields() -> None:

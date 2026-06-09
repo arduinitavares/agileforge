@@ -350,6 +350,7 @@ class _StoryPhaseRunner(Protocol):
         idempotency_key: str,
         scope: str | None = None,
         scope_id: str | None = None,
+        parent_requirements: list[str] | None = None,
     ) -> dict[str, Any]:
         """Complete the Story phase."""
         ...
@@ -1324,6 +1325,7 @@ class AgentWorkbenchApplication:
         idempotency_key: str,
         scope: str | None = None,
         scope_id: str | None = None,
+        parent_requirements: list[str] | None = None,
     ) -> dict[str, Any]:
         """Complete the Story phase."""
         return self._get_story_runner().complete(
@@ -1332,6 +1334,7 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
             scope=scope,
             scope_id=scope_id,
+            parent_requirements=parent_requirements,
         )
 
     def story_reopen(

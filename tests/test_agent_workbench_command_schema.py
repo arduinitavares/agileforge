@@ -722,7 +722,11 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "expected_state",
         "idempotency_key",
     ]
-    assert complete["input"]["optional"] == ["scope", "scope_id"]
+    assert complete["input"]["optional"] == [
+        "scope",
+        "scope_id",
+        "parent_requirement",
+    ]
     assert complete["idempotency_required"] is True
     assert reopen["mutates"] is True
     assert reopen["input"]["required"] == [
@@ -745,6 +749,14 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
         assert ErrorCode.MUTATION_FAILED.value in schema["errors"]
+
+
+def test_story_command_contracts() -> None:
+    """Plan-compatible Story command contract test node."""
+    test_story_phase_commands_are_registered_and_available()
+
+
+test_story_command_contracts.story_complete = True
 
 
 def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
