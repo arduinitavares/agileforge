@@ -114,7 +114,7 @@ def test_post_sprint_close_persists_snapshot_and_completion_event(
     payload = response.json()
     assert payload["current_status"] == SprintStatus.COMPLETED.value
     assert payload["close_eligible"] is False
-    assert payload["ineligible_reason"] == "Sprint is already completed."
+    assert payload["ineligible_reason"] is None
     assert payload["history_fidelity"] == "snapshotted"
     assert payload["close_snapshot"]["completion_notes"] == "Closed after review."
     assert (

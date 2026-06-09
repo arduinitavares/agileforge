@@ -104,6 +104,7 @@ Examples:
   agileforge sprint start --project-id 1 --expected-state SPRINT_PERSISTENCE """
     """--idempotency-key start-sprint-001
   agileforge sprint status --project-id 1
+  agileforge sprint status --project-id 1 --sprint-id <completed_sprint_id>
   agileforge sprint tasks --project-id 1
   agileforge sprint task next --project-id 1
   agileforge sprint task update --project-id 1 --task-id <task_id> """
@@ -1384,6 +1385,20 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_pending = story_sub.add_parser(
         "pending",
         help="List roadmap requirements pending Story coverage.",
+        description=(
+            "List Roadmap requirements grouped by Story coverage state. Saved or "
+            "merged Story drafts can be completed as a selected scope; pending "
+            "requirements remain excluded from scoped Sprint planning until they "
+            "are refined later."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  agileforge story pending --project-id 1\n"
+            "  agileforge story complete --project-id 1 --scope selection "
+            "--parent-requirement <requirement> --expected-state STORY_PERSISTENCE "
+            "--idempotency-key complete-story-selection-001"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     story_pending.add_argument("--project-id", type=int, required=True)
     story_pending.set_defaults(command_handler=_story_pending)
@@ -1542,6 +1557,19 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_candidates = sprint_sub.add_parser(
         "candidates",
         help="List sprint candidate stories.",
+        description=(
+            "List sprint candidate stories. If Story completed a selected scope, "
+            "candidates are filtered to that saved Story scope and non-refined "
+            "requirements are counted as excluded."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  agileforge sprint candidates --project-id 1\n\n"
+            "Readiness shows whether the selected scope can seed a Sprint. "
+            "Excluded counts explain requirements left outside the current "
+            "candidate pool."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sprint_candidates.add_argument("--project-id", type=int, required=True)
     sprint_candidates.set_defaults(command_handler=_sprint_candidates)
@@ -1601,6 +1629,18 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_status = sprint_sub.add_parser(
         "status",
         help="Show Sprint execution status.",
+        description=(
+            "Show Sprint execution status. By default this shows the active or "
+            "planned Sprint. Completed Sprints require --sprint-id because they "
+            "are read-only history, not the current execution Sprint."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  agileforge sprint status --project-id 1\n"
+            "  agileforge sprint status --project-id 1 "
+            "--sprint-id <completed_sprint_id>"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sprint_status.add_argument("--project-id", type=int, required=True)
     sprint_status.add_argument("--sprint-id", type=int)

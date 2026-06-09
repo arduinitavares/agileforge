@@ -270,6 +270,33 @@ def _scope_requirement_keys(scope_payload: dict[str, Any]) -> set[str]:
     }
 
 
+def _story_completion_scope_candidate_message(
+    *,
+    candidate_count: int,
+    scope_payload: dict[str, Any],
+    excluded_counts: dict[str, Any],
+) -> str:
+    """Return a user-facing candidate message without internal scope ids."""
+    scope = as_text(scope_payload.get("scope")).strip().lower()
+    if scope == "selection":
+        scope_label = "selected-story scope"
+    elif scope == "milestone":
+        scope_label = "milestone Story scope"
+    else:
+        scope_label = "Story scope"
+
+    candidate_word = "candidate" if candidate_count == 1 else "candidates"
+    message = f"Found {candidate_count} sprint {candidate_word} for {scope_label}."
+    non_refined_count = normalize_positive_int(excluded_counts.get("non_refined"))
+    if non_refined_count:
+        requirement_word = "requirement" if non_refined_count == 1 else "requirements"
+        message = (
+            f"{message} Excluded: {non_refined_count} non-refined "
+            f"{requirement_word}."
+        )
+    return message
+
+
 def apply_story_completion_scope_to_candidate_result(
     candidate_result: dict[str, Any],
     story_completion_scope: object,
@@ -314,8 +341,11 @@ def apply_story_completion_scope_to_candidate_result(
     if excluded_count:
         excluded_counts["story_completion_scope"] = excluded_count
     result["excluded_counts"] = excluded_counts
-    scope_id = scope_payload.get("scope_id") or "selected scope"
-    result["message"] = f"Found {len(filtered)} sprint candidates for {scope_id}."
+    result["message"] = _story_completion_scope_candidate_message(
+        candidate_count=len(filtered),
+        scope_payload=scope_payload,
+        excluded_counts=excluded_counts,
+    )
     result["story_completion_scope"] = scope_payload
     result.pop("source_fingerprint", None)
     return result

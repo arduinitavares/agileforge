@@ -150,4 +150,4 @@ def test_close_story_marks_story_done_and_returns_payload() -> None:
     assert payload["current_status"] == StoryStatus.DONE.value
     assert payload["resolution"] == StoryResolution.COMPLETED
     assert payload["close_eligible"] is False
-    assert payload["ineligible_reason"] == "Story is already Done."
+    assert payload["ineligible_reason"] is None

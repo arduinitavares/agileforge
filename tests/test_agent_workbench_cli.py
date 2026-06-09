@@ -3624,6 +3624,58 @@ def test_top_level_help_describes_agent_workbench_commands(
     assert (
         "agileforge context pack --project-id 1 --phase sprint-planning" in captured.out
     )
+    assert (
+        "agileforge sprint status --project-id 1 --sprint-id <completed_sprint_id>"
+        in captured.out
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_fragments"),
+    [
+        (
+            ["story", "pending", "--help"],
+            [
+                "Saved or merged Story drafts can be completed as a selected scope",
+                "agileforge story complete --project-id 1 --scope selection",
+                "pending requirements remain excluded from scoped Sprint planning",
+            ],
+        ),
+        (
+            ["sprint", "candidates", "--help"],
+            [
+                "If Story completed a selected scope, candidates are filtered",
+                "non-refined requirements are counted as excluded",
+                "agileforge sprint candidates --project-id 1",
+            ],
+        ),
+        (
+            ["sprint", "status", "--help"],
+            [
+                "By default this shows the active or planned Sprint",
+                "Completed Sprints require --sprint-id",
+                (
+                    "agileforge sprint status --project-id 1 "
+                    "--sprint-id <completed_sprint_id>"
+                ),
+            ],
+        ),
+    ],
+)
+def test_scoped_story_sprint_help_explains_selection_behavior(
+    argv: list[str],
+    expected_fragments: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scoped Story/Sprint help should explain selection and completed history."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(argv)
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 0
+    assert captured.err == ""
+    for fragment in expected_fragments:
+        assert fragment in captured.out
 
 
 def test_cli_configures_logging(monkeypatch: pytest.MonkeyPatch) -> None:

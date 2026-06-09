@@ -116,7 +116,9 @@ test('scoped Story planning uses explicit selection wording', () => {
     assert.match(stepperSource, /scopedStepperStatus\(step\.id, 'Active', stateKey\)/);
     assert.match(overviewSource, /Sprint planning is scoped to selected stories/);
     assert.match(overviewSource, /Sprint Draft from Selection/);
+    assert.match(overviewSource, /selected Story scope/);
     assert.match(projectJsSource, /requirements excluded or not refined/);
+    assert.match(projectJsSource, /requirements included/);
     assert.match(summarySource, /const scopePrefix = scopedSummary/);
     assert.match(summarySource, /current candidate pool/);
 });

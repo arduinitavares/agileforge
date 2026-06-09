@@ -34,10 +34,19 @@ VALID_FSM_STATES = {state.value for state in OrchestratorState}
 class SprintPhaseError(Exception):
     """Domain-level sprint phase error for router translation."""
 
-    def __init__(self, detail: str, *, status_code: int = 409) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status_code: int = 409,
+        details: dict[str, Any] | None = None,
+        remediation: Sequence[str] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
         self.status_code = status_code
+        self.details = dict(details or {})
+        self.remediation = list(remediation or [])
 
 
 def _status_key(status: object) -> str | None:
@@ -547,7 +556,7 @@ def close_sprint(
         "completed_at": getattr(closed_sprint, "completed_at", None),
         "readiness": readiness,
         "close_eligible": False,
-        "ineligible_reason": "Sprint is already completed.",
+        "ineligible_reason": None,
         "history_fidelity": "snapshotted",
         "close_snapshot": snapshot,
     }

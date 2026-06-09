@@ -269,5 +269,5 @@ def close_story(
         "completed_at": story.completed_at,
         "readiness": readiness,
         "close_eligible": False,
-        "ineligible_reason": f"Story is already {story.status.value}.",
+        "ineligible_reason": None,
     }

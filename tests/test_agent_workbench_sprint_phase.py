@@ -359,6 +359,55 @@ def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(
     assert event is not None
 
 
+def test_sprint_status_without_active_sprint_guides_to_completed_id(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status without --sprint-id should point to completed Sprint history."""
+    product = Product(name="Completed Status Product")
+    team = Team(name="Completed Status Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Already completed",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.status(project_id=product.product_id)
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "INVALID_COMMAND"
+    assert error["message"] == "No active or planned Sprint found."
+    assert error["details"] == {
+        "project_id": product.product_id,
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    assert error["remediation"] == [
+        (
+            f"Run agileforge sprint status --project-id {product.product_id} "
+            f"--sprint-id {completed_sprint.sprint_id} to inspect the latest "
+            "completed Sprint."
+        )
+    ]
+
+
 def test_sprint_runner_tasks_include_dependency_safe_execution_metadata(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -1278,8 +1327,10 @@ def test_sprint_story_close_marks_story_done_and_unblocks_next_task(
     assert close["data"]["idempotency"]["replayed"] is False
     assert close["data"]["current_status"] == "Done"
     assert close["data"]["resolution"] == StoryResolution.COMPLETED.value
+    assert close["data"]["ineligible_reason"] is None
     assert replay["ok"] is True
     assert replay["data"]["idempotency"]["replayed"] is True
+    assert replay["data"]["ineligible_reason"] is None
     assert after_next["data"]["task_ticket"]["story"]["story_id"] == (
         dependent_story.story_id
     )
@@ -1471,8 +1522,10 @@ def test_sprint_close_marks_sprint_completed_and_updates_workflow(
     assert close["data"]["current_status"] == SprintStatus.COMPLETED.value
     assert close["data"]["fsm_state"] == "SPRINT_COMPLETE"
     assert close["data"]["idempotency"]["replayed"] is False
+    assert close["data"]["ineligible_reason"] is None
     assert replay["ok"] is True
     assert replay["data"]["idempotency"]["replayed"] is True
+    assert replay["data"]["ineligible_reason"] is None
     assert workflow.state["fsm_state"] == "SPRINT_COMPLETE"
     assert workflow.state["active_sprint_id"] is None
     assert workflow.state["latest_completed_sprint_id"] == sprint.sprint_id

@@ -674,6 +674,49 @@ def test_prepare_sprint_input_filters_to_story_completion_scope(
     )
 
 
+def test_selected_story_scope_message_hides_internal_scope_hash() -> None:
+    """Selected scope messages should be user-facing and keep hashes in metadata."""
+    result = sprint_input.apply_story_completion_scope_to_candidate_result(
+        {
+            "success": True,
+            "count": 3,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "source_requirement": "enable login",
+                },
+                {
+                    "story_id": 12,
+                    "story_title": "Reset email",
+                    "source_requirement": "reset password",
+                },
+                {
+                    "story_id": 13,
+                    "story_title": "Invite teammates",
+                    "source_requirement": "invite teammates",
+                },
+            ],
+            "excluded_counts": {"non_refined": 11},
+            "readiness": {"status": "ready", "blocking_codes": []},
+        },
+        {
+            "scope": "selection",
+            "scope_id": "selection:sha256:87ff8c3304815fa16f844b512c92528d77bf65e",
+            "requirements": ["Enable Login", "Reset Password"],
+        },
+    )
+
+    assert result["message"] == (
+        "Found 2 sprint candidates for selected-story scope. "
+        "Excluded: 11 non-refined requirements."
+    )
+    assert "sha256" not in result["message"]
+    assert result["story_completion_scope"]["scope_id"].startswith(
+        "selection:sha256:"
+    )
+
+
 def test_prepare_sprint_input_preserves_dependency_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -918,7 +918,7 @@ def test_close_sprint_returns_completed_snapshot_payload() -> None:
 
     assert payload["current_status"] == "Completed"
     assert payload["close_eligible"] is False
-    assert payload["ineligible_reason"] == "Sprint is already completed."
+    assert payload["ineligible_reason"] is None
     assert payload["history_fidelity"] == "snapshotted"
     assert payload["close_snapshot"] == {
         "closed_at": "2026-04-04T12:00:00Z",

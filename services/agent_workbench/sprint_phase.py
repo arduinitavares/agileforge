@@ -1210,7 +1210,25 @@ class SprintPhaseRunner:
                 )
             ).first()
         if sprint is None or sprint.sprint_id is None:
-            _raise_no_execution_sprint_found()
+            completed_sprint = session.exec(
+                select(Sprint)
+                .where(
+                    Sprint.product_id == project_id,
+                    Sprint.status == SprintStatus.COMPLETED,
+                )
+                .order_by(
+                    cast("Any", Sprint.completed_at).desc(),
+                    cast("Any", Sprint.updated_at).desc(),
+                    cast("Any", Sprint.sprint_id).desc(),
+                )
+            ).first()
+            completed_sprint_id = (
+                completed_sprint.sprint_id if completed_sprint is not None else None
+            )
+            _raise_no_execution_sprint_found(
+                project_id=project_id,
+                completed_sprint_id=completed_sprint_id,
+            )
         return sprint.sprint_id
 
 
@@ -1219,9 +1237,36 @@ def _raise_sprint_not_found() -> NoReturn:
     raise SprintPhaseError(message, status_code=404)
 
 
-def _raise_no_execution_sprint_found() -> NoReturn:
+def _raise_no_execution_sprint_found(
+    *,
+    project_id: int,
+    completed_sprint_id: int | None,
+) -> NoReturn:
     message = "No active or planned Sprint found."
-    raise SprintPhaseError(message, status_code=404)
+    details: dict[str, Any] = {"project_id": project_id}
+    if completed_sprint_id is not None:
+        details["latest_completed_sprint_id"] = completed_sprint_id
+        remediation = [
+            (
+                f"Run agileforge sprint status --project-id {project_id} "
+                f"--sprint-id {completed_sprint_id} to inspect the latest "
+                "completed Sprint."
+            )
+        ]
+    else:
+        remediation = [
+            (
+                f"Run agileforge sprint status --project-id {project_id} "
+                "--sprint-id <completed_sprint_id> to inspect completed Sprint "
+                "history."
+            )
+        ]
+    raise SprintPhaseError(
+        message,
+        status_code=404,
+        details=details,
+        remediation=remediation,
+    )
 
 
 def _raise_task_not_found() -> NoReturn:
@@ -2917,7 +2962,12 @@ def _phase_error(exc: SprintPhaseError) -> dict[str, Any]:
         if message.startswith("Setup required")
         else ErrorCode.INVALID_COMMAND
     )
-    return _error_envelope(code, message)
+    return _error_envelope(
+        code,
+        message,
+        details=exc.details,
+        remediation=exc.remediation,
+    )
 
 
 def _workflow_error(exc: RuntimeError) -> dict[str, Any]:
