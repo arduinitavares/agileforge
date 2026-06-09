@@ -30,6 +30,7 @@ _EFFORT_TO_STORY_POINTS: dict[str, int] = {
 }
 _INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
 _STORY_QUALITY_SCHEMA_VERSION = "agileforge.story_quality.v1"
+_STORY_COMPLETION_SCOPE_SCHEMA_VERSION = "agileforge.story_completion_scope.v1"
 
 
 class StoryPhaseError(Exception):
@@ -74,15 +75,115 @@ def _roadmap_milestone_requirements(
     return None
 
 
+def _normalized_parent_requirements(
+    parent_requirements: list[str] | None,
+) -> list[str]:
+    """Return non-empty parent requirements deduplicated by normalized key."""
+    if parent_requirements is None:
+        return []
+
+    requirements: list[str] = []
+    seen_keys: set[str] = set()
+    for parent_requirement in parent_requirements:
+        requirement = parent_requirement.strip()
+        if not requirement:
+            continue
+
+        requirement_key = normalize_requirement_key(requirement)
+        if requirement_key in seen_keys:
+            continue
+
+        requirements.append(requirement)
+        seen_keys.add(requirement_key)
+    return requirements
+
+
+def _selection_scope_id(requirements: list[str]) -> str:
+    """Return deterministic completion scope ID for selected requirements."""
+    return "selection:" + canonical_hash(
+        {"scope": "selection", "requirements": requirements}
+    )
+
+
+def _roadmap_ordered_selection_requirements(
+    state: dict[str, Any],
+    *,
+    parent_requirements: list[str],
+) -> list[str]:
+    """Resolve selected parent requirements into saved roadmap order."""
+    selected_by_key = {
+        normalize_requirement_key(requirement): requirement
+        for requirement in parent_requirements
+    }
+    matched_keys: set[str] = set()
+    selected_requirements: list[str] = []
+
+    for roadmap_requirement in get_all_roadmap_requirements(state):
+        if not isinstance(roadmap_requirement, str):
+            continue
+
+        requirement_key = normalize_requirement_key(roadmap_requirement)
+        if requirement_key not in selected_by_key or requirement_key in matched_keys:
+            continue
+
+        selected_requirements.append(roadmap_requirement)
+        matched_keys.add(requirement_key)
+
+    for requirement in parent_requirements:
+        requirement_key = normalize_requirement_key(requirement)
+        if requirement_key not in matched_keys:
+            raise StoryPhaseError(
+                "Story completion selection includes unknown roadmap requirement: "
+                f"{requirement}.",
+                status_code=400,
+            )
+
+    return selected_requirements
+
+
 def _story_completion_scope_requirements(
     state: dict[str, Any],
     *,
     scope: str | None,
     scope_id: str | None,
+    parent_requirements: list[str] | None = None,
 ) -> tuple[list[str], dict[str, Any] | None]:
     """Resolve Story completion requirements for full or scoped completion."""
     normalized_scope = scope.strip() if isinstance(scope, str) else None
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else None
+    if parent_requirements is not None and normalized_scope != "selection":
+        raise StoryPhaseError(
+            "--parent-requirement is only supported with --scope selection",
+            status_code=400,
+        )
+    if normalized_scope == "selection":
+        if normalized_scope_id:
+            raise StoryPhaseError(
+                "story complete --scope selection does not accept --scope-id",
+                status_code=400,
+            )
+
+        normalized_parent_requirements = _normalized_parent_requirements(
+            parent_requirements
+        )
+        if not normalized_parent_requirements:
+            raise StoryPhaseError(
+                "story complete --scope selection requires at least one "
+                "--parent-requirement",
+                status_code=400,
+            )
+
+        requirements = _roadmap_ordered_selection_requirements(
+            state,
+            parent_requirements=normalized_parent_requirements,
+        )
+        return requirements, {
+            "schema_version": _STORY_COMPLETION_SCOPE_SCHEMA_VERSION,
+            "scope": normalized_scope,
+            "scope_id": _selection_scope_id(requirements),
+            "requirements": requirements,
+        }
+
     if not normalized_scope and not normalized_scope_id:
         return get_all_roadmap_requirements(state), None
     if not normalized_scope or not normalized_scope_id:
@@ -108,7 +209,7 @@ def _story_completion_scope_requirements(
         )
 
     return requirements, {
-        "schema_version": "agileforge.story_completion_scope.v1",
+        "schema_version": _STORY_COMPLETION_SCOPE_SCHEMA_VERSION,
         "scope": normalized_scope,
         "scope_id": normalized_scope_id,
         "requirements": requirements,
@@ -1749,6 +1850,7 @@ async def complete_story_phase(
     idempotency_key: str | None,
     scope: str | None = None,
     scope_id: str | None = None,
+    parent_requirements: list[str] | None = None,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
@@ -1784,6 +1886,7 @@ async def complete_story_phase(
         state,
         scope=scope,
         scope_id=scope_id,
+        parent_requirements=parent_requirements,
     )
     saved_reqs_dict = state.get("story_saved", {})
     if not isinstance(saved_reqs_dict, dict):

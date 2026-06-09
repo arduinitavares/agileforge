@@ -2011,6 +2011,199 @@ async def test_complete_story_phase_allows_saved_milestone_scope_with_pending_la
 
 
 @pytest.mark.asyncio
+async def test_complete_story_phase_allows_saved_selection_scope_in_roadmap_order() -> None:  # noqa: E501
+    """Verify selection scope completes only selected saved parent requirements."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [
+            {"items": ["Enable login", "Reset password"]},
+            {"items": ["Invite teammates"]},
+        ],
+        "story_saved": {"Enable login": True, "Reset password": True},
+    }
+    saved_states: list[JsonDict] = []
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-story-selection-login",
+        scope="selection",
+        parent_requirements=[
+            " reset password ",
+            "Enable login",
+            "ENABLE LOGIN",
+        ],
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-09T12:00:00Z",
+    )
+
+    selected_requirements = ["Enable login", "Reset password"]
+    expected_scope = {
+        "schema_version": "agileforge.story_completion_scope.v1",
+        "scope": "selection",
+        "scope_id": "selection:"
+        + canonical_hash(
+            {"scope": "selection", "requirements": selected_requirements}
+        ),
+        "requirements": selected_requirements,
+        "completed_at": "2026-06-09T12:00:00Z",
+    }
+    assert payload == {
+        "fsm_state": "SPRINT_SETUP",
+        "coverage": {"saved": 2, "merged": 0, "total": 2},
+        "idempotency_key": "complete-story-selection-login",
+        "story_completion_scope": expected_scope,
+    }
+    assert state["fsm_state"] == "SPRINT_SETUP"
+    assert state["story_completion_scope"] == expected_scope
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_rejects_empty_selection_scope() -> None:
+    """Verify selection scope requires at least one parent requirement."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Enable login"]}],
+        "story_saved": {"Enable login": True},
+    }
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-empty-selection",
+            scope="selection",
+            parent_requirements=[" ", ""],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+
+    assert exc_info.value.status_code == 400  # noqa: PLR2004
+    assert exc_info.value.detail == (
+        "story complete --scope selection requires at least one "
+        "--parent-requirement"
+    )
+    assert state["fsm_state"] == "STORY_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_rejects_unknown_selection_requirement() -> None:
+    """Verify selection scope rejects parent requirements outside the roadmap."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Enable login"]}],
+        "story_saved": {"Enable login": True},
+    }
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-unknown-selection",
+            scope="selection",
+            parent_requirements=["Missing requirement"],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+
+    assert exc_info.value.status_code == 400  # noqa: PLR2004
+    assert exc_info.value.detail == (
+        "Story completion selection includes unknown roadmap requirement: "
+        "Missing requirement."
+    )
+    assert state["fsm_state"] == "STORY_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_rejects_unsaved_selection_requirement() -> None:
+    """Verify selection scope still requires saved or merged Story output."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Enable login", "Reset password"]}],
+        "story_saved": {"Enable login": True},
+    }
+
+    selected_requirements = ["Enable login", "Reset password"]
+    expected_scope_id = "selection:" + canonical_hash(
+        {"scope": "selection", "requirements": selected_requirements}
+    )
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-unsaved-selection",
+            scope="selection",
+            parent_requirements=selected_requirements,
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert exc_info.value.detail == (
+        f"Story phase cannot complete for {expected_scope_id}: "
+        "1 of 2 roadmap requirements are saved or merged."
+    )
+    assert state["fsm_state"] == "STORY_PERSISTENCE"
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_rejects_selection_argument_combinations() -> None:
+    """Verify selection flags are only accepted for selection completion."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [{"items": ["Enable login"]}],
+        "story_saved": {"Enable login": True},
+    }
+
+    with pytest.raises(StoryPhaseError) as full_exc:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-parent-no-scope",
+            parent_requirements=["Enable login"],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+    assert full_exc.value.status_code == 400  # noqa: PLR2004
+    assert full_exc.value.detail == (
+        "--parent-requirement is only supported with --scope selection"
+    )
+
+    with pytest.raises(StoryPhaseError) as milestone_exc:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-parent-milestone",
+            scope="milestone",
+            scope_id="milestone_0",
+            parent_requirements=["Enable login"],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+    assert milestone_exc.value.status_code == 400  # noqa: PLR2004
+    assert milestone_exc.value.detail == (
+        "--parent-requirement is only supported with --scope selection"
+    )
+
+    with pytest.raises(StoryPhaseError) as scope_id_exc:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-selection-scope-id",
+            scope="selection",
+            scope_id="selection:manual",
+            parent_requirements=["Enable login"],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: None,  # noqa: ARG005
+            now_iso=lambda: "2026-06-09T12:00:00Z",
+        )
+    assert scope_id_exc.value.status_code == 400  # noqa: PLR2004
+    assert scope_id_exc.value.detail == (
+        "story complete --scope selection does not accept --scope-id"
+    )
+
+
+@pytest.mark.asyncio
 async def test_complete_story_phase_rejects_unknown_milestone_scope_id() -> None:
     """Verify unknown milestone scopes fail without advancing the FSM."""
     state: JsonDict = {
