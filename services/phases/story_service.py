@@ -18,6 +18,7 @@ from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import hydrate_story_runtime_from_legacy
 from services.phases import workflow_state
+from services.story_feedback_quality import evaluate_story_feedback_quality
 
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
 _EFFORT_TO_STORY_POINTS: dict[str, int] = {
@@ -1054,11 +1055,12 @@ async def generate_story_draft(
     project_id: int,
     parent_requirement: str,
     user_input: str | None,
+    force_feedback: bool = False,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
     run_story_agent_from_state: Callable[..., Awaitable[dict[str, Any]]],
-    append_feedback_entry: Callable[[dict[str, Any], str, str], dict[str, Any]],
+    append_feedback_entry: Callable[..., dict[str, Any]],
     set_request_projection: Callable[..., dict[str, Any]],
     append_attempt: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     promote_reusable_draft: Callable[..., dict[str, Any]],
@@ -1088,8 +1090,32 @@ async def generate_story_draft(
             status_code=400,
         )
 
+    feedback_quality: dict[str, Any] | None = None
     if normalized_user_input:
-        append_feedback_entry(runtime, normalized_user_input, now_iso())
+        feedback_quality = evaluate_story_feedback_quality(
+            normalized_user_input,
+            parent_requirement=normalized_parent_requirement,
+            force=force_feedback,
+        )
+        if feedback_quality["needs_revision"] and not force_feedback:
+            state["fsm_state"] = OrchestratorState.STORY_INTERVIEW.value
+            save_state(state)
+            return {
+                "fsm_state": OrchestratorState.STORY_INTERVIEW.value,
+                "parent_requirement": normalized_parent_requirement,
+                "data": {
+                    "generation_ran": False,
+                    "feedback_quality": feedback_quality,
+                    **story_interview_summary(runtime),
+                },
+            }
+
+        append_feedback_entry(
+            runtime,
+            normalized_user_input,
+            now_iso(),
+            feedback_quality=feedback_quality,
+        )
 
     included_feedback_ids = story_unabsorbed_feedback_ids(runtime)
     story_result = await run_story_agent_from_state(
@@ -1176,6 +1202,8 @@ async def generate_story_draft(
         "fsm_state": next_state,
         "parent_requirement": normalized_parent_requirement,
         "data": {
+            "generation_ran": True,
+            "feedback_quality": feedback_quality,
             "output_artifact": story_result.get("output_artifact"),
             **story_interview_summary(runtime),
         },

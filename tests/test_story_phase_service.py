@@ -363,6 +363,27 @@ async def test_generate_story_draft_normalizes_requirement_and_persists_reusable
     None
 ):
     """Verify generate story draft normalizes requirement and persists reusable output."""  # noqa: E501
+    refinement_feedback = """
+Target:
+Requirement A, latest story draft
+
+Issue:
+Draft needs a narrower milestone boundary.
+
+Evidence:
+Current feedback requests one milestone only.
+
+Required change:
+Keep the stories to one milestone.
+
+Acceptance criteria:
+- Stories cover one milestone.
+- Each story has a single user goal.
+- Draft remains saveable.
+
+Scope limit:
+Do not add cross-milestone work.
+"""
     state: JsonDict = {
         "roadmap_releases": [
             {
@@ -380,7 +401,7 @@ async def test_generate_story_draft_normalizes_requirement_and_persists_reusable
                         "items": [
                             {
                                 "feedback_id": "feedback-1",
-                                "text": "Please keep this to one milestone.",
+                                "text": refinement_feedback,
                                 "created_at": "2026-03-28T09:59:00Z",
                                 "status": "unabsorbed",
                                 "absorbed_by_attempt_id": None,
@@ -429,12 +450,12 @@ async def test_generate_story_draft_normalizes_requirement_and_persists_reusable
     payload = await generate_story_draft(
         project_id=7,
         parent_requirement="  Requirement A  ",
-        user_input="Please keep this to one milestone.",
+        user_input=refinement_feedback,
         load_state=lambda: _async_value(state),
         save_state=lambda updated: saved_states.append(dict(updated)),
         now_iso=lambda: "2026-04-04T12:00:00Z",
         run_story_agent_from_state=fake_run_story_agent_from_state,
-        append_feedback_entry=lambda runtime, text, created_at: runtime[
+        append_feedback_entry=lambda runtime, text, created_at, **_kwargs: runtime[
             "feedback_projection"
         ]["items"].append(
             {
@@ -489,6 +510,158 @@ async def test_generate_story_draft_normalizes_requirement_and_persists_reusable
         == "Story A"
     )
     assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_soft_gates_weak_feedback() -> None:
+    """Weak refinement feedback returns guidance without running generation."""
+    parent_requirement = "Requirement A"
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "quality_gate_failed",
+                            "is_reusable": False,
+                            "retryable": False,
+                            "draft_kind": "quality_blocked_draft",
+                            "output_artifact": _story_artifact(
+                                parent_requirement,
+                                "Broad draft",
+                                is_complete=False,
+                            ),
+                        }
+                    ],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+    calls = {"agent": 0, "feedback": 0}
+
+    async def fake_run_story_agent_from_state(
+        *args: object,
+        **kwargs: object,
+    ) -> JsonDict:
+        del args, kwargs
+        calls["agent"] += 1
+        return {"success": True}
+
+    def fake_append_feedback_entry(*args: object, **kwargs: object) -> JsonDict:
+        del args, kwargs
+        calls["feedback"] += 1
+        return {}
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Make this more INVEST.",
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-09T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(kwargs),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == {"agent": 0, "feedback": 0}
+    assert payload["fsm_state"] == "STORY_INTERVIEW"
+    assert payload["data"]["generation_ran"] is False
+    assert payload["data"]["feedback_quality"]["needs_revision"] is True
+    assert "required_change" in payload["data"]["feedback_quality"]["missing_fields"]
+    runtime = state["interview_runtime"]["story"][parent_requirement]
+    assert len(runtime["attempt_history"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_force_feedback_runs_generation() -> None:
+    """Forced weak feedback records quality metadata and still runs generation."""
+    parent_requirement = "Requirement A"
+    artifact = _story_artifact(parent_requirement, "Forced draft")
+    state: JsonDict = {"roadmap_releases": [{"items": [parent_requirement]}]}
+    captured_feedback: dict[str, Any] = {}
+
+    async def fake_run_story_agent_from_state(
+        *args: object,
+        **kwargs: object,
+    ) -> JsonDict:
+        del args, kwargs
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {"parent_requirement": parent_requirement},
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(
+        runtime: JsonDict,
+        text: str,
+        created_at: str,
+        **kwargs: object,
+    ) -> JsonDict:
+        del runtime, text, created_at
+        captured_feedback.update(kwargs)
+        return {"feedback_id": "feedback-1"}
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Try again.",
+        force_feedback=True,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-09T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"]["forced"] is True
+    feedback_quality = cast("JsonDict", captured_feedback["feedback_quality"])
+    assert feedback_quality["forced"] is True
 
 
 @pytest.mark.asyncio

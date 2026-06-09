@@ -198,6 +198,8 @@ def append_feedback_entry(
     text: str,
     created_at: object,
     feedback_id: str | None = None,
+    *,
+    feedback_quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append a feedback entry and allocate a stable feedback identifier."""
     feedback_projection = _normalize_feedback_projection(runtime)
@@ -215,6 +217,8 @@ def append_feedback_entry(
         "status": "unabsorbed",
         "absorbed_by_attempt_id": None,
     }
+    if isinstance(feedback_quality, dict):
+        entry["feedback_quality"] = dict(feedback_quality)
     items.append(entry)
     return entry
 
