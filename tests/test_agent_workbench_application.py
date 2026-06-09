@@ -1169,6 +1169,7 @@ class _FakeStoryRunner:
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> dict[str, Any]:
         """Record Story generation."""
         self.calls.append(
@@ -1178,6 +1179,7 @@ class _FakeStoryRunner:
                     "project_id": project_id,
                     "parent_requirement": parent_requirement,
                     "user_input": user_input,
+                    "force_feedback": force_feedback,
                 },
             )
         )
@@ -2190,6 +2192,32 @@ def test_application_routes_roadmap_commands_to_runner() -> None:
     ]
 
 
+def test_story_generate_threads_force_feedback() -> None:
+    """Story facade forwards the feedback quality override to the runner."""
+    runner = _FakeStoryRunner()
+    app = AgentWorkbenchApplication(story_runner=cast("Any", runner))
+
+    result = app.story_generate(
+        project_id=PROJECT_ID,
+        parent_requirement="REQ.checkout",
+        user_input="ship it despite sparse notes",
+        force_feedback=True,
+    )
+
+    assert result["ok"] is True
+    assert runner.calls == [
+        (
+            "generate",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "REQ.checkout",
+                "user_input": "ship it despite sparse notes",
+                "force_feedback": True,
+            },
+        )
+    ]
+
+
 def test_application_routes_story_commands_to_runner() -> None:
     """Verify Story facade methods delegate to the configured runner."""
     runner = _FakeStoryRunner()
@@ -2279,6 +2307,7 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "project_id": PROJECT_ID,
                 "parent_requirement": "REQ.checkout",
                 "user_input": "focus payment errors",
+                "force_feedback": False,
             },
         ),
         (

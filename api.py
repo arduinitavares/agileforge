@@ -405,6 +405,7 @@ class StoryGenerateRequest(BaseModel):
     """Request body for generating user stories."""
 
     user_input: str | None = None
+    force_feedback: bool = False
 
 
 class StorySaveRequest(BaseModel):
@@ -2646,6 +2647,7 @@ async def generate_project_story(
             project_id=project_id,
             parent_requirement=parent_requirement,
             user_input=req.user_input,
+            force_feedback=req.force_feedback,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             now_iso=_now_iso,

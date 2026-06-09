@@ -455,6 +455,7 @@ class _Application(Protocol):
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> JsonObject:
         """Generate or refine a Story draft."""
         ...
@@ -1392,6 +1393,11 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_generate.add_argument("--project-id", type=int, required=True)
     story_generate.add_argument("--parent-requirement", required=True)
     story_generate.add_argument("--input", dest="user_input")
+    story_generate.add_argument(
+        "--force-feedback",
+        action="store_true",
+        help="Run Story generation even when feedback quality needs revision.",
+    )
     story_generate.set_defaults(command_handler=_story_generate)
     story_retry = story_sub.add_parser(
         "retry",
@@ -2830,6 +2836,7 @@ def _story_generate(
         project_id=args.project_id,
         parent_requirement=args.parent_requirement,
         user_input=args.user_input,
+        force_feedback=bool(args.force_feedback),
     )
 
 

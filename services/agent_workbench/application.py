@@ -311,6 +311,7 @@ class _StoryPhaseRunner(Protocol):
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
         ...
@@ -1261,12 +1262,14 @@ class AgentWorkbenchApplication:
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
         return self._get_story_runner().generate(
             project_id=project_id,
             parent_requirement=parent_requirement,
             user_input=user_input,
+            force_feedback=force_feedback,
         )
 
     def story_retry(

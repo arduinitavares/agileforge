@@ -120,9 +120,16 @@ class StoryPhaseRunner:
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
-        return anyio.run(self._generate, project_id, parent_requirement, user_input)
+        return anyio.run(
+            self._generate,
+            project_id,
+            parent_requirement,
+            user_input,
+            force_feedback,
+        )
 
     def retry(self, *, project_id: int, parent_requirement: str) -> dict[str, Any]:
         """Retry the latest retryable Story request."""
@@ -271,6 +278,7 @@ class StoryPhaseRunner:
         project_id: int,
         parent_requirement: str,
         user_input: str | None,
+        force_feedback: bool,
     ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
@@ -281,6 +289,7 @@ class StoryPhaseRunner:
                 project_id=project_id,
                 parent_requirement=parent_requirement,
                 user_input=user_input,
+                force_feedback=force_feedback,
                 load_state=lambda: self._load_story_state(
                     str(project_id), project_id, product
                 ),

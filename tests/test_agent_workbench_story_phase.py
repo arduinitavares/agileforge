@@ -399,6 +399,7 @@ def test_story_generate_hydrates_spec_authority_and_roadmap(
         project_id=PROJECT_ID,
         parent_requirement="Review match result",
         user_input="draft story",
+        force_feedback=True,
     )
 
     assert result["ok"] is True

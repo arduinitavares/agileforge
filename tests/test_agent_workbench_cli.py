@@ -587,6 +587,7 @@ class _FakeApplication:
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
+        force_feedback: bool = False,
     ) -> JsonObject:
         """Return a story generate payload."""
         self.calls.append(
@@ -596,6 +597,7 @@ class _FakeApplication:
                     "project_id": project_id,
                     "parent_requirement": parent_requirement,
                     "user_input": user_input,
+                    "force_feedback": force_feedback,
                 },
             )
         )
@@ -2456,6 +2458,7 @@ def test_cli_routes_roadmap_commands(
                 "REQ.checkout",
                 "--input",
                 "focus payment errors",
+                "--force-feedback",
             ],
             (
                 "story_generate",
@@ -2463,6 +2466,7 @@ def test_cli_routes_roadmap_commands(
                     "project_id": PROJECT_ID,
                     "parent_requirement": "REQ.checkout",
                     "user_input": "focus payment errors",
+                    "force_feedback": True,
                 },
             ),
             "agileforge story generate",
