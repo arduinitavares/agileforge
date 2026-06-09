@@ -465,16 +465,16 @@ class _StoryReviewReadProjection(_FakeReadProjection):
 
 
 class _StoryPersistenceReadProjection(_FakeReadProjection):
-    """Fake read projection for saved Story state."""
+    """Fake read projection for incomplete Story state without coverage."""
 
     def workflow_state(self, *, project_id: int) -> dict[str, Any]:
-        """Return Story persistence workflow state."""
+        """Return Story persistence workflow state without coverage."""
         result = super().workflow_state(project_id=project_id)
         result["data"]["state"] = {
             "fsm_state": "STORY_PERSISTENCE",
             "setup_status": "passed",
             "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
-            "story_saved": {"Requirement A": True},
+            "story_saved": {},
         }
         return result
 
@@ -509,6 +509,19 @@ class _StoryMilestoneReadyReadProjection(_FakeReadProjection):
             ],
             "story_saved": {"Requirement A": True, "Requirement B": True},
         }
+        return result
+
+
+class _WorkflowStateReader(_FakeReadProjection):
+    """Fake read projection with caller-supplied workflow state."""
+
+    def __init__(self, state: dict[str, Any]) -> None:
+        self._state = state
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return caller-supplied workflow state."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = self._state
         return result
 
 
@@ -3026,7 +3039,7 @@ def test_application_workflow_next_routes_story_review_to_history_save_and_refin
 def test_application_workflow_next_routes_story_persistence_to_next_pending_story() -> (
     None
 ):
-    """Keep Story completion hidden until every Roadmap requirement is covered."""
+    """Keep Story completion hidden until at least one requirement is covered."""
     app = AgentWorkbenchApplication(
         read_projection=_StoryPersistenceReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3040,6 +3053,62 @@ def test_application_workflow_next_routes_story_persistence_to_next_pending_stor
         (
             "agileforge story generate --project-id 7 "
             "--parent-requirement <parent_requirement>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_routes_story_persistence_to_selection_complete_when_partially_saved() -> None:  # noqa: E501
+    """Story persistence should advertise installed selection completion."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "STORY_PERSISTENCE",
+                "roadmap_releases": [
+                    {
+                        "items": [
+                            "Technology and Model Research Spike",
+                            "Python Project Scaffold and uv Management Setup",
+                        ]
+                    }
+                ],
+                "story_saved": {
+                    "Technology and Model Research Spike": True,
+                    "Python Project Scaffold and uv Management Setup": False,
+                },
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ),
+        "agileforge story dependencies inspect --project-id 7",
+        (
+            "agileforge story dependencies propose --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story dependencies apply --project-id 7 "
+            "--attempt-id <attempt_id> "
+            "--expected-artifact-fingerprint <artifact_fingerprint> "
+            "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--scope selection "
+            '--parent-requirement "Technology and Model Research Spike" '
+            "--idempotency-key <idempotency_key>"
         ),
     ]
     assert result["data"]["blocked_commands"] == []
@@ -3114,6 +3183,14 @@ def test_workflow_next_routes_story_persistence_to_scoped_complete_when_mileston
             "agileforge story complete --project-id 7 "
             "--expected-state STORY_PERSISTENCE "
             "--scope milestone --scope-id milestone_0 "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--scope selection "
+            '--parent-requirement "Requirement A" '
+            '--parent-requirement "Requirement B" '
             "--idempotency-key <idempotency_key>"
         ),
     ]

@@ -2490,7 +2490,11 @@ def _story_command_candidates(
                 project_id=project_id,
                 workflow=workflow,
             )
-            if scoped_complete_commands:
+            selection_complete_commands = _covered_story_selection_complete_command(
+                project_id=project_id,
+                workflow=workflow,
+            )
+            if scoped_complete_commands or selection_complete_commands:
                 return [
                     pending_command,
                     generate_command,
@@ -2499,6 +2503,7 @@ def _story_command_candidates(
                         expected_state="STORY_PERSISTENCE",
                     ),
                     *scoped_complete_commands,
+                    *selection_complete_commands,
                 ]
             return [pending_command, generate_command]
         return [
@@ -2546,6 +2551,22 @@ def _story_command_candidates(
     ]
 
 
+def _story_requirement_is_covered(
+    state_data: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> bool:
+    """Return whether a Story requirement is saved or merged."""
+    saved = state_data.get("story_saved")
+    saved_map = saved if isinstance(saved, dict) else {}
+    return bool(saved_map.get(parent_requirement)) or (
+        _story_requirement_has_merge_resolution(
+            state_data,
+            parent_requirement=parent_requirement,
+        )
+    )
+
+
 def _covered_story_milestone_complete_commands(
     *,
     project_id: int,
@@ -2558,8 +2579,6 @@ def _covered_story_milestone_complete_commands(
     if not isinstance(releases, list):
         return []
 
-    saved = state_data.get("story_saved")
-    saved_map = saved if isinstance(saved, dict) else {}
     commands: list[tuple[str, str]] = []
     for release_index, release in enumerate(releases):
         if not isinstance(release, dict):
@@ -2572,8 +2591,7 @@ def _covered_story_milestone_complete_commands(
         if not requirements:
             continue
         if not all(
-            bool(saved_map.get(requirement))
-            or _story_requirement_has_merge_resolution(
+            _story_requirement_is_covered(
                 state_data,
                 parent_requirement=requirement,
             )
@@ -2595,6 +2613,55 @@ def _covered_story_milestone_complete_commands(
     return commands
 
 
+def _covered_story_selection_complete_command(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return one scoped Story complete command for covered roadmap requirements."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    requirements = _roadmap_requirements_from_state(state_data)
+    covered_requirements = [
+        requirement
+        for requirement in requirements
+        if _story_requirement_is_covered(
+            state_data,
+            parent_requirement=requirement,
+        )
+    ]
+    if not covered_requirements:
+        return []
+
+    parent_requirement_flags = " ".join(
+        _story_parent_requirement_flag(requirement)
+        for requirement in covered_requirements
+    )
+    return [
+        (
+            "agileforge story complete",
+            (
+                f"agileforge story complete --project-id {project_id} "
+                "--expected-state STORY_PERSISTENCE "
+                "--scope selection "
+                f"{parent_requirement_flags} "
+                "--idempotency-key <idempotency_key>"
+            ),
+        )
+    ]
+
+
+def _story_parent_requirement_flag(parent_requirement: str) -> str:
+    """Return a quoted parent requirement flag for workflow command help."""
+    quoted = (
+        parent_requirement.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+    return f'--parent-requirement "{quoted}"'
+
+
 def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
     """Return whether all Roadmap requirements have Story coverage."""
     state = _envelope_data(workflow).get("state")
@@ -2603,11 +2670,8 @@ def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
     if not requirements:
         return False
 
-    saved = state_data.get("story_saved")
-    saved_map = saved if isinstance(saved, dict) else {}
     return all(
-        bool(saved_map.get(requirement))
-        or _story_requirement_has_merge_resolution(
+        _story_requirement_is_covered(
             state_data,
             parent_requirement=requirement,
         )
