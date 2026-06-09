@@ -59,9 +59,12 @@ Rules:
 - Every selected parent requirement must exist in the roadmap.
 - Every selected parent requirement must be saved or merged.
 - Duplicate selected requirements are normalized away while preserving roadmap order.
-- `scope_id` is derived deterministically from the normalized selected requirement list.
+- `scope_id` is derived deterministically from a canonical payload containing `scope="selection"` and the normalized selected requirement list in roadmap order.
+- `completed_at` is required in the stored scope payload and is set when Story completion advances to `SPRINT_SETUP`.
 - Reusing the same idempotency key replays the original completion result.
 - A caller that wants a different selection must use a new idempotency key.
+
+The implementation should use the repository's canonical hash helper for the `scope_id` payload. The selected requirement list is not alphabetically sorted; it follows roadmap order so the scope remains aligned with parent rank, candidate ordering, and downstream planning traceability.
 
 ## Candidate Filtering
 
@@ -88,6 +91,21 @@ Initial rule:
 - Sprint generation must refuse to run while candidate readiness is blocked.
 
 This keeps partial planning honest without requiring the user to finish an entire milestone.
+
+## Post-Selection Workflow Semantics
+
+`scope=selection` is a Story completion operation. A successful selection moves the workflow to `SPRINT_SETUP`, the same as full or milestone completion.
+
+After the workflow reaches `SPRINT_SETUP`, the user cannot run another `story complete` with a different selection from the same state. Changing the selected planning scope requires returning to Story correction flow first, for example through an explicit reopen/reset workflow that brings the project back to a Story state before Sprint planning continues.
+
+Scope precedence:
+
+- full Story completion stores no `story_completion_scope` and clears any previous scoped completion data
+- milestone completion stores a milestone `story_completion_scope`
+- selection completion stores a selection `story_completion_scope`
+- a later successful completion after reopening Story replaces the previous scope payload
+
+Sprint candidates and Sprint generation always use the currently stored `story_completion_scope`.
 
 ## Commands And APIs
 
