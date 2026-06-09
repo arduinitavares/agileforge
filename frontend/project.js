@@ -2881,6 +2881,8 @@ async function selectStoryRequirement(reqName) {
     // Clear input
     const input = document.getElementById('story-user-input');
     if (input) input.value = '';
+    const forceFeedback = document.getElementById('story-force-feedback');
+    if (forceFeedback) forceFeedback.checked = false;
     renderStoryFeedbackQuality(null);
 
     activeStoryAttemptCount = 0;
@@ -3279,6 +3281,8 @@ async function generateStoryDraft() {
 
     const input = document.getElementById('story-user-input');
     const userInput = input?.value?.trim() || '';
+    const forceFeedback = document.getElementById('story-force-feedback');
+    const shouldForceFeedback = forceFeedback?.checked === true;
     const requiresRefinementInput = activeStoryAttemptCount > 0 && activeStoryLatestClassification !== 'reset_marker';
 
     if (requiresRefinementInput && !userInput) {
@@ -3297,7 +3301,7 @@ async function generateStoryDraft() {
         const response = await fetch(`/api/projects/${selectedProjectId}/story/generate?parent_requirement=${encodeURIComponent(activeStoryReq)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_input: userInput }),
+            body: JSON.stringify({ user_input: userInput, force_feedback: shouldForceFeedback }),
         });
 
         if (response.status >= 400) {
@@ -3313,6 +3317,7 @@ async function generateStoryDraft() {
         if (payloadData.generation_ran === false) {
             return;
         }
+        if (forceFeedback) forceFeedback.checked = false;
 
         // reload data
         await loadStoryRequirements();
@@ -3473,6 +3478,8 @@ async function deleteStoryDraft() {
         // Success - clear active UI state
         const input = document.getElementById('story-user-input');
         if (input) input.value = '';
+        const forceFeedback = document.getElementById('story-force-feedback');
+        if (forceFeedback) forceFeedback.checked = false;
         renderStoryFeedbackQuality(null);
 
         // Reload data from backend
