@@ -24,6 +24,7 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     SaveSprintPlanInput,
     save_sprint_plan_tool,
 )
+from services.sprint_input import load_sprint_candidates
 from tests.typing_helpers import require_id
 from tools.orchestrator_tools import fetch_sprint_candidates
 from utils.spec_schemas import ValidationEvidence
@@ -785,6 +786,250 @@ def test_fetch_sprint_candidates_reports_blocked_readiness_for_unsized_rows(
         "dependency_issue_count": 0,
         "dependency_cycle_paths": [],
     }
+
+
+def test_load_sprint_candidates_blocks_scope_external_dependency(monkeypatch) -> None:  # noqa: ANN001
+    """Scoped loader should block selected candidates that depend on excluded rows."""
+    expected_product_id = 77
+
+    def fake_fetch_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == expected_product_id
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 10,
+                    "story_title": "Selected",
+                    "story_points": 3,
+                    "priority": 1,
+                    "source_requirement": "Research slice",
+                    "prerequisite_story_ids": [20],
+                    "blocked_by_story_ids": [],
+                },
+                {
+                    "story_id": 20,
+                    "story_title": "Excluded",
+                    "story_points": 2,
+                    "priority": 2,
+                    "source_requirement": "Later slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "services.sprint_input.fetch_sprint_candidates",
+        fake_fetch_candidates,
+    )
+
+    result = load_sprint_candidates(
+        expected_product_id,
+        story_completion_scope={
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Research slice"],
+        },
+    )
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [10]
+    assert result["readiness"]["status"] == "blocked"
+    assert result["readiness"]["blocking_codes"] == [
+        "SPRINT_SCOPE_EXTERNAL_DEPENDENCY"
+    ]
+    assert result["readiness"]["blocking_story_ids"] == [10]
+    assert result["readiness"]["external_dependency_story_ids"] == [20]
+
+
+def test_load_sprint_candidates_preserves_readiness_for_scope_external_dependency(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """Scoped loader should preserve existing readiness blockers."""
+    expected_product_id = 77
+
+    def fake_fetch_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == expected_product_id
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 10,
+                    "story_title": "Selected",
+                    "story_points": 3,
+                    "priority": 1,
+                    "source_requirement": "Research slice",
+                    "prerequisite_story_ids": [20],
+                    "blocked_by_story_ids": [],
+                },
+                {
+                    "story_id": 20,
+                    "story_title": "Excluded",
+                    "story_points": 2,
+                    "priority": 2,
+                    "source_requirement": "Later slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": ["EXISTING_BLOCKER"],
+                "blocking_story_ids": [10],
+                "unsized_count": 0,
+                "default_priority_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.sprint_input.fetch_sprint_candidates",
+        fake_fetch_candidates,
+    )
+
+    result = load_sprint_candidates(
+        expected_product_id,
+        story_completion_scope={
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Research slice"],
+        },
+    )
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [10]
+    assert result["readiness"]["status"] == "blocked"
+    assert result["readiness"]["blocking_codes"] == [
+        "EXISTING_BLOCKER",
+        "SPRINT_SCOPE_EXTERNAL_DEPENDENCY",
+    ]
+    assert result["readiness"]["blocking_story_ids"] == [10]
+    assert result["readiness"]["external_dependency_story_ids"] == [20]
+
+
+def test_load_sprint_candidates_drops_excluded_readiness_blockers(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """Scoped loader should drop upstream blockers tied to excluded rows."""
+    expected_product_id = 77
+
+    def fake_fetch_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == expected_product_id
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 10,
+                    "story_title": "Selected",
+                    "story_points": 3,
+                    "priority": 1,
+                    "source_requirement": "Research slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+                {
+                    "story_id": 20,
+                    "story_title": "Excluded",
+                    "story_points": None,
+                    "priority": 2,
+                    "source_requirement": "Later slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": ["EXCLUDED_BLOCKER"],
+                "blocking_story_ids": [20],
+                "unsized_count": 1,
+                "default_priority_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.sprint_input.fetch_sprint_candidates",
+        fake_fetch_candidates,
+    )
+
+    result = load_sprint_candidates(
+        expected_product_id,
+        story_completion_scope={
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Research slice"],
+        },
+    )
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [10]
+    assert result["readiness"]["status"] == "ready"
+    assert result["readiness"]["blocking_codes"] == []
+    assert result["readiness"]["blocking_story_ids"] == []
+    assert "external_dependency_story_ids" not in result["readiness"]
+
+
+def test_load_sprint_candidates_uses_filtered_standard_readiness_codes(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """Scoped loader should recompute standard blockers from selected rows."""
+    expected_product_id = 77
+
+    def fake_fetch_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == expected_product_id
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 10,
+                    "story_title": "Selected",
+                    "story_points": None,
+                    "priority": 1,
+                    "source_requirement": "Research slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+                {
+                    "story_id": 20,
+                    "story_title": "Excluded",
+                    "story_points": 2,
+                    "priority": 999,
+                    "source_requirement": "Later slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": [
+                    "SPRINT_CANDIDATES_UNSIZED",
+                    "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+                ],
+                "blocking_story_ids": [10, 20],
+                "unsized_count": 1,
+                "default_priority_count": 1,
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.sprint_input.fetch_sprint_candidates",
+        fake_fetch_candidates,
+    )
+
+    result = load_sprint_candidates(
+        expected_product_id,
+        story_completion_scope={
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Research slice"],
+        },
+    )
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [10]
+    assert result["readiness"]["unsized_count"] == 1
+    assert result["readiness"]["default_priority_count"] == 0
+    assert result["readiness"]["blocking_codes"] == ["SPRINT_CANDIDATES_UNSIZED"]
+    assert result["readiness"]["blocking_story_ids"] == [10]
+    assert "external_dependency_story_ids" not in result["readiness"]
 
 
 def test_save_sprint_plan_rejects_out_of_scope_task_invariants(

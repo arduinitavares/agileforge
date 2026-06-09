@@ -18,6 +18,10 @@ from services.sprint_selection import (
 )
 
 DEFAULT_PRIORITY: int = 999
+STANDARD_SPRINT_CANDIDATE_BLOCKING_CODES: set[str] = {
+    "SPRINT_CANDIDATES_UNSIZED",
+    "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
+}
 
 
 class _SprintCandidateFetcher(Protocol):
@@ -111,6 +115,132 @@ def _sprint_candidate_readiness(candidates: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _merge_sprint_candidate_readiness(
+    existing_readiness: object,
+    filtered_readiness: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Merge upstream readiness with readiness recalculated for filtered rows."""
+    readiness = dict(filtered_readiness)
+    if not isinstance(existing_readiness, dict):
+        return readiness
+
+    selected_story_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(candidate.get("story_id"))
+            for candidate in candidates
+        )
+        if story_id is not None
+    }
+    upstream_readiness = cast("dict[str, Any]", existing_readiness)
+    upstream_codes: list[str] = []
+    for code in upstream_readiness.get("blocking_codes") or []:
+        normalized_code = str(code).strip()
+        if (
+            normalized_code
+            and normalized_code not in STANDARD_SPRINT_CANDIDATE_BLOCKING_CODES
+            and normalized_code not in upstream_codes
+        ):
+            upstream_codes.append(normalized_code)
+
+    upstream_blocking_story_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(value)
+            for value in (upstream_readiness.get("blocking_story_ids") or [])
+        )
+        if story_id is not None
+    }
+    retained_upstream_story_ids = upstream_blocking_story_ids & selected_story_ids
+    preserve_upstream_codes = bool(retained_upstream_story_ids) or (
+        bool(upstream_codes) and not upstream_blocking_story_ids
+    )
+
+    blocking_codes: list[str] = []
+    if preserve_upstream_codes:
+        blocking_codes.extend(upstream_codes)
+    for code in filtered_readiness.get("blocking_codes") or []:
+        normalized_code = str(code).strip()
+        if normalized_code and normalized_code not in blocking_codes:
+            blocking_codes.append(normalized_code)
+
+    filtered_blocking_story_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(value)
+            for value in (filtered_readiness.get("blocking_story_ids") or [])
+        )
+        if story_id is not None
+    }
+    blocking_story_ids = retained_upstream_story_ids | filtered_blocking_story_ids
+
+    readiness["blocking_codes"] = blocking_codes
+    readiness["blocking_story_ids"] = sorted(blocking_story_ids)
+    readiness["status"] = (
+        "blocked"
+        if blocking_codes
+        or blocking_story_ids
+        or filtered_readiness.get("status") == "blocked"
+        else "ready"
+    )
+    return readiness
+
+
+def _augment_readiness_with_scope_external_dependencies(
+    readiness: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Block scoped planning when selected candidates depend on excluded stories."""
+    selected_story_ids: set[int] = set()
+    for candidate in candidates:
+        story_id = normalize_positive_int(candidate.get("story_id"))
+        if story_id is not None:
+            selected_story_ids.add(story_id)
+
+    blocking_story_ids: set[int] = set()
+    external_dependency_story_ids: set[int] = set()
+    for candidate in candidates:
+        story_id = normalize_positive_int(candidate.get("story_id"))
+        if story_id is None:
+            continue
+        dependency_ids = [
+            *(candidate.get("prerequisite_story_ids") or []),
+            *(candidate.get("blocked_by_story_ids") or []),
+        ]
+        for dependency_id in dependency_ids:
+            normalized_dependency_id = normalize_positive_int(dependency_id)
+            if (
+                normalized_dependency_id is not None
+                and normalized_dependency_id not in selected_story_ids
+            ):
+                blocking_story_ids.add(story_id)
+                external_dependency_story_ids.add(normalized_dependency_id)
+
+    if not external_dependency_story_ids:
+        return readiness
+
+    blocking_codes = list(readiness.get("blocking_codes") or [])
+    if "SPRINT_SCOPE_EXTERNAL_DEPENDENCY" not in blocking_codes:
+        blocking_codes.append("SPRINT_SCOPE_EXTERNAL_DEPENDENCY")
+
+    existing_blocking_story_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(value)
+            for value in (readiness.get("blocking_story_ids") or [])
+        )
+        if story_id is not None
+    }
+    readiness["status"] = "blocked"
+    readiness["blocking_codes"] = blocking_codes
+    readiness["blocking_story_ids"] = sorted(
+        existing_blocking_story_ids | blocking_story_ids
+    )
+    readiness["external_dependency_story_ids"] = sorted(external_dependency_story_ids)
+    return readiness
+
+
 def _story_completion_scope_payload(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -171,7 +301,15 @@ def apply_story_completion_scope_to_candidate_result(
     result = dict(candidate_result)
     result["stories"] = filtered
     result["count"] = len(filtered)
-    result["readiness"] = _sprint_candidate_readiness(filtered)
+    filtered_readiness = _sprint_candidate_readiness(filtered)
+    result["readiness"] = _augment_readiness_with_scope_external_dependencies(
+        _merge_sprint_candidate_readiness(
+            candidate_result.get("readiness"),
+            filtered_readiness,
+            filtered,
+        ),
+        filtered,
+    )
     excluded_counts = dict(result.get("excluded_counts") or {})
     if excluded_count:
         excluded_counts["story_completion_scope"] = excluded_count

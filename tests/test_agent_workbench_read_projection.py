@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import create_engine
 from sqlmodel import select
 
-from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
+from models.core import (
+    Product,
+    Sprint,
+    SprintStory,
+    Task,
+    Team,
+    UserStory,
+    UserStoryDependency,
+)
 from models.enums import SprintStatus, StoryStatus
 from services.agent_workbench.read_projection import ReadProjectionService
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
@@ -370,6 +378,80 @@ def test_sprint_candidates_filters_to_story_completion_scope(
     assert out_of_scope.story_id not in [
         item["story_id"] for item in result["data"]["items"]
     ]
+
+
+def test_sprint_candidates_blocks_selection_with_external_dependency(
+    session: Session,
+) -> None:
+    """Selection-scoped candidates should block external dependencies."""
+    product = Product(name="Scoped Dependency Project", description="Demo")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    selected = UserStory(
+        product_id=product_id,
+        title="Selected story",
+        story_description="Ready",
+        acceptance_criteria="- AC",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        rank="1",
+        story_points=2,
+        source_requirement="Research slice",
+    )
+    excluded = UserStory(
+        product_id=product_id,
+        title="Excluded dependency",
+        story_description="Later",
+        acceptance_criteria="- AC",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        rank="2",
+        story_points=3,
+        source_requirement="Later slice",
+    )
+    session.add_all([selected, excluded])
+    session.commit()
+    session.refresh(selected)
+    session.refresh(excluded)
+    session.add(
+        UserStoryDependency(
+            product_id=product_id,
+            dependent_story_id=require_id(selected.story_id, "story_id"),
+            prerequisite_story_id=require_id(excluded.story_id, "story_id"),
+            status="active",
+            source="manual_review",
+            confidence="reviewed",
+        )
+    )
+    session.commit()
+
+    service = ReadProjectionService(
+        engine=_engine(session),
+        session_reader=cast(
+            "ReadOnlySessionReader",
+            _FakeSessionReader(
+                {
+                    "fsm_state": "SPRINT_SETUP",
+                    "story_completion_scope": {
+                        "scope": "selection",
+                        "scope_id": "selection:sha256:fixture",
+                        "requirements": ["Research slice"],
+                    },
+                }
+            ),
+        ),
+    )
+
+    result = service.sprint_candidates(project_id=product_id)
+
+    assert result["ok"] is True
+    readiness = result["data"]["readiness"]
+    assert readiness["status"] == "blocked"
+    assert readiness["blocking_codes"] == ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"]
+    assert readiness["blocking_story_ids"] == [selected.story_id]
+    assert readiness["external_dependency_story_ids"] == [excluded.story_id]
 
 
 def test_sprint_candidates_reports_readiness_blockers(
