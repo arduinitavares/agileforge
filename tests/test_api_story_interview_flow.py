@@ -11,6 +11,9 @@ from fastapi.testclient import TestClient
 import api as api_module
 from services.phases.story_service import _story_artifact_fingerprint
 
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+EXPECTED_REFINEMENT_ATTEMPT_COUNT = 2
+
 
 @dataclass
 class DummyProduct:  # noqa: D101
@@ -169,14 +172,27 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
     workflow.states[str(product.product_id)] = {
         "fsm_state": "STORY_INTERVIEW",
         "pending_spec_content": "SPEC",
-        "compiled_authority_cached": '{"ok": true}',
+        "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
         "roadmap_releases": [{"items": ["Requirement A"]}],
         "interview_runtime": {
             "story": {
                 "Requirement A": {
                     "phase": "story",
                     "subject_key": "Requirement A",
-                    "attempt_history": [],
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "created_at": "2026-03-28T09:58:00Z",
+                            "trigger": "auto_transition",
+                            "classification": "reusable_content_result",
+                            "is_reusable": True,
+                            "retryable": False,
+                            "draft_kind": "complete_draft",
+                            "output_artifact": _story_artifact(
+                                "Requirement A", "Prior Story"
+                            ),
+                        }
+                    ],
                     "draft_projection": {},
                     "feedback_projection": {
                         "items": [
@@ -200,7 +216,7 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         "parent_requirement": "Requirement A",
         "requirement_context": "assembled",
         "technical_spec": "SPEC",
-        "compiled_authority": '{"ok": true}',
+        "compiled_authority": COMPILED_AUTHORITY_JSON,
         "global_roadmap_context": "",
         "already_generated_milestone_stories": "",
         "artifact_registry": {},
@@ -218,22 +234,19 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         assert user_input is None
         assert state["roadmap_releases"][0]["items"] == ["Requirement A"]
         runtime = state["interview_runtime"]["story"]["Requirement A"]
-        assert runtime["feedback_projection"]["items"] == [
-            {
-                "feedback_id": "feedback-1",
-                "text": "Please also keep the auth path out of scope.",
-                "created_at": "2026-03-28T09:59:00Z",
-                "status": "unabsorbed",
-                "absorbed_by_attempt_id": None,
-            },
-            {
-                "feedback_id": "feedback-2",
-                "text": "Please keep this to one milestone.",
-                "created_at": runtime["feedback_projection"]["items"][1]["created_at"],
-                "status": "unabsorbed",
-                "absorbed_by_attempt_id": None,
-            },
-        ]
+        feedback_items = runtime["feedback_projection"]["items"]
+        assert feedback_items[0] == {
+            "feedback_id": "feedback-1",
+            "text": "Please also keep the auth path out of scope.",
+            "created_at": "2026-03-28T09:59:00Z",
+            "status": "unabsorbed",
+            "absorbed_by_attempt_id": None,
+        }
+        assert feedback_items[1]["feedback_id"] == "feedback-2"
+        assert feedback_items[1]["text"] == "Please keep this to one milestone."
+        assert feedback_items[1]["status"] == "unabsorbed"
+        assert feedback_items[1]["absorbed_by_attempt_id"] is None
+        assert feedback_items[1]["feedback_quality"]["forced"] is True
         return {
             "success": True,
             "input_context": {"requirement_context": "assembled"},
@@ -258,7 +271,10 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
     response = client.post(
         f"/api/projects/{product.product_id}/story/generate",
         params={"parent_requirement": "Requirement A"},
-        json={"user_input": "Please keep this to one milestone."},
+        json={
+            "user_input": "Please keep this to one milestone.",
+            "force_feedback": True,
+        },
     )
 
     assert response.status_code == 200  # noqa: PLR2004
@@ -268,7 +284,7 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         "Requirement A", payload["output_artifact"]
     )
     assert payload["current_draft"] == {
-        "attempt_id": "attempt-1",
+        "attempt_id": "attempt-2",
         "kind": "complete_draft",
         "is_complete": True,
         "artifact_fingerprint": artifact_fingerprint,
@@ -279,7 +295,7 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
     }
     assert payload["save"] == {
         "available": True,
-        "attempt_id": "attempt-1",
+        "attempt_id": "attempt-2",
         "artifact_fingerprint": artifact_fingerprint,
         "expected_state": "STORY_REVIEW",
     }
@@ -292,41 +308,42 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         "feedback-2",
     ]
     assert runtime["draft_projection"] == {
-        "latest_reusable_attempt_id": "attempt-1",
+        "latest_reusable_attempt_id": "attempt-2",
         "kind": "complete_draft",
         "is_complete": True,
         "artifact_fingerprint": artifact_fingerprint,
         "updated_at": runtime["draft_projection"]["updated_at"],
     }
-    assert runtime["attempt_history"][0]["included_feedback_ids"] == [
+    latest_attempt = runtime["attempt_history"][-1]
+    assert latest_attempt["included_feedback_ids"] == [
         "feedback-1",
         "feedback-2",
     ]
-    assert runtime["attempt_history"][0]["input_context"] == {
+    assert latest_attempt["input_context"] == {
         "requirement_context": "assembled"
     }
-    assert runtime["attempt_history"][0]["classification"] == "reusable_content_result"
-    assert runtime["feedback_projection"]["items"] == [
-        {
-            "feedback_id": "feedback-1",
-            "text": "Please also keep the auth path out of scope.",
-            "created_at": "2026-03-28T09:59:00Z",
-            "status": "absorbed",
-            "absorbed_by_attempt_id": "attempt-1",
-        },
-        {
-            "feedback_id": "feedback-2",
-            "text": "Please keep this to one milestone.",
-            "created_at": runtime["feedback_projection"]["items"][1]["created_at"],
-            "status": "absorbed",
-            "absorbed_by_attempt_id": "attempt-1",
-        },
-    ]
+    assert latest_attempt["classification"] == "reusable_content_result"
+    feedback_items = runtime["feedback_projection"]["items"]
+    assert feedback_items[0] == {
+        "feedback_id": "feedback-1",
+        "text": "Please also keep the auth path out of scope.",
+        "created_at": "2026-03-28T09:59:00Z",
+        "status": "absorbed",
+        "absorbed_by_attempt_id": "attempt-2",
+    }
+    assert feedback_items[1]["feedback_id"] == "feedback-2"
+    assert feedback_items[1]["text"] == "Please keep this to one milestone."
+    assert feedback_items[1]["status"] == "absorbed"
+    assert feedback_items[1]["absorbed_by_attempt_id"] == "attempt-2"
+    assert feedback_items[1]["feedback_quality"]["forced"] is True
     assert (
         state["story_outputs"]["Requirement A"]["user_stories"][0]["story_title"]
         == "Story A"
     )
-    assert len(state["story_attempts"]["Requirement A"]) == 1
+    assert (
+        len(state["story_attempts"]["Requirement A"])
+        == EXPECTED_REFINEMENT_ATTEMPT_COUNT
+    )
 
 
 def test_story_retry_replays_frozen_request_and_preserves_prior_good_draft_when_retry_fails(  # noqa: ANN201, D103, E501
@@ -338,7 +355,7 @@ def test_story_retry_replays_frozen_request_and_preserves_prior_good_draft_when_
     workflow.states[str(product.product_id)] = {
         "fsm_state": "STORY_INTERVIEW",
         "pending_spec_content": "SPEC",
-        "compiled_authority_cached": '{"ok": true}',
+        "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
         "roadmap_releases": [{"items": ["Requirement A"]}],
         "interview_runtime": {
             "story": {
@@ -399,7 +416,7 @@ def test_story_retry_replays_frozen_request_and_preserves_prior_good_draft_when_
                             "parent_requirement": "Requirement A",
                             "requirement_context": "frozen",
                             "technical_spec": "SPEC",
-                            "compiled_authority": '{"ok": true}',
+                            "compiled_authority": COMPILED_AUTHORITY_JSON,
                             "global_roadmap_context": "",
                             "already_generated_milestone_stories": "",
                             "artifact_registry": {},
@@ -549,7 +566,7 @@ def test_story_retry_promotes_reusable_draft_and_absorbs_frozen_feedback_ids(  #
                             "parent_requirement": "Requirement A",
                             "requirement_context": "frozen",
                             "technical_spec": "SPEC",
-                            "compiled_authority": '{"ok": true}',
+                            "compiled_authority": COMPILED_AUTHORITY_JSON,
                             "global_roadmap_context": "",
                             "already_generated_milestone_stories": "",
                             "artifact_registry": {},
@@ -691,7 +708,7 @@ def test_story_retry_rejects_when_latest_attempt_is_not_retryable_even_with_froz
                             "parent_requirement": "Requirement A",
                             "requirement_context": "frozen",
                             "technical_spec": "SPEC",
-                            "compiled_authority": '{"ok": true}',
+                            "compiled_authority": COMPILED_AUTHORITY_JSON,
                             "global_roadmap_context": "",
                             "already_generated_milestone_stories": "",
                             "artifact_registry": {},
@@ -881,9 +898,9 @@ def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # no
     }
 
 
-def test_story_complete_phase_omits_parent_requirements_for_milestone_body(  # noqa: ANN001, ANN201, D103, E501
-    monkeypatch,
-):
+def test_story_complete_phase_omits_parent_requirements_for_milestone_body(  # noqa: D103
+    monkeypatch: Any,  # noqa: ANN401
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Story Project")
     workflow.states[str(product.product_id)] = {
@@ -1291,7 +1308,7 @@ def test_story_generate_allows_fresh_run_after_reset_without_manual_refinement_i
         "parent_requirement": "Requirement A",
         "requirement_context": "reset fresh start",
         "technical_spec": "SPEC",
-        "compiled_authority": '{"ok": true}',
+        "compiled_authority": COMPILED_AUTHORITY_JSON,
         "global_roadmap_context": "",
         "already_generated_milestone_stories": "",
         "artifact_registry": {},
@@ -1299,7 +1316,7 @@ def test_story_generate_allows_fresh_run_after_reset_without_manual_refinement_i
     workflow.states[str(product.product_id)] = {
         "fsm_state": "STORY_INTERVIEW",
         "pending_spec_content": "SPEC",
-        "compiled_authority_cached": '{"ok": true}',
+        "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
         "roadmap_releases": [{"items": ["Requirement A"]}],
         "interview_runtime": {
             "story": {

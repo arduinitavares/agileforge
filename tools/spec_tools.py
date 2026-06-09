@@ -35,6 +35,9 @@ from services.specs.compiler_service import (
     CheckSpecAuthorityStatusInput as _service_CheckSpecAuthorityStatusInput,
 )
 from services.specs.compiler_service import (
+    CompiledArtifactLoadResult,
+)
+from services.specs.compiler_service import (
     CompileSpecAuthorityForVersionInput as _service_CompileSpecAuthorityForVersionInput,
 )
 from services.specs.compiler_service import (
@@ -319,7 +322,7 @@ def _render_invariant_summary(invariant: Invariant) -> str:
 
 def _load_compiled_artifact(
     authority: CompiledSpecAuthority,
-) -> SpecAuthorityCompilationSuccess | None:
+) -> CompiledArtifactLoadResult:
     """Compatibility shim over the public compiler service helper."""
     return _service_load_compiled_artifact(authority)
 

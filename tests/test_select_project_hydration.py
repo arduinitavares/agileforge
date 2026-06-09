@@ -10,6 +10,7 @@ from tests.typing_helpers import require_id
 from tools.orchestrator_tools import get_project_details, select_project
 
 JsonDict = dict[str, Any]
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext
@@ -75,7 +76,7 @@ def test_select_project_hydrates_spec_and_authority(session: Session) -> None:
     product = _create_product(
         session,
         technical_spec="Spec body",
-        compiled_authority_json='{"compiled":true}',
+        compiled_authority_json=COMPILED_AUTHORITY_JSON,
         spec_file_path="specs/spec.md",
         spec_loaded_at=spec_loaded_at,
         description="Desc",
@@ -97,7 +98,7 @@ def test_select_project_hydrates_spec_and_authority(session: Session) -> None:
     assert result["success"] is True
     assert context.state["pending_spec_content"] == "Spec body"
     assert context.state["pending_spec_path"] == "specs/spec.md"
-    assert context.state["compiled_authority_cached"] == '{"compiled":true}'
+    assert context.state["compiled_authority_cached"] == COMPILED_AUTHORITY_JSON
     assert context.state["latest_spec_version_id"] == require_id(
         spec.spec_version_id, "spec_version_id"
     )
@@ -106,7 +107,7 @@ def test_select_project_hydrates_spec_and_authority(session: Session) -> None:
     active_project = context.state["active_project"]
     assert active_project["description"] == "Desc"
     assert active_project["technical_spec"] == "Spec body"
-    assert active_project["compiled_authority_json"] == '{"compiled":true}'
+    assert active_project["compiled_authority_json"] == COMPILED_AUTHORITY_JSON
     assert active_project["spec_file_path"] == "specs/spec.md"
     expected_loaded_at = spec_loaded_at.replace(tzinfo=None).isoformat()
     assert active_project["spec_loaded_at"] == expected_loaded_at
@@ -141,7 +142,7 @@ def test_get_project_details_includes_spec_fields(session: Session) -> None:
     product = _create_product(
         session,
         technical_spec="Spec body",
-        compiled_authority_json='{"compiled":true}',
+        compiled_authority_json=COMPILED_AUTHORITY_JSON,
         spec_file_path="specs/spec.md",
         spec_loaded_at=spec_loaded_at,
         description="Desc",
@@ -153,7 +154,7 @@ def test_get_project_details_includes_spec_fields(session: Session) -> None:
     assert result["success"] is True
     details = result["product"]
     assert details["technical_spec"] == "Spec body"
-    assert details["compiled_authority_json"] == '{"compiled":true}'
+    assert details["compiled_authority_json"] == COMPILED_AUTHORITY_JSON
     assert details["spec_file_path"] == "specs/spec.md"
     expected_loaded_at = spec_loaded_at.replace(tzinfo=None).isoformat()
     assert details["spec_loaded_at"] == expected_loaded_at

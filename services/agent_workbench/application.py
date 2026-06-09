@@ -7,19 +7,13 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
-from models.db import get_engine
-from services.agent_workbench.authority_decision import (
-    AuthorityAcceptRequest,
-    AuthorityDecisionRunner,
-    AuthorityRejectRequest,
-)
-from services.agent_workbench.authority_projection import AuthorityProjectionService
-from services.agent_workbench.authority_regenerate import (
-    AUTHORITY_REGENERATE_COMMAND,
-    AuthorityRegenerateRequest,
-    default_authority_regenerate_runner,
-)
-from services.agent_workbench.authority_review import AuthorityReviewService
+    from services.agent_workbench.authority_decision import (
+        AuthorityAcceptRequest,
+        AuthorityRejectRequest,
+    )
+    from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
+    from services.agent_workbench.context_pack import ContextPackService
+
 from services.agent_workbench.command_registry import (
     command_is_available,
     installed_command_names,
@@ -28,7 +22,6 @@ from services.agent_workbench.command_schema import (
     capabilities_payload,
     command_schema_payload,
 )
-from services.agent_workbench.context_pack import ContextPackService
 from services.agent_workbench.diagnostics import doctor_payload, schema_check_payload
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
@@ -38,7 +31,6 @@ from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
 )
-from services.agent_workbench.read_projection import ReadProjectionService
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
@@ -46,6 +38,14 @@ from services.agent_workbench.schema_readiness import (
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
+AUTHORITY_REGENERATE_COMMAND: Final[str] = "agileforge authority regenerate"
+
+
+def get_engine() -> Engine:
+    """Return the default engine without importing the DB layer at import time."""
+    from models.db import get_engine as _get_engine  # noqa: PLC0415
+
+    return _get_engine()
 
 
 class _ReadProjection(Protocol):
@@ -342,7 +342,7 @@ class _StoryPhaseRunner(Protocol):
         """Persist the current Story draft."""
         ...
 
-    def complete(
+    def complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,
@@ -977,6 +977,10 @@ class AgentWorkbenchApplication:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Regenerate compiled authority through the workbench facade."""
+        from services.agent_workbench.authority_regenerate import (  # noqa: PLC0415
+            AuthorityRegenerateRequest,
+        )
+
         return self._get_authority_regenerate_runner().regenerate(
             AuthorityRegenerateRequest(
                 project_id=project_id,
@@ -1317,7 +1321,7 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
-    def story_complete(
+    def story_complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,
@@ -1650,18 +1654,30 @@ class AgentWorkbenchApplication:
     def _get_read_projection(self) -> _ReadProjection:
         """Return the read projection, constructing the default lazily."""
         if self._read_projection is None:
+            from services.agent_workbench.read_projection import (  # noqa: PLC0415
+                ReadProjectionService,
+            )
+
             self._read_projection = ReadProjectionService()
         return self._read_projection
 
     def _get_authority_projection(self) -> _AuthorityProjection:
         """Return the authority projection, constructing the default lazily."""
         if self._authority_projection is None:
+            from services.agent_workbench.authority_projection import (  # noqa: PLC0415
+                AuthorityProjectionService,
+            )
+
             self._authority_projection = AuthorityProjectionService()
         return self._authority_projection
 
     def _get_context_pack(self) -> ContextPackService:
         """Return the context pack service after projections are needed."""
         if self._context_pack is None:
+            from services.agent_workbench.context_pack import (  # noqa: PLC0415
+                ContextPackService,
+            )
+
             self._context_pack = ContextPackService(
                 read_projection=self._get_read_projection(),
                 authority_projection=self._get_authority_projection(),
@@ -1677,18 +1693,30 @@ class AgentWorkbenchApplication:
     def _get_authority_review(self) -> _AuthorityReview:
         """Return the authority review service, constructing the default lazily."""
         if self._authority_review is None:
+            from services.agent_workbench.authority_review import (  # noqa: PLC0415
+                AuthorityReviewService,
+            )
+
             self._authority_review = AuthorityReviewService()
         return self._authority_review
 
     def _get_authority_decision_runner(self) -> _AuthorityDecisionRunner:
         """Return the authority decision runner, constructing the default lazily."""
         if self._authority_decision_runner is None:
+            from services.agent_workbench.authority_decision import (  # noqa: PLC0415
+                AuthorityDecisionRunner,
+            )
+
             self._authority_decision_runner = AuthorityDecisionRunner()
         return self._authority_decision_runner
 
     def _get_authority_regenerate_runner(self) -> _AuthorityRegenerateRunner:
         """Return the authority regenerate runner, constructing it lazily."""
         if self._authority_regenerate_runner is None:
+            from services.agent_workbench.authority_regenerate import (  # noqa: PLC0415
+                default_authority_regenerate_runner,
+            )
+
             self._authority_regenerate_runner = default_authority_regenerate_runner()
         return self._authority_regenerate_runner
 

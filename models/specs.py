@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from sqlalchemy.orm import relationship
 from sqlalchemy.types import Text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -51,6 +52,13 @@ class SpecRegistry(SQLModel, table=True):
     )
 
     product: Product = Relationship(back_populates="spec_versions")
+    compiled_authority: list[CompiledSpecAuthority] = Relationship(
+        sa_relationship=relationship(
+            "CompiledSpecAuthority",
+            back_populates="spec_version",
+        )
+    )
+
 
 class CompiledSpecAuthority(SQLModel, table=True):
     """Cached compilation output for an approved spec version."""
@@ -99,7 +107,12 @@ class CompiledSpecAuthority(SQLModel, table=True):
         description="JSON array of detected spec ambiguities or gaps",
     )
 
-    spec_version: SpecRegistry = Relationship()
+    spec_version: SpecRegistry = Relationship(
+        sa_relationship=relationship(
+            "SpecRegistry",
+            back_populates="compiled_authority",
+        )
+    )
 
 
 class SpecAuthorityAcceptance(SQLModel, table=True):

@@ -11,6 +11,8 @@ import api as api_module
 from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
 from utils import failure_artifacts
 
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+
 
 @dataclass
 class DummyProduct:
@@ -112,7 +114,7 @@ def _build_client(
             "spec_file_path": product.spec_file_path,
         }
         context.state.setdefault("pending_spec_content", "SPEC")
-        context.state.setdefault("compiled_authority_cached", '{"ok": true}')
+        context.state.setdefault("compiled_authority_cached", COMPILED_AUTHORITY_JSON)
         return {"success": True}
 
     monkeypatch.setattr(api_module, "select_project", fake_select_project)
@@ -130,7 +132,7 @@ def _build_client(
                     "prior_vision_state": "NO_HISTORY",
                     "specification_content": state.get("pending_spec_content", "SPEC"),
                     "compiled_authority": state.get(
-                        "compiled_authority_cached", '{"ok": true}'
+                        "compiled_authority_cached", COMPILED_AUTHORITY_JSON
                     ),
                 },
                 "output_artifact": {
@@ -156,7 +158,7 @@ def _build_client(
                 "prior_vision_state": "NO_HISTORY",
                 "specification_content": state.get("pending_spec_content", "SPEC"),
                 "compiled_authority": state.get(
-                    "compiled_authority_cached", '{"ok": true}'
+                    "compiled_authority_cached", COMPILED_AUTHORITY_JSON
                 ),
             },
             "output_artifact": {
@@ -207,12 +209,12 @@ def _seed_setup_passed_project(
 ) -> int:
     product = repo.create("Vision Project")
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "VISION_INTERVIEW",
         "setup_status": "passed",
         "pending_spec_content": "SPEC",
-        "compiled_authority_cached": '{"ok": true}',
+        "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
     }
     return product.product_id
 

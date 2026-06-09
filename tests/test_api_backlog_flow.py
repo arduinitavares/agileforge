@@ -13,6 +13,7 @@ HTTP_OK = 200
 HTTP_CONFLICT = 409
 HTTP_TEAPOT = 418
 EXPECTED_HISTORY_COUNT = 2
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
 
 
 class _StateContext(Protocol):
@@ -122,7 +123,7 @@ def _build_client(
             "spec_file_path": product.spec_file_path,
         }
         context.state.setdefault("pending_spec_content", "SPEC")
-        context.state.setdefault("compiled_authority_cached", '{"ok": true}')
+        context.state.setdefault("compiled_authority_cached", COMPILED_AUTHORITY_JSON)
         return {"success": True}
 
     monkeypatch.setattr(api_module, "select_project", fake_select_project)
@@ -142,7 +143,7 @@ def _build_client(
                     "user_raw_text": user_input or "",
                     "product_vision_statement": "A clear vision",
                     "technical_spec": "SPEC",
-                    "compiled_authority": '{"ok": true}',
+                    "compiled_authority": COMPILED_AUTHORITY_JSON,
                     "prior_backlog_state": "NO_HISTORY",
                 },
                 "output_artifact": {
@@ -167,7 +168,7 @@ def _build_client(
                 "user_raw_text": user_input or "",
                 "product_vision_statement": "A clear vision",
                 "technical_spec": "SPEC",
-                "compiled_authority": '{"ok": true}',
+                "compiled_authority": COMPILED_AUTHORITY_JSON,
                 "prior_backlog_state": "NO_HISTORY",
             },
             "output_artifact": {
@@ -220,7 +221,7 @@ def _seed_vision_persisted_project(
 ) -> int:
     product = repo.create("Backlog Project")
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "VISION_PERSISTENCE",
         "product_vision_assessment": {
@@ -228,7 +229,7 @@ def _seed_vision_persisted_project(
             "is_complete": True,
         },
         "pending_spec_content": "SPEC",
-        "compiled_authority_cached": '{"ok": true}',
+        "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
     }
     return product.product_id
 

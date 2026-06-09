@@ -86,6 +86,7 @@ TASK_PACKET_PARENT_PROMPT_NOTE = (
     "This prompt assumes the session was already initialized with the parent "
     "story prompt. If not, restart with Copy Story Prompt."
 )
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
 
 
 def _require_id(value: int | None, label: str) -> int:
@@ -173,7 +174,7 @@ def _seed_story_phase_project(
 ) -> int:
     product = repo.create("Sprint Project")
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "STORY_PERSISTENCE",
         "roadmap_releases": [
@@ -192,7 +193,7 @@ def _seed_sprint_setup_project(
 ) -> int:
     product = repo.create("Sprint Project")
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "SPRINT_SETUP",
     }
@@ -239,7 +240,7 @@ def _seed_sprint_draft_project(
 ) -> int:
     product = repo.create("Sprint Draft Project")
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "SPRINT_DRAFT",
         "sprint_attempts": [
@@ -1334,7 +1335,7 @@ def test_project_state_reconciles_completed_active_sprint(  # noqa: ANN201, D103
     product = repo.get_by_id(project_id)
     assert product is not None
     product.spec_file_path = __file__
-    product.compiled_authority_json = '{"ok": true}'
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(project_id)] = {
         "fsm_state": "SPRINT_PERSISTENCE",
         "setup_status": "passed",

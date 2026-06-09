@@ -55,7 +55,8 @@ def _summarize_authority(compiled: CompiledSpecAuthority | None) -> str:
     """Render compact summary of compiled authority for reviewer context."""
     if not compiled:
         return "NO_COMPILED_AUTHORITY"
-    artifact = _load_compiled_artifact(compiled)
+    load_result = _load_compiled_artifact(compiled)
+    artifact = load_result.artifact if load_result else None
     if not artifact:
         return "INVALID_COMPILED_AUTHORITY_ARTIFACT"
 

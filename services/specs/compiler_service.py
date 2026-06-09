@@ -30,9 +30,6 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (
     compiler_contract,
     instructions_source,
 )
-from orchestrator_agent.agent_tools.spec_authority_compiler_agent.agent import (
-    root_agent as spec_authority_compiler_agent,
-)
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (
     normalize_compiler_output,
 )
@@ -44,7 +41,6 @@ from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
-from utils.adk_runner import get_agent_model_info, invoke_agent_to_text
 from utils.agileforge_spec_profile import (
     AgileForgeSpecStatus,
     RequirementLevel,
@@ -425,6 +421,33 @@ class CompiledArtifactLoadResult:
     def unsupported(self) -> bool:
         """Whether the stored artifact schema version is unsupported."""
         return self.status == "schema_unsupported"
+
+
+def _spec_authority_compiler_agent() -> object:
+    """Load the ADK compiler agent only for compile-time execution paths."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.agent import (  # noqa: PLC0415
+        root_agent,
+    )
+
+    return root_agent
+
+
+async def invoke_agent_to_text(*args: Any, **kwargs: Any) -> str:  # noqa: ANN401
+    """Lazy compatibility wrapper for invoking ADK agents."""
+    from utils.adk_runner import (  # noqa: PLC0415
+        invoke_agent_to_text as _invoke_agent_to_text,
+    )
+
+    return await _invoke_agent_to_text(*args, **kwargs)
+
+
+def get_agent_model_info(agent: object) -> dict[str, Any]:
+    """Lazy compatibility wrapper for extracting ADK agent metadata."""
+    from utils.adk_runner import (  # noqa: PLC0415
+        get_agent_model_info as _get_agent_model_info,
+    )
+
+    return _get_agent_model_info(agent)
 
 
 def compiled_authority_schema_unsupported_details(
@@ -991,7 +1014,7 @@ async def _invoke_spec_authority_compiler_async(
 ) -> str:
     """Invoke the spec authority compiler agent and return raw JSON text."""
     return await invoke_agent_to_text(
-        agent=spec_authority_compiler_agent,
+        agent=_spec_authority_compiler_agent(),
         runner_identity=SPEC_AUTHORITY_COMPILER_IDENTITY,
         payload_json=input_payload.model_dump_json(),
         no_text_error="Compiler agent returned no text response",
@@ -1741,6 +1764,7 @@ def _compiler_failure_result(
         exception=kwargs.get("exception"),
     )
     summary = f"{details.error}: {details.reason}" if details.reason else details.error
+    agent = _spec_authority_compiler_agent()
     artifact_result = write_failure_artifact(
         phase="spec_authority",
         project_id=details.product_id,
@@ -1753,7 +1777,7 @@ def _compiler_failure_result(
             "content_ref": details.content_ref,
         },
         model_info={
-            **get_agent_model_info(spec_authority_compiler_agent),
+            **get_agent_model_info(agent),
             "app_name": SPEC_AUTHORITY_COMPILER_IDENTITY.app_name,
             "user_id": SPEC_AUTHORITY_COMPILER_IDENTITY.user_id,
         },

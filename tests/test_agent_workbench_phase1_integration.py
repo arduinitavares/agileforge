@@ -53,6 +53,7 @@ COMPILER_VERSION = "1.0.0"
 PROMPT_HASH = "a" * 64
 SEEDED_STORY_COUNT = 2
 SCHEMA_NOT_READY_EXIT_CODE = 5
+PHASE1_INVARIANT_ID = "INV-0000000000000001"
 PHASE_1_GROUPS = (
     "project",
     "workflow",
@@ -96,6 +97,42 @@ def _structured_spec_content() -> str:
 
 
 SPEC_CONTENT = _structured_spec_content()
+
+
+def _phase1_compiled_authority_json(
+    *,
+    source_item_id: str = "REQ.phase1-context",
+) -> str:
+    """Return a supported v2 compiled-authority artifact for Phase 1 fixtures."""
+    return json.dumps(
+        {
+            "schema_version": "agileforge.compiled_authority.v2",
+            "scope_themes": ["read-only cli"],
+            "domain": None,
+            "invariants": [
+                {
+                    "id": PHASE1_INVARIANT_ID,
+                    "type": "REQUIRED_FIELD",
+                    "source_item_id": source_item_id,
+                    "source_level": "MUST",
+                    "parameters": {"field_name": "phase1_context"},
+                }
+            ],
+            "eligible_feature_rules": [],
+            "rejected_features": [],
+            "gaps": [],
+            "assumptions": [],
+            "source_map": [],
+            "compiler_version": COMPILER_VERSION,
+            "prompt_hash": PROMPT_HASH,
+            "ir_schema_version": None,
+            "ir_provenance": None,
+            "source_units": [],
+            "requirement_candidates": [],
+            "authority_mappings": [],
+            "ir_packet_limits": None,
+        }
+    )
 
 
 class _SprintPlanningSessionReader:
@@ -199,11 +236,11 @@ def _seed_phase1_project(
         compiler_version=COMPILER_VERSION,
         prompt_hash=PROMPT_HASH,
         compiled_at=datetime(2026, 5, 14, 13, tzinfo=UTC),
-        compiled_artifact_json=json.dumps(
-            {"invariants": [{"id": "INV-1", "text": "Keep CLI read-only."}]}
-        ),
+        compiled_artifact_json=_phase1_compiled_authority_json(),
         scope_themes=json.dumps(["read-only cli"]),
-        invariants=json.dumps([{"id": "INV-1", "text": "Keep CLI read-only."}]),
+        invariants=json.dumps(
+            [{"id": PHASE1_INVARIANT_ID, "text": "Keep CLI read-only."}]
+        ),
         eligible_feature_ids=json.dumps([]),
         rejected_features=json.dumps([]),
         spec_gaps=json.dumps([]),
@@ -435,8 +472,9 @@ def test_phase1_cli_drives_real_application_facade(
             ["authority", "invariants", "--project-id", str(project_id)],
             "agileforge authority invariants",
             lambda data: (
-                data["count"] == 1
-                and _mapping(_sequence(data["invariants"])[0])["id"] == "INV-1"
+                    data["count"] == 1
+                    and _mapping(_sequence(data["invariants"])[0])["id"]
+                    == PHASE1_INVARIANT_ID
             ),
         ),
         (
@@ -537,18 +575,7 @@ def test_evidence_collect_cli_writes_workflow_state(
     )
     authority = session.get(CompiledSpecAuthority, 1)
     assert authority is not None
-    authority.compiled_artifact_json = json.dumps(
-        {
-            "spec_version_id": 1,
-            "items": [
-                {
-                    "id": "REQ.phase1-context",
-                    "type": "REQ",
-                    "verification": "inspection",
-                }
-            ],
-        }
-    )
+    authority.compiled_artifact_json = _phase1_compiled_authority_json()
     session.add(authority)
     session.flush()
     acceptance = session.get(SpecAuthorityAcceptance, 1)
@@ -601,7 +628,7 @@ def test_phase1_console_script_help_is_wired(tmp_path: Path) -> None:
     uv_path = shutil.which("uv")
     assert uv_path is not None
 
-    result = subprocess.run(  # noqa: S603  # nosec B603
+    result = subprocess.run(  # nosec B603  # noqa: S603
         [
             uv_path,
             "run",
