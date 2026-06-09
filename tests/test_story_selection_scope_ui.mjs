@@ -15,7 +15,10 @@ function functionSource(name) {
     const functionStart = asyncStart >= 0 ? asyncStart : start;
     assert.notEqual(functionStart, -1, `${name} should exist in frontend/project.js`);
 
-    const bodyStart = projectJsSource.indexOf('{', functionStart);
+    const signatureEnd = projectJsSource.indexOf(') {', functionStart);
+    const bodyStart = signatureEnd >= 0
+        ? signatureEnd + 2
+        : projectJsSource.indexOf('{', functionStart);
     assert.notEqual(bodyStart, -1, `${name} should have a function body`);
 
     let depth = 0;
@@ -95,6 +98,27 @@ test('loadSprintCandidates preserves scoped planning metadata', () => {
     assert.match(source, /sprintCandidateCompletionScope = data\.data\?\.story_completion_scope \|\| null/);
     assert.match(source, /sprintCandidateReadiness = null/);
     assert.match(source, /sprintCandidateCompletionScope = null/);
+});
+
+test('scoped Story planning uses explicit selection wording', () => {
+    const fetchStateSource = functionSource('fetchProjectFSMState');
+    const stepperSource = functionSource('updateStepperUI');
+    const overviewSource = functionSource('renderOverviewPanel');
+    const summarySource = functionSource('updateSprintSelectionSummary');
+
+    assert.match(fetchStateSource, /currentProjectState = \{\s*\.\.\.state,/);
+    assert.match(fetchStateSource, /sprintCandidateCompletionScope = state\.story_completion_scope \|\| null/);
+    assert.match(projectJsSource, /function activeStorySelectionScope/);
+    assert.match(projectJsSource, /function storySelectionScopeSummary/);
+    assert.match(projectJsSource, /Selected Stories Completed/);
+    assert.match(projectJsSource, /Draft from Selection/);
+    assert.match(stepperSource, /scopedStepperStatus\(step\.id, 'Completed', stateKey\)/);
+    assert.match(stepperSource, /scopedStepperStatus\(step\.id, 'Active', stateKey\)/);
+    assert.match(overviewSource, /Sprint planning is scoped to selected stories/);
+    assert.match(overviewSource, /Sprint Draft from Selection/);
+    assert.match(projectJsSource, /requirements excluded or not refined/);
+    assert.match(summarySource, /const scopePrefix = scopedSummary/);
+    assert.match(summarySource, /current candidate pool/);
 });
 
 test('Story selection handlers are exported for inline browser controls', () => {

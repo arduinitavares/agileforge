@@ -205,6 +205,62 @@ function isResolvedStoryStatus(status) {
     return status === 'Saved' || status === 'Merged';
 }
 
+function activeStorySelectionScope() {
+    const stateScope = currentProjectState?.story_completion_scope;
+    const scope = stateScope || sprintCandidateCompletionScope;
+    if (!scope || scope.scope !== 'selection') return null;
+    return scope;
+}
+
+function roadmapRequirementNamesFromState() {
+    const releases = Array.isArray(currentProjectState?.roadmap_releases)
+        ? currentProjectState.roadmap_releases
+        : [];
+    const names = [];
+    releases.forEach(release => {
+        const items = Array.isArray(release?.items) ? release.items : [];
+        items.forEach(item => {
+            if (typeof item === 'string' && item.trim()) {
+                names.push(item.trim());
+            }
+        });
+    });
+    return names;
+}
+
+function storySelectionScopeSummary() {
+    const scope = activeStorySelectionScope();
+    if (!scope) return null;
+
+    const includedCount = Array.isArray(scope.requirements)
+        ? scope.requirements.filter(item => typeof item === 'string' && item.trim()).length
+        : 0;
+    const roadmapCount = roadmapRequirementNamesFromState().length;
+    const totalCount = Math.max(roadmapCount, storyRequirements.length, includedCount);
+    const excludedCount = Math.max(totalCount - includedCount, 0);
+
+    return {
+        includedCount,
+        totalCount,
+        excludedCount,
+        includedText: `${includedCount} of ${totalCount || includedCount} requirements included`,
+        excludedText: `${excludedCount} requirements excluded or not refined`,
+    };
+}
+
+function scopedStepperStatus(stepId, statusText, stateKey) {
+    if (!activeStorySelectionScope()) return statusText;
+    if (stepId === 'story' && statusText === 'Completed') {
+        return 'Selected Stories Completed';
+    }
+    if (stepId === 'sprint' && statusText === 'Active') {
+        return stateKey === 'SPRINT_DRAFT'
+            ? 'Draft from Selection'
+            : 'From Selection';
+    }
+    return statusText;
+}
+
 function selectedStoryScopeNames() {
     const names = [];
     const seen = new Set();
@@ -1559,9 +1615,11 @@ async function fetchProjectFSMState(projectId, options = {}) {
 
         const state = data.data || {};
         currentProjectState = {
+            ...state,
             setup_status: state.setup_status || 'failed',
             setup_error: state.setup_error || null,
         };
+        sprintCandidateCompletionScope = state.story_completion_scope || null;
 
         const stateKey = normalizeStateKey(state.fsm_state);
         const landing = resolveProjectLanding(stateKey);
@@ -1702,7 +1760,7 @@ function updateStepperUI(fsmState) {
                 iconContainer.innerHTML = '<span class="material-symbols-outlined text-xl">check</span>';
                 labelSpan.className = 'text-xs font-bold text-emerald-600 dark:text-emerald-400 transition-colors';
                 statusSpan.className = 'text-[10px] text-emerald-500 uppercase font-black transition-colors';
-                statusSpan.innerText = 'Completed';
+                statusSpan.innerText = scopedStepperStatus(step.id, 'Completed', stateKey);
                 return;
             }
 
@@ -1713,7 +1771,7 @@ function updateStepperUI(fsmState) {
                 iconContainer.innerHTML = `<span class="material-symbols-outlined text-xl">${icon}</span>`;
                 labelSpan.className = 'text-xs font-bold text-primary transition-colors';
                 statusSpan.className = 'text-[10px] text-primary/80 uppercase font-black transition-colors';
-                statusSpan.innerText = 'Active';
+                statusSpan.innerText = scopedStepperStatus(step.id, 'Active', stateKey);
                 return;
             }
 
@@ -3804,6 +3862,45 @@ function renderOverviewPanel() {
     const plannedSprintId = sprintRuntimeSummary?.planned_sprint_id || null;
     const latestCompletedSprintId = sprintRuntimeSummary?.latest_completed_sprint_id || null;
     const savedSprintCount = savedSprints.length;
+    const scopedSummary = storySelectionScopeSummary();
+    const overviewTitle = scopedSummary
+        ? 'Sprint planning is scoped to selected stories'
+        : `Planning is ${planningComplete ? 'complete' : 'still in progress'}`;
+    const overviewText = scopedSummary
+        ? `${scopedSummary.includedText}. ${scopedSummary.excludedText}.`
+        : (planningComplete
+            ? 'Sprint runtime continues in the sprint workspace.'
+            : (nextPhase ? `The next unfinished planning step is ${capitalizePhase(nextPhase)}.` : 'Continue the planning pipeline before sprint runtime begins.'));
+    const planningStatusTitle = scopedSummary
+        ? 'Selection Scope Active'
+        : (planningComplete ? 'Ready for Iteration' : 'In Progress');
+    const planningStatusText = scopedSummary
+        ? `${scopedSummary.includedText}; ${scopedSummary.excludedText}.`
+        : (planningComplete ? 'The one-time planning pipeline is complete for this project shell.' : 'Continue setup, vision, backlog, roadmap, stories, and sprint planning.');
+    const sprintRuntimeTitle = hasDraftToReview
+        ? (scopedSummary ? 'Sprint Draft from Selection' : 'Sprint Draft Ready')
+        : activeSprintId
+        ? (scopedSummary ? 'Sprint Active from Selection' : 'Sprint Active')
+        : plannedSprintId
+            ? (scopedSummary ? 'Planned Sprint from Selection' : 'Planned Sprint Ready')
+            : latestCompletedSprintId
+                ? 'Last Sprint Completed'
+                : 'No Sprint Yet';
+    const sprintRuntimeText = hasDraftToReview
+        ? (scopedSummary
+            ? `A generated sprint draft from the selected Story scope is ready for review. ${scopedSummary.includedText}.`
+            : 'A generated sprint draft is ready for review and save.')
+        : activeSprintId
+        ? (scopedSummary
+            ? 'Execution is active for a sprint planned from the selected Story scope.'
+            : 'Execution is active. Open the sprint workspace to manage in-flight work.')
+        : plannedSprintId
+            ? (scopedSummary
+                ? 'A planned sprint from the selected Story scope is ready to start or refine.'
+                : 'A planned sprint is ready to start or refine.')
+            : latestCompletedSprintId
+                ? 'The last sprint is closed and available as read-only history.'
+                : 'Create the first sprint to begin iterative runtime.';
 
     const primaryActionHtml = hasDraftToReview
         ? `<button type="button" onclick="openSprintPlanner()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
@@ -3835,11 +3932,9 @@ function renderOverviewPanel() {
                             Workflow Overview
                         </div>
                         <div>
-                            <h3 class="text-2xl font-black text-slate-800 dark:text-white">Planning is ${planningComplete ? 'complete' : 'still in progress'}</h3>
+                            <h3 class="text-2xl font-black text-slate-800 dark:text-white">${overviewTitle}</h3>
                             <p class="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                                ${planningComplete
-                                    ? 'Sprint runtime continues in the sprint workspace.'
-                                    : (nextPhase ? `The next unfinished planning step is ${capitalizePhase(nextPhase)}.` : 'Continue the planning pipeline before sprint runtime begins.')}
+                                ${overviewText}
                             </p>
                         </div>
                     </div>
@@ -3862,21 +3957,13 @@ function renderOverviewPanel() {
                 </div>
                 <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                     <div class="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Planning Status</div>
-                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${planningComplete ? 'Ready for Iteration' : 'In Progress'}</div>
-                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${planningComplete ? 'The one-time planning pipeline is complete for this project shell.' : 'Continue setup, vision, backlog, roadmap, stories, and sprint planning.'}</p>
+                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${planningStatusTitle}</div>
+                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${planningStatusText}</p>
                 </div>
                 <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                     <div class="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sprint Runtime</div>
-                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${hasDraftToReview ? 'Sprint Draft Ready' : activeSprintId ? 'Sprint Active' : plannedSprintId ? 'Planned Sprint Ready' : latestCompletedSprintId ? 'Last Sprint Completed' : 'No Sprint Yet'}</div>
-                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${hasDraftToReview
-                        ? 'A generated sprint draft is ready for review and save.'
-                        : activeSprintId
-                        ? 'Execution is active. Open the sprint workspace to manage in-flight work.'
-                        : plannedSprintId
-                            ? 'A planned sprint is ready to start or refine.'
-                            : latestCompletedSprintId
-                                ? 'The last sprint is closed and available as read-only history.'
-                                : 'Create the first sprint to begin iterative runtime.'}</p>
+                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${sprintRuntimeTitle}</div>
+                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${sprintRuntimeText}</p>
                 </div>
             </div>
         </div>
@@ -4437,14 +4524,19 @@ function updateSprintSelectionSummary() {
     const summary = document.getElementById('sprint-selection-summary');
     if (!summary) return;
 
+    const scopedSummary = storySelectionScopeSummary();
+    const scopePrefix = scopedSummary
+        ? `${scopedSummary.includedText}; ${scopedSummary.excludedText}. `
+        : '';
+
     if (sprintCandidates.length === 0) {
-        summary.innerText = 'No sprint-eligible stories are available yet.';
+        summary.innerText = `${scopePrefix}No sprint-eligible stories are available yet.`;
         return;
     }
 
     const selected = getSelectedSprintCandidates();
     if (selected.length === 0) {
-        summary.innerText = `${sprintCandidates.length} eligible stories available. Leave all unchecked to let the planner choose from the full candidate pool.`;
+        summary.innerText = `${scopePrefix}${sprintCandidates.length} eligible stories available. Leave all unchecked to let the planner choose from the current candidate pool.`;
         return;
     }
 
@@ -4455,7 +4547,7 @@ function updateSprintSelectionSummary() {
         ? `${estimatedPoints.reduce((sum, value) => sum + value, 0)} estimated points`
         : 'partial point estimates';
 
-    summary.innerText = `${selected.length} stories manually selected (${pointsText}).`;
+    summary.innerText = `${scopePrefix}${selected.length} stories manually selected (${pointsText}).`;
 }
 
 function renderSprintCandidates() {
