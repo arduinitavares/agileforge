@@ -513,6 +513,78 @@ Do not add cross-milestone work.
 
 
 @pytest.mark.asyncio
+async def test_generate_story_draft_first_generation_allows_guidance_input() -> None:
+    """Weak-looking first-generation guidance still runs the Story writer."""
+    parent_requirement = "Requirement A"
+    artifact = _story_artifact(parent_requirement, "Initial draft")
+    state: JsonDict = {"roadmap_releases": [{"items": [parent_requirement]}]}
+    calls = {"agent": 0, "feedback": 0}
+    captured: JsonDict = {}
+
+    async def fake_run_story_agent_from_state(
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> JsonDict:
+        del state_arg
+        calls["agent"] += 1
+        captured["project_id"] = project_id
+        captured["parent_requirement"] = parent_requirement
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {"parent_requirement": parent_requirement},
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(*args: object, **kwargs: object) -> JsonDict:
+        del args, kwargs
+        calls["feedback"] += 1
+        return {}
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Focus on operator workflow.",
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-09T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(kwargs),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == {"agent": 1, "feedback": 0}
+    assert captured == {
+        "project_id": 7,
+        "parent_requirement": parent_requirement,
+        "user_input": "Focus on operator workflow.",
+    }
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"] is None
+
+
+@pytest.mark.asyncio
 async def test_generate_story_draft_soft_gates_weak_feedback() -> None:
     """Weak refinement feedback returns guidance without running generation."""
     parent_requirement = "Requirement A"
@@ -597,7 +669,34 @@ async def test_generate_story_draft_force_feedback_runs_generation() -> None:
     """Forced weak feedback records quality metadata and still runs generation."""
     parent_requirement = "Requirement A"
     artifact = _story_artifact(parent_requirement, "Forced draft")
-    state: JsonDict = {"roadmap_releases": [{"items": [parent_requirement]}]}
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "quality_gate_failed",
+                            "is_reusable": False,
+                            "retryable": False,
+                            "draft_kind": "quality_blocked_draft",
+                            "output_artifact": _story_artifact(
+                                parent_requirement,
+                                "Broad draft",
+                                is_complete=False,
+                            ),
+                        }
+                    ],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
     captured_feedback: dict[str, Any] = {}
 
     async def fake_run_story_agent_from_state(

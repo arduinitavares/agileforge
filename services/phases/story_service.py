@@ -710,6 +710,17 @@ def story_has_working_state(runtime: dict[str, Any]) -> bool:
     )
 
 
+def story_has_prior_attempt(runtime: dict[str, Any]) -> bool:
+    attempts = runtime.get("attempt_history") or []
+    if not isinstance(attempts, list):
+        return False
+
+    return any(
+        isinstance(attempt, dict) and attempt.get("trigger") != "reset"
+        for attempt in attempts
+    )
+
+
 def story_retry_target_attempt_id(runtime: dict[str, Any]) -> str | None:
     attempts = runtime.get("attempt_history") or []
     latest_attempt = attempts[-1] if attempts else {}
@@ -1082,16 +1093,17 @@ async def generate_story_draft(
         parent_requirement=normalized_parent_requirement,
     )
 
-    has_attempts = story_has_working_state(runtime)
+    has_working_state = story_has_working_state(runtime)
+    has_prior_attempt = story_has_prior_attempt(runtime)
     normalized_user_input = user_input.strip() if isinstance(user_input, str) else None
-    if has_attempts and not normalized_user_input:
+    if has_working_state and not normalized_user_input:
         raise StoryPhaseError(
             "User input is required to refine an existing story.",
             status_code=400,
         )
 
     feedback_quality: dict[str, Any] | None = None
-    if normalized_user_input:
+    if has_prior_attempt and normalized_user_input:
         feedback_quality = evaluate_story_feedback_quality(
             normalized_user_input,
             parent_requirement=normalized_parent_requirement,
