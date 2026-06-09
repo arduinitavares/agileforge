@@ -756,7 +756,7 @@ def test_story_command_contracts() -> None:
     test_story_phase_commands_are_registered_and_available()
 
 
-test_story_command_contracts.story_complete = True
+setattr(test_story_command_contracts, "story_complete", True)  # noqa: B010
 
 
 def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915

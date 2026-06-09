@@ -364,18 +364,20 @@ def _repair_invalid_invariant_ids_for_validation(payload: object) -> None:
     if not isinstance(invariants, list):
         return
 
-    used_ids = {
-        item.get("id")
-        for item in invariants
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and _STRICT_INVARIANT_ID_RE.fullmatch(cast("str", item.get("id")))
-    }
+    used_ids: set[str] = set()
+    for item in invariants:
+        if not isinstance(item, dict):
+            continue
+        item_dict = cast("dict[str, Any]", item)
+        raw_id = item_dict.get("id")
+        if isinstance(raw_id, str) and _STRICT_INVARIANT_ID_RE.fullmatch(raw_id):
+            used_ids.add(raw_id)
     repaired_count = 0
     for index, item in enumerate(invariants):
         if not isinstance(item, dict):
             continue
-        raw_id = item.get("id")
+        item_dict = cast("dict[str, Any]", item)
+        raw_id = item_dict.get("id")
         if isinstance(raw_id, str) and _STRICT_INVARIANT_ID_RE.fullmatch(raw_id):
             continue
         candidate_index = index
@@ -383,7 +385,7 @@ def _repair_invalid_invariant_ids_for_validation(payload: object) -> None:
         while replacement in used_ids:
             candidate_index += len(invariants) + 1
             replacement = _temporary_invariant_id(candidate_index)
-        item["id"] = replacement
+        item_dict["id"] = replacement
         used_ids.add(replacement)
         repaired_count += 1
 

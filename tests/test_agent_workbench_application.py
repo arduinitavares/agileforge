@@ -1275,7 +1275,7 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
-    def complete(
+    def complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,

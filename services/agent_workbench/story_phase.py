@@ -165,7 +165,7 @@ class StoryPhaseRunner:
             idempotency_key,
         )
 
-    def complete(
+    def complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,
@@ -431,7 +431,7 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _complete(
+    async def _complete(  # noqa: PLR0913
         self,
         project_id: int,
         expected_state: str,

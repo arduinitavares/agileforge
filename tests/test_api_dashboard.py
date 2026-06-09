@@ -5,7 +5,7 @@ import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +18,13 @@ from services.agent_workbench.authority_decision import (
 from services.agent_workbench.authority_projection import _AuthoritySelection
 from services.agent_workbench.authority_review import AuthorityReviewSnapshot
 from services.specs.compiler_service import CompiledArtifactLoadResult
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
+
+    from models.specs import CompiledSpecAuthority, SpecRegistry
+    from utils.spec_schemas import ValidationEvidence
+    from utils.task_metadata import TaskMetadata
 
 HTTP_OK = 200
 HTTP_BAD_REQUEST = 400
@@ -1277,8 +1284,11 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
         latest_spec=None,
         accepted=None,
         rejected=None,
-        accepted_spec=SimpleNamespace(spec_version_id=9),
-        authority=SimpleNamespace(compiled_artifact_json="{}"),
+        accepted_spec=cast("SpecRegistry", SimpleNamespace(spec_version_id=9)),
+        authority=cast(
+            "CompiledSpecAuthority",
+            SimpleNamespace(compiled_artifact_json="{}"),
+        ),
         pending_authority=None,
     )
 
@@ -1515,8 +1525,11 @@ def test_build_story_compliance_boundaries_ignores_non_success_loader_result(
     )
 
     result = api_module._build_story_compliance_boundaries(
-        authority=object(),
-        evidence=SimpleNamespace(finding_invariant_ids=["INV-1"]),
+        authority=cast("CompiledSpecAuthority", object()),
+        evidence=cast(
+            "ValidationEvidence",
+            SimpleNamespace(finding_invariant_ids=["INV-1"]),
+        ),
     )
 
     assert result == []
@@ -1536,8 +1549,11 @@ def test_build_task_hard_constraints_ignores_non_success_loader_result(
     )
 
     result = api_module._build_task_hard_constraints(
-        authority=object(),
-        task_metadata=SimpleNamespace(relevant_invariant_ids=["INV-1"]),
+        authority=cast("CompiledSpecAuthority", object()),
+        task_metadata=cast(
+            "TaskMetadata",
+            SimpleNamespace(relevant_invariant_ids=["INV-1"]),
+        ),
     )
 
     assert result == []
@@ -1613,7 +1629,7 @@ def test_load_packet_story_context_marks_unreadable_authority_missing(
     )
 
     context = api_module._load_packet_story_context(
-        _Session([story, sprint, sprint_story]),
+        cast("Session", _Session([story, sprint, sprint_story])),
         project_id=1,
         sprint_id=2,
         story_id=7,

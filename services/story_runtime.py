@@ -242,11 +242,12 @@ def _finding(
 
 
 def _finding_codes(findings: list[dict[str, Any]]) -> set[str]:
-    return {
-        finding.get("code")
-        for finding in findings
-        if isinstance(finding.get("code"), str)
-    }
+    codes: set[str] = set()
+    for finding in findings:
+        code = finding.get("code")
+        if isinstance(code, str):
+            codes.add(code)
+    return codes
 
 
 def _all_story_indexes(output: UserStoryWriterOutput) -> list[int]:

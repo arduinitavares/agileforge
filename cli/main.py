@@ -486,7 +486,7 @@ class _Application(Protocol):
         """Persist the current Story draft."""
         ...
 
-    def story_complete(
+    def story_complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,

@@ -499,7 +499,7 @@ def test_repair_setup_recovery_target_reports_in_progress_on_lease_race(
                 )
                 competing_session.commit()
             refreshing_lease = False
-        return original_exec(session, statement)
+        return cast("Any", original_exec)(session, statement)
 
     monkeypatch.setattr(mutation_ledger_mod.Session, "exec", exec_with_lease_race)
 
@@ -559,7 +559,7 @@ def test_repair_setup_recovery_target_fences_snapshot_lease_owner(
                 )
                 competing_session.commit()
             changing_owner = False
-        return original_exec(session, statement)
+        return cast("Any", original_exec)(session, statement)
 
     monkeypatch.setattr(mutation_ledger_mod.Session, "exec", exec_with_owner_race)
 

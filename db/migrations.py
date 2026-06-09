@@ -327,7 +327,7 @@ def _migrate_compiled_authority_candidate_contract(engine: Engine) -> bool:
         )))
         conn.execute(
             text(
-                "INSERT INTO compiled_spec_authority__new "  # noqa: S608
+                "INSERT INTO compiled_spec_authority__new "  # nosec B608  # noqa: S608
                 f"({column_sql}) SELECT {column_sql} FROM compiled_spec_authority"
             )
         )

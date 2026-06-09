@@ -252,13 +252,14 @@ def _project_hydration_error(error: object) -> dict[str, Any]:
     if not isinstance(error, dict):
         return _error_envelope(ErrorCode.INVALID_COMMAND, str(error))
 
+    error_dict = cast("dict[str, Any]", error)
     try:
-        code = ErrorCode(str(error.get("code", ErrorCode.INVALID_COMMAND.value)))
+        code = ErrorCode(str(error_dict.get("code", ErrorCode.INVALID_COMMAND.value)))
     except ValueError:
         code = ErrorCode.INVALID_COMMAND
-    message = str(error.get("message") or error)
-    details = error.get("details")
-    remediation = error.get("remediation")
+    message = str(error_dict.get("message") or error_dict)
+    details = error_dict.get("details")
+    remediation = error_dict.get("remediation")
     return _error_envelope(
         code,
         message,

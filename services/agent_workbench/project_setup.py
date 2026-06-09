@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -1280,7 +1280,7 @@ class ProjectSetupMutationRunner:
             authority = session.exec(
                 select(CompiledSpecAuthority)
                 .where(CompiledSpecAuthority.spec_version_id == spec.spec_version_id)
-                .order_by(CompiledSpecAuthority.authority_id.desc())
+                .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
             ).first()
             if authority is None:
                 return None

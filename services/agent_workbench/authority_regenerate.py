@@ -1,5 +1,7 @@
 """Regenerate compiled authority for an approved spec version."""
 
+# ruff: noqa: SIM300
+
 from __future__ import annotations
 
 import json
@@ -42,6 +44,11 @@ if TYPE_CHECKING:
 
 AUTHORITY_REGENERATE_COMMAND: str = "agileforge authority regenerate"
 AUTHORITY_REGENERATE_LEASE_SECONDS: int = 300
+_ACCEPTANCE_STATUS: Any = SpecAuthorityAcceptance.status
+_LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
+_LEDGER_STATUS: Any = CliMutationLedger.status
+_LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
+_LEDGER_LEASE_EXPIRES_AT: Any = CliMutationLedger.lease_expires_at
 
 
 class AuthorityRegenerateRequest(BaseModel):
@@ -78,8 +85,8 @@ class AuthorityRegenerateRunner:
             return dry_run_response
 
         active_mutation = self._start_mutation(request)
-        if isinstance(active_mutation, dict):
-            return active_mutation
+        if not isinstance(active_mutation, AuthorityRegenerateRunner._ActiveMutation):
+            return cast("dict[str, Any]", active_mutation)
 
         compile_result = self._compile_authority(
             request=request,
@@ -464,7 +471,7 @@ def _has_terminal_decision_for_authority(
                 == request.spec_version_id
             )
             .where(SpecAuthorityAcceptance.pending_authority_id == authority_id)
-            .where(SpecAuthorityAcceptance.status.in_(("accepted", "rejected")))
+            .where(_ACCEPTANCE_STATUS.in_(("accepted", "rejected")))
         ).first()
         is not None
     )
@@ -529,10 +536,10 @@ def _finalize_mutation_status(
     with Session(engine) as session:
         result = session.exec(
             update(CliMutationLedger)
-            .where(CliMutationLedger.mutation_event_id == mutation_event_id)
-            .where(CliMutationLedger.status == MutationStatus.PENDING.value)
-            .where(CliMutationLedger.lease_owner == lease_owner)
-            .where(CliMutationLedger.lease_expires_at > now)
+            .where(_LEDGER_MUTATION_EVENT_ID == mutation_event_id)
+            .where(_LEDGER_STATUS == MutationStatus.PENDING.value)
+            .where(_LEDGER_LEASE_OWNER == lease_owner)
+            .where(_LEDGER_LEASE_EXPIRES_AT > now)
             .values(
                 status=status.value,
                 response_json=json.dumps(

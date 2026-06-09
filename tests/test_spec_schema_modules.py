@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess  # nosec B404
 from pathlib import Path
 from shutil import which
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -155,6 +156,7 @@ def test_behavioral_invariants_keep_provenance_top_level() -> None:
 
     assert invariant.source_item_id == "REQ.todo-create"
     assert invariant.source_level == "MUST"
+    assert isinstance(invariant.parameters, UserInteractionParams)
     assert invariant.parameters.trigger == "user presses Enter"
 
     with pytest.raises(ValidationError):
@@ -235,7 +237,7 @@ def test_authority_quality_report_schema_is_optional_and_strict() -> None:
     with pytest.raises(ValidationError):
         AuthorityQualityReviewGroup(
             group_id="AQ-GROUP-002",
-            group_type="unsupported",
+            group_type=cast("Any", "unsupported"),
             severity="warning",
             member_ids=[],
             reason="bad type",

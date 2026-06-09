@@ -685,7 +685,7 @@ class _FakeApplication:
             "errors": [],
         }
 
-    def story_complete(
+    def story_complete(  # noqa: PLR0913
         self,
         *,
         project_id: int,

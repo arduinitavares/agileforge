@@ -31,7 +31,8 @@ with Session(engine) as s:
     if auth:
         emit(f"Authority for spec 9: authority_id={auth.authority_id}")
         emit(f"  compiled_artifact_json present: {bool(auth.compiled_artifact_json)}")
-        artifact = _load_compiled_artifact(auth)
+        load_result = _load_compiled_artifact(auth)
+        artifact = load_result.artifact if load_result.ok else None
         if artifact:
             emit(f"  scope_themes: {artifact.scope_themes}")
             emit(f"  invariants count: {len(artifact.invariants)}")

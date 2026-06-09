@@ -2324,8 +2324,9 @@ def _run_compiler_invocation_with_guards[CompilerInvocationResult](
     if not _compiler_invocation_guard_allows(lease_guard, finished_boundary):
         return _mutation_lease_lost_result(finished_boundary)
 
-    if "exception" in worker_result:
-        raise worker_result["exception"]
+    exception = worker_result.get("exception")
+    if isinstance(exception, BaseException):
+        raise exception
     return cast("CompilerInvocationResult", worker_result["value"])
 
 
@@ -2360,19 +2361,21 @@ def _cached_compilation_result(
     load_result = load_compiled_artifact(existing_authority)
     if load_result.unsupported:
         observed_schema_version = load_result.observed_schema_version
+        project_id = context.spec_version.product_id
+        spec_version_id = cast("int", context.spec_version.spec_version_id)
         return {
             "success": False,
             "cached": False,
             "error": "Compiled authority artifact schema is unsupported.",
             "error_code": ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value,
             "details": compiled_authority_schema_unsupported_details(
-                project_id=context.product.product_id,
-                spec_version_id=context.spec_version.spec_version_id,
+                project_id=project_id,
+                spec_version_id=spec_version_id,
                 observed_schema_version=observed_schema_version,
             ),
             "remediation": compiled_authority_schema_unsupported_remediation(
-                project_id=context.product.product_id,
-                spec_version_id=context.spec_version.spec_version_id,
+                project_id=project_id,
+                spec_version_id=spec_version_id,
             ),
             "observed_schema_version": observed_schema_version,
             "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
@@ -2472,9 +2475,10 @@ def _invoke_compiler_for_version(
     )
 
     if isinstance(compiled, dict):
+        compiled_failure = cast("dict[str, Any]", compiled)
         return _CompilerInvocationResult(
             failure=_attach_schema_retry_metadata(
-                compiled,
+                compiled_failure,
                 attempted=False,
                 reason=None,
                 attempts=0,
@@ -2517,9 +2521,10 @@ def _invoke_compiler_for_version(
         domain_hint=_SCHEMA_RETRY_FEEDBACK,
     )
     if isinstance(retried, dict):
+        retried_failure = cast("dict[str, Any]", retried)
         return _CompilerInvocationResult(
             failure=_attach_schema_retry_metadata(
-                retried,
+                retried_failure,
                 attempted=retry_attempted,
                 reason=retry_reason,
                 attempts=retry_attempts,

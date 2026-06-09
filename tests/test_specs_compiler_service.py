@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -72,7 +72,7 @@ def _stored_compiled_success_json() -> str:
     return json.dumps(v2_compiled_authority_payload())
 
 
-def v2_compiled_authority_payload() -> dict[str, object]:
+def v2_compiled_authority_payload() -> dict[str, Any]:
     """Return a stored v2 compiled-authority payload fixture."""
     return {
         "schema_version": "agileforge.compiled_authority.v2",
@@ -103,7 +103,7 @@ def v2_compiled_authority_payload() -> dict[str, object]:
     }
 
 
-def legacy_compiled_authority_payload() -> dict[str, object]:
+def legacy_compiled_authority_payload() -> dict[str, Any]:
     """Return a legacy stored payload fixture without schema_version."""
     payload = v2_compiled_authority_payload()
     payload.pop("schema_version")
@@ -210,7 +210,7 @@ def _duplicate_required_field_compiler_output_json() -> str:
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
 
 
-def _structured_retry_success_payload() -> dict[str, object]:
+def _structured_retry_success_payload() -> dict[str, Any]:
     """Return a compile-success payload valid against structured source checks."""
     return {
         "schema_version": "agileforge.compiled_authority.v2",
@@ -241,12 +241,12 @@ def _structured_retry_success_payload() -> dict[str, object]:
     }
 
 
-def _structured_retry_invalid_payload() -> dict[str, object]:
+def _structured_retry_invalid_payload() -> dict[str, Any]:
     """Return schema-invalid structured retry output for retry tests."""
     payload = _structured_retry_success_payload()
     payload["invariants"] = [
         {
-            **cast("dict[str, object]", payload["invariants"][0]),
+            **cast("dict[str, Any]", payload["invariants"][0]),
             "parameters": {"unexpected": "value"},
         }
     ]

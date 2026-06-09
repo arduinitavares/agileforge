@@ -12,6 +12,7 @@ from utils.spec_schemas import (
     RequiredFieldParams,
     SourceMapEntry,
     SpecAuthorityCompilationSuccess,
+    SpecAuthoritySourceLevel,
     StateTransitionParams,
 )
 
@@ -44,7 +45,7 @@ def _required(
     item_id: str,
     *,
     source_item_id: str = "REQ.alpha",
-    source_level: str = "MUST",
+    source_level: SpecAuthoritySourceLevel = "MUST",
     field_name: str = "email",
 ) -> Invariant:
     return Invariant(

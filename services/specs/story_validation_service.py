@@ -99,7 +99,7 @@ class _ValidateStoryOptions(TypedDict, total=False):
     ]
     load_compiled_artifact_fn: Callable[
         [CompiledSpecAuthority],
-        SpecAuthorityCompilationSuccess | None,
+        object | None,
     ]
     render_invariant_summary_fn: Callable[[Invariant], str]
     validator_version: str
@@ -133,7 +133,7 @@ class _ValidationDependencies(TypedDict):
     ]
     load_artifact: Callable[
         [CompiledSpecAuthority],
-        SpecAuthorityCompilationSuccess | None,
+        object | None,
     ]
     render_invariant: Callable[[Invariant], str]
     validator_version: str

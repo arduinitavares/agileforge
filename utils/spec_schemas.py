@@ -438,18 +438,16 @@ class Invariant(BaseModel):
     source_item_id: Annotated[
         str | None,
         Field(
-            default=None,
             min_length=1,
             description="Structured spec item ID that authorizes this invariant.",
         ),
-    ]
+    ] = None
     source_level: Annotated[
         SpecAuthoritySourceLevel | None,
         Field(
-            default=None,
             description="Normative level of the source item.",
         ),
-    ]
+    ] = None
     parameters: Annotated[
         InvariantParameters,
         Field(description="Typed parameters for the invariant."),

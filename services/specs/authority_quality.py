@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from utils.spec_schemas import (
+    AuthorityQualityGroupType,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualityReviewGroup,
@@ -397,7 +398,7 @@ def _noisy_assumption_groups(
 
 
 def _group(
-    group_type: str,
+    group_type: AuthorityQualityGroupType,
     members: list[Invariant],
     reason: str,
 ) -> AuthorityQualityReviewGroup:
