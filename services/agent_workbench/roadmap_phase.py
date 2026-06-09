@@ -14,6 +14,10 @@ from models.db import get_engine
 from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    structured_workbench_error_envelope,
+)
 from services.phases.roadmap_service import (
     RoadmapPhaseError,
     generate_roadmap_draft,
@@ -208,8 +212,10 @@ class RoadmapPhaseRunner:
         result = select_project(project_id, _build_tool_context(context))
         if not result.get("success"):
             raise RoadmapPhaseError(
-                str(result.get("error", "Project hydration failed"))
+                result.get("error", "Project hydration failed")
             )
+        if block_error := phase_authority_block_error(project_id=project_id):
+            raise RoadmapPhaseError(block_error)
         _hydrate_vision_assessment_from_active_project(context.state)
         _hydrate_active_backlog_from_db(context.state, project_id=project_id)
         _assert_required_context(context.state)
@@ -351,7 +357,10 @@ def _error_envelope(
 
 def _phase_error(exc: RoadmapPhaseError) -> dict[str, Any]:
     """Map Roadmap phase errors onto registered CLI errors."""
-    message = exc.detail
+    structured = structured_workbench_error_envelope(exc.detail)
+    if structured is not None:
+        return structured
+    message = str(exc.detail)
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
         if message.startswith("Setup required")

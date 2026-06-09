@@ -195,6 +195,10 @@ from services.phases.vision_service import (
 from services.phases.vision_service import (
     save_vision_draft as save_vision_draft_service,
 )
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    sync_compiled_authority_cache,
+)
 from services.roadmap_runtime import run_roadmap_agent_from_state
 from services.setup_service import (
     run_project_setup as run_project_setup_service,
@@ -719,13 +723,24 @@ def _raise_if_authority_json_unsupported(
         )
 
 
+def _raise_phase_authority_blocked(error: dict[str, Any]) -> None:
+    """Raise the dashboard conflict for blocked authority states."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "status": "error",
+            "errors": [error],
+        },
+    )
+
+
 async def _guard_phase_generation_authority(
     *,
     project_id: int,
     product: object,
     session_id: str,
 ) -> None:
-    """Block phase generation when active authority is an unsupported artifact."""
+    """Block phase generation when authority is unsupported or not current."""
     state = await _ensure_session(session_id)
     spec_version_id = _phase_authority_spec_version_id(state)
     _raise_if_authority_json_unsupported(
@@ -738,6 +753,13 @@ async def _guard_phase_generation_authority(
         spec_version_id=spec_version_id,
         authority_json=getattr(product, "compiled_authority_json", None),
     )
+    if block_error := phase_authority_block_error(project_id=project_id):
+        _raise_phase_authority_blocked(block_error)
+    if sync_compiled_authority_cache(
+        state=state,
+        product_authority_json=getattr(product, "compiled_authority_json", None),
+    ):
+        _save_session_state(session_id, state)
 
 
 def _extract_workbench_error(result: dict[str, Any]) -> str:

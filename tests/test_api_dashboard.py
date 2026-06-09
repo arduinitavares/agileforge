@@ -1407,6 +1407,120 @@ def test_phase_generate_blocks_legacy_cached_authority(
     ]
 
 
+def test_phase_generate_blocks_stale_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase generation must stop when accepted authority is stale."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Stale Authority Project")
+    product.spec_file_path = __file__
+    product.compiled_authority_json = '{"schema_version":"agileforge.compiled_authority.v2"}'
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": 9,
+        "compiled_authority_cached": '{"schema_version":"agileforge.compiled_authority.v2"}',
+    }
+    service_calls: list[str] = []
+
+    async def unexpected_service_call(*_args: object, **_kwargs: object) -> object:
+        service_calls.append("generate_vision_draft_service")
+        raise AssertionError("phase service should not run with stale authority")
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        unexpected_service_call,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "phase_authority_block_error",
+        lambda *, project_id: {
+            "code": "STALE_AUTHORITY_VERSION",
+            "message": (
+                "Accepted authority is stale and must be reviewed before "
+                "phase generation. (accepted_compiler_prompt_mismatch)"
+            ),
+            "details": {
+                "project_id": project_id,
+                "authority_status": "stale",
+                "reason": "accepted_compiler_prompt_mismatch",
+                "stale_reason": "accepted_compiler_prompt_mismatch",
+            },
+            "remediation": [
+                f"Run agileforge authority review --project-id {project_id} --open.",
+                "Accept reviewed authority before continuing.",
+            ],
+        },
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "STALE_AUTHORITY_VERSION"
+
+
+def test_phase_generate_syncs_stale_session_authority_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API phase generation should hydrate authority cache from the product row."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Authority Cache Sync Project")
+    product.spec_file_path = __file__
+    fresh_authority = (
+        '{"schema_version":"agileforge.compiled_authority.v2","invariants":[]}'
+    )
+    product.compiled_authority_json = fresh_authority
+    session_id = str(product.product_id)
+    workflow.states[session_id] = {
+        "fsm_state": "VISION_INTERVIEW",
+        "latest_spec_version_id": 9,
+        "compiled_authority_cached": '{"schema_version":"agileforge.compiled_authority.v2","old":true}',
+    }
+    captured_state: dict[str, object] = {}
+
+    async def fake_generate_vision_draft_service(
+        *,
+        load_state: object,
+        save_state: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        del save_state
+        state = await load_state()
+        captured_state.update(state)
+        return {"vision_run_success": True}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        fake_generate_vision_draft_service,
+    )
+    monkeypatch.setattr(api_module, "phase_authority_block_error", lambda *, project_id: None)
+    monkeypatch.setattr(
+        api_module,
+        "run_vision_agent_from_state",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {"is_complete": False},
+            "is_complete": False,
+        },
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_OK
+    assert workflow.states[session_id]["compiled_authority_cached"] == fresh_authority
+    assert captured_state["compiled_authority_cached"] == fresh_authority
+
+
 def test_retry_setup_nonexistent_or_invalid_spec_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

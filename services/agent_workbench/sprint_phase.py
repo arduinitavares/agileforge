@@ -36,6 +36,10 @@ from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
 )
 from services.phases import workflow_state
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    structured_workbench_error_envelope,
+)
 from services.phases.sprint_service import (
     SprintPhaseError,
     generate_sprint_plan,
@@ -1113,7 +1117,9 @@ class SprintPhaseRunner:
         context = SimpleNamespace(state=dict(state), session_id=session_id)
         result = select_project(project_id, _build_tool_context(context))
         if not result.get("success"):
-            raise SprintPhaseError(str(result.get("error", "Project hydration failed")))
+            raise SprintPhaseError(result.get("error", "Project hydration failed"))
+        if block_error := phase_authority_block_error(project_id=project_id):
+            raise SprintPhaseError(block_error)
         return context
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
@@ -2911,7 +2917,10 @@ def _sprint_close_error(exc: Exception) -> dict[str, Any]:
 
 def _phase_error(exc: SprintPhaseError) -> dict[str, Any]:
     """Map Sprint phase errors onto registered CLI errors."""
-    message = exc.detail
+    structured = structured_workbench_error_envelope(exc.detail)
+    if structured is not None:
+        return structured
+    message = str(exc.detail)
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
         if message.startswith("Setup required")

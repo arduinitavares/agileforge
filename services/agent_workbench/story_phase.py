@@ -32,6 +32,10 @@ from services.interview_runtime import (
     reset_subject_working_set,
     set_request_projection,
 )
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    structured_workbench_error_envelope,
+)
 from services.phases.sprint_service import reset_sprint_planner_working_set
 from services.phases.story_service import (
     StoryPhaseError,
@@ -745,7 +749,9 @@ class StoryPhaseRunner:
         context = SimpleNamespace(state=dict(state), session_id=session_id)
         result = select_project(project_id, _build_tool_context(context))
         if not result.get("success"):
-            raise StoryPhaseError(str(result.get("error", "Project hydration failed")))
+            raise StoryPhaseError(result.get("error", "Project hydration failed"))
+        if block_error := phase_authority_block_error(project_id=project_id):
+            raise StoryPhaseError(block_error)
         _hydrate_roadmap_from_product(context.state, product)
         _assert_required_context(context.state)
         return context
@@ -1599,7 +1605,10 @@ def _error_envelope(
 
 def _phase_error(exc: StoryPhaseError) -> dict[str, Any]:
     """Map Story phase errors onto registered CLI errors."""
-    message = exc.detail
+    structured = structured_workbench_error_envelope(exc.detail)
+    if structured is not None:
+        return structured
+    message = str(exc.detail)
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
         if message.startswith("Setup required")

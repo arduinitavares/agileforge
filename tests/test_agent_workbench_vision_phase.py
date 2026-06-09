@@ -262,3 +262,69 @@ def test_vision_generate_blocks_unsupported_authority_before_agent(
         "Run agileforge authority regenerate --project-id 2 "
         "--spec-version-id 12 --idempotency-key <new-key>."
     ]
+
+
+def test_vision_generate_blocks_stale_authority_before_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale accepted authority must fail closed before Vision generation."""
+    agent_calls: list[dict[str, Any]] = []
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        return {"success": True, "project_id": product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.vision_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.vision_phase.phase_authority_block_error",
+        lambda *, project_id: {
+            "code": "STALE_AUTHORITY_VERSION",
+            "message": (
+                "Accepted authority is stale and must be reviewed before "
+                "phase generation. (accepted_compiler_prompt_mismatch)"
+            ),
+            "details": {
+                "project_id": project_id,
+                "authority_status": "stale",
+                "reason": "accepted_compiler_prompt_mismatch",
+                "stale_reason": "accepted_compiler_prompt_mismatch",
+            },
+            "remediation": [
+                "Run agileforge authority review --project-id 2 --open.",
+                "Accept reviewed authority before continuing.",
+            ],
+        },
+    )
+
+    async def fake_run_vision_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        agent_calls.append(
+            {"state": state, "project_id": project_id, "user_input": user_input}
+        )
+        return {"success": True, "input_context": {}, "output_artifact": {}}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.vision_phase.run_vision_agent_from_state",
+        fake_run_vision_agent_from_state,
+    )
+    runner = VisionPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(project_id=2)
+
+    assert result["ok"] is False
+    assert agent_calls == []
+    assert result["errors"][0]["code"] == "STALE_AUTHORITY_VERSION"

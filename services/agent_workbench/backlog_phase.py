@@ -37,6 +37,10 @@ from services.agent_workbench.schema_readiness import (
     check_schema_readiness,
 )
 from services.backlog_runtime import run_backlog_agent_from_state
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    structured_workbench_error_envelope,
+)
 from services.phases.backlog_service import (
     BacklogPhaseError,
     generate_backlog_draft,
@@ -681,8 +685,10 @@ class BacklogPhaseRunner:
         result = select_project(project_id, _build_tool_context(context))
         if not result.get("success"):
             raise BacklogPhaseError(
-                str(result.get("error", "Project hydration failed"))
+                result.get("error", "Project hydration failed")
             )
+        if block_error := phase_authority_block_error(project_id=project_id):
+            raise BacklogPhaseError(block_error)
         _hydrate_vision_assessment_from_active_project(context.state)
         _assert_required_context(context.state)
         return context
@@ -875,7 +881,10 @@ def _reset_active_schema_error(engine: Engine) -> dict[str, Any] | None:
 
 def _phase_error(exc: BacklogPhaseError) -> dict[str, Any]:
     """Map Backlog phase errors onto registered CLI errors."""
-    message = exc.detail
+    structured = structured_workbench_error_envelope(exc.detail)
+    if structured is not None:
+        return structured
+    message = str(exc.detail)
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
         if message.startswith("Setup required")
