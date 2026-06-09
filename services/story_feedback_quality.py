@@ -13,32 +13,61 @@ STORY_FEEDBACK_QUALITY_SCHEMA_VERSION: str = (
 )
 
 _FIELD_LABELS: Mapping[str, Sequence[str]] = {
-    "target": ("target:", "story:", "requirement:", "attempt:"),
-    "issue": ("issue:", "problem:", "gap:"),
+    "target": ("target",),
+    "issue": ("issue", "problem", "gap"),
     "evidence": (
-        "evidence:",
-        "because:",
+        "evidence",
+        "because",
         "quality.blocking_findings",
         "remaining_scope",
     ),
+    "required_change": ("required change", "change"),
+    "acceptance_criteria": ("acceptance criteria",),
+    "scope_limit": ("scope limit", "out of scope"),
+    "priority": ("priority",),
+}
+_CONTEXT_LINE_PATTERNS: Mapping[str, Sequence[re.Pattern[str]]] = {
+    "evidence": (
+        re.compile(
+            r"^\s*(quality\.blocking_findings|remaining_scope)\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
     "required_change": (
-        "required change:",
-        "change:",
-        "refine only",
-        "split",
-        "remove",
-        "preserve",
-        "do not cover",
+        re.compile(
+            r"^\s*(refine only|split|remove|preserve)\b",
+            flags=re.IGNORECASE,
+        ),
     ),
     "acceptance_criteria": (
-        "acceptance criteria:",
-        "- stories",
-        "- each story",
-        "coverage_status=complete",
-        "saveable",
+        re.compile(
+            r"^\s*-\s*(stories|each story|draft returns)\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*coverage_status\s*=",
+            flags=re.IGNORECASE,
+        ),
     ),
-    "scope_limit": ("scope limit:", "do not", "preserve", "out of scope"),
-    "priority": ("priority:", "must fix", "should fix", "optional"),
+    "scope_limit": (
+        re.compile(
+            r"^\s*(do not (add|change|cover|include|modify|touch)|out of scope)\b",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    "priority": (
+        re.compile(
+            r"^\s*(must fix|should fix|optional)\.?\s*$",
+            flags=re.IGNORECASE,
+        ),
+    ),
+}
+_FIELD_LABEL_RE: Mapping[str, Sequence[re.Pattern[str]]] = {
+    field: tuple(
+        re.compile(rf"^\s*{re.escape(label)}\s*:", flags=re.IGNORECASE)
+        for label in labels
+    )
+    for field, labels in _FIELD_LABELS.items()
 }
 
 _REQUIRED_FIELDS: Sequence[str] = (
@@ -66,10 +95,16 @@ def _normalized_text(text: str | None) -> str:
 
 
 def _present_fields(feedback: str) -> list[str]:
-    normalized = feedback.casefold()
+    lines = feedback.splitlines()
     present: list[str] = []
-    for field, labels in _FIELD_LABELS.items():
-        if any(label.casefold() in normalized for label in labels):
+    for field in _FIELD_LABELS:
+        label_patterns = _FIELD_LABEL_RE[field]
+        context_patterns = _CONTEXT_LINE_PATTERNS.get(field, ())
+        if any(
+            pattern.search(line)
+            for line in lines
+            for pattern in (*label_patterns, *context_patterns)
+        ):
             present.append(field)
     return present
 
@@ -161,8 +196,9 @@ def evaluate_story_feedback_quality(
     force: bool = False,
 ) -> dict[str, Any]:
     """Return local quality metadata for one Story refinement feedback string."""
+    raw_feedback = (feedback or "").strip()
     text = _normalized_text(feedback)
-    present_fields = _present_fields(text)
+    present_fields = _present_fields(raw_feedback)
     missing_fields = _missing_fields(present_fields)
 
     warnings: list[dict[str, str]] = []

@@ -67,6 +67,35 @@ Must fix.
     assert result["score"] >= PASSING_SCORE_FLOOR
 
 
+def test_unstructured_prose_tokens_do_not_satisfy_required_fields() -> None:
+    """Broad prose words should not count as required feedback fields."""
+    feedback = """
+Target:
+Requirement A, attempt-2
+
+Issue:
+The draft mentions preserved context and might be saveable.
+
+Evidence:
+I do not know which scope should change from this note.
+
+Priority:
+Must fix.
+"""
+
+    result = evaluate_story_feedback_quality(
+        feedback,
+        parent_requirement="Requirement A",
+        force=False,
+    )
+
+    assert result["needs_revision"] is True
+    assert "required_change" in result["missing_fields"]
+    assert "acceptance_criteria" in result["missing_fields"]
+    assert "scope_limit" in result["missing_fields"]
+    assert result["warnings"][0]["code"] == "FEEDBACK_FIELDS_MISSING"
+
+
 def test_force_records_override_but_keeps_warnings() -> None:
     """Force override should not hide weak feedback warnings."""
     result = evaluate_story_feedback_quality(
