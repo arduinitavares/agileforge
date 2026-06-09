@@ -3116,7 +3116,7 @@ def test_workflow_next_routes_story_persistence_to_selection_complete_when_parti
 
 
 def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> None:
-    """Expose Story completion only after all Roadmap requirements are covered."""
+    """Expose whole-phase and selection Story completion for full coverage."""
     app = AgentWorkbenchApplication(
         read_projection=_StoryCompleteReadyReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3143,6 +3143,14 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
         (
             "agileforge story complete --project-id 7 "
             "--expected-state STORY_PERSISTENCE "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_PERSISTENCE "
+            "--scope selection "
+            '--parent-requirement "Requirement A" '
+            '--parent-requirement "Requirement B" '
             "--idempotency-key <idempotency_key>"
         ),
     ]

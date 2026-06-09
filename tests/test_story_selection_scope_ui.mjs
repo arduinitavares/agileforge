@@ -86,6 +86,17 @@ test('loadStoryRequirements prunes stale selected requirements to current resolv
     assert.match(source, /filter\(requirement => selectableRequirementNames\.has\(requirement\)\)/);
 });
 
+test('loadSprintCandidates preserves scoped planning metadata', () => {
+    const source = functionSource('loadSprintCandidates');
+
+    assert.match(projectJsSource, /let sprintCandidateReadiness = null;/);
+    assert.match(projectJsSource, /let sprintCandidateCompletionScope = null;/);
+    assert.match(source, /sprintCandidateReadiness = data\.data\?\.readiness \|\| null/);
+    assert.match(source, /sprintCandidateCompletionScope = data\.data\?\.story_completion_scope \|\| null/);
+    assert.match(source, /sprintCandidateReadiness = null/);
+    assert.match(source, /sprintCandidateCompletionScope = null/);
+});
+
 test('Story selection handlers are exported for inline browser controls', () => {
     assert.match(projectJsSource, /window\.toggleStorySelectionRequirement = toggleStorySelectionRequirement/);
     assert.match(projectJsSource, /window\.completeSelectedStoryScope = completeSelectedStoryScope/);

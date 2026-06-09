@@ -530,6 +530,15 @@ def test_sprint_candidates_endpoint_returns_normalized_items(monkeypatch):  # no
                 }
             ],
             "excluded_counts": {"non_refined": 1, "superseded": 0},
+            "readiness": {
+                "ready": False,
+                "blocking_codes": ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"],
+            },
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_0",
+                "requirements": ["Event Delta Persistence"],
+            },
             "message": "Found 1 sprint candidate.",
         }
 
@@ -546,6 +555,15 @@ def test_sprint_candidates_endpoint_returns_normalized_items(monkeypatch):  # no
     assert payload["data"]["count"] == 1
     assert payload["data"]["items"][0]["story_title"] == "Event Delta Persistence"
     assert payload["data"]["excluded_counts"]["non_refined"] == 1
+    assert payload["data"]["readiness"]["ready"] is False
+    assert payload["data"]["readiness"]["blocking_codes"] == [
+        "SPRINT_SCOPE_EXTERNAL_DEPENDENCY"
+    ]
+    assert payload["data"]["story_completion_scope"] == {
+        "scope": "milestone",
+        "scope_id": "milestone_0",
+        "requirements": ["Event Delta Persistence"],
+    }
 
 
 def test_sprint_generate_rejects_numeric_velocity_request(monkeypatch):  # noqa: ANN001, ANN201, D103

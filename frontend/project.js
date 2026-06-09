@@ -99,6 +99,8 @@ let currentSprintInputContextJSON = null;
 let latestSprintIsComplete = false;
 let sprintAttemptCount = 0;
 let sprintCandidates = [];
+let sprintCandidateReadiness = null;
+let sprintCandidateCompletionScope = null;
 let selectedSprintStoryIds = new Set();
 
 const SPRINT_VELOCITY_LIMITS = {
@@ -4571,10 +4573,14 @@ async function loadSprintCandidates() {
             Array.from(selectedSprintStoryIds).map(Number).filter(storyId => validIds.has(storyId))
         );
         sprintCandidates = items;
+        sprintCandidateReadiness = data.data?.readiness || null;
+        sprintCandidateCompletionScope = data.data?.story_completion_scope || null;
         renderSprintCandidates();
     } catch (e) {
         console.error('Failed to load sprint candidates:', e);
         sprintCandidates = [];
+        sprintCandidateReadiness = null;
+        sprintCandidateCompletionScope = null;
         selectedSprintStoryIds = new Set();
         renderSprintCandidates();
     }

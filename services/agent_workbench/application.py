@@ -2506,6 +2506,10 @@ def _story_command_candidates(
                     *selection_complete_commands,
                 ]
             return [pending_command, generate_command]
+        selection_complete_commands = _covered_story_selection_complete_command(
+            project_id=project_id,
+            workflow=workflow,
+        )
         return [
             pending_command,
             *_story_dependency_command_candidates(
@@ -2520,6 +2524,7 @@ def _story_command_candidates(
                     "--idempotency-key <idempotency_key>"
                 ),
             ),
+            *selection_complete_commands,
         ]
     return [
         (
