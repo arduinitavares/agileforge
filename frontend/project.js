@@ -75,6 +75,7 @@ let roadmapAttemptCount = 0;
 
 // Story Phase State
 let storyRequirements = []; // Array of { requirement, status, attempt_count }
+let selectedStoryScopeRequirements = new Set();
 let activeStoryReq = null;
 let activeStoryAttemptCount = 0;
 let activeStoryIsComplete = false;
@@ -200,6 +201,36 @@ function capitalizePhase(phaseId) {
 
 function isResolvedStoryStatus(status) {
     return status === 'Saved' || status === 'Merged';
+}
+
+function selectedStoryScopeNames() {
+    const names = [];
+    const seen = new Set();
+    storyRequirements.forEach(req => {
+        if (
+            selectedStoryScopeRequirements.has(req.requirement)
+            && isResolvedStoryStatus(req.status)
+            && !seen.has(req.requirement)
+        ) {
+            names.push(req.requirement);
+            seen.add(req.requirement);
+        }
+    });
+    return names;
+}
+
+function toggleStorySelectionRequirement(requirement) {
+    const target = storyRequirements.find(req => req.requirement === requirement);
+    if (!target || !isResolvedStoryStatus(target.status)) return;
+
+    if (selectedStoryScopeRequirements.has(target.requirement)) {
+        selectedStoryScopeRequirements.delete(target.requirement);
+    } else {
+        selectedStoryScopeRequirements.add(target.requirement);
+    }
+
+    renderStoryRequirementsList();
+    updateCompleteStoryPhaseButton();
 }
 
 function deriveStoryProjectionState(payload) {
@@ -2778,6 +2809,15 @@ async function loadStoryRequirements() {
             storyGroups.forEach(g => {
                 storyRequirements.push(...g.requirements);
             });
+            const selectableRequirementNames = new Set(
+                storyRequirements
+                    .filter(req => isResolvedStoryStatus(req.status))
+                    .map(req => req.requirement),
+            );
+            selectedStoryScopeRequirements = new Set(
+                Array.from(selectedStoryScopeRequirements)
+                    .filter(requirement => selectableRequirementNames.has(requirement)),
+            );
 
             renderStoryRequirementsList();
             updateCompleteStoryPhaseButton();
@@ -2837,6 +2877,23 @@ function renderStoryRequirementsList() {
             }
 
             const isSelected = activeStoryReq === req.requirement;
+            const isSelectableForScope = isResolvedStoryStatus(req.status);
+            const isScopeSelected = isSelectableForScope && selectedStoryScopeRequirements.has(req.requirement);
+            const selectionTitle = isSelectableForScope
+                ? `${isScopeSelected ? 'Remove' : 'Add'} "${req.requirement}" ${isScopeSelected ? 'from' : 'to'} sprint planning selection.`
+                : 'Save or merge this requirement before selecting it for sprint planning.';
+            const selectionClasses = isSelectableForScope
+                ? (isScopeSelected
+                    ? 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-primary bg-primary text-white transition-colors'
+                    : 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-400 transition-colors hover:border-primary hover:text-primary dark:border-slate-600 dark:bg-slate-900')
+                : 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-slate-200 bg-slate-100 text-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-600';
+            const selectionControl = isSelectableForScope
+                ? `<button type="button" data-story-scope-toggle class="${selectionClasses}" title="${escapeAttribute(selectionTitle)}" aria-label="${escapeAttribute(selectionTitle)}" aria-pressed="${isScopeSelected ? 'true' : 'false'}">
+                        <span class="material-symbols-outlined text-[14px]">${isScopeSelected ? 'check_box' : 'check_box_outline_blank'}</span>
+                    </button>`
+                : `<span class="${selectionClasses}" title="${escapeAttribute(selectionTitle)}" aria-hidden="true">
+                        <span class="material-symbols-outlined text-[14px]">check_box_outline_blank</span>
+                    </span>`;
             const selectedClasses = isSelected
                 ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/30 shadow-sm'
                 : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-orange-300 dark:hover:border-orange-700 cursor-pointer';
@@ -2849,18 +2906,26 @@ function renderStoryRequirementsList() {
 
             row.innerHTML = `
                 <div class="flex items-start gap-2">
+                    ${selectionControl}
                     <div class="mt-0.5 rounded-full ${statusColor} w-3 h-3 flex-shrink-0 flex items-center justify-center">
                         <span class="material-symbols-outlined text-[8px] text-white font-bold">${statusIcon}</span>
                     </div>
                     <div class="flex-1 min-w-0">
-                        <p class="text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate" title="${req.requirement.replace(/"/g, '&quot;')}">${req.requirement}</p>
+                        <p class="text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate" title="${escapeAttribute(req.requirement)}">${escapeHtml(req.requirement)}</p>
                         <div class="flex items-center justify-between mt-1">
-                            <span class="text-[9px] text-slate-500">${req.status}</span>
-                            <span class="text-[9px] font-bold px-1.5 py-0 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded">${req.attempt_count} runs</span>
+                            <span class="text-[9px] text-slate-500">${escapeHtml(req.status)}</span>
+                            <span class="text-[9px] font-bold px-1.5 py-0 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded">${escapeHtml(String(req.attempt_count ?? 0))} runs</span>
                         </div>
                     </div>
                 </div>
             `;
+            const scopeToggle = row.querySelector('[data-story-scope-toggle]');
+            if (scopeToggle && isSelectableForScope) {
+                scopeToggle.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    toggleStorySelectionRequirement(req.requirement);
+                });
+            }
             itemsContainer.appendChild(row);
         });
 
@@ -3265,15 +3330,31 @@ function updateStorySaveButton() {
 
 function updateCompleteStoryPhaseButton() {
     const btn = document.getElementById('btn-complete-story-phase');
-    if (!btn) return;
+    const selectionBtn = document.getElementById('btn-complete-story-selection');
 
     // Allow completion if at least one requirement has stories saved
     const anySaved = storyRequirements.length > 0 && storyRequirements.some(r => r.status === 'Saved');
+    const hasSelectableRequirements = storyRequirements.some(r => isResolvedStoryStatus(r.status));
+    const selectedCount = selectedStoryScopeNames().length;
 
-    btn.disabled = !anySaved;
-    btn.className = anySaved
-        ? 'inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-md animate-pulse-once ring-2 ring-emerald-300'
-        : 'inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 font-bold cursor-not-allowed transition-all';
+    if (btn) {
+        btn.disabled = !anySaved;
+        btn.className = anySaved
+            ? 'inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-md animate-pulse-once ring-2 ring-emerald-300'
+            : 'inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 font-bold cursor-not-allowed transition-all';
+    }
+
+    if (selectionBtn) {
+        selectionBtn.disabled = selectedCount === 0;
+        selectionBtn.title = selectedCount > 0
+            ? `Plan sprint from ${selectedCount} selected ${selectedCount === 1 ? 'requirement' : 'requirements'}.`
+            : 'Select saved or merged requirements to plan a sprint.';
+        selectionBtn.className = hasSelectableRequirements
+            ? (selectedCount > 0
+                ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary hover:bg-blue-600 text-white font-bold transition-all shadow-md'
+                : 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 font-bold cursor-not-allowed transition-all')
+            : 'hidden items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 font-bold cursor-not-allowed transition-all';
+    }
 }
 
 async function generateStoryDraft() {
@@ -3510,14 +3591,21 @@ async function completeStoryPhase() {
     }
 
     try {
-        const response = await fetch(`/api/projects/${selectedProjectId}/story/complete_phase`, { method: 'POST' });
+        const response = await fetch(`/api/projects/${selectedProjectId}/story/complete_phase`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                expected_state: 'STORY_PERSISTENCE',
+                idempotency_key: `complete-story-full-${Date.now()}`,
+            }),
+        });
         if (response.status >= 400) {
             const body = await response.json();
             throw new Error(body.detail || 'Failed to complete phase.');
         }
 
         if (btn) {
-            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">flag</span> Complete Refining Phase';
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">flag</span> Complete Story Phase';
             btn.disabled = false;
         }
 
@@ -3528,7 +3616,61 @@ async function completeStoryPhase() {
         alert(e.message || "Failed to complete phase.");
     } finally {
         if (btn) {
-            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">flag</span> Complete Refining Phase';
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">flag</span> Complete Story Phase';
+            btn.disabled = false;
+        }
+        updateCompleteStoryPhaseButton();
+    }
+}
+
+async function completeSelectedStoryScope() {
+    if (!selectedProjectId) return;
+
+    const selectedRequirements = selectedStoryScopeNames();
+    if (selectedRequirements.length === 0) {
+        alert('Select at least one saved or merged requirement before planning a sprint.');
+        return;
+    }
+
+    const btn = document.getElementById('btn-complete-story-selection');
+    const original = btn?.innerHTML;
+    if (btn) {
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm animate-spin">playlist_add_check</span> Planning...';
+        btn.disabled = true;
+    }
+
+    try {
+        const response = await fetch(`/api/projects/${selectedProjectId}/story/complete_phase`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                expected_state: 'STORY_PERSISTENCE',
+                idempotency_key: `complete-story-selection-${Date.now()}`,
+                scope: 'selection',
+                parent_requirements: selectedRequirements,
+            }),
+        });
+        if (response.status >= 400) {
+            let body = {};
+            try {
+                body = await response.json();
+            } catch (error) {
+                body = {};
+            }
+            throw new Error(body.detail || 'Failed to complete selected Story scope.');
+        }
+
+        const data = await response.json();
+        if (data.status !== 'success') throw new Error('Failed to complete selected Story scope.');
+
+        await fetchProjectFSMState(selectedProjectId);
+        await loadSprintCandidates();
+
+    } catch (e) {
+        alert(e.message || 'Failed to complete selected Story scope.');
+    } finally {
+        if (btn) {
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">playlist_add_check</span> Plan Sprint from Selection';
             btn.disabled = false;
         }
         updateCompleteStoryPhaseButton();
@@ -3748,6 +3890,8 @@ const escapeHtml = (str) => {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 };
+
+const escapeAttribute = (value) => escapeHtml(value);
 
 function renderSprintSavedWorkspace() {
     const savedWorkspace = document.getElementById('sprint-saved-workspace');
@@ -5101,11 +5245,13 @@ window.saveBacklogDraft = saveBacklogDraft;
 window.generateRoadmapDraft = generateRoadmapDraft;
 window.saveRoadmapDraft = saveRoadmapDraft;
 window.selectStoryRequirement = selectStoryRequirement;
+window.toggleStorySelectionRequirement = toggleStorySelectionRequirement;
 window.generateStoryDraft = generateStoryDraft;
 window.retryStoryDraft = retryStoryDraft;
 window.saveStoryDraft = saveStoryDraft;
 window.deleteStoryDraft = deleteStoryDraft;
 window.completeStoryPhase = completeStoryPhase;
+window.completeSelectedStoryScope = completeSelectedStoryScope;
 window.generateSprintDraft = generateSprintDraft;
 window.saveSprintDraft = saveSprintDraft;
 window.selectSavedSprintById = selectSavedSprintById;

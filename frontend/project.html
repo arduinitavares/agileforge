@@ -776,12 +776,20 @@
                                         </div>
                                     </div>
 
-                                    <button id="btn-complete-story-phase" onclick="completeStoryPhase()"
-                                        class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all shadow-sm"
-                                        disabled>
-                                        <span class="material-symbols-outlined text-sm">flag</span>
-                                        Complete Story Phase
-                                    </button>
+                                    <div class="flex flex-wrap items-center justify-end gap-2">
+                                        <button id="btn-complete-story-selection" onclick="completeSelectedStoryScope()"
+                                            class="hidden items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-200 text-slate-400 dark:bg-slate-800 dark:text-slate-600 font-bold cursor-not-allowed transition-all"
+                                            disabled>
+                                            <span class="material-symbols-outlined text-sm">playlist_add_check</span>
+                                            Plan Sprint from Selection
+                                        </button>
+                                        <button id="btn-complete-story-phase" onclick="completeStoryPhase()"
+                                            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all shadow-sm"
+                                            disabled>
+                                            <span class="material-symbols-outlined text-sm">flag</span>
+                                            Complete Story Phase
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div class="flex-1 overflow-hidden flex flex-col lg:flex-row">
