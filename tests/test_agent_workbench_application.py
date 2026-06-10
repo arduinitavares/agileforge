@@ -446,6 +446,40 @@ class _SprintCompletePlannedSprintMissingTriageReadProjection(_FakeReadProjectio
         return result
 
 
+class _SprintCompleteTriagedNonePlannedSprintReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with none triage and planned Sprint."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with triage and planned Sprint."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact="none",
+                affected_requirements=None,
+                affected_task_ids=None,
+                affected_story_ids=None,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=None,
+                learning_summary="No follow-up impact.",
+                decision_reason="Continue only through executable bridges.",
+                idempotency_key="triage-none-planned-sprint",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+            "planned_sprint_id": 21,
+            "downstream_backlog_stale": False,
+            "stale_backlog_reason": None,
+            "backlog_attempts": [],
+        }
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -3877,6 +3911,42 @@ def test_planned_sprint_start_is_blocked_until_triage_confirms_none() -> None:
     assert result["data"]["status"] == "post_sprint_triage_required"
     assert result["data"]["blocked_commands"][0]["reason"] == (
         "POST_SPRINT_TRIAGE_REQUIRED"
+    )
+    assert not any(
+        command.startswith("agileforge sprint start")
+        for command in result["data"]["next_valid_commands"]
+    )
+
+
+def test_planned_sprint_start_after_triage_none_is_blocked_until_bridge_exists() -> None:
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNonePlannedSprintReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    expected_command = (
+        "agileforge sprint start --project-id 7 --sprint-id 21 "
+        "--expected-state SPRINT_COMPLETE --idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "post_sprint_planned_sprint_start_blocked"
+    assert expected_command not in data["next_valid_commands"]
+    assert data["blocked_commands"] == [
+        {
+            "command": expected_command,
+            "reason": "POST_SPRINT_PLANNED_SPRINT_START_NOT_IMPLEMENTED",
+            "message": (
+                "Starting a planned Sprint from SPRINT_COMPLETE is not executable "
+                "until a workflow bridge is implemented."
+            ),
+        }
+    ]
+    assert all(
+        action.get("command") != expected_command or action.get("runnable") is False
+        for action in data["next_actions"]
     )
 
 

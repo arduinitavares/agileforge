@@ -3066,6 +3066,7 @@ def _post_sprint_none_next(
 ) -> dict[str, Any]:
     """Return next-cycle routing when triage records no follow-up impact."""
     planned_sprint_id = _planned_sprint_id(workflow)
+    blocked_commands: list[dict[str, str]] = []
     commands = [
         (
             "agileforge story pending",
@@ -3087,31 +3088,32 @@ def _post_sprint_none_next(
         primary_command = f"agileforge sprint generate --project-id {project_id}"
         status = "post_sprint_story_continuation_available"
     else:
-        commands.append(
-            (
-                "agileforge sprint start",
-                _post_sprint_planned_sprint_start_command(
-                    project_id=project_id,
-                    planned_sprint_id=planned_sprint_id,
-                    expected_state="SPRINT_COMPLETE",
-                ),
-            )
-        )
-        primary_command_name = "agileforge sprint start"
         primary_command = _post_sprint_planned_sprint_start_command(
             project_id=project_id,
             planned_sprint_id=planned_sprint_id,
             expected_state="SPRINT_COMPLETE",
         )
-        status = "post_sprint_planned_sprint_start_available"
+        primary_command_name = "agileforge sprint start"
+        status = "post_sprint_planned_sprint_start_blocked"
+        blocked_commands.append(
+            _post_sprint_planned_sprint_start_blocker(command=primary_command)
+        )
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
     primary_command_installed = command_is_available(primary_command_name)
+    primary_command_runnable = (
+        primary_command_installed
+        and status != "post_sprint_planned_sprint_start_blocked"
+    )
     next_actions = [
         {
             "command": primary_command,
             "status": status,
-            "reason": "Post-sprint triage recorded no follow-up impact.",
-            "runnable": primary_command_installed,
+            "reason": (
+                "POST_SPRINT_PLANNED_SPRINT_START_NOT_IMPLEMENTED"
+                if planned_sprint_id is not None
+                else "Post-sprint triage recorded no follow-up impact."
+            ),
+            "runnable": primary_command_runnable,
             "installed": primary_command_installed,
             "requires_cli_installation": not primary_command_installed,
         }
@@ -3120,7 +3122,7 @@ def _post_sprint_none_next(
         project_id=project_id,
         workflow=workflow,
         next_valid_commands=next_valid_commands,
-        blocked_commands=[],
+        blocked_commands=blocked_commands,
         blocked_future_commands=blocked_future_commands,
         status=status,
         next_actions=next_actions,
@@ -3147,6 +3149,21 @@ def _post_sprint_planned_sprint_start_command(
         f"--expected-state {expected_state} "
         "--idempotency-key <idempotency_key>"
     )
+
+
+def _post_sprint_planned_sprint_start_blocker(
+    *,
+    command: str,
+) -> dict[str, str]:
+    """Return the blocker for the not-yet-executable planned Sprint bridge."""
+    return {
+        "command": command,
+        "reason": "POST_SPRINT_PLANNED_SPRINT_START_NOT_IMPLEMENTED",
+        "message": (
+            "Starting a planned Sprint from SPRINT_COMPLETE is not executable "
+            "until a workflow bridge is implemented."
+        ),
+    }
 
 
 def _post_sprint_triage_required_blocked_commands(
