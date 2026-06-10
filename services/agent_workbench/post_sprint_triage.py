@@ -115,10 +115,14 @@ def build_triage_payload(
 
 def current_triage_for_latest_sprint(state: dict[str, Any]) -> dict[str, Any] | None:
     """Return stored triage only when it belongs to the latest completed sprint."""
+    latest_completed_sprint_id = state.get("latest_completed_sprint_id")
+    if latest_completed_sprint_id is None:
+        return None
+
     triage = state.get("post_sprint_triage")
     if not isinstance(triage, dict):
         return None
-    if triage.get("sprint_id") != state.get("latest_completed_sprint_id"):
+    if triage.get("sprint_id") != latest_completed_sprint_id:
         return None
     return triage
 
@@ -165,13 +169,10 @@ def _normalize_positive_int_list(values: list[object] | None) -> list[int]:
 def _positive_int_or_none(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
-    if isinstance(value, int):
-        normalized = value
-    else:
-        try:
-            normalized = int(_normalize_text(value))
-        except ValueError:
-            return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
     if normalized <= 0:
         return None
     return normalized
