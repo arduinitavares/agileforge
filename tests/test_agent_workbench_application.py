@@ -24,6 +24,7 @@ from services.agent_workbench.mutation_ledger import (
     MutationStatus,
     RecoveryAction,
 )
+from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 if TYPE_CHECKING:
@@ -235,13 +236,51 @@ class _SprintCompleteReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintCompleteRequiresTriageReadProjection(_FakeReadProjection):
+    """Fake read projection for a completed Sprint needing triage."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with next-cycle Backlog source."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "backlog_attempts": [
+                {
+                    "attempt_id": "backlog-attempt-1",
+                    "artifact_fingerprint": "sha256:source",
+                }
+            ],
+        }
+        return result
+
+
 class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjection):
     """Fake completed Sprint state with a source Backlog attempt."""
 
     def workflow_state(self, *, project_id: int) -> dict[str, Any]:
         """Return sprint complete workflow state with Backlog refinement source."""
         result = super().workflow_state(project_id=project_id)
-        result["data"]["state"]["backlog_attempts"] = [
+        state = result["data"]["state"]
+        state["latest_completed_sprint_id"] = 13
+        state["post_sprint_triage"] = build_triage_payload(
+            project_id=project_id,
+            sprint_id=13,
+            impact="backlog",
+            affected_requirements=None,
+            affected_task_ids=None,
+            affected_story_ids=None,
+            affected_backlog_item_ids=None,
+            affected_roadmap_item_ids=None,
+            affected_layers=None,
+            learning_summary="Backlog follow-up is needed.",
+            decision_reason="Review the next-cycle Backlog source.",
+            idempotency_key="triage-key",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        )
+        state["backlog_attempts"] = [
             {
                 "attempt_id": "backlog-attempt-1",
                 "artifact_fingerprint": "sha256:old-source",
@@ -3417,6 +3456,35 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
         "agileforge sprint history --project-id 7",
     ]
     assert result["data"]["blocked_commands"] == []
+
+
+def test_workflow_next_requires_post_sprint_triage_required_before_backlog_refinement() -> (
+    None
+):
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteRequiresTriageReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_triage_required"
+    assert data["next_valid_commands"] == [
+        "agileforge sprint review --project-id 7",
+        (
+            "agileforge sprint triage --project-id 7 "
+            "--expected-state SPRINT_COMPLETE --impact <impact> "
+            "--learning-summary <summary> --decision-reason <reason> "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "agileforge sprint history --project-id 7",
+    ]
+    assert not any(
+        "backlog refine" in command for command in data["next_valid_commands"]
+    )
+    assert data["next_actions"][0]["status"] == "post_sprint_triage_required"
 
 
 def test_workflow_next_does_not_route_sprint_complete_to_empty_history() -> None:

@@ -31,6 +31,10 @@ from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
 )
+from services.agent_workbench.post_sprint_triage import (
+    current_triage_for_latest_sprint,
+    post_sprint_triage_required,
+)
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
@@ -2853,6 +2857,82 @@ def _sprint_workflow_next(
     blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
     if fsm_state == "SPRINT_COMPLETE":
+        state = _envelope_data(workflow).get("state")
+        state_data = state if isinstance(state, dict) else {}
+        if _active_backlog_reset_stale_marker(workflow):
+            blocked_commands.extend(_active_backlog_reset_blocked_commands())
+            data: dict[str, Any] = {
+                "project_id": project_id,
+                "next_valid_commands": next_valid_commands,
+                "blocked_commands": blocked_commands,
+                "blocked_future_commands": blocked_future_commands,
+                "status": "blocked_by_stale_active_backlog_reset",
+            }
+            data["source_fingerprint"] = canonical_hash(
+                {
+                    "command": WORKFLOW_NEXT_COMMAND,
+                    "project_id": project_id,
+                    "workflow": _fingerprint_input(_envelope_data(workflow)),
+                    "installed_command_names": sorted(installed_command_names()),
+                    "next_valid_commands": data["next_valid_commands"],
+                    "blocked_commands": data["blocked_commands"],
+                    "blocked_future_commands": data["blocked_future_commands"],
+                    "status": data["status"],
+                }
+            )
+            return {
+                "ok": True,
+                "data": data,
+                "warnings": _section_warnings(
+                    section="workflow",
+                    source="workflow_state",
+                    envelope=workflow,
+                ),
+                "errors": [],
+            }
+        if (
+            current_triage_for_latest_sprint(state_data) is None
+            and post_sprint_triage_required(state_data)
+        ):
+            for command_name, command_text in _post_sprint_triage_required_commands(
+                project_id=project_id,
+            ):
+                if command_is_available(command_name):
+                    next_valid_commands.append(command_text)
+                else:
+                    blocked_future_commands.append(command_text)
+            next_actions = [_post_sprint_triage_required_next_action()]
+            data = {
+                "project_id": project_id,
+                "next_valid_commands": next_valid_commands,
+                "blocked_commands": blocked_commands,
+                "blocked_future_commands": blocked_future_commands,
+                "status": "post_sprint_triage_required",
+                "next_actions": next_actions,
+            }
+            data["source_fingerprint"] = canonical_hash(
+                {
+                    "command": WORKFLOW_NEXT_COMMAND,
+                    "project_id": project_id,
+                    "workflow": _fingerprint_input(_envelope_data(workflow)),
+                    "installed_command_names": sorted(installed_command_names()),
+                    "next_valid_commands": data["next_valid_commands"],
+                    "blocked_commands": data["blocked_commands"],
+                    "blocked_future_commands": data["blocked_future_commands"],
+                    "status": data["status"],
+                    "next_actions": data["next_actions"],
+                }
+            )
+            return {
+                "ok": True,
+                "data": data,
+                "warnings": _section_warnings(
+                    section="workflow",
+                    source="workflow_state",
+                    envelope=workflow,
+                ),
+                "errors": [],
+            }
         for command_name, command_text in _sprint_complete_backlog_refinement_commands(
             project_id=project_id,
             workflow=workflow,
@@ -2943,6 +3023,49 @@ def _sprint_workflow_next(
             envelope=workflow,
         ),
         "errors": [],
+    }
+
+
+def _post_sprint_triage_required_commands(
+    *,
+    project_id: int,
+) -> list[tuple[str, str]]:
+    """Return Sprint commands when a completed Sprint needs triage."""
+    return [
+        (
+            "agileforge sprint review",
+            f"agileforge sprint review --project-id {project_id}",
+        ),
+        (
+            "agileforge sprint triage",
+            (
+                f"agileforge sprint triage --project-id {project_id} "
+                "--expected-state SPRINT_COMPLETE --impact <impact> "
+                "--learning-summary <summary> --decision-reason <reason> "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge sprint history",
+            f"agileforge sprint history --project-id {project_id}",
+        ),
+    ]
+
+
+def _post_sprint_triage_required_next_action() -> dict[str, Any]:
+    """Return the structured action for required post-sprint triage."""
+    return {
+        "command": "agileforge sprint triage",
+        "status": "post_sprint_triage_required",
+        "reason": "A completed Sprint needs learning triage before next-cycle routing.",
+        "runnable": True,
+        "requires": [
+            "expected_state",
+            "impact",
+            "learning_summary",
+            "decision_reason",
+            "idempotency_key",
+        ],
     }
 
 
