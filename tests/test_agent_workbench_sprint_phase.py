@@ -1673,6 +1673,72 @@ def test_sprint_review_returns_latest_completed_sprint_without_mutation(
     assert workflow.state == original_state
 
 
+def test_sprint_review_scopes_triage_to_explicit_completed_sprint(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit old Sprint review should not borrow latest Sprint triage."""
+    product = Product(name="Review Explicit Completed Product")
+    team = Team(name="Review Explicit Completed Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    earlier_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Review earlier completed sprint",
+        start_date=date(2026, 5, 1),
+        end_date=date(2026, 5, 14),
+        status=SprintStatus.COMPLETED,
+    )
+    latest_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Review latest completed sprint",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add_all([earlier_sprint, latest_sprint])
+    session.commit()
+    assert earlier_sprint.sprint_id is not None
+    assert latest_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": latest_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+    triage = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Latest sprint outcomes matched the current backlog.",
+        idempotency_key="triage-latest-for-explicit-review-001",
+        changed_by="cli-agent",
+    )
+
+    result = runner.review(
+        project_id=product.product_id,
+        sprint_id=earlier_sprint.sprint_id,
+    )
+
+    assert triage["ok"] is True
+    assert triage["data"]["post_sprint_triage"]["sprint_id"] == latest_sprint.sprint_id
+    assert result["ok"] is True
+    assert result["data"]["sprint_id"] == earlier_sprint.sprint_id
+    assert result["data"]["post_sprint_triage"] is None
+    assert result["data"]["post_sprint_triage_required"] is False
+
+
 def test_sprint_triage_records_metadata_without_changing_fsm_state(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -1906,3 +1972,52 @@ def test_sprint_triage_preserves_field_invalid_validation_code(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "TRIAGE_FIELD_INVALID"
+
+
+def test_sprint_triage_preserves_impact_fields_invalid_validation_code(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage should preserve Task 1 impact-field validation codes."""
+    product = Product(name="Triage Impact Fields Product")
+    team = Team(name="Triage Impact Fields Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Validate triage impact fields",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    result = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="story",
+        learning_summary="Story-level follow-up is needed.",
+        decision_reason="A story-level decision needs structured affected fields.",
+        idempotency_key="triage-impact-fields-invalid-001",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "TRIAGE_IMPACT_FIELDS_INVALID"

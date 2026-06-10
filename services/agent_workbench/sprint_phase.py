@@ -1637,16 +1637,26 @@ def _post_sprint_review_payload(
     sprint_id: int,
 ) -> dict[str, Any]:
     """Build stable post-sprint review and triage response data."""
-    current_triage = current_triage_for_latest_sprint(state)
+    latest_completed_sprint_id = _int_or_none(state.get("latest_completed_sprint_id"))
+    is_latest_completed_sprint = latest_completed_sprint_id == sprint_id
+    current_triage = (
+        current_triage_for_latest_sprint(state) if is_latest_completed_sprint else None
+    )
+    triage_required = (
+        post_sprint_triage_required(state) if is_latest_completed_sprint else False
+    )
     return {
         "project_id": project_id,
         "fsm_state": state.get("fsm_state"),
         "latest_completed_sprint_id": state.get("latest_completed_sprint_id"),
         "planned_sprint_id": state.get("planned_sprint_id"),
         "sprint_id": sprint_id,
-        "post_sprint_triage_required": post_sprint_triage_required(state),
+        "post_sprint_triage_required": triage_required,
         "post_sprint_triage": current_triage,
-        "post_sprint_triage_history": _post_sprint_triage_history(state),
+        "post_sprint_triage_history": _post_sprint_triage_history(
+            state,
+            sprint_id=sprint_id,
+        ),
         "sprint": {
             "id": sprint.sprint_id,
             "goal": sprint.goal,
@@ -1695,12 +1705,23 @@ def _assert_post_sprint_triage_state(
     )
 
 
-def _post_sprint_triage_history(state: dict[str, Any]) -> list[dict[str, Any]]:
+def _post_sprint_triage_history(
+    state: dict[str, Any],
+    *,
+    sprint_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Return stored triage history entries without mutating state."""
     history = state.get("post_sprint_triage_history")
     if not isinstance(history, list):
         return []
-    return [dict(entry) for entry in history if isinstance(entry, dict)]
+    entries = [dict(entry) for entry in history if isinstance(entry, dict)]
+    if sprint_id is None:
+        return entries
+    return [
+        entry
+        for entry in entries
+        if _int_or_none(entry.get("sprint_id")) == sprint_id
+    ]
 
 
 def _triage_history_entry(
