@@ -1835,7 +1835,7 @@ def _triage_ledger_positive_int_or_none(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        normalized = int(value)
+        normalized = int(cast("Any", value))
     except (TypeError, ValueError, OverflowError):
         return None
     if not isinstance(value, (str, bytes, bytearray)) and value != normalized:

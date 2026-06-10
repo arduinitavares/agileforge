@@ -1,4 +1,10 @@
+"""Post-sprint triage helper tests."""
+
+# ruff: noqa: D103
+
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -10,11 +16,15 @@ from services.agent_workbench.post_sprint_triage import (
     post_sprint_triage_required,
 )
 
+PROJECT_ID = 7
+SPRINT_ID = 13
+MATCHING_SPRINT_ID = 14
 
-def _story_triage_kwargs(**overrides: object) -> dict[str, object]:
-    values: dict[str, object] = {
-        "project_id": 7,
-        "sprint_id": 13,
+
+def _story_triage_kwargs(**overrides: object) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "project_id": PROJECT_ID,
+        "sprint_id": SPRINT_ID,
         "impact": "story",
         "affected_requirements": [],
         "affected_task_ids": [],
@@ -35,8 +45,8 @@ def _story_triage_kwargs(**overrides: object) -> dict[str, object]:
 
 def test_build_triage_payload_normalizes_and_fingerprints_story_impact() -> None:
     payload = build_triage_payload(
-        project_id=7,
-        sprint_id=13,
+        project_id=PROJECT_ID,
+        sprint_id=SPRINT_ID,
         impact="story",
         affected_requirements=["  Quality Gate  ", "Quality Gate"],
         affected_task_ids=[],
@@ -53,7 +63,7 @@ def test_build_triage_payload_normalizes_and_fingerprints_story_impact() -> None
     )
 
     assert payload["schema_version"] == TRIAGE_SCHEMA_VERSION
-    assert payload["sprint_id"] == 13
+    assert payload["sprint_id"] == SPRINT_ID
     assert payload["impact"] == "story"
     assert payload["affected_requirements"] == ["Quality Gate"]
     assert payload["affected_story_ids"] == [4, 5]
@@ -67,7 +77,7 @@ def test_build_triage_payload_rejects_multiple_without_structured_layers() -> No
     with pytest.raises(PostSprintTriageValidationError) as excinfo:
         build_triage_payload(
             project_id=7,
-            sprint_id=13,
+            sprint_id=SPRINT_ID,
             impact="multiple",
             affected_requirements=[],
             affected_task_ids=[],
@@ -223,14 +233,14 @@ def test_build_triage_payload_preserves_backlog_and_roadmap_string_ids() -> None
     assert current_triage_for_latest_sprint(
         {
             "fsm_state": "SPRINT_COMPLETE",
-            "latest_completed_sprint_id": 13,
+            "latest_completed_sprint_id": SPRINT_ID,
             "post_sprint_triage": backlog_payload,
         }
     ) == backlog_payload
     assert current_triage_for_latest_sprint(
         {
             "fsm_state": "SPRINT_COMPLETE",
-            "latest_completed_sprint_id": 13,
+            "latest_completed_sprint_id": SPRINT_ID,
             "post_sprint_triage": roadmap_payload,
         }
     ) == roadmap_payload
@@ -307,8 +317,8 @@ def test_build_triage_payload_normalizes_top_level_ids_before_fingerprinting() -
         ),
     )
 
-    assert string_payload["project_id"] == 7
-    assert string_payload["sprint_id"] == 13
+    assert string_payload["project_id"] == PROJECT_ID
+    assert string_payload["sprint_id"] == SPRINT_ID
     assert string_payload["request_fingerprint"] == int_payload["request_fingerprint"]
 
 
@@ -362,10 +372,10 @@ def test_current_triage_for_latest_sprint_requires_matching_sprint_id() -> None:
 def test_current_triage_for_latest_sprint_rejects_incomplete_payload_shape() -> None:
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 13,
+        "latest_completed_sprint_id": SPRINT_ID,
         "post_sprint_triage": {
             "schema_version": TRIAGE_SCHEMA_VERSION,
-            "sprint_id": 13,
+            "sprint_id": SPRINT_ID,
             "impact": "none",
             "affected_requirements": [],
             "affected_task_ids": [],
@@ -385,10 +395,10 @@ def test_current_triage_for_latest_sprint_rejects_incomplete_payload_shape() -> 
 def test_current_triage_for_latest_sprint_rejects_invalid_impact_fields() -> None:
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 13,
+        "latest_completed_sprint_id": SPRINT_ID,
         "post_sprint_triage": {
             "schema_version": TRIAGE_SCHEMA_VERSION,
-            "sprint_id": 13,
+            "sprint_id": SPRINT_ID,
             "impact": "story",
             "affected_requirements": [],
             "affected_task_ids": [],
@@ -417,8 +427,8 @@ def test_current_triage_for_latest_sprint_requires_latest_completed_sprint_id() 
 
 def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
     triage = build_triage_payload(
-        project_id=7,
-        sprint_id=14,
+        project_id=PROJECT_ID,
+        sprint_id=MATCHING_SPRINT_ID,
         impact="none",
         affected_requirements=[],
         affected_task_ids=[],
@@ -435,7 +445,7 @@ def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
     )
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 14,
+        "latest_completed_sprint_id": MATCHING_SPRINT_ID,
         "post_sprint_triage": triage,
     }
 
@@ -445,8 +455,8 @@ def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
 
 def test_current_triage_for_latest_sprint_normalizes_matching_sprint_ids() -> None:
     triage = build_triage_payload(
-        project_id=7,
-        sprint_id=14,
+        project_id=PROJECT_ID,
+        sprint_id=MATCHING_SPRINT_ID,
         impact="none",
         affected_requirements=[],
         affected_task_ids=[],
@@ -473,8 +483,8 @@ def test_current_triage_for_latest_sprint_normalizes_matching_sprint_ids() -> No
 
 def test_current_triage_for_latest_sprint_returns_safe_copy() -> None:
     triage = build_triage_payload(
-        project_id=7,
-        sprint_id=14,
+        project_id=PROJECT_ID,
+        sprint_id=MATCHING_SPRINT_ID,
         impact="none",
         affected_requirements=[],
         affected_task_ids=[],
@@ -491,7 +501,7 @@ def test_current_triage_for_latest_sprint_returns_safe_copy() -> None:
     )
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 14,
+        "latest_completed_sprint_id": MATCHING_SPRINT_ID,
         "post_sprint_triage": triage,
     }
 
@@ -508,8 +518,8 @@ def test_current_triage_for_latest_sprint_returns_safe_copy() -> None:
 
 def test_current_triage_for_latest_sprint_rejects_extra_stored_keys() -> None:
     triage = build_triage_payload(
-        project_id=7,
-        sprint_id=14,
+        project_id=PROJECT_ID,
+        sprint_id=MATCHING_SPRINT_ID,
         impact="none",
         affected_requirements=[],
         affected_task_ids=[],
@@ -527,7 +537,7 @@ def test_current_triage_for_latest_sprint_rejects_extra_stored_keys() -> None:
     triage["unexpected"] = "value"
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 14,
+        "latest_completed_sprint_id": MATCHING_SPRINT_ID,
         "post_sprint_triage": triage,
     }
 
@@ -540,8 +550,8 @@ def test_current_triage_for_latest_sprint_rejects_tampered_fingerprints(
     field_name: str,
 ) -> None:
     triage = build_triage_payload(
-        project_id=7,
-        sprint_id=14,
+        project_id=PROJECT_ID,
+        sprint_id=MATCHING_SPRINT_ID,
         impact="none",
         affected_requirements=[],
         affected_task_ids=[],
@@ -559,7 +569,7 @@ def test_current_triage_for_latest_sprint_rejects_tampered_fingerprints(
     triage[field_name] = "sha256:tampered"
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 14,
+        "latest_completed_sprint_id": MATCHING_SPRINT_ID,
         "post_sprint_triage": triage,
     }
 
@@ -570,8 +580,8 @@ def test_current_triage_for_latest_sprint_rejects_tampered_fingerprints(
 def test_current_triage_for_latest_sprint_rejects_malformed_matching_state() -> None:
     state = {
         "fsm_state": "SPRINT_COMPLETE",
-        "latest_completed_sprint_id": 13,
-        "post_sprint_triage": {"sprint_id": 13},
+            "latest_completed_sprint_id": SPRINT_ID,
+            "post_sprint_triage": {"sprint_id": SPRINT_ID},
     }
 
     assert current_triage_for_latest_sprint(state) is None

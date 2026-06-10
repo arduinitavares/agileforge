@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from services.agent_workbench.fingerprints import canonical_hash
 
+TriageListInput = list[object] | list[str] | list[int] | None
 TRIAGE_SCHEMA_VERSION: Final[str] = "agileforge.post_sprint_triage.v1"
+MIN_MULTIPLE_AFFECTED_LAYERS: Final[int] = 2
 VALID_TRIAGE_IMPACTS: Final[frozenset[str]] = frozenset(
     {"none", "task", "story", "roadmap", "backlog", "multiple"}
 )
@@ -45,26 +47,47 @@ TRIAGE_FIELD_INVALID: Final[str] = "TRIAGE_FIELD_INVALID"
 
 @dataclass(frozen=True)
 class PostSprintTriageValidationError(ValueError):
+    """Structured validation error for post-sprint triage requests."""
+
     code: str
     message: str
     details: dict[str, Any]
     remediation: list[str]
 
     def __post_init__(self) -> None:
+        """Mirror the public message through ValueError args."""
         object.__setattr__(self, "args", (self.message,))
 
 
-def build_triage_payload(
+@dataclass(frozen=True)
+class _TriageAffectedFields:
+    requirements: list[str] | list[int]
+    task_ids: list[str] | list[int]
+    story_ids: list[str] | list[int]
+    backlog_item_ids: list[str] | list[int]
+    roadmap_item_ids: list[str] | list[int]
+
+    def as_payload(self) -> dict[str, list[str] | list[int]]:
+        return {
+            "affected_requirements": self.requirements,
+            "affected_task_ids": self.task_ids,
+            "affected_story_ids": self.story_ids,
+            "affected_backlog_item_ids": self.backlog_item_ids,
+            "affected_roadmap_item_ids": self.roadmap_item_ids,
+        }
+
+
+def build_triage_payload(  # noqa: PLR0913
     *,
     project_id: int,
     sprint_id: int,
     impact: str,
-    affected_requirements: list[object] | None,
-    affected_task_ids: list[object] | None,
-    affected_story_ids: list[object] | None,
-    affected_backlog_item_ids: list[object] | None,
-    affected_roadmap_item_ids: list[object] | None,
-    affected_layers: list[object] | None,
+    affected_requirements: TriageListInput,
+    affected_task_ids: TriageListInput,
+    affected_story_ids: TriageListInput,
+    affected_backlog_item_ids: TriageListInput,
+    affected_roadmap_item_ids: TriageListInput,
+    affected_layers: TriageListInput,
     learning_summary: str,
     decision_reason: str,
     idempotency_key: str,
@@ -76,28 +99,28 @@ def build_triage_payload(
     normalized_project_id = _required_positive_int(project_id, field_name="project_id")
     normalized_sprint_id = _required_positive_int(sprint_id, field_name="sprint_id")
     normalized_impact = _normalize_impact(impact)
-    normalized_fields: dict[str, list[str] | list[int]] = {
-        "affected_requirements": _normalize_text_list(
+    normalized_fields = _TriageAffectedFields(
+        requirements=_normalize_text_list(
             affected_requirements,
             field_name="affected_requirements",
         ),
-        "affected_task_ids": _normalize_positive_int_list(
+        task_ids=_normalize_positive_int_list(
             affected_task_ids,
             field_name="affected_task_ids",
         ),
-        "affected_story_ids": _normalize_positive_int_list(
+        story_ids=_normalize_positive_int_list(
             affected_story_ids,
             field_name="affected_story_ids",
         ),
-        "affected_backlog_item_ids": _normalize_text_list(
+        backlog_item_ids=_normalize_text_list(
             affected_backlog_item_ids,
             field_name="affected_backlog_item_ids",
         ),
-        "affected_roadmap_item_ids": _normalize_text_list(
+        roadmap_item_ids=_normalize_text_list(
             affected_roadmap_item_ids,
             field_name="affected_roadmap_item_ids",
         ),
-    }
+    )
     normalized_layers = _normalize_affected_layers(affected_layers)
     normalized_learning_summary = _required_text(
         learning_summary,
@@ -117,11 +140,7 @@ def build_triage_payload(
 
     _validate_impact_fields(
         impact=normalized_impact,
-        affected_requirements=normalized_fields["affected_requirements"],
-        affected_task_ids=normalized_fields["affected_task_ids"],
-        affected_story_ids=normalized_fields["affected_story_ids"],
-        affected_backlog_item_ids=normalized_fields["affected_backlog_item_ids"],
-        affected_roadmap_item_ids=normalized_fields["affected_roadmap_item_ids"],
+        affected_fields=normalized_fields,
         affected_layers=normalized_layers,
         decision_reason=normalized_decision_reason,
     )
@@ -130,7 +149,7 @@ def build_triage_payload(
         "project_id": normalized_project_id,
         "sprint_id": normalized_sprint_id,
         "impact": normalized_impact,
-        **normalized_fields,
+        **normalized_fields.as_payload(),
         "affected_layers": normalized_layers,
         "learning_summary": normalized_learning_summary,
         "decision_reason": normalized_decision_reason,
@@ -182,7 +201,7 @@ def _normalize_text(value: object) -> str:
 
 
 def _normalize_text_list(
-    values: list[object] | None,
+    values: TriageListInput,
     *,
     field_name: str,
 ) -> list[str]:
@@ -201,7 +220,7 @@ def _normalize_text_list(
 
 
 def _normalize_positive_int_list(
-    values: list[object] | None,
+    values: TriageListInput,
     *,
     field_name: str,
 ) -> list[int]:
@@ -221,7 +240,7 @@ def _positive_int_or_none(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        normalized = int(value)
+        normalized = int(cast("Any", value))
     except (TypeError, ValueError, OverflowError):
         return None
     if not isinstance(value, (str, bytes, bytearray)) and value != normalized:
@@ -255,6 +274,7 @@ def _normalize_impact(impact: object) -> str:
                 "Use one of: none, task, story, roadmap, backlog, multiple.",
             ],
         )
+        return ""
     normalized = impact.strip().lower()
     if normalized not in VALID_TRIAGE_IMPACTS:
         _raise_invalid_impact_fields(
@@ -270,7 +290,7 @@ def _normalize_impact(impact: object) -> str:
     return normalized
 
 
-def _normalize_affected_layers(values: list[object] | None) -> list[str]:
+def _normalize_affected_layers(values: TriageListInput) -> list[str]:
     values = _affected_list_or_empty(values, field_name="affected_layers")
     normalized_layers: list[str] = []
     seen: set[str] = set()
@@ -302,14 +322,14 @@ def _normalize_affected_layers(values: list[object] | None) -> list[str]:
 
 
 def _affected_list_or_empty(
-    values: list[object] | None,
+    values: TriageListInput,
     *,
     field_name: str,
 ) -> list[object]:
     if values is None:
         return []
     if isinstance(values, list):
-        return values
+        return cast("list[object]", values)
     _raise_invalid_impact_fields(
         f"{field_name} must be a list or null.",
         details={
@@ -318,6 +338,7 @@ def _affected_list_or_empty(
         },
         remediation=[f"Provide {field_name} as a list or null."],
     )
+    return []
 
 
 def _normalize_replace_existing(value: object) -> bool:
@@ -349,24 +370,14 @@ def _required_text(value: object, *, field_name: str) -> str:
     )
 
 
-def _validate_impact_fields(
+def _validate_impact_fields(  # noqa: C901
     *,
     impact: str,
-    affected_requirements: list[str] | list[int],
-    affected_task_ids: list[str] | list[int],
-    affected_story_ids: list[str] | list[int],
-    affected_backlog_item_ids: list[str] | list[int],
-    affected_roadmap_item_ids: list[str] | list[int],
+    affected_fields: _TriageAffectedFields,
     affected_layers: list[str],
     decision_reason: str,
 ) -> None:
-    affected_field_values = {
-        "affected_requirements": affected_requirements,
-        "affected_task_ids": affected_task_ids,
-        "affected_story_ids": affected_story_ids,
-        "affected_backlog_item_ids": affected_backlog_item_ids,
-        "affected_roadmap_item_ids": affected_roadmap_item_ids,
-    }
+    affected_field_values = affected_fields.as_payload()
 
     if impact == "none":
         if any(affected_field_values.values()) or affected_layers:
@@ -391,12 +402,17 @@ def _validate_impact_fields(
                 "affected_layers": affected_layers,
             },
             remediation=[
-                "Clear affected_layers or set impact=multiple with at least two layers.",
+                "Clear affected_layers or set impact=multiple "
+                "with at least two layers.",
             ],
         )
 
     if impact == "task":
-        if not (affected_task_ids or affected_story_ids or affected_requirements):
+        if not (
+            affected_fields.task_ids
+            or affected_fields.story_ids
+            or affected_fields.requirements
+        ):
             _raise_missing_impact_fields(
                 impact,
                 "impact=task requires affected task ids, story ids, or requirements.",
@@ -406,7 +422,7 @@ def _validate_impact_fields(
         return
 
     if impact == "story":
-        if not (affected_story_ids or affected_requirements):
+        if not (affected_fields.story_ids or affected_fields.requirements):
             _raise_missing_impact_fields(
                 impact,
                 "impact=story requires affected story ids or requirements.",
@@ -416,7 +432,7 @@ def _validate_impact_fields(
         return
 
     if impact == "roadmap":
-        if not (affected_roadmap_item_ids or affected_requirements):
+        if not (affected_fields.roadmap_item_ids or affected_fields.requirements):
             _raise_missing_impact_fields(
                 impact,
                 "impact=roadmap requires affected roadmap item ids or requirements.",
@@ -426,16 +442,17 @@ def _validate_impact_fields(
         return
 
     if impact == "backlog":
-        if not (affected_backlog_item_ids or decision_reason):
+        if not (affected_fields.backlog_item_ids or decision_reason):
             _raise_missing_impact_fields(
                 impact,
-                "impact=backlog requires affected backlog item ids or a decision reason.",
+                "impact=backlog requires affected backlog item ids "
+                "or a decision reason.",
                 affected_field_values,
                 affected_layers,
             )
         return
 
-    if impact == "multiple" and len(affected_layers) < 2:
+    if impact == "multiple" and len(affected_layers) < MIN_MULTIPLE_AFFECTED_LAYERS:
         _raise_invalid_impact_fields(
             "impact=multiple requires at least two structured affected layers.",
             details={
@@ -449,17 +466,10 @@ def _validate_impact_fields(
 
 
 def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
-    if set(triage) != set(TRIAGE_STORED_REQUIRED_FIELDS):
-        return False
-    if triage.get("schema_version") != TRIAGE_SCHEMA_VERSION:
-        return False
     impact = triage.get("impact")
-    if not isinstance(impact, str) or impact not in VALID_TRIAGE_IMPACTS:
+    if not _stored_triage_shape_is_valid(triage, impact):
         return False
-    if not _stored_fingerprint_matches(triage, "request_fingerprint"):
-        return False
-    if not _stored_fingerprint_matches(triage, "triage_fingerprint"):
-        return False
+    stored_impact = cast("str", impact)
 
     try:
         project_id = _stored_positive_int(triage, "project_id")
@@ -488,13 +498,16 @@ def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
         if not isinstance(replace_existing, bool):
             return False
 
+        affected_fields = _TriageAffectedFields(
+            requirements=affected_requirements,
+            task_ids=affected_task_ids,
+            story_ids=affected_story_ids,
+            backlog_item_ids=affected_backlog_item_ids,
+            roadmap_item_ids=affected_roadmap_item_ids,
+        )
         _validate_impact_fields(
-            impact=impact,
-            affected_requirements=affected_requirements,
-            affected_task_ids=affected_task_ids,
-            affected_story_ids=affected_story_ids,
-            affected_backlog_item_ids=affected_backlog_item_ids,
-            affected_roadmap_item_ids=affected_roadmap_item_ids,
+            impact=stored_impact,
+            affected_fields=affected_fields,
             affected_layers=affected_layers,
             decision_reason=decision_reason,
         )
@@ -504,12 +517,8 @@ def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
     request_fingerprint_payload: dict[str, Any] = {
         "project_id": project_id,
         "sprint_id": sprint_id,
-        "impact": impact,
-        "affected_requirements": affected_requirements,
-        "affected_task_ids": affected_task_ids,
-        "affected_story_ids": affected_story_ids,
-        "affected_backlog_item_ids": affected_backlog_item_ids,
-        "affected_roadmap_item_ids": affected_roadmap_item_ids,
+        "impact": stored_impact,
+        **affected_fields.as_payload(),
         "affected_layers": affected_layers,
         "learning_summary": learning_summary,
         "decision_reason": decision_reason,
@@ -526,11 +535,20 @@ def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
         "recorded_by": recorded_by,
         "request_fingerprint": triage["request_fingerprint"],
     }
-    if triage["triage_fingerprint"] != canonical_hash(
+    return triage["triage_fingerprint"] == canonical_hash(
         payload_without_triage_fingerprint
-    ):
-        return False
-    return True
+    )
+
+
+def _stored_triage_shape_is_valid(triage: dict[str, Any], impact: object) -> bool:
+    return (
+        set(triage) == set(TRIAGE_STORED_REQUIRED_FIELDS)
+        and triage.get("schema_version") == TRIAGE_SCHEMA_VERSION
+        and isinstance(impact, str)
+        and impact in VALID_TRIAGE_IMPACTS
+        and _stored_fingerprint_matches(triage, "request_fingerprint")
+        and _stored_fingerprint_matches(triage, "triage_fingerprint")
+    )
 
 
 def _stored_fingerprint_matches(triage: dict[str, Any], field_name: str) -> bool:
@@ -541,14 +559,14 @@ def _stored_fingerprint_matches(triage: dict[str, Any], field_name: str) -> bool
 def _stored_positive_int(triage: dict[str, Any], field_name: str) -> int:
     value = triage[field_name]
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise TypeError(f"{field_name} must be a positive integer.")
+        raise TypeError
     return value
 
 
 def _stored_required_text(triage: dict[str, Any], field_name: str) -> str:
     value = triage[field_name]
     if not isinstance(value, str) or value != value.strip() or not value:
-        raise TypeError(f"{field_name} must be normalized non-empty text.")
+        raise TypeError
     return value
 
 
@@ -558,14 +576,14 @@ def _stored_normalized_text_list(
 ) -> list[str]:
     value = triage[field_name]
     if not isinstance(value, list):
-        raise TypeError(f"{field_name} must be a list.")
+        raise TypeError
     seen: set[str] = set()
     normalized: list[str] = []
     for item in value:
         if not isinstance(item, str) or item != item.strip() or not item:
-            raise TypeError(f"{field_name} must contain normalized text.")
+            raise TypeError
         if item in seen:
-            raise TypeError(f"{field_name} must not contain duplicates.")
+            raise TypeError
         seen.add(item)
         normalized.append(item)
     return normalized
@@ -577,14 +595,14 @@ def _stored_normalized_int_list(
 ) -> list[int]:
     value = triage[field_name]
     if not isinstance(value, list):
-        raise TypeError(f"{field_name} must be a list.")
+        raise TypeError
     seen: set[int] = set()
     normalized: list[int] = []
     for item in value:
         if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
-            raise TypeError(f"{field_name} must contain positive integers.")
+            raise TypeError
         if item in seen:
-            raise TypeError(f"{field_name} must not contain duplicates.")
+            raise TypeError
         seen.add(item)
         normalized.append(item)
     return normalized
@@ -596,10 +614,10 @@ def _stored_normalized_layers(
 ) -> list[str]:
     value = _stored_normalized_text_list(triage, field_name)
     if value != sorted(value):
-        raise TypeError(f"{field_name} must be sorted.")
+        raise TypeError
     for item in value:
         if item.lower() != item or item not in VALID_AFFECTED_LAYERS:
-            raise TypeError(f"{field_name} must contain normalized affected layers.")
+            raise TypeError
     return value
 
 

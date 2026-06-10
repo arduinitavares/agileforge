@@ -3359,17 +3359,18 @@ def test_sprint_review_cli_routes_to_application(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Sprint review CLI routes to the application facade."""
+    sprint_id = 11
     app = _FakeApplication()
 
     exit_code = main(
-        ["sprint", "review", "--project-id", "7", "--sprint-id", "11"],
+        ["sprint", "review", "--project-id", "7", "--sprint-id", str(sprint_id)],
         application=app,
     )
 
     payload = _stdout_payload(capsys)
     assert exit_code == 0
-    assert payload["data"]["sprint_id"] == 11
-    assert app.calls[-1] == ("sprint_review", {"project_id": 7, "sprint_id": 11})
+    assert payload["data"]["sprint_id"] == sprint_id
+    assert app.calls[-1] == ("sprint_review", {"project_id": 7, "sprint_id": sprint_id})
 
 
 def test_sprint_triage_cli_routes_learning_impact(

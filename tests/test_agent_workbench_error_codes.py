@@ -50,6 +50,13 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.IDEMPOTENCY_KEY_REUSED: (2, False),
     ErrorCode.MUTATION_NOT_FOUND: (4, False),
     ErrorCode.WORKFLOW_SESSION_FAILED: (1, True),
+    ErrorCode.TRIAGE_ALREADY_RECORDED: (2, False),
+    ErrorCode.TRIAGE_FINGERPRINT_MISMATCH: (2, False),
+    ErrorCode.TRIAGE_EXPECTED_STATE_MISMATCH: (2, False),
+    ErrorCode.TRIAGE_IMPACT_FIELDS_INVALID: (2, False),
+    ErrorCode.TRIAGE_REQUIRED_FIELD_MISSING: (2, False),
+    ErrorCode.TRIAGE_FIELD_INVALID: (2, False),
+    ErrorCode.BACKLOG_SOURCE_UNAVAILABLE: (2, False),
 }
 
 
