@@ -60,6 +60,11 @@ class ErrorCode(StrEnum):
     IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
     MUTATION_NOT_FOUND = "MUTATION_NOT_FOUND"
     WORKFLOW_SESSION_FAILED = "WORKFLOW_SESSION_FAILED"
+    TRIAGE_ALREADY_RECORDED = "TRIAGE_ALREADY_RECORDED"
+    TRIAGE_FINGERPRINT_MISMATCH = "TRIAGE_FINGERPRINT_MISMATCH"
+    TRIAGE_EXPECTED_STATE_MISMATCH = "TRIAGE_EXPECTED_STATE_MISMATCH"
+    TRIAGE_IMPACT_FIELDS_INVALID = "TRIAGE_IMPACT_FIELDS_INVALID"
+    BACKLOG_SOURCE_UNAVAILABLE = "BACKLOG_SOURCE_UNAVAILABLE"
 
 
 _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
@@ -302,6 +307,36 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=1,
         retryable=True,
         description="Workflow session setup failed.",
+    ),
+    ErrorCode.TRIAGE_ALREADY_RECORDED: ErrorMetadata(
+        code=ErrorCode.TRIAGE_ALREADY_RECORDED.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Post-sprint triage has already been recorded.",
+    ),
+    ErrorCode.TRIAGE_FINGERPRINT_MISMATCH: ErrorMetadata(
+        code=ErrorCode.TRIAGE_FINGERPRINT_MISMATCH.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Post-sprint triage fingerprint did not match.",
+    ),
+    ErrorCode.TRIAGE_EXPECTED_STATE_MISMATCH: ErrorMetadata(
+        code=ErrorCode.TRIAGE_EXPECTED_STATE_MISMATCH.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Workflow state does not allow post-sprint triage.",
+    ),
+    ErrorCode.TRIAGE_IMPACT_FIELDS_INVALID: ErrorMetadata(
+        code=ErrorCode.TRIAGE_IMPACT_FIELDS_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Post-sprint triage impact fields are invalid.",
+    ),
+    ErrorCode.BACKLOG_SOURCE_UNAVAILABLE: ErrorMetadata(
+        code=ErrorCode.BACKLOG_SOURCE_UNAVAILABLE.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Backlog source data is unavailable.",
     ),
 }
 

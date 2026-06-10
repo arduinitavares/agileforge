@@ -76,6 +76,7 @@ class WorkflowEventType(StrEnum):
     SPRINT_PLAN_SAVED = "sprint_plan_saved"
     SPRINT_STARTED = "sprint_started"
     SPRINT_COMPLETED = "sprint_completed"
+    POST_SPRINT_TRIAGE_RECORDED = "post_sprint_triage_recorded"
     FSM_STATE_DWELL = "fsm_state_dwell"
     TLX_PROMPT_TRIGGERED = "tlx_prompt_triggered"
 

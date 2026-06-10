@@ -1623,3 +1623,187 @@ def test_sprint_close_rejects_stale_sprint_fingerprint(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
     assert result["errors"][0]["details"]["reason_code"] == ("SPRINT_FINGERPRINT_STALE")
+
+
+def test_sprint_review_returns_latest_completed_sprint_without_mutation(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint review should expose post-sprint context without changing state."""
+    product = Product(name="Review Completed Product")
+    team = Team(name="Review Completed Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Review latest completed sprint",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+        "planned_sprint_id": 777,
+        "backlog_stale": True,
+    }
+    original_state = dict(workflow.state)
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    result = runner.review(project_id=product.product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["fsm_state"] == "SPRINT_COMPLETE"
+    assert result["data"]["latest_completed_sprint_id"] == completed_sprint.sprint_id
+    assert result["data"]["sprint_id"] == completed_sprint.sprint_id
+    assert result["data"]["post_sprint_triage_required"] is True
+    assert workflow.state == original_state
+
+
+def test_sprint_triage_records_metadata_without_changing_fsm_state(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage should record durable metadata and keep SPRINT_COMPLETE."""
+    product = Product(name="Triage Metadata Product")
+    team = Team(name="Triage Metadata Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Record post-sprint triage",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    planned_sprint_id = 888
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+        "planned_sprint_id": planned_sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    result = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-record-001",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.state["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.state["planned_sprint_id"] == planned_sprint_id
+    assert workflow.state["post_sprint_triage"]["impact"] == "none"
+    assert (
+        workflow.state["post_sprint_triage_history"][-1]["history_action"]
+        == "recorded"
+    )
+    triage_event = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED
+        )
+    ).first()
+    assert triage_event is not None
+    assert triage_event.product_id == product.product_id
+    assert triage_event.sprint_id == completed_sprint.sprint_id
+
+
+def test_sprint_triage_guarded_correction_supersedes_previous_payload(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage correction should replace current payload under guard."""
+    product = Product(name="Triage Correction Product")
+    team = Team(name="Triage Correction Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Correct post-sprint triage",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    first = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-correction-001",
+        changed_by="cli-agent",
+    )
+    first_fingerprint = first["data"]["post_sprint_triage"]["triage_fingerprint"]
+    second = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="story",
+        affected_story_ids=[42],
+        learning_summary="One story needs acceptance criteria follow-up.",
+        decision_reason="A completed task exposed missing story-level detail.",
+        idempotency_key="triage-correction-002",
+        replace_existing=True,
+        expected_triage_fingerprint=first_fingerprint,
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert first["data"]["post_sprint_triage"]["impact"] == "none"
+    assert second["ok"] is True
+    assert second["data"]["fsm_state"] == "SPRINT_COMPLETE"
+    assert second["data"]["post_sprint_triage"]["impact"] == "story"
+    assert workflow.state["post_sprint_triage"]["impact"] == "story"
+    assert [
+        entry["history_action"]
+        for entry in workflow.state["post_sprint_triage_history"]
+    ] == ["recorded", "superseded", "corrected"]

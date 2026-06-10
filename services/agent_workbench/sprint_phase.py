@@ -35,6 +35,12 @@ from services.agent_workbench.mutation_ledger import (
     LedgerLoadResult,
     MutationLedgerRepository,
 )
+from services.agent_workbench.post_sprint_triage import (
+    PostSprintTriageValidationError,
+    build_triage_payload,
+    current_triage_for_latest_sprint,
+    post_sprint_triage_required,
+)
 from services.phases import workflow_state
 from services.phases.sprint_service import (
     SprintPhaseError,
@@ -95,6 +101,9 @@ _SPRINT_STORY_CLOSE_COMMAND = "agileforge sprint story close"
 _SPRINT_STORY_CLOSE_LEASE_OWNER = "agileforge-cli:sprint-story-close"
 _SPRINT_CLOSE_COMMAND = "agileforge sprint close"
 _SPRINT_CLOSE_LEASE_OWNER = "agileforge-cli:sprint-close"
+_SPRINT_REVIEW_COMMAND = "agileforge sprint review"
+_SPRINT_TRIAGE_COMMAND = "agileforge sprint triage"
+_SPRINT_TRIAGE_LEASE_OWNER = "agileforge-cli:sprint-triage"
 _DEPENDENCY_RISK_INTEGRATION_MARKERS = (
     "execute",
     "artifact set",
@@ -178,6 +187,24 @@ class _SprintCloseError(SprintPhaseError):
     ) -> None:
         super().__init__(detail, status_code=status_code)
         self.details = details
+
+
+class _SprintTriageError(SprintPhaseError):
+    """Sprint triage guard failure with a registered error code."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        detail: str,
+        *,
+        details: dict[str, Any],
+        remediation: list[str],
+        status_code: int = 409,
+    ) -> None:
+        super().__init__(detail, status_code=status_code)
+        self.code = code
+        self.details = details
+        self.remediation = remediation
 
 
 class _ResolveSprintId(Protocol):
@@ -900,6 +927,245 @@ class SprintPhaseRunner:
         )
         return response
 
+    def review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return read-only post-sprint review context."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        state = self._workflow_service.get_session_status(str(project_id)) or {}
+        try:
+            with Session(get_engine()) as session:
+                resolved_sprint_id = _resolve_review_sprint_id(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=sprint_id,
+                    state=state,
+                )
+                sprint = _completed_sprint(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id,
+                )
+                data = _post_sprint_review_payload(
+                    state=state,
+                    project_id=project_id,
+                    sprint=sprint,
+                    sprint_id=resolved_sprint_id,
+                )
+        except SprintPhaseError as exc:
+            return _phase_error(exc)
+        return _data_envelope(data)
+
+    def triage(  # noqa: C901, PLR0913, PLR0915
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        impact: str,
+        learning_summary: str,
+        decision_reason: str,
+        idempotency_key: str,
+        affected_requirements: list[str] | None = None,
+        affected_task_ids: list[int] | None = None,
+        affected_story_ids: list[int] | None = None,
+        affected_backlog_item_ids: list[str] | None = None,
+        affected_roadmap_item_ids: list[str] | None = None,
+        affected_layers: list[str] | None = None,
+        sprint_id: int | None = None,
+        replace_existing: bool = False,
+        expected_triage_fingerprint: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record or correct post-sprint triage metadata."""
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        state = anyio.run(self._ensure_session, str(project_id))
+        resolved_sprint_id = (
+            sprint_id
+            if sprint_id is not None
+            else _int_or_none(state.get("latest_completed_sprint_id"))
+        )
+        request_payload = {
+            "project_id": project_id,
+            "sprint_id": resolved_sprint_id,
+            "expected_state": expected_state,
+            "impact": impact,
+            "affected_requirements": affected_requirements or [],
+            "affected_task_ids": affected_task_ids or [],
+            "affected_story_ids": affected_story_ids or [],
+            "affected_backlog_item_ids": affected_backlog_item_ids or [],
+            "affected_roadmap_item_ids": affected_roadmap_item_ids or [],
+            "affected_layers": affected_layers or [],
+            "learning_summary": learning_summary,
+            "decision_reason": decision_reason,
+            "replace_existing": replace_existing,
+            "expected_triage_fingerprint": expected_triage_fingerprint,
+            "changed_by": changed_by,
+        }
+        engine = get_engine()
+        ledger = MutationLedgerRepository(engine=engine)
+        ledger_result = ledger.create_or_load(
+            command=_SPRINT_TRIAGE_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=canonical_hash(request_payload),
+            project_id=project_id,
+            correlation_id=f"sprint-triage:{uuid4()}",
+            changed_by=changed_by,
+            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
+            now=datetime.now(UTC),
+        )
+        if ledger_result.error_code is not None:
+            return _ledger_error(ledger_result)
+        if ledger_result.replayed:
+            replay = ledger_result.response or {}
+            if isinstance(replay.get("data"), dict):
+                replay["data"].setdefault("idempotency", {})["replayed"] = True
+            return replay
+
+        try:
+            _assert_post_sprint_triage_state(
+                state=state,
+                expected_state=expected_state,
+                sprint_id=resolved_sprint_id,
+            )
+            resolved_sprint_id_int = cast("int", resolved_sprint_id)
+            recorded_at = _now_iso()
+            triage_payload = build_triage_payload(
+                project_id=project_id,
+                sprint_id=resolved_sprint_id_int,
+                impact=impact,
+                affected_requirements=affected_requirements,
+                affected_task_ids=affected_task_ids,
+                affected_story_ids=affected_story_ids,
+                affected_backlog_item_ids=affected_backlog_item_ids,
+                affected_roadmap_item_ids=affected_roadmap_item_ids,
+                affected_layers=affected_layers,
+                learning_summary=learning_summary,
+                decision_reason=decision_reason,
+                idempotency_key=idempotency_key,
+                replace_existing=replace_existing,
+                recorded_at=recorded_at,
+                recorded_by=changed_by,
+            )
+            with Session(engine) as session:
+                sprint = _completed_sprint(
+                    session=session,
+                    project_id=project_id,
+                    sprint_id=resolved_sprint_id_int,
+                )
+                current_triage = current_triage_for_latest_sprint(state)
+                history = _post_sprint_triage_history(state)
+                event_metadata: dict[str, Any] = {
+                    "project_id": project_id,
+                    "sprint_id": resolved_sprint_id_int,
+                    "replace_existing": replace_existing,
+                    "triage_fingerprint": triage_payload["triage_fingerprint"],
+                }
+
+                if current_triage is None:
+                    if replace_existing:
+                        _raise_triage_fingerprint_mismatch(
+                            expected_triage_fingerprint=expected_triage_fingerprint,
+                            current_triage_fingerprint=None,
+                            sprint_id=resolved_sprint_id_int,
+                        )
+                    state["post_sprint_triage"] = triage_payload
+                    history.append(
+                        _triage_history_entry(
+                            triage_payload,
+                            history_action="recorded",
+                            recorded_at=recorded_at,
+                            recorded_by=changed_by,
+                        )
+                    )
+                    event_metadata["history_action"] = "recorded"
+                else:
+                    if not replace_existing:
+                        _raise_triage_already_recorded(
+                            sprint_id=resolved_sprint_id_int,
+                            current_triage=current_triage,
+                        )
+                    current_fingerprint = str(
+                        current_triage.get("triage_fingerprint") or ""
+                    )
+                    if expected_triage_fingerprint != current_fingerprint:
+                        _raise_triage_fingerprint_mismatch(
+                            expected_triage_fingerprint=expected_triage_fingerprint,
+                            current_triage_fingerprint=current_fingerprint,
+                            sprint_id=resolved_sprint_id_int,
+                        )
+                    history.append(
+                        _triage_history_entry(
+                            current_triage,
+                            history_action="superseded",
+                            recorded_at=recorded_at,
+                            recorded_by=changed_by,
+                        )
+                    )
+                    state["post_sprint_triage"] = triage_payload
+                    history.append(
+                        _triage_history_entry(
+                            triage_payload,
+                            history_action="corrected",
+                            recorded_at=recorded_at,
+                            recorded_by=changed_by,
+                        )
+                    )
+                    event_metadata["history_action"] = "corrected"
+                    event_metadata["superseded_triage_fingerprint"] = (
+                        current_fingerprint
+                    )
+
+                state["post_sprint_triage_history"] = history
+                self._save_session_state(str(project_id), state)
+                session.add(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED,
+                        product_id=project_id,
+                        sprint_id=resolved_sprint_id_int,
+                        session_id=str(project_id),
+                        event_metadata=json.dumps(event_metadata),
+                    )
+                )
+                session.commit()
+                data = _post_sprint_review_payload(
+                    state=state,
+                    project_id=project_id,
+                    sprint=sprint,
+                    sprint_id=resolved_sprint_id_int,
+                )
+                data["idempotency"] = {"replayed": False}
+                response = _data_envelope(data)
+        except PostSprintTriageValidationError as exc:
+            response = _post_sprint_triage_validation_error(exc)
+        except _SprintTriageError as exc:
+            response = _post_sprint_triage_error(exc)
+        except SprintPhaseError as exc:
+            response = _phase_error(exc)
+
+        raw_response_data = response.get("data")
+        response_data = (
+            cast("dict[str, Any]", raw_response_data)
+            if isinstance(raw_response_data, dict)
+            else {}
+        )
+        ledger.finalize_success(
+            mutation_event_id=cast("int", ledger_result.ledger.mutation_event_id),
+            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
+            after=response_data,
+            response=response,
+            now=datetime.now(UTC),
+        )
+        return response
+
     async def _generate(  # noqa: PLR0913
         self,
         project_id: int,
@@ -1301,6 +1567,195 @@ def _get_saved_sprint(
             Sprint.sprint_id == sprint_id,
         )
     ).first()
+
+
+def _resolve_review_sprint_id(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int | None,
+    state: dict[str, Any],
+) -> int:
+    """Resolve a completed Sprint id for post-sprint review."""
+    if sprint_id is not None:
+        return sprint_id
+    latest_completed_sprint_id = _int_or_none(state.get("latest_completed_sprint_id"))
+    if latest_completed_sprint_id is not None:
+        return latest_completed_sprint_id
+    sprint = session.exec(
+        select(Sprint)
+        .where(
+            Sprint.product_id == project_id,
+            Sprint.status == SprintStatus.COMPLETED,
+        )
+        .order_by(
+            cast("Any", Sprint.completed_at).desc(),
+            cast("Any", Sprint.updated_at).desc(),
+            cast("Any", Sprint.sprint_id).desc(),
+        )
+    ).first()
+    if sprint is None or sprint.sprint_id is None:
+        message = "No completed Sprint found."
+        raise SprintPhaseError(
+            message,
+            details={"project_id": project_id},
+            remediation=["Complete a Sprint before running sprint review."],
+        )
+    return sprint.sprint_id
+
+
+def _completed_sprint(
+    *,
+    session: Session,
+    project_id: int,
+    sprint_id: int,
+) -> Sprint:
+    """Return a completed Sprint constrained to one project."""
+    sprint = _get_saved_sprint(session, project_id, sprint_id)
+    if sprint is None:
+        _raise_sprint_not_found()
+    if sprint.status != SprintStatus.COMPLETED:
+        message = "Sprint is not completed."
+        raise SprintPhaseError(
+            message,
+            details={
+                "project_id": project_id,
+                "sprint_id": sprint_id,
+                "current_status": _enum_value(sprint.status),
+                "required_status": SprintStatus.COMPLETED.value,
+            },
+            remediation=["Complete the Sprint before running post-sprint review."],
+        )
+    return sprint
+
+
+def _post_sprint_review_payload(
+    *,
+    state: dict[str, Any],
+    project_id: int,
+    sprint: Sprint,
+    sprint_id: int,
+) -> dict[str, Any]:
+    """Build stable post-sprint review and triage response data."""
+    current_triage = current_triage_for_latest_sprint(state)
+    return {
+        "project_id": project_id,
+        "fsm_state": state.get("fsm_state"),
+        "latest_completed_sprint_id": state.get("latest_completed_sprint_id"),
+        "planned_sprint_id": state.get("planned_sprint_id"),
+        "sprint_id": sprint_id,
+        "post_sprint_triage_required": post_sprint_triage_required(state),
+        "post_sprint_triage": current_triage,
+        "post_sprint_triage_history": _post_sprint_triage_history(state),
+        "sprint": {
+            "id": sprint.sprint_id,
+            "goal": sprint.goal,
+            "status": _enum_value(sprint.status),
+            "started_at": _serialize_temporal(sprint.started_at),
+            "completed_at": _serialize_temporal(sprint.completed_at),
+            "start_date": _serialize_temporal(sprint.start_date),
+            "end_date": _serialize_temporal(sprint.end_date),
+            "team_id": sprint.team_id,
+            "team_name": sprint.team.name if sprint.team else None,
+            "story_count": len(_sorted_sprint_stories(sprint)),
+        },
+    }
+
+
+def _assert_post_sprint_triage_state(
+    *,
+    state: dict[str, Any],
+    expected_state: str,
+    sprint_id: int | None,
+) -> None:
+    """Raise when the current workflow state cannot accept Sprint triage."""
+    current_state = str(state.get("fsm_state") or "")
+    latest_completed_sprint_id = _int_or_none(state.get("latest_completed_sprint_id"))
+    if (
+        current_state == "SPRINT_COMPLETE"
+        and expected_state == "SPRINT_COMPLETE"
+        and sprint_id is not None
+        and latest_completed_sprint_id == sprint_id
+    ):
+        return
+    raise _SprintTriageError(
+        ErrorCode.TRIAGE_EXPECTED_STATE_MISMATCH,
+        "Post-sprint triage requires the latest completed Sprint.",
+        details={
+            "current_state": current_state,
+            "expected_state": expected_state,
+            "required_state": "SPRINT_COMPLETE",
+            "sprint_id": sprint_id,
+            "latest_completed_sprint_id": latest_completed_sprint_id,
+        },
+        remediation=[
+            "Run agileforge sprint review --project-id <project_id>.",
+            "Retry triage only while the project is in SPRINT_COMPLETE.",
+        ],
+    )
+
+
+def _post_sprint_triage_history(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return stored triage history entries without mutating state."""
+    history = state.get("post_sprint_triage_history")
+    if not isinstance(history, list):
+        return []
+    return [dict(entry) for entry in history if isinstance(entry, dict)]
+
+
+def _triage_history_entry(
+    triage_payload: dict[str, Any],
+    *,
+    history_action: str,
+    recorded_at: str,
+    recorded_by: str,
+) -> dict[str, Any]:
+    """Return a JSON-ready triage history entry."""
+    entry = cast("dict[str, Any]", _json_ready(dict(triage_payload)))
+    entry["history_action"] = history_action
+    entry["history_recorded_at"] = recorded_at
+    entry["history_recorded_by"] = recorded_by
+    return entry
+
+
+def _raise_triage_already_recorded(
+    *,
+    sprint_id: int,
+    current_triage: dict[str, Any],
+) -> NoReturn:
+    """Reject an unguarded triage write over existing current metadata."""
+    raise _SprintTriageError(
+        ErrorCode.TRIAGE_ALREADY_RECORDED,
+        "Post-sprint triage has already been recorded.",
+        details={
+            "sprint_id": sprint_id,
+            "current_triage_fingerprint": current_triage.get("triage_fingerprint"),
+        },
+        remediation=[
+            "Pass replace_existing=true with expected_triage_fingerprint to correct it."
+        ],
+    )
+
+
+def _raise_triage_fingerprint_mismatch(
+    *,
+    expected_triage_fingerprint: str | None,
+    current_triage_fingerprint: str | None,
+    sprint_id: int,
+) -> NoReturn:
+    """Reject a guarded correction whose current triage fingerprint changed."""
+    raise _SprintTriageError(
+        ErrorCode.TRIAGE_FINGERPRINT_MISMATCH,
+        "Post-sprint triage fingerprint did not match.",
+        details={
+            "sprint_id": sprint_id,
+            "expected_triage_fingerprint": expected_triage_fingerprint,
+            "current_triage_fingerprint": current_triage_fingerprint,
+        },
+        remediation=[
+            "Run agileforge sprint review --project-id <project_id> and retry.",
+        ],
+    )
 
 
 def _execution_sprint_and_task_view(
@@ -2951,6 +3406,34 @@ def _sprint_close_error(exc: Exception) -> dict[str, Any]:
             "Run agileforge sprint close-readiness --project-id <project_id>.",
             "Refresh the Sprint close guard values and retry.",
         ],
+    )
+
+
+def _post_sprint_triage_validation_error(
+    exc: PostSprintTriageValidationError,
+) -> dict[str, Any]:
+    """Map post-sprint triage validation failures onto registered errors."""
+    details = dict(exc.details)
+    try:
+        code = ErrorCode(exc.code)
+    except ValueError:
+        code = ErrorCode.TRIAGE_IMPACT_FIELDS_INVALID
+        details.setdefault("validation_code", exc.code)
+    return _error_envelope(
+        code,
+        exc.message,
+        details=details,
+        remediation=exc.remediation,
+    )
+
+
+def _post_sprint_triage_error(exc: _SprintTriageError) -> dict[str, Any]:
+    """Map Sprint triage guard failures onto registered CLI errors."""
+    return _error_envelope(
+        exc.code,
+        exc.detail,
+        details=exc.details,
+        remediation=exc.remediation,
     )
 
 
