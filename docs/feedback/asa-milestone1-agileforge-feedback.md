@@ -54,3 +54,26 @@ inside the ASA execution goal.
   easier if `task show`, `story readiness`, or companion commands exposed a
   compact machine-readable summary mode with `id`, `status`, `fingerprint`, and
   next update command only.
+
+### Workflow next routes to sprint generation when no sprint candidates remain
+
+- Project: ASA `project_id=3`
+- Context: after Sprint 15 was closed and post-sprint triage was recorded as
+  `impact=none`.
+- Command: `agileforge workflow next --project-id 3`
+- Observed result: `status=post_sprint_story_continuation_available` with valid
+  commands:
+  - `agileforge story pending --project-id 3`
+  - `agileforge sprint candidates --project-id 3`
+  - `agileforge sprint generate --project-id 3`
+- Command: `agileforge story pending --project-id 3`
+- Observed result: Milestone 1 still has pending non-refined requirements,
+  including `pyrepo-check Quality Gate Integration`, `Raw Data Ingestion
+  Pipeline`, and `Canonical Process Event Record Definition and Validation`.
+- Command: `agileforge sprint candidates --project-id 3`
+- Observed result: `count=0`, message `Found 0 sprint candidates for
+  selected-story scope. Excluded: 11 non-refined requirements.`
+- Product feedback: this is a workflow-routing gap. When there are no sprint
+  candidates and pending non-refined requirements remain, `workflow next` should
+  route to Story generation/refinement or explicit reconciliation, not only to
+  `sprint generate`.
