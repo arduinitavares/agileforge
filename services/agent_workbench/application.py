@@ -26,14 +26,14 @@ from services.agent_workbench.diagnostics import doctor_payload, schema_check_pa
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import MutationLedgerRepository
+from services.agent_workbench.post_sprint_triage import (
+    current_triage_for_latest_sprint,
+    post_sprint_triage_required,
+)
 from services.agent_workbench.project_setup import (
     ProjectCreateRequest,
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
-)
-from services.agent_workbench.post_sprint_triage import (
-    current_triage_for_latest_sprint,
-    post_sprint_triage_required,
 )
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
@@ -2853,136 +2853,14 @@ def _sprint_workflow_next(
     }:
         return None
 
+    if fsm_state == "SPRINT_COMPLETE":
+        return _sprint_complete_workflow_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
     next_valid_commands: list[str] = []
     blocked_commands: list[Any] = []
     blocked_future_commands: list[Any] = []
-    if fsm_state == "SPRINT_COMPLETE":
-        state = _envelope_data(workflow).get("state")
-        state_data = state if isinstance(state, dict) else {}
-        if _active_backlog_reset_stale_marker(workflow):
-            blocked_commands.extend(_active_backlog_reset_blocked_commands())
-            data: dict[str, Any] = {
-                "project_id": project_id,
-                "next_valid_commands": next_valid_commands,
-                "blocked_commands": blocked_commands,
-                "blocked_future_commands": blocked_future_commands,
-                "status": "blocked_by_stale_active_backlog_reset",
-            }
-            data["source_fingerprint"] = canonical_hash(
-                {
-                    "command": WORKFLOW_NEXT_COMMAND,
-                    "project_id": project_id,
-                    "workflow": _fingerprint_input(_envelope_data(workflow)),
-                    "installed_command_names": sorted(installed_command_names()),
-                    "next_valid_commands": data["next_valid_commands"],
-                    "blocked_commands": data["blocked_commands"],
-                    "blocked_future_commands": data["blocked_future_commands"],
-                    "status": data["status"],
-                }
-            )
-            return {
-                "ok": True,
-                "data": data,
-                "warnings": _section_warnings(
-                    section="workflow",
-                    source="workflow_state",
-                    envelope=workflow,
-                ),
-                "errors": [],
-            }
-        if (
-            current_triage_for_latest_sprint(state_data) is None
-            and post_sprint_triage_required(state_data)
-        ):
-            next_actions: list[dict[str, Any]] = []
-            for command_name, command_text in _post_sprint_triage_required_commands(
-                project_id=project_id,
-            ):
-                installed = command_is_available(command_name)
-                if command_name == "agileforge sprint triage":
-                    next_actions = [
-                        _post_sprint_triage_required_next_action(
-                            command=command_text,
-                            installed=installed,
-                        )
-                    ]
-                if installed:
-                    next_valid_commands.append(command_text)
-                else:
-                    blocked_future_commands.append(command_text)
-            data = {
-                "project_id": project_id,
-                "next_valid_commands": next_valid_commands,
-                "blocked_commands": blocked_commands,
-                "blocked_future_commands": blocked_future_commands,
-                "status": "post_sprint_triage_required",
-                "next_actions": next_actions,
-            }
-            data["source_fingerprint"] = canonical_hash(
-                {
-                    "command": WORKFLOW_NEXT_COMMAND,
-                    "project_id": project_id,
-                    "workflow": _fingerprint_input(_envelope_data(workflow)),
-                    "installed_command_names": sorted(installed_command_names()),
-                    "next_valid_commands": data["next_valid_commands"],
-                    "blocked_commands": data["blocked_commands"],
-                    "blocked_future_commands": data["blocked_future_commands"],
-                    "status": data["status"],
-                    "next_actions": data["next_actions"],
-                }
-            )
-            return {
-                "ok": True,
-                "data": data,
-                "warnings": _section_warnings(
-                    section="workflow",
-                    source="workflow_state",
-                    envelope=workflow,
-                ),
-                "errors": [],
-            }
-        for command_name, command_text in _sprint_complete_backlog_refinement_commands(
-            project_id=project_id,
-            workflow=workflow,
-        ):
-            if command_is_available(command_name):
-                next_valid_commands.append(command_text)
-            else:
-                blocked_future_commands.append(command_text)
-        status = (
-            "sprint_complete_backlog_refinement_available"
-            if next_valid_commands
-            else "sprint_complete"
-        )
-        data: dict[str, Any] = {
-            "project_id": project_id,
-            "next_valid_commands": next_valid_commands,
-            "blocked_commands": blocked_commands,
-            "blocked_future_commands": blocked_future_commands,
-            "status": status,
-        }
-        data["source_fingerprint"] = canonical_hash(
-            {
-                "command": WORKFLOW_NEXT_COMMAND,
-                "project_id": project_id,
-                "workflow": _fingerprint_input(_envelope_data(workflow)),
-                "installed_command_names": sorted(installed_command_names()),
-                "next_valid_commands": data["next_valid_commands"],
-                "blocked_commands": data["blocked_commands"],
-                "blocked_future_commands": data["blocked_future_commands"],
-                "status": data["status"],
-            }
-        )
-        return {
-            "ok": True,
-            "data": data,
-            "warnings": _section_warnings(
-                section="workflow",
-                source="workflow_state",
-                envelope=workflow,
-            ),
-            "errors": [],
-        }
     save_blocker = (
         _sprint_save_blocker(workflow) if fsm_state == "SPRINT_DRAFT" else None
     )
@@ -3022,6 +2900,401 @@ def _sprint_workflow_next(
             "status": data["status"],
         }
     )
+    return {
+        "ok": True,
+        "data": data,
+        "warnings": _section_warnings(
+            section="workflow",
+            source="workflow_state",
+            envelope=workflow,
+        ),
+        "errors": [],
+    }
+
+
+def _sprint_complete_workflow_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Return workflow-next routing for SPRINT_COMPLETE."""
+    next_valid_commands: list[str] = []
+    blocked_commands: list[Any] = []
+    blocked_future_commands: list[Any] = []
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    current_triage = current_triage_for_latest_sprint(state_data)
+    if _active_backlog_reset_stale_marker(workflow):
+        return _sprint_complete_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=_active_backlog_reset_blocked_commands(),
+            blocked_future_commands=blocked_future_commands,
+            status="blocked_by_stale_active_backlog_reset",
+        )
+    if current_triage is None and post_sprint_triage_required(state_data):
+        next_actions: list[dict[str, Any]] = []
+        for command_name, command_text in _post_sprint_triage_required_commands(
+            project_id=project_id,
+        ):
+            installed = command_is_available(command_name)
+            if command_name == "agileforge sprint triage":
+                next_actions = [
+                    _post_sprint_triage_required_next_action(
+                        command=command_text,
+                        installed=installed,
+                    )
+                ]
+            if installed:
+                next_valid_commands.append(command_text)
+            else:
+                blocked_future_commands.append(command_text)
+        return _sprint_complete_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=blocked_commands,
+            blocked_future_commands=blocked_future_commands,
+            status="post_sprint_triage_required",
+            next_actions=next_actions,
+        )
+
+    impact_next = _post_sprint_triage_impact_next(
+        project_id=project_id,
+        workflow=workflow,
+        triage=current_triage,
+    )
+    if impact_next is not None:
+        return impact_next
+
+    for command_name, command_text in _sprint_complete_backlog_refinement_commands(
+        project_id=project_id,
+        workflow=workflow,
+    ):
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+    status = (
+        "sprint_complete_backlog_refinement_available"
+        if next_valid_commands
+        else "sprint_complete"
+    )
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=blocked_commands,
+        blocked_future_commands=blocked_future_commands,
+        status=status,
+    )
+
+
+def _post_sprint_triage_impact_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    triage: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return routed workflow-next data for recorded triage impacts."""
+    if triage is None:
+        return None
+    triage_impact = triage.get("impact")
+    if triage_impact == "none":
+        return _post_sprint_none_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
+    if triage_impact == "story":
+        return _post_sprint_story_next(
+            project_id=project_id,
+            workflow=workflow,
+            triage=triage,
+        )
+    if triage_impact == "task":
+        return _post_sprint_task_next(
+            project_id=project_id,
+            workflow=workflow,
+            triage=triage,
+        )
+    if triage_impact == "multiple":
+        return _post_sprint_multiple_next(
+            project_id=project_id,
+            workflow=workflow,
+            triage=triage,
+        )
+    return None
+
+
+def _post_sprint_none_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Return next-cycle routing when triage records no follow-up impact."""
+    commands = [
+        (
+            "agileforge story pending",
+            f"agileforge story pending --project-id {project_id}",
+        ),
+        (
+            "agileforge sprint candidates",
+            f"agileforge sprint candidates --project-id {project_id}",
+        ),
+        (
+            "agileforge sprint generate",
+            f"agileforge sprint generate --project-id {project_id}",
+        ),
+    ]
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    sprint_generate_command = f"agileforge sprint generate --project-id {project_id}"
+    sprint_generate_installed = command_is_available("agileforge sprint generate")
+    next_actions = [
+        {
+            "command": sprint_generate_command,
+            "status": "post_sprint_story_continuation_available",
+            "reason": "Post-sprint triage recorded no follow-up impact.",
+            "runnable": sprint_generate_installed,
+            "installed": sprint_generate_installed,
+            "requires_cli_installation": not sprint_generate_installed,
+        }
+    ]
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=[],
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_story_continuation_available",
+        next_actions=next_actions,
+    )
+
+
+def _post_sprint_story_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    triage: dict[str, Any],
+) -> dict[str, Any]:
+    """Return Story reconciliation routing for story-level impacts."""
+    commands: list[tuple[str, str]] = [
+        (
+            "agileforge story pending",
+            f"agileforge story pending --project-id {project_id}",
+        )
+    ]
+    affected_requirements = triage.get("affected_requirements")
+    if isinstance(affected_requirements, list) and affected_requirements:
+        for requirement in affected_requirements:
+            if not isinstance(requirement, str) or not requirement:
+                continue
+            commands.append(
+                (
+                    "agileforge story generate",
+                    (
+                        f"agileforge story generate --project-id {project_id} "
+                        f"{_story_parent_requirement_flag(requirement)}"
+                    ),
+                )
+            )
+    else:
+        commands.append(
+            (
+                "agileforge story generate",
+                (
+                    f"agileforge story generate --project-id {project_id} "
+                    "--parent-requirement <parent_requirement>"
+                ),
+            )
+        )
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    blocked_commands = [
+        {
+            "command": "agileforge sprint generate",
+            "reason": "POST_SPRINT_STORY_IMPACT_NEEDS_RECONCILIATION",
+            "message": (
+                "Story-level post-sprint impact must be reconciled before "
+                "generating another Sprint."
+            ),
+        }
+    ]
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=blocked_commands,
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_story_impact_needs_reconciliation",
+    )
+
+
+def _post_sprint_task_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    triage: dict[str, Any],
+) -> dict[str, Any]:
+    """Return task-impact routing for completed Sprint review context."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    latest_completed_sprint_id = state_data.get("latest_completed_sprint_id")
+    sprint_status_command = f"agileforge sprint status --project-id {project_id}"
+    if isinstance(latest_completed_sprint_id, int) and latest_completed_sprint_id > 0:
+        sprint_status_command = (
+            f"{sprint_status_command} --sprint-id {latest_completed_sprint_id}"
+        )
+    commands = [
+        (
+            "agileforge sprint review",
+            f"agileforge sprint review --project-id {project_id}",
+        ),
+        (
+            "agileforge sprint status",
+            sprint_status_command,
+        ),
+        (
+            "agileforge sprint history",
+            f"agileforge sprint history --project-id {project_id}",
+        ),
+    ]
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    blocked_commands = [
+        {
+            "command": "agileforge sprint task carryover",
+            "reason": "TASK_CARRYOVER_NOT_IMPLEMENTED",
+            "message": (
+                "Task carryover is not implemented yet; review the completed "
+                "Sprint before planning follow-up work."
+            ),
+            "affected_task_ids": triage.get("affected_task_ids", []),
+        }
+    ]
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=blocked_commands,
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_task_impact_needs_carryover",
+    )
+
+
+def _post_sprint_multiple_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    triage: dict[str, Any],
+) -> dict[str, Any]:
+    """Return guarded correction routing for multi-layer impacts."""
+    triage_fingerprint = str(
+        triage.get("triage_fingerprint") or "<triage_fingerprint>"
+    ).strip()
+    commands = [
+        (
+            "agileforge sprint review",
+            f"agileforge sprint review --project-id {project_id}",
+        ),
+        (
+            "agileforge sprint triage",
+            (
+                f"agileforge sprint triage --project-id {project_id} "
+                "--expected-state SPRINT_COMPLETE --replace-existing "
+                f"--expected-triage-fingerprint {triage_fingerprint}"
+            ),
+        ),
+    ]
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=_post_sprint_multiple_blocked_commands(triage=triage),
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_multiple_impacts_need_decision",
+    )
+
+
+def _installed_command_texts(
+    commands: list[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    """Split command texts by installed command availability."""
+    next_valid_commands: list[str] = []
+    blocked_future_commands: list[str] = []
+    for command_name, command_text in commands:
+        if command_is_available(command_name):
+            next_valid_commands.append(command_text)
+        else:
+            blocked_future_commands.append(command_text)
+    return next_valid_commands, blocked_future_commands
+
+
+def _post_sprint_multiple_blocked_commands(
+    *,
+    triage: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Return blocked layer bridge commands for multi-impact triage."""
+    layer_commands = {
+        "task": "agileforge sprint task carryover",
+        "story": "agileforge story generate",
+        "roadmap": "agileforge roadmap generate",
+        "backlog": "agileforge backlog refine",
+    }
+    layers = triage.get("affected_layers")
+    affected_layers = set(layers if isinstance(layers, list) else [])
+    blocked_commands: list[dict[str, str]] = []
+    for layer in ("story", "task", "roadmap", "backlog"):
+        if layer not in affected_layers:
+            continue
+        command = layer_commands.get(layer)
+        if command is None:
+            continue
+        blocked_commands.append(
+            {
+                "command": command,
+                "reason": "POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION",
+                "message": (
+                    "Resolve the post-sprint triage decision before routing "
+                    f"{layer} follow-up."
+                ),
+            }
+        )
+    return blocked_commands
+
+
+def _sprint_complete_next_response(  # noqa: PLR0913
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    next_valid_commands: list[str],
+    blocked_commands: list[Any],
+    blocked_future_commands: list[Any],
+    status: str,
+    next_actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return a workflow-next response for completed-Sprint routing."""
+    data: dict[str, Any] = {
+        "project_id": project_id,
+        "next_valid_commands": next_valid_commands,
+        "blocked_commands": blocked_commands,
+        "blocked_future_commands": blocked_future_commands,
+        "status": status,
+    }
+    if next_actions is not None:
+        data["next_actions"] = next_actions
+    fingerprint_input: dict[str, Any] = {
+        "command": WORKFLOW_NEXT_COMMAND,
+        "project_id": project_id,
+        "workflow": _fingerprint_input(_envelope_data(workflow)),
+        "installed_command_names": sorted(installed_command_names()),
+        "next_valid_commands": data["next_valid_commands"],
+        "blocked_commands": data["blocked_commands"],
+        "blocked_future_commands": data["blocked_future_commands"],
+        "status": data["status"],
+    }
+    if next_actions is not None:
+        fingerprint_input["next_actions"] = data["next_actions"]
+    data["source_fingerprint"] = canonical_hash(fingerprint_input)
     return {
         "ok": True,
         "data": data,

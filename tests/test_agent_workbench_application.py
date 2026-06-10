@@ -12,6 +12,7 @@ from sqlmodel import SQLModel
 import services.agent_workbench.application as application_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
+from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
@@ -271,6 +272,51 @@ class _SprintCompleteStaleRequiresTriageReadProjection(
                 "active_backlog_reset_attempt_id": "backlog-attempt-12",
             }
         )
+        return result
+
+
+class _SprintCompleteWithCurrentTriageReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with current post-sprint triage."""
+
+    def __init__(
+        self,
+        *,
+        impact: str,
+        affected_requirements: list[object] | None = None,
+        affected_task_ids: list[object] | None = None,
+        affected_story_ids: list[object] | None = None,
+        affected_layers: list[object] | None = None,
+    ) -> None:
+        self._impact = impact
+        self._affected_requirements = affected_requirements
+        self._affected_task_ids = affected_task_ids
+        self._affected_story_ids = affected_story_ids
+        self._affected_layers = affected_layers
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with current triage."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact=self._impact,
+                affected_requirements=self._affected_requirements,
+                affected_task_ids=self._affected_task_ids,
+                affected_story_ids=self._affected_story_ids,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=self._affected_layers,
+                learning_summary="Recorded post-sprint learning.",
+                decision_reason="Route the current post-sprint impact.",
+                idempotency_key=f"triage-{self._impact}",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+        }
         return result
 
 
@@ -3477,9 +3523,10 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
     assert result["data"]["blocked_commands"] == []
 
 
-def test_workflow_next_requires_post_sprint_triage_required_before_backlog_refinement() -> (
+def test_workflow_next_requires_post_sprint_triage_required_before_backlog_refinement() -> (  # noqa: E501
     None
 ):
+    """Require triage before completed Sprint routing exposes Backlog refinement."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteRequiresTriageReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3529,9 +3576,99 @@ def test_workflow_next_requires_post_sprint_triage_required_before_backlog_refin
     ]
 
 
-def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(
+def test_workflow_next_routes_impact_none_to_story_and_sprint_continuation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Route impact=none to Story continuation and next Sprint planning."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_story_continuation_available"
+    assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
+    assert "agileforge sprint candidates --project-id 7" in data["next_valid_commands"]
+    assert "agileforge sprint generate --project-id 7" in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge backlog refine")
+        for command in data["next_valid_commands"]
+    )
+    assert {
+        "command": "agileforge sprint generate --project-id 7",
+        "status": "post_sprint_story_continuation_available",
+        "reason": "Post-sprint triage recorded no follow-up impact.",
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    } in data["next_actions"]
+
+
+def test_workflow_next_routes_impact_multiple_to_guarded_correction_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route impact=multiple only to review and guarded triage correction."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="multiple",
+            affected_layers=["story", "backlog"],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_multiple_impacts_need_decision"
+    assert data["next_valid_commands"] == [
+        "agileforge sprint review --project-id 7",
+        (
+            "agileforge sprint triage --project-id 7 "
+            "--expected-state SPRINT_COMPLETE --replace-existing "
+            "--expected-triage-fingerprint sha256:triage"
+        ),
+    ]
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge story generate",
+            "reason": "POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION",
+            "message": (
+                "Resolve the post-sprint triage decision before routing story "
+                "follow-up."
+            ),
+        },
+        {
+            "command": "agileforge backlog refine",
+            "reason": "POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION",
+            "message": (
+                "Resolve the post-sprint triage decision before routing backlog "
+                "follow-up."
+            ),
+        },
+    ]
+    assert data["blocked_future_commands"] == []
+
+
+def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reflect unavailable triage commands in the required next action."""
     def unavailable_triage_command(command_name: str) -> bool:
         return command_name != "agileforge sprint triage"
 
@@ -3581,6 +3718,7 @@ def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_t
 def test_workflow_next_sprint_complete_stale_reset_wins_before_triage_required() -> (
     None
 ):
+    """Keep stale active-reset blocking ahead of post-sprint triage routing."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteStaleRequiresTriageReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),

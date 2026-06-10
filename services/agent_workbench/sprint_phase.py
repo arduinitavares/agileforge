@@ -1188,9 +1188,17 @@ class SprintPhaseRunner:
             return product
 
         try:
+            state = await self._ensure_session(str(project_id))
+            allow_completed_sprint_generation = (
+                _allow_completed_sprint_generation(state)
+            )
+
+            async def load_state() -> dict[str, Any]:
+                return state
+
             data = await generate_sprint_plan(
                 project_id=project_id,
-                load_state=lambda: self._ensure_session(str(project_id)),
+                load_state=load_state,
                 save_state=lambda state: self._save_session_state(
                     str(project_id), state
                 ),
@@ -1209,6 +1217,7 @@ class SprintPhaseRunner:
                 include_task_decomposition=include_task_decomposition,
                 selected_story_ids=selected_story_ids,
                 user_input=user_input,
+                allow_completed_sprint_generation=allow_completed_sprint_generation,
             )
         except SprintPhaseError as exc:
             return _phase_error(exc)
@@ -1503,6 +1512,43 @@ class SprintPhaseRunner:
                 completed_sprint_id=completed_sprint_id,
             )
         return sprint.sprint_id
+
+
+def _allow_completed_sprint_generation(state: dict[str, Any]) -> bool:
+    """Return whether SPRINT_COMPLETE may bridge into Sprint generation."""
+    if state.get("fsm_state") != "SPRINT_COMPLETE":
+        return False
+    try:
+        workflow_state.assert_downstream_backlog_not_stale(state)
+    except workflow_state.DownstreamBacklogStaleError as exc:
+        raise SprintPhaseError(str(exc)) from exc
+
+    current_triage = current_triage_for_latest_sprint(state)
+    if current_triage is None or current_triage.get("impact") != "none":
+        impact = (
+            current_triage.get("impact")
+            if isinstance(current_triage, dict)
+            else None
+        )
+        message = (
+            "Sprint generation from SPRINT_COMPLETE requires current "
+            "post-sprint triage impact none."
+        )
+        raise SprintPhaseError(
+            message,
+            details={
+                "fsm_state": state.get("fsm_state"),
+                "latest_completed_sprint_id": state.get("latest_completed_sprint_id"),
+                "current_post_sprint_triage_impact": impact,
+            },
+            remediation=[
+                (
+                    "Run agileforge sprint triage --project-id <project_id> "
+                    "--expected-state SPRINT_COMPLETE --impact none."
+                )
+            ],
+        )
+    return True
 
 
 def _raise_sprint_not_found() -> NoReturn:

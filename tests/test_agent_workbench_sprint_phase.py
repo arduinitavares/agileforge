@@ -28,6 +28,7 @@ from models.enums import (
 )
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from services.agent_workbench import sprint_phase as sprint_phase_module
+from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.phases import sprint_service
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
@@ -244,6 +245,155 @@ def test_sprint_runner_generate_blocks_active_reset_stale_marker(
     assert workflow_service.state["stale_since_backlog_attempt_id"] == (
         "backlog-attempt-12"
     )
+
+
+def test_sprint_runner_generate_blocks_sprint_complete_without_impact_none_triage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block SPRINT_COMPLETE generation when current triage is absent or non-none."""
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {"available_stories": []},
+            "output_artifact": {"is_complete": True},
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        sprint_phase_module,
+        "run_sprint_agent_from_state",
+        fake_run_sprint_agent,
+    )
+    monkeypatch.setattr(
+        sprint_service,
+        "load_sprint_candidates",
+        lambda _project_id, **_kwargs: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 1}],
+            "readiness": {"status": "ready"},
+        },
+    )
+    monkeypatch.setattr(
+        SprintPhaseRunner,
+        "_current_planned_sprint_id",
+        lambda _self, _project_id: None,
+    )
+
+    for triage in (
+        None,
+        build_triage_payload(
+            project_id=7,
+            sprint_id=13,
+            impact="story",
+            affected_requirements=["Story follow-up"],
+            affected_task_ids=None,
+            affected_story_ids=None,
+            affected_backlog_item_ids=None,
+            affected_roadmap_item_ids=None,
+            affected_layers=None,
+            learning_summary="Story-level follow-up is needed.",
+            decision_reason="A completed task exposed missing story-level detail.",
+            idempotency_key="triage-story-for-generate-guard",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        ),
+    ):
+        workflow_service = _FakeWorkflowService()
+        workflow_service.state = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+        }
+        if triage is not None:
+            workflow_service.state["post_sprint_triage"] = triage
+        runner = SprintPhaseRunner(
+            product_repo=cast("Any", _FakeProductRepository()),
+            workflow_service=cast("Any", workflow_service),
+        )
+
+        result = runner.generate(project_id=7)
+
+        assert result["ok"] is False
+        assert result["data"] is None
+        assert result["errors"][0]["code"] == "INVALID_COMMAND"
+
+    assert captured["agent_calls"] == 0
+
+
+def test_sprint_runner_generate_allows_sprint_complete_with_impact_none_triage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow SPRINT_COMPLETE generation only after current impact=none triage."""
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {"available_stories": [{"story_id": 1}]},
+            "output_artifact": {"is_complete": True},
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        sprint_phase_module,
+        "run_sprint_agent_from_state",
+        fake_run_sprint_agent,
+    )
+    monkeypatch.setattr(
+        sprint_service,
+        "load_sprint_candidates",
+        lambda _project_id, **_kwargs: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 1}],
+            "readiness": {"status": "ready"},
+        },
+    )
+    monkeypatch.setattr(
+        SprintPhaseRunner,
+        "_current_planned_sprint_id",
+        lambda _self, _project_id: None,
+    )
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": 13,
+        "post_sprint_triage": build_triage_payload(
+            project_id=7,
+            sprint_id=13,
+            impact="none",
+            affected_requirements=None,
+            affected_task_ids=None,
+            affected_story_ids=None,
+            affected_backlog_item_ids=None,
+            affected_roadmap_item_ids=None,
+            affected_layers=None,
+            learning_summary="No follow-up changes are needed.",
+            decision_reason="Sprint outcomes matched the current backlog.",
+            idempotency_key="triage-none-for-generate-bridge",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        ),
+    }
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow_service),
+    )
+
+    result = runner.generate(project_id=7)
+
+    assert result["ok"] is True
+    assert result["data"]["fsm_state"] == "SPRINT_DRAFT"
+    assert result["data"]["attempt_id"] == "sprint-attempt-1"
+    assert captured["agent_calls"] == 1
 
 
 def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(

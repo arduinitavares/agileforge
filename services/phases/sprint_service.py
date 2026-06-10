@@ -264,6 +264,7 @@ async def generate_sprint_plan(
     selected_story_ids: list[int] | None,
     user_input: str | None,
     load_candidates: Callable[[], dict[str, Any]] | None = None,
+    allow_completed_sprint_generation: bool = False,
 ) -> dict[str, Any]:
     state = await load_state()
     try:
@@ -276,9 +277,13 @@ async def generate_sprint_plan(
         current_planned_sprint_id=current_planned_sprint_id,
     )
 
-    if state.get("fsm_state") not in VALID_SPRINT_GENERATION_STATES:
+    current_state = state.get("fsm_state")
+    valid_generation_states = set(VALID_SPRINT_GENERATION_STATES)
+    if allow_completed_sprint_generation:
+        valid_generation_states.add(OrchestratorState.SPRINT_COMPLETE.value)
+    if current_state not in valid_generation_states:
         raise SprintPhaseError(
-            f"Invalid phase for sprint generation (state: {state.get('fsm_state')})"
+            f"Invalid phase for sprint generation (state: {current_state})"
         )
 
     candidates_payload = (
