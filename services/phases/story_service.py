@@ -1211,10 +1211,11 @@ async def generate_story_draft(
             force=force_feedback,
         )
         if feedback_quality["needs_revision"] and not force_feedback:
-            state["fsm_state"] = OrchestratorState.STORY_INTERVIEW.value
-            save_state(state)
+            if not story_save_payload(runtime):
+                state["fsm_state"] = OrchestratorState.STORY_INTERVIEW.value
+                save_state(state)
             return {
-                "fsm_state": OrchestratorState.STORY_INTERVIEW.value,
+                "fsm_state": _normalize_fsm_state(state.get("fsm_state")),
                 "parent_requirement": normalized_parent_requirement,
                 "data": {
                     "generation_ran": False,
