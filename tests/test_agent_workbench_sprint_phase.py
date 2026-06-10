@@ -1807,3 +1807,102 @@ def test_sprint_triage_guarded_correction_supersedes_previous_payload(
         entry["history_action"]
         for entry in workflow.state["post_sprint_triage_history"]
     ] == ["recorded", "superseded", "corrected"]
+
+
+def test_sprint_triage_preserves_required_field_validation_code(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage should preserve Task 1 required-field validation codes."""
+    product = Product(name="Triage Required Field Product")
+    team = Team(name="Triage Required Field Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Validate required triage fields",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    result = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary=" ",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-required-field-001",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "TRIAGE_REQUIRED_FIELD_MISSING"
+
+
+def test_sprint_triage_preserves_field_invalid_validation_code(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage should preserve Task 1 invalid-field validation codes."""
+    product = Product(name="Triage Invalid Field Product")
+    team = Team(name="Triage Invalid Field Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Validate invalid triage fields",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    result = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-invalid-field-001",
+        replace_existing=cast("Any", "maybe"),
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "TRIAGE_FIELD_INVALID"

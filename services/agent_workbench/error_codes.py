@@ -64,6 +64,8 @@ class ErrorCode(StrEnum):
     TRIAGE_FINGERPRINT_MISMATCH = "TRIAGE_FINGERPRINT_MISMATCH"
     TRIAGE_EXPECTED_STATE_MISMATCH = "TRIAGE_EXPECTED_STATE_MISMATCH"
     TRIAGE_IMPACT_FIELDS_INVALID = "TRIAGE_IMPACT_FIELDS_INVALID"
+    TRIAGE_REQUIRED_FIELD_MISSING = "TRIAGE_REQUIRED_FIELD_MISSING"
+    TRIAGE_FIELD_INVALID = "TRIAGE_FIELD_INVALID"
     BACKLOG_SOURCE_UNAVAILABLE = "BACKLOG_SOURCE_UNAVAILABLE"
 
 
@@ -331,6 +333,18 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="Post-sprint triage impact fields are invalid.",
+    ),
+    ErrorCode.TRIAGE_REQUIRED_FIELD_MISSING: ErrorMetadata(
+        code=ErrorCode.TRIAGE_REQUIRED_FIELD_MISSING.value,
+        default_exit_code=2,
+        retryable=False,
+        description="A required post-sprint triage field is missing.",
+    ),
+    ErrorCode.TRIAGE_FIELD_INVALID: ErrorMetadata(
+        code=ErrorCode.TRIAGE_FIELD_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="A post-sprint triage field is invalid.",
     ),
     ErrorCode.BACKLOG_SOURCE_UNAVAILABLE: ErrorMetadata(
         code=ErrorCode.BACKLOG_SOURCE_UNAVAILABLE.value,
