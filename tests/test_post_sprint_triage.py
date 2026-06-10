@@ -73,3 +73,15 @@ def test_current_triage_for_latest_sprint_requires_matching_sprint_id() -> None:
 
     assert current_triage_for_latest_sprint(state) is None
     assert post_sprint_triage_required(state) is True
+
+
+def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
+    triage = {"sprint_id": 14, "impact": "none"}
+    state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": 14,
+        "post_sprint_triage": triage,
+    }
+
+    assert current_triage_for_latest_sprint(state) == triage
+    assert post_sprint_triage_required(state) is False
