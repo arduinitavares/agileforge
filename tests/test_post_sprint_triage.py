@@ -310,6 +310,35 @@ def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
     assert post_sprint_triage_required(state) is False
 
 
+def test_current_triage_for_latest_sprint_rejects_extra_stored_keys() -> None:
+    triage = build_triage_payload(
+        project_id=7,
+        sprint_id=14,
+        impact="none",
+        affected_requirements=[],
+        affected_task_ids=[],
+        affected_story_ids=[],
+        affected_backlog_item_ids=[],
+        affected_roadmap_item_ids=[],
+        affected_layers=[],
+        learning_summary="No follow-up required.",
+        decision_reason="Sprint learning is already accounted for.",
+        idempotency_key="triage-current",
+        replace_existing=False,
+        recorded_at="2026-06-10T00:00:00Z",
+        recorded_by="cli-agent",
+    )
+    triage["unexpected"] = "value"
+    state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": 14,
+        "post_sprint_triage": triage,
+    }
+
+    assert current_triage_for_latest_sprint(state) is None
+    assert post_sprint_triage_required(state) is True
+
+
 @pytest.mark.parametrize("field_name", ["request_fingerprint", "triage_fingerprint"])
 def test_current_triage_for_latest_sprint_rejects_tampered_fingerprints(
     field_name: str,

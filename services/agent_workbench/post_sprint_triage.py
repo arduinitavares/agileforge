@@ -390,7 +390,7 @@ def _validate_impact_fields(
 
 
 def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
-    if any(field_name not in triage for field_name in TRIAGE_STORED_REQUIRED_FIELDS):
+    if set(triage) != set(TRIAGE_STORED_REQUIRED_FIELDS):
         return False
     if triage.get("schema_version") != TRIAGE_SCHEMA_VERSION:
         return False
