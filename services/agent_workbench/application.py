@@ -3050,6 +3050,11 @@ def _post_sprint_triage_impact_next(
             project_id=project_id,
             workflow=workflow,
         )
+    elif triage_impact == "roadmap":
+        impact_next = _post_sprint_roadmap_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
     elif triage_impact == "multiple":
         impact_next = _post_sprint_multiple_next(
             project_id=project_id,
@@ -3426,6 +3431,59 @@ def _post_sprint_story_next(
         blocked_future_commands=blocked_future_commands,
         status="post_sprint_story_impact_needs_reconciliation",
     )
+
+
+def _post_sprint_roadmap_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Return Roadmap reconciliation routing for roadmap-level impacts."""
+    commands = [
+        (
+            "agileforge roadmap history",
+            f"agileforge roadmap history --project-id {project_id}",
+        ),
+        (
+            "agileforge roadmap generate",
+            f"agileforge roadmap generate --project-id {project_id} --input <feedback>",
+        ),
+    ]
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=_post_sprint_roadmap_blocked_commands(),
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_roadmap_reconciliation_available",
+    )
+
+
+def _post_sprint_roadmap_blocked_commands() -> list[dict[str, str]]:
+    """Return downstream continuation blockers for roadmap-impact triage."""
+    reason = "POST_SPRINT_ROADMAP_IMPACT_NEEDS_RECONCILIATION"
+    message = (
+        "Roadmap-level post-sprint impact must be reconciled before continuing "
+        "Story or Sprint planning."
+    )
+    return [
+        {
+            "command": "agileforge story generate",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge sprint candidates",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge sprint generate",
+            "reason": reason,
+            "message": message,
+        },
+    ]
 
 
 def _post_sprint_task_next(

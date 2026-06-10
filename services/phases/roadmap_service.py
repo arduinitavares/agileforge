@@ -29,7 +29,6 @@ _PRESERVED_ROADMAP_STATES = {
     OrchestratorState.SPRINT_LIST.value,
     OrchestratorState.SPRINT_UPDATE_STORY.value,
     OrchestratorState.SPRINT_MODIFY.value,
-    OrchestratorState.SPRINT_COMPLETE.value,
 }
 _VALID_FSM_STATES = {state.value for state in OrchestratorState}
 

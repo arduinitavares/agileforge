@@ -3819,6 +3819,71 @@ def test_workflow_next_routes_impact_story_to_story_reconciliation(
     assert not any("backlog refine" in command for command in all_commands)
 
 
+def test_workflow_next_routes_impact_roadmap_to_roadmap_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route impact=roadmap to Roadmap reconciliation without Backlog scope."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="roadmap",
+            affected_requirements=["Milestone Ordering"],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_roadmap_reconciliation_available"
+    assert data["next_valid_commands"] == [
+        "agileforge roadmap history --project-id 7",
+        "agileforge roadmap generate --project-id 7 --input <feedback>",
+    ]
+    all_commands = (
+        data["next_valid_commands"]
+        + data["blocked_future_commands"]
+        + [
+            item["command"]
+            for item in data["blocked_commands"]
+            if isinstance(item, dict) and isinstance(item.get("command"), str)
+        ]
+    )
+    assert not any("backlog refine" in command for command in all_commands)
+    assert "agileforge sprint generate --project-id 7" not in all_commands
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge story generate",
+            "reason": "POST_SPRINT_ROADMAP_IMPACT_NEEDS_RECONCILIATION",
+            "message": (
+                "Roadmap-level post-sprint impact must be reconciled before "
+                "continuing Story or Sprint planning."
+            ),
+        },
+        {
+            "command": "agileforge sprint candidates",
+            "reason": "POST_SPRINT_ROADMAP_IMPACT_NEEDS_RECONCILIATION",
+            "message": (
+                "Roadmap-level post-sprint impact must be reconciled before "
+                "continuing Story or Sprint planning."
+            ),
+        },
+        {
+            "command": "agileforge sprint generate",
+            "reason": "POST_SPRINT_ROADMAP_IMPACT_NEEDS_RECONCILIATION",
+            "message": (
+                "Roadmap-level post-sprint impact must be reconciled before "
+                "continuing Story or Sprint planning."
+            ),
+        },
+    ]
+
+
 def test_workflow_next_routes_impact_task_to_carryover_blocker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

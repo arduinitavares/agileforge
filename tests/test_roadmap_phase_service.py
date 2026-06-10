@@ -171,6 +171,21 @@ def test_set_roadmap_fsm_state_preserves_sprint_modify_state() -> None:
     assert "fsm_state_entered_at" not in state
 
 
+def test_set_roadmap_fsm_state_moves_sprint_complete_to_review() -> None:
+    """Verify Roadmap generation can bridge from completed Sprint state."""
+    state: JsonDict = {"fsm_state": "SPRINT_COMPLETE"}
+
+    next_state = set_roadmap_fsm_state(
+        state,
+        is_complete=True,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+    )
+
+    assert next_state == "ROADMAP_REVIEW"
+    assert state["fsm_state"] == "ROADMAP_REVIEW"
+    assert state["fsm_state_entered_at"] == "2026-04-04T00:00:00Z"
+
+
 def test_ensure_roadmap_attempts_returns_existing_list() -> None:
     """Verify ensure roadmap attempts returns existing list."""
     attempts = [{"created_at": "2026-04-04T00:00:00Z"}]
