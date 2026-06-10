@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -26,11 +27,7 @@ TRIAGE_STORED_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
     "project_id",
     "sprint_id",
     "impact",
-    "affected_requirements",
-    "affected_task_ids",
-    "affected_story_ids",
-    "affected_backlog_item_ids",
-    "affected_roadmap_item_ids",
+    *TRIAGE_AFFECTED_FIELDS,
     "affected_layers",
     "learning_summary",
     "decision_reason",
@@ -43,6 +40,7 @@ TRIAGE_STORED_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 )
 TRIAGE_IMPACT_FIELDS_INVALID: Final[str] = "TRIAGE_IMPACT_FIELDS_INVALID"
 TRIAGE_REQUIRED_FIELD_MISSING: Final[str] = "TRIAGE_REQUIRED_FIELD_MISSING"
+TRIAGE_FIELD_INVALID: Final[str] = "TRIAGE_FIELD_INVALID"
 
 
 @dataclass(frozen=True)
@@ -70,7 +68,7 @@ def build_triage_payload(
     learning_summary: str,
     decision_reason: str,
     idempotency_key: str,
-    replace_existing: bool,
+    replace_existing: bool | str,
     recorded_at: str,
     recorded_by: str,
 ) -> dict[str, Any]:
@@ -82,12 +80,8 @@ def build_triage_payload(
         "affected_requirements": _normalize_text_list(affected_requirements),
         "affected_task_ids": _normalize_positive_int_list(affected_task_ids),
         "affected_story_ids": _normalize_positive_int_list(affected_story_ids),
-        "affected_backlog_item_ids": _normalize_positive_int_list(
-            affected_backlog_item_ids
-        ),
-        "affected_roadmap_item_ids": _normalize_positive_int_list(
-            affected_roadmap_item_ids
-        ),
+        "affected_backlog_item_ids": _normalize_text_list(affected_backlog_item_ids),
+        "affected_roadmap_item_ids": _normalize_text_list(affected_roadmap_item_ids),
     }
     normalized_layers = _normalize_affected_layers(affected_layers)
     normalized_learning_summary = _required_text(
@@ -104,6 +98,7 @@ def build_triage_payload(
     )
     normalized_recorded_at = _required_text(recorded_at, field_name="recorded_at")
     normalized_recorded_by = _required_text(recorded_by, field_name="recorded_by")
+    normalized_replace_existing = _normalize_replace_existing(replace_existing)
 
     _validate_impact_fields(
         impact=normalized_impact,
@@ -125,7 +120,7 @@ def build_triage_payload(
         "learning_summary": normalized_learning_summary,
         "decision_reason": normalized_decision_reason,
         "idempotency_key": normalized_idempotency_key,
-        "replace_existing": bool(replace_existing),
+        "replace_existing": normalized_replace_existing,
     }
     payload: dict[str, Any] = {
         "schema_version": TRIAGE_SCHEMA_VERSION,
@@ -151,7 +146,7 @@ def current_triage_for_latest_sprint(state: dict[str, Any]) -> dict[str, Any] | 
         return None
     if not _is_valid_stored_triage(triage):
         return None
-    return triage
+    return deepcopy(triage)
 
 
 def post_sprint_triage_required(state: dict[str, Any]) -> bool:
@@ -275,7 +270,24 @@ def _normalize_affected_layers(values: list[object] | None) -> list[str]:
                 "Use affected_layers from: task, story, roadmap, backlog.",
             ],
         )
-    return normalized_layers
+    return sorted(normalized_layers)
+
+
+def _normalize_replace_existing(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise PostSprintTriageValidationError(
+        code=TRIAGE_FIELD_INVALID,
+        message="replace_existing must be a boolean.",
+        details={"field": "replace_existing"},
+        remediation=["Provide replace_existing as true or false."],
+    )
 
 
 def _required_text(value: object, *, field_name: str) -> str:
@@ -411,11 +423,11 @@ def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
         )
         affected_task_ids = _stored_normalized_int_list(triage, "affected_task_ids")
         affected_story_ids = _stored_normalized_int_list(triage, "affected_story_ids")
-        affected_backlog_item_ids = _stored_normalized_int_list(
+        affected_backlog_item_ids = _stored_normalized_text_list(
             triage,
             "affected_backlog_item_ids",
         )
-        affected_roadmap_item_ids = _stored_normalized_int_list(
+        affected_roadmap_item_ids = _stored_normalized_text_list(
             triage,
             "affected_roadmap_item_ids",
         )
@@ -536,6 +548,8 @@ def _stored_normalized_layers(
     field_name: str,
 ) -> list[str]:
     value = _stored_normalized_text_list(triage, field_name)
+    if value != sorted(value):
+        raise TypeError(f"{field_name} must be sorted.")
     for item in value:
         if item.lower() != item or item not in VALID_AFFECTED_LAYERS:
             raise TypeError(f"{field_name} must contain normalized affected layers.")

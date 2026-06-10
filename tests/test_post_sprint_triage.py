@@ -160,6 +160,102 @@ def test_build_triage_payload_skips_fractional_numeric_ids() -> None:
     assert payload["affected_story_ids"] == [4]
 
 
+def test_build_triage_payload_preserves_backlog_and_roadmap_string_ids() -> None:
+    backlog_payload = build_triage_payload(
+        **_story_triage_kwargs(
+            impact="backlog",
+            affected_story_ids=[],
+            affected_backlog_item_ids=[" item-001 ", "item-001", "item-002"],
+            idempotency_key="triage-backlog-ids",
+        ),
+    )
+    roadmap_payload = build_triage_payload(
+        **_story_triage_kwargs(
+            impact="roadmap",
+            affected_story_ids=[],
+            affected_roadmap_item_ids=[" roadmap-001 ", "roadmap-001", "roadmap-002"],
+            idempotency_key="triage-roadmap-ids",
+        ),
+    )
+
+    assert backlog_payload["affected_backlog_item_ids"] == ["item-001", "item-002"]
+    assert roadmap_payload["affected_roadmap_item_ids"] == [
+        "roadmap-001",
+        "roadmap-002",
+    ]
+    assert current_triage_for_latest_sprint(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": backlog_payload,
+        }
+    ) == backlog_payload
+    assert current_triage_for_latest_sprint(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": roadmap_payload,
+        }
+    ) == roadmap_payload
+
+
+def test_build_triage_payload_parses_replace_existing_for_fingerprints() -> None:
+    bool_payload = build_triage_payload(
+        **_story_triage_kwargs(
+            idempotency_key="triage-replace-existing",
+            replace_existing=False,
+        ),
+    )
+    string_payload = build_triage_payload(
+        **_story_triage_kwargs(
+            idempotency_key="triage-replace-existing",
+            replace_existing="false",
+        ),
+    )
+    true_payload = build_triage_payload(
+        **_story_triage_kwargs(
+            idempotency_key="triage-replace-existing",
+            replace_existing="TRUE",
+        ),
+    )
+
+    assert string_payload["replace_existing"] is False
+    assert true_payload["replace_existing"] is True
+    assert string_payload["request_fingerprint"] == bool_payload["request_fingerprint"]
+
+
+def test_build_triage_payload_rejects_invalid_replace_existing() -> None:
+    with pytest.raises(PostSprintTriageValidationError) as excinfo:
+        build_triage_payload(
+            **_story_triage_kwargs(replace_existing="yes"),
+        )
+
+    assert excinfo.value.code == "TRIAGE_FIELD_INVALID"
+
+
+def test_build_triage_payload_canonicalizes_multiple_layers_for_fingerprint() -> None:
+    story_first = build_triage_payload(
+        **_story_triage_kwargs(
+            impact="multiple",
+            affected_story_ids=[],
+            affected_layers=["story", "backlog"],
+            idempotency_key="triage-multiple-layers",
+        ),
+    )
+    backlog_first = build_triage_payload(
+        **_story_triage_kwargs(
+            impact="multiple",
+            affected_story_ids=[],
+            affected_layers=["backlog", "story"],
+            idempotency_key="triage-multiple-layers",
+        ),
+    )
+
+    assert story_first["affected_layers"] == ["backlog", "story"]
+    assert backlog_first["affected_layers"] == ["backlog", "story"]
+    assert story_first["request_fingerprint"] == backlog_first["request_fingerprint"]
+
+
 def test_build_triage_payload_normalizes_top_level_ids_before_fingerprinting() -> None:
     int_payload = build_triage_payload(
         **_story_triage_kwargs(
@@ -308,6 +404,41 @@ def test_current_triage_for_latest_sprint_accepts_matching_sprint_id() -> None:
 
     assert current_triage_for_latest_sprint(state) == triage
     assert post_sprint_triage_required(state) is False
+
+
+def test_current_triage_for_latest_sprint_returns_safe_copy() -> None:
+    triage = build_triage_payload(
+        project_id=7,
+        sprint_id=14,
+        impact="none",
+        affected_requirements=[],
+        affected_task_ids=[],
+        affected_story_ids=[],
+        affected_backlog_item_ids=[],
+        affected_roadmap_item_ids=[],
+        affected_layers=[],
+        learning_summary="No follow-up required.",
+        decision_reason="Sprint learning is already accounted for.",
+        idempotency_key="triage-current-copy",
+        replace_existing=False,
+        recorded_at="2026-06-10T00:00:00Z",
+        recorded_by="cli-agent",
+    )
+    state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": 14,
+        "post_sprint_triage": triage,
+    }
+
+    current = current_triage_for_latest_sprint(state)
+    assert current == triage
+    assert current is not state["post_sprint_triage"]
+    assert current is not None
+    current["learning_summary"] = "mutated"
+    current["affected_requirements"].append("Mutation")
+
+    assert state["post_sprint_triage"]["learning_summary"] == "No follow-up required."
+    assert state["post_sprint_triage"]["affected_requirements"] == []
 
 
 def test_current_triage_for_latest_sprint_rejects_extra_stored_keys() -> None:
