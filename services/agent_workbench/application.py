@@ -798,6 +798,24 @@ class AgentWorkbenchApplication:
                 review=review,
             )
 
+        fsm_state = _fsm_state_from_envelope(workflow)
+        if fsm_state == "SPRINT_COMPLETE":
+            state = _envelope_data(workflow).get("state")
+            state_data = state if isinstance(state, dict) else {}
+            current_triage = current_triage_for_latest_sprint(state_data)
+            sprint_candidates = (
+                self.sprint_candidates(project_id=project_id)
+                if current_triage is not None
+                and current_triage.get("impact") == "none"
+                and _stale_backlog_reason(workflow) is None
+                else None
+            )
+            return _sprint_complete_workflow_next(
+                project_id=project_id,
+                workflow=workflow,
+                sprint_candidates=sprint_candidates,
+            )
+
         phase_next_handlers = (
             _vision_workflow_next,
             _backlog_workflow_next,
@@ -1930,6 +1948,18 @@ def _positive_int_or_none(value: object) -> int | None:
     return None
 
 
+def _sprint_candidate_count(candidates: dict[str, Any] | None) -> int | None:
+    """Return non-negative Sprint candidate counts from a read projection."""
+    if candidates is None or candidates.get("ok") is not True:
+        return None
+    count = _envelope_data(candidates).get("count")
+    if isinstance(count, bool):
+        return None
+    if isinstance(count, int) and count >= 0:
+        return count
+    return None
+
+
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     """Return whether workflow state has the exact active-reset stale marker."""
     data = _envelope_data(envelope)
@@ -2818,6 +2848,20 @@ def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
     )
 
 
+def _uncovered_story_requirements(workflow: dict[str, Any]) -> list[str]:
+    """Return Roadmap requirements that still need saved or merged Stories."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    return [
+        requirement
+        for requirement in _roadmap_requirements_from_state(state_data)
+        if not _story_requirement_is_covered(
+            state_data,
+            parent_requirement=requirement,
+        )
+    ]
+
+
 def _roadmap_requirements_from_state(state: dict[str, Any]) -> list[str]:
     """Return Roadmap requirement titles from workflow state."""
     releases = state.get("roadmap_releases")
@@ -2934,6 +2978,7 @@ def _sprint_complete_workflow_next(
     *,
     project_id: int,
     workflow: dict[str, Any],
+    sprint_candidates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return workflow-next routing for SPRINT_COMPLETE."""
     next_valid_commands: list[str] = []
@@ -2991,6 +3036,7 @@ def _sprint_complete_workflow_next(
         project_id=project_id,
         workflow=workflow,
         triage=current_triage,
+        sprint_candidates=sprint_candidates,
     )
     if impact_next is not None:
         return impact_next
@@ -3023,6 +3069,7 @@ def _post_sprint_triage_impact_next(
     project_id: int,
     workflow: dict[str, Any],
     triage: dict[str, Any] | None,
+    sprint_candidates: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return routed workflow-next data for recorded triage impacts."""
     if triage is None:
@@ -3032,6 +3079,7 @@ def _post_sprint_triage_impact_next(
         impact_next = _post_sprint_none_next(
             project_id=project_id,
             workflow=workflow,
+            sprint_candidates=sprint_candidates,
         )
     elif triage_impact == "story":
         impact_next = _post_sprint_story_next(
@@ -3070,10 +3118,11 @@ def _post_sprint_none_next(
     *,
     project_id: int,
     workflow: dict[str, Any],
+    sprint_candidates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return next-cycle routing when triage records no follow-up impact."""
     planned_sprint_id = _planned_sprint_id(workflow)
-    blocked_commands: list[dict[str, str]] = []
+    blocked_commands: list[dict[str, Any]] = []
     commands = [
         (
             "agileforge story pending",
@@ -3084,6 +3133,62 @@ def _post_sprint_none_next(
             f"agileforge sprint candidates --project-id {project_id}",
         ),
     ]
+    pending_story_requirements = _uncovered_story_requirements(workflow)
+    candidate_count = _sprint_candidate_count(sprint_candidates)
+    if (
+        planned_sprint_id is None
+        and candidate_count == 0
+        and pending_story_requirements
+    ):
+        story_command = (
+            f"agileforge story generate --project-id {project_id} "
+            f"{_story_parent_requirement_flag(pending_story_requirements[0])}"
+        )
+        commands.insert(
+            1,
+            (
+                "agileforge story generate",
+                story_command,
+            ),
+        )
+        next_valid_commands, blocked_future_commands = _installed_command_texts(
+            commands
+        )
+        story_command_installed = command_is_available("agileforge story generate")
+        status = "post_sprint_story_generation_required"
+        return _sprint_complete_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=[
+                {
+                    "command": "agileforge sprint generate",
+                    "reason": "NO_SAVED_SPRINT_CANDIDATES",
+                    "message": (
+                        "Sprint generation is blocked until at least one saved Story "
+                        "candidate is available."
+                    ),
+                    "candidate_count": candidate_count,
+                    "pending_story_requirements": len(pending_story_requirements),
+                }
+            ],
+            blocked_future_commands=blocked_future_commands,
+            status=status,
+            next_actions=[
+                {
+                    "command": story_command,
+                    "status": status,
+                    "reason": (
+                        "Post-sprint triage recorded no follow-up impact, but no "
+                        "Sprint candidates are available and Roadmap requirements "
+                        "still need saved Stories."
+                    ),
+                    "runnable": story_command_installed,
+                    "installed": story_command_installed,
+                    "requires_cli_installation": not story_command_installed,
+                }
+            ],
+        )
     if planned_sprint_id is None:
         commands.append(
             (

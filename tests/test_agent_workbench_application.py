@@ -319,6 +319,60 @@ class _SprintCompleteWithCurrentTriageReadProjection(_FakeReadProjection):
         }
         return result
 
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return available Sprint candidates for the next-cycle planning path."""
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "items": [{"story_id": 101}, {"story_id": 102}],
+                "count": 2,
+                "excluded_counts": {},
+                "source_fingerprint": CANDIDATES_FINGERPRINT,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _SprintCompleteTriagedNoneNoCandidatesReadProjection(
+    _SprintCompleteWithCurrentTriageReadProjection
+):
+    """Fake completed Sprint state with pending Story work and no candidates."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with uncovered Roadmap requirements."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "roadmap_releases": [
+                    {
+                        "items": [
+                            "Technology and Model Research Spike",
+                            "pyrepo-check Quality Gate Integration",
+                        ]
+                    }
+                ],
+                "story_saved": {"Technology and Model Research Spike": True},
+            }
+        )
+        return result
+
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return no eligible Sprint candidates with non-refined exclusions."""
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "items": [],
+                "count": 0,
+                "excluded_counts": {"non_refined": 1},
+                "source_fingerprint": CANDIDATES_FINGERPRINT,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
 
 class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjection):
     """Fake completed Sprint state with a source Backlog attempt."""
@@ -3774,6 +3828,66 @@ def test_workflow_next_routes_impact_none_to_story_and_sprint_continuation(
         "installed": True,
         "requires_cli_installation": False,
     } in data["next_actions"]
+
+
+def test_workflow_next_routes_impact_none_with_no_candidates_to_story_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route impact=none to Story generation when no Sprint candidates exist."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_story_generation_required"
+    assert data["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story generate --project-id 7 "
+            '--parent-requirement "pyrepo-check Quality Gate Integration"'
+        ),
+        "agileforge sprint candidates --project-id 7",
+    ]
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge sprint generate",
+            "reason": "NO_SAVED_SPRINT_CANDIDATES",
+            "message": (
+                "Sprint generation is blocked until at least one saved Story "
+                "candidate is available."
+            ),
+            "candidate_count": 0,
+            "pending_story_requirements": 1,
+        }
+    ]
+    assert data["next_actions"] == [
+        {
+            "command": (
+                "agileforge story generate --project-id 7 "
+                '--parent-requirement "pyrepo-check Quality Gate Integration"'
+            ),
+            "status": "post_sprint_story_generation_required",
+            "reason": (
+                "Post-sprint triage recorded no follow-up impact, but no "
+                "Sprint candidates are available and Roadmap requirements "
+                "still need saved Stories."
+            ),
+            "runnable": True,
+            "installed": True,
+            "requires_cli_installation": False,
+        }
+    ]
 
 
 def test_workflow_next_routes_impact_story_to_story_reconciliation(
