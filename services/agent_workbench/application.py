@@ -569,6 +569,38 @@ class _SprintPhaseRunner(Protocol):
         """Close the active Sprint."""
         ...
 
+    def review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return post-sprint review context."""
+        ...
+
+    def triage(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        impact: str,
+        learning_summary: str,
+        decision_reason: str,
+        idempotency_key: str,
+        affected_requirements: list[str] | None = None,
+        affected_task_ids: list[int] | None = None,
+        affected_story_ids: list[int] | None = None,
+        affected_backlog_item_ids: list[str] | None = None,
+        affected_roadmap_item_ids: list[str] | None = None,
+        affected_layers: list[str] | None = None,
+        sprint_id: int | None = None,
+        replace_existing: bool = False,
+        expected_triage_fingerprint: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record post-sprint triage metadata."""
+        ...
+
 
 class _EvidenceCollectionRunner(Protocol):
     """Evidence collection commands exposed through the facade."""
@@ -1648,6 +1680,58 @@ class AgentWorkbenchApplication:
             completion_notes=completion_notes,
             follow_up_notes=follow_up_notes,
             sprint_id=sprint_id,
+            changed_by=changed_by,
+        )
+
+    def sprint_review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return post-sprint review context."""
+        return self._get_sprint_runner().review(
+            project_id=project_id,
+            sprint_id=sprint_id,
+        )
+
+    def sprint_triage(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        impact: str,
+        learning_summary: str,
+        decision_reason: str,
+        idempotency_key: str,
+        affected_requirements: list[str] | None = None,
+        affected_task_ids: list[int] | None = None,
+        affected_story_ids: list[int] | None = None,
+        affected_backlog_item_ids: list[str] | None = None,
+        affected_roadmap_item_ids: list[str] | None = None,
+        affected_layers: list[str] | None = None,
+        sprint_id: int | None = None,
+        replace_existing: bool = False,
+        expected_triage_fingerprint: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record post-sprint triage metadata."""
+        return self._get_sprint_runner().triage(
+            project_id=project_id,
+            expected_state=expected_state,
+            impact=impact,
+            learning_summary=learning_summary,
+            decision_reason=decision_reason,
+            idempotency_key=idempotency_key,
+            affected_requirements=affected_requirements,
+            affected_task_ids=affected_task_ids,
+            affected_story_ids=affected_story_ids,
+            affected_backlog_item_ids=affected_backlog_item_ids,
+            affected_roadmap_item_ids=affected_roadmap_item_ids,
+            affected_layers=affected_layers,
+            sprint_id=sprint_id,
+            replace_existing=replace_existing,
+            expected_triage_fingerprint=expected_triage_fingerprint,
             changed_by=changed_by,
         )
 

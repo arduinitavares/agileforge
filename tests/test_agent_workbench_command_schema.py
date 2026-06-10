@@ -80,7 +80,9 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story dependencies apply",
     "agileforge sprint generate",
     "agileforge sprint history",
+    "agileforge sprint review",
     "agileforge sprint save",
+    "agileforge sprint triage",
 }
 
 EXPECTED_PHASE_2E_COMMAND_NAMES = {
@@ -759,6 +761,39 @@ def test_story_command_contracts() -> None:
 setattr(test_story_command_contracts, "story_complete", True)  # noqa: B010
 
 
+def test_command_schema_includes_sprint_review_and_triage() -> None:
+    """Expose post-sprint review and triage command contracts."""
+    review = command_schema_payload("agileforge sprint review")
+    triage = command_schema_payload("agileforge sprint triage")
+
+    assert review["mutates"] is False
+    assert review["input"]["required"] == ["project_id"]
+    assert review["input"]["optional"] == ["sprint_id"]
+
+    assert triage["mutates"] is True
+    assert triage["idempotency_required"] is True
+    assert triage["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "impact",
+        "learning_summary",
+        "decision_reason",
+        "idempotency_key",
+    ]
+    assert triage["input"]["optional"] == [
+        "sprint_id",
+        "affected_requirement",
+        "affected_task_id",
+        "affected_story_id",
+        "affected_backlog_item_id",
+        "affected_roadmap_item_id",
+        "affected_layer",
+        "replace_existing",
+        "expected_triage_fingerprint",
+        "changed_by",
+    ]
+
+
 def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Sprint phase generation commands as installed CLI capabilities."""
     names = installed_command_names()
@@ -766,6 +801,7 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     sprint_command_names = {
         "agileforge sprint generate",
         "agileforge sprint history",
+        "agileforge sprint review",
         "agileforge sprint save",
         "agileforge sprint start",
         "agileforge sprint status",
@@ -776,6 +812,7 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
         "agileforge sprint task show",
         "agileforge sprint task update",
         "agileforge sprint tasks",
+        "agileforge sprint triage",
     }
 
     assert sprint_command_names.issubset(names)
@@ -786,10 +823,12 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
 
     generate = command_schema_payload("agileforge sprint generate")
     history = command_schema_payload("agileforge sprint history")
+    review = command_schema_payload("agileforge sprint review")
     save = command_schema_payload("agileforge sprint save")
     start = command_schema_payload("agileforge sprint start")
     status = command_schema_payload("agileforge sprint status")
     tasks = command_schema_payload("agileforge sprint tasks")
+    triage = command_schema_payload("agileforge sprint triage")
     story_readiness = command_schema_payload("agileforge sprint story readiness")
     story_close = command_schema_payload("agileforge sprint story close")
     task_next = command_schema_payload("agileforge sprint task next")
@@ -809,6 +848,9 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     ]
     assert history["mutates"] is False
     assert history["input"]["required"] == ["project_id"]
+    assert review["mutates"] is False
+    assert review["input"]["required"] == ["project_id"]
+    assert review["input"]["optional"] == ["sprint_id"]
     assert save["mutates"] is True
     assert save["input"]["required"] == [
         "project_id",
@@ -834,6 +876,28 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     assert tasks["mutates"] is False
     assert tasks["input"]["required"] == ["project_id"]
     assert tasks["input"]["optional"] == ["sprint_id"]
+    assert triage["mutates"] is True
+    assert triage["idempotency_required"] is True
+    assert triage["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "impact",
+        "learning_summary",
+        "decision_reason",
+        "idempotency_key",
+    ]
+    assert triage["input"]["optional"] == [
+        "sprint_id",
+        "affected_requirement",
+        "affected_task_id",
+        "affected_story_id",
+        "affected_backlog_item_id",
+        "affected_roadmap_item_id",
+        "affected_layer",
+        "replace_existing",
+        "expected_triage_fingerprint",
+        "changed_by",
+    ]
     assert story_readiness["mutates"] is False
     assert story_readiness["input"]["required"] == ["project_id", "story_id"]
     assert story_readiness["input"]["optional"] == ["sprint_id"]
@@ -884,10 +948,12 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     for schema in (
         generate,
         history,
+        review,
         save,
         start,
         status,
         tasks,
+        triage,
         story_readiness,
         story_close,
         task_next,

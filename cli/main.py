@@ -714,6 +714,38 @@ class _Application(Protocol):
         """Close the active Sprint."""
         ...
 
+    def sprint_review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return post-sprint review context."""
+        ...
+
+    def sprint_triage(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        impact: str,
+        learning_summary: str,
+        decision_reason: str,
+        idempotency_key: str,
+        affected_requirements: list[str] | None = None,
+        affected_task_ids: list[int] | None = None,
+        affected_story_ids: list[int] | None = None,
+        affected_backlog_item_ids: list[str] | None = None,
+        affected_roadmap_item_ids: list[str] | None = None,
+        affected_layers: list[str] | None = None,
+        sprint_id: int | None = None,
+        replace_existing: bool = False,
+        expected_triage_fingerprint: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record post-sprint triage metadata."""
+        ...
+
     def context_pack(
         self,
         *,
@@ -1731,6 +1763,61 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     sprint_close.add_argument("--sprint-id", type=int)
     sprint_close.add_argument("--changed-by", default="cli-agent")
     sprint_close.set_defaults(command_handler=_sprint_close)
+    sprint_review = sprint_sub.add_parser(
+        "review",
+        help="Review completed Sprint learning before routing the next cycle.",
+    )
+    sprint_review.add_argument("--project-id", type=int, required=True)
+    sprint_review.add_argument("--sprint-id", type=int)
+    sprint_review.set_defaults(command_handler=_sprint_review)
+    sprint_triage = sprint_sub.add_parser(
+        "triage",
+        help="Record post-sprint learning impact routing.",
+    )
+    sprint_triage.add_argument("--project-id", type=int, required=True)
+    sprint_triage.add_argument("--sprint-id", type=int)
+    sprint_triage.add_argument("--expected-state", required=True)
+    sprint_triage.add_argument(
+        "--impact",
+        choices=("none", "task", "story", "roadmap", "backlog", "multiple"),
+        required=True,
+    )
+    sprint_triage.add_argument("--affected-requirement", action="append", default=[])
+    sprint_triage.add_argument(
+        "--affected-task-id",
+        action="append",
+        type=int,
+        default=[],
+    )
+    sprint_triage.add_argument(
+        "--affected-story-id",
+        action="append",
+        type=int,
+        default=[],
+    )
+    sprint_triage.add_argument(
+        "--affected-backlog-item-id",
+        action="append",
+        default=[],
+    )
+    sprint_triage.add_argument(
+        "--affected-roadmap-item-id",
+        action="append",
+        default=[],
+    )
+    sprint_triage.add_argument(
+        "--affected-layer",
+        action="append",
+        choices=("task", "story", "roadmap", "backlog"),
+        default=[],
+    )
+    sprint_triage.add_argument("--learning-summary", required=True)
+    sprint_triage.add_argument("--decision-reason", required=True)
+    sprint_triage.add_argument("--idempotency-key", required=True)
+    sprint_triage.add_argument("--replace-existing", action="store_true")
+    sprint_triage.add_argument("--expected-triage-fingerprint")
+    sprint_triage.add_argument("--changed-by", default="cli-agent")
+    sprint_triage.set_defaults(command_handler=_sprint_triage)
     sprint_story = sprint_sub.add_parser(
         "story",
         help="Inspect and close active Sprint stories.",
@@ -3211,6 +3298,42 @@ def _sprint_close(
         completion_notes=args.completion_notes,
         follow_up_notes=args.follow_up_notes,
         sprint_id=args.sprint_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _sprint_review(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route post-sprint review to the application facade."""
+    return "agileforge sprint review", application.sprint_review(
+        project_id=args.project_id,
+        sprint_id=args.sprint_id,
+    )
+
+
+def _sprint_triage(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route post-sprint triage to the application facade."""
+    return "agileforge sprint triage", application.sprint_triage(
+        project_id=args.project_id,
+        expected_state=args.expected_state,
+        impact=args.impact,
+        learning_summary=args.learning_summary,
+        decision_reason=args.decision_reason,
+        idempotency_key=args.idempotency_key,
+        affected_requirements=args.affected_requirement,
+        affected_task_ids=args.affected_task_id,
+        affected_story_ids=args.affected_story_id,
+        affected_backlog_item_ids=args.affected_backlog_item_id,
+        affected_roadmap_item_ids=args.affected_roadmap_item_id,
+        affected_layers=args.affected_layer,
+        sprint_id=args.sprint_id,
+        replace_existing=args.replace_existing,
+        expected_triage_fingerprint=args.expected_triage_fingerprint,
         changed_by=args.changed_by,
     )
 

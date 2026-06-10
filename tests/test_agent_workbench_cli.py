@@ -1227,6 +1227,74 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def sprint_review(
+        self,
+        *,
+        project_id: int,
+        sprint_id: int | None = None,
+    ) -> JsonObject:
+        """Return a post-sprint review payload."""
+        self.calls.append(
+            ("sprint_review", {"project_id": project_id, "sprint_id": sprint_id})
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "sprint_id": sprint_id or 11},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_triage(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        impact: str,
+        learning_summary: str,
+        decision_reason: str,
+        idempotency_key: str,
+        affected_requirements: list[str] | None = None,
+        affected_task_ids: list[int] | None = None,
+        affected_story_ids: list[int] | None = None,
+        affected_backlog_item_ids: list[str] | None = None,
+        affected_roadmap_item_ids: list[str] | None = None,
+        affected_layers: list[str] | None = None,
+        sprint_id: int | None = None,
+        replace_existing: bool = False,
+        expected_triage_fingerprint: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a post-sprint triage payload."""
+        self.calls.append(
+            (
+                "sprint_triage",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "impact": impact,
+                    "learning_summary": learning_summary,
+                    "decision_reason": decision_reason,
+                    "idempotency_key": idempotency_key,
+                    "affected_requirements": affected_requirements,
+                    "affected_task_ids": affected_task_ids,
+                    "affected_story_ids": affected_story_ids,
+                    "affected_backlog_item_ids": affected_backlog_item_ids,
+                    "affected_roadmap_item_ids": affected_roadmap_item_ids,
+                    "affected_layers": affected_layers,
+                    "sprint_id": sprint_id,
+                    "replace_existing": replace_existing,
+                    "expected_triage_fingerprint": expected_triage_fingerprint,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "impact": impact},
+            "warnings": [],
+            "errors": [],
+        }
+
     def context_pack(
         self,
         *,
@@ -3285,6 +3353,79 @@ def test_sprint_close_cli_routes_readiness_and_guarded_close(
             },
         ),
     ]
+
+
+def test_sprint_review_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint review CLI routes to the application facade."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        ["sprint", "review", "--project-id", "7", "--sprint-id", "11"],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["sprint_id"] == 11
+    assert app.calls[-1] == ("sprint_review", {"project_id": 7, "sprint_id": 11})
+
+
+def test_sprint_triage_cli_routes_learning_impact(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint triage CLI routes learning impact fields."""
+    app = _FakeApplication()
+
+    exit_code = main(
+        [
+            "sprint",
+            "triage",
+            "--project-id",
+            "7",
+            "--expected-state",
+            "SPRINT_COMPLETE",
+            "--impact",
+            "multiple",
+            "--affected-layer",
+            "story",
+            "--affected-layer",
+            "backlog",
+            "--learning-summary",
+            "Learned",
+            "--decision-reason",
+            "Routing",
+            "--idempotency-key",
+            "triage-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert exit_code == 0
+    assert payload["data"]["impact"] == "multiple"
+    assert app.calls[-1] == (
+        "sprint_triage",
+        {
+            "project_id": 7,
+            "expected_state": "SPRINT_COMPLETE",
+            "impact": "multiple",
+            "learning_summary": "Learned",
+            "decision_reason": "Routing",
+            "idempotency_key": "triage-001",
+            "affected_requirements": [],
+            "affected_task_ids": [],
+            "affected_story_ids": [],
+            "affected_backlog_item_ids": [],
+            "affected_roadmap_item_ids": [],
+            "affected_layers": ["story", "backlog"],
+            "sprint_id": None,
+            "replace_existing": False,
+            "expected_triage_fingerprint": None,
+            "changed_by": "cli-agent",
+        },
+    )
 
 
 def test_story_save_cli_flattens_save_result(
