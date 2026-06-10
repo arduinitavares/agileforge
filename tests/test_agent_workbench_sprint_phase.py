@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -1803,6 +1804,13 @@ def test_sprint_triage_records_metadata_without_changing_fsm_state(
     assert triage_event is not None
     assert triage_event.product_id == product.product_id
     assert triage_event.sprint_id == completed_sprint.sprint_id
+    event_metadata = json.loads(triage_event.event_metadata or "{}")
+    assert event_metadata["history_action"] == "recorded"
+    assert event_metadata["replace_existing"] is False
+    assert (
+        event_metadata["triage_fingerprint"]
+        == result["data"]["post_sprint_triage"]["triage_fingerprint"]
+    )
 
 
 def test_sprint_triage_guarded_correction_supersedes_previous_payload(
@@ -1873,6 +1881,146 @@ def test_sprint_triage_guarded_correction_supersedes_previous_payload(
         entry["history_action"]
         for entry in workflow.state["post_sprint_triage_history"]
     ] == ["recorded", "superseded", "corrected"]
+    triage_events = session.exec(
+        select(WorkflowEvent)
+        .where(
+            WorkflowEvent.event_type == WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED
+        )
+        .order_by(cast("Any", WorkflowEvent.event_id))
+    ).all()
+    expected_event_count = 2
+    assert len(triage_events) == expected_event_count
+    correction_metadata = json.loads(triage_events[-1].event_metadata or "{}")
+    assert correction_metadata["history_action"] == "corrected"
+    assert correction_metadata["superseded_triage_fingerprint"] == first_fingerprint
+    assert (
+        correction_metadata["triage_fingerprint"]
+        == second["data"]["post_sprint_triage"]["triage_fingerprint"]
+    )
+
+
+def test_sprint_triage_detects_existing_triage_with_string_latest_sprint_id(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage should not miss current triage when state ids are strings."""
+    product = Product(name="Triage String Latest Product")
+    team = Team(name="Triage String Latest Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Detect existing triage with string latest id",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": str(completed_sprint.sprint_id),
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    first = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-string-latest-001",
+        changed_by="cli-agent",
+    )
+    second = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are still needed.",
+        decision_reason="Trying to record an unguarded duplicate.",
+        idempotency_key="triage-string-latest-002",
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "TRIAGE_ALREADY_RECORDED"
+
+
+def test_sprint_triage_replays_normalized_equivalent_idempotency_request(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage idempotency should use normalized request semantics."""
+    product = Product(name="Triage Normalized Replay Product")
+    team = Team(name="Triage Normalized Replay Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Replay normalized triage request",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    first = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-normalized-replay-001",
+        replace_existing=cast("Any", "false"),
+        changed_by="cli-agent",
+    )
+    replay = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-normalized-replay-001",
+        replace_existing=False,
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+    assert (
+        replay["data"]["post_sprint_triage"]["request_fingerprint"]
+        == first["data"]["post_sprint_triage"]["request_fingerprint"]
+    )
 
 
 def test_sprint_triage_preserves_required_field_validation_code(

@@ -962,7 +962,7 @@ class SprintPhaseRunner:
             return _phase_error(exc)
         return _data_envelope(data)
 
-    def triage(  # noqa: C901, PLR0913, PLR0915
+    def triage(  # noqa: C901, PLR0912, PLR0913, PLR0915
         self,
         *,
         project_id: int,
@@ -993,43 +993,6 @@ class SprintPhaseRunner:
             if sprint_id is not None
             else _int_or_none(state.get("latest_completed_sprint_id"))
         )
-        request_payload = {
-            "project_id": project_id,
-            "sprint_id": resolved_sprint_id,
-            "expected_state": expected_state,
-            "impact": impact,
-            "affected_requirements": affected_requirements or [],
-            "affected_task_ids": affected_task_ids or [],
-            "affected_story_ids": affected_story_ids or [],
-            "affected_backlog_item_ids": affected_backlog_item_ids or [],
-            "affected_roadmap_item_ids": affected_roadmap_item_ids or [],
-            "affected_layers": affected_layers or [],
-            "learning_summary": learning_summary,
-            "decision_reason": decision_reason,
-            "replace_existing": replace_existing,
-            "expected_triage_fingerprint": expected_triage_fingerprint,
-            "changed_by": changed_by,
-        }
-        engine = get_engine()
-        ledger = MutationLedgerRepository(engine=engine)
-        ledger_result = ledger.create_or_load(
-            command=_SPRINT_TRIAGE_COMMAND,
-            idempotency_key=idempotency_key,
-            request_hash=canonical_hash(request_payload),
-            project_id=project_id,
-            correlation_id=f"sprint-triage:{uuid4()}",
-            changed_by=changed_by,
-            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
-            now=datetime.now(UTC),
-        )
-        if ledger_result.error_code is not None:
-            return _ledger_error(ledger_result)
-        if ledger_result.replayed:
-            replay = ledger_result.response or {}
-            if isinstance(replay.get("data"), dict):
-                replay["data"].setdefault("idempotency", {})["replayed"] = True
-            return replay
-
         try:
             _assert_post_sprint_triage_state(
                 state=state,
@@ -1055,6 +1018,33 @@ class SprintPhaseRunner:
                 recorded_at=recorded_at,
                 recorded_by=changed_by,
             )
+        except PostSprintTriageValidationError as exc:
+            return _post_sprint_triage_validation_error(exc)
+        except _SprintTriageError as exc:
+            return _post_sprint_triage_error(exc)
+
+        normalized_replace_existing = bool(triage_payload["replace_existing"])
+        engine = get_engine()
+        ledger = MutationLedgerRepository(engine=engine)
+        ledger_result = ledger.create_or_load(
+            command=_SPRINT_TRIAGE_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=str(triage_payload["request_fingerprint"]),
+            project_id=project_id,
+            correlation_id=f"sprint-triage:{uuid4()}",
+            changed_by=changed_by,
+            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
+            now=datetime.now(UTC),
+        )
+        if ledger_result.error_code is not None:
+            return _ledger_error(ledger_result)
+        if ledger_result.replayed:
+            replay = ledger_result.response or {}
+            if isinstance(replay.get("data"), dict):
+                replay["data"].setdefault("idempotency", {})["replayed"] = True
+            return replay
+
+        try:
             with Session(engine) as session:
                 sprint = _completed_sprint(
                     session=session,
@@ -1066,12 +1056,12 @@ class SprintPhaseRunner:
                 event_metadata: dict[str, Any] = {
                     "project_id": project_id,
                     "sprint_id": resolved_sprint_id_int,
-                    "replace_existing": replace_existing,
+                    "replace_existing": normalized_replace_existing,
                     "triage_fingerprint": triage_payload["triage_fingerprint"],
                 }
 
                 if current_triage is None:
-                    if replace_existing:
+                    if normalized_replace_existing:
                         _raise_triage_fingerprint_mismatch(
                             expected_triage_fingerprint=expected_triage_fingerprint,
                             current_triage_fingerprint=None,
@@ -1088,7 +1078,7 @@ class SprintPhaseRunner:
                     )
                     event_metadata["history_action"] = "recorded"
                 else:
-                    if not replace_existing:
+                    if not normalized_replace_existing:
                         _raise_triage_already_recorded(
                             sprint_id=resolved_sprint_id_int,
                             current_triage=current_triage,

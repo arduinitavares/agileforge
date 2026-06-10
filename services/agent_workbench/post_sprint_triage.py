@@ -150,14 +150,16 @@ def build_triage_payload(
 
 def current_triage_for_latest_sprint(state: dict[str, Any]) -> dict[str, Any] | None:
     """Return stored triage only when it belongs to the latest completed sprint."""
-    latest_completed_sprint_id = state.get("latest_completed_sprint_id")
+    latest_completed_sprint_id = _positive_int_or_none(
+        state.get("latest_completed_sprint_id")
+    )
     if latest_completed_sprint_id is None:
         return None
 
     triage = state.get("post_sprint_triage")
     if not isinstance(triage, dict):
         return None
-    if triage.get("sprint_id") != latest_completed_sprint_id:
+    if _positive_int_or_none(triage.get("sprint_id")) != latest_completed_sprint_id:
         return None
     if not _is_valid_stored_triage(triage):
         return None
@@ -168,7 +170,7 @@ def post_sprint_triage_required(state: dict[str, Any]) -> bool:
     """Return whether the latest completed sprint still needs triage."""
     if state.get("fsm_state") != "SPRINT_COMPLETE":
         return False
-    if state.get("latest_completed_sprint_id") is None:
+    if _positive_int_or_none(state.get("latest_completed_sprint_id")) is None:
         return False
     return current_triage_for_latest_sprint(state) is None
 
