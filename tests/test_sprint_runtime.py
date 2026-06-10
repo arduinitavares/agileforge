@@ -717,6 +717,130 @@ def test_selected_story_scope_message_hides_internal_scope_hash() -> None:
     )
 
 
+def test_milestone_scope_candidate_message_uses_milestone_label() -> None:
+    """Milestone scope messages should use the milestone label, not internal ids."""
+    result = sprint_input.apply_story_completion_scope_to_candidate_result(
+        {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "source_requirement": "enable login",
+                },
+            ],
+            "readiness": {"status": "ready", "blocking_codes": []},
+        },
+        {
+            "scope": "milestone",
+            "scope_id": "milestone_0",
+            "requirements": ["Enable Login"],
+        },
+    )
+
+    assert result["message"] == "Found 1 sprint candidate for milestone Story scope."
+
+
+def test_generic_scope_candidate_message_avoids_internal_scope_id() -> None:
+    """Unknown scope kinds should fall back to a generic Story scope label."""
+    result = sprint_input.apply_story_completion_scope_to_candidate_result(
+        {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "source_requirement": "enable login",
+                },
+                {
+                    "story_id": 12,
+                    "story_title": "Reset email",
+                    "source_requirement": "reset password",
+                },
+            ],
+            "readiness": {"status": "ready", "blocking_codes": []},
+        },
+        {
+            "scope": "custom",
+            "scope_id": "selection:sha256:secret",
+            "requirements": ["Enable Login", "Reset Password"],
+        },
+    )
+
+    assert result["message"] == "Found 2 sprint candidates for Story scope."
+    assert "sha256" not in result["message"]
+
+
+def test_scope_candidate_message_uses_singular_excluded_requirement() -> None:
+    """Excluded-count copy should use singular wording for one requirement."""
+    result = sprint_input.apply_story_completion_scope_to_candidate_result(
+        {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 11,
+                    "story_title": "Login UI",
+                    "source_requirement": "enable login",
+                },
+            ],
+            "excluded_counts": {"non_refined": 1},
+            "readiness": {"status": "ready", "blocking_codes": []},
+        },
+        {
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Enable Login"],
+        },
+    )
+
+    assert result["message"] == (
+        "Found 1 sprint candidate for selected-story scope. "
+        "Excluded: 1 non-refined requirement."
+    )
+
+
+def test_apply_story_completion_scope_passthrough_when_scope_invalid() -> None:
+    """Invalid or missing scope metadata should not rewrite candidate results."""
+    candidate_result = {
+        "success": True,
+        "count": 1,
+        "stories": [{"story_id": 11, "source_requirement": "enable login"}],
+        "message": "Found 1 sprint candidates.",
+        "readiness": {"status": "ready", "blocking_codes": []},
+    }
+
+    assert (
+        sprint_input.apply_story_completion_scope_to_candidate_result(
+            candidate_result,
+            None,
+        )
+        is candidate_result
+    )
+    assert sprint_input.apply_story_completion_scope_to_candidate_result(
+        candidate_result,
+        {"scope": "selection"},
+    ) == candidate_result
+
+    failed_result = {
+        "success": False,
+        "error_code": "SPRINT_CANDIDATE_FETCH_FAILED",
+        "message": "Failed to fetch sprint candidates.",
+        "stories": [],
+    }
+    scoped = sprint_input.apply_story_completion_scope_to_candidate_result(
+        failed_result,
+        {
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Enable Login"],
+        },
+    )
+    assert scoped is failed_result
+
+
 def test_prepare_sprint_input_preserves_dependency_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

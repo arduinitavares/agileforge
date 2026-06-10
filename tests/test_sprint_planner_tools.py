@@ -906,6 +906,66 @@ def test_load_sprint_candidates_preserves_readiness_for_scope_external_dependenc
     assert result["readiness"]["external_dependency_story_ids"] == [20]
 
 
+def test_load_sprint_candidates_preserves_upstream_codes_without_story_ids(
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """Scoped loader should keep upstream readiness codes that are not row-specific."""
+    expected_product_id = 77
+
+    def fake_fetch_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == expected_product_id
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 10,
+                    "story_title": "Selected",
+                    "story_points": 3,
+                    "priority": 1,
+                    "source_requirement": "Research slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+                {
+                    "story_id": 20,
+                    "story_title": "Excluded",
+                    "story_points": 2,
+                    "priority": 2,
+                    "source_requirement": "Later slice",
+                    "prerequisite_story_ids": [],
+                    "blocked_by_story_ids": [],
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": ["PROJECT_POLICY_BLOCKER"],
+                "blocking_story_ids": [],
+                "unsized_count": 0,
+                "default_priority_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.sprint_input.fetch_sprint_candidates",
+        fake_fetch_candidates,
+    )
+
+    result = load_sprint_candidates(
+        expected_product_id,
+        story_completion_scope={
+            "scope": "selection",
+            "scope_id": "selection:sha256:fixture",
+            "requirements": ["Research slice"],
+        },
+    )
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [10]
+    assert result["readiness"]["status"] == "blocked"
+    assert result["readiness"]["blocking_codes"] == ["PROJECT_POLICY_BLOCKER"]
+    assert result["readiness"]["blocking_story_ids"] == []
+
+
 def test_load_sprint_candidates_drops_excluded_readiness_blockers(
     monkeypatch,  # noqa: ANN001
 ) -> None:
