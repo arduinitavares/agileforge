@@ -358,6 +358,94 @@ class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjec
         return result
 
 
+class _SprintCompleteTriagedBacklogNoSourceReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with backlog impact but no source attempt."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with backlog triage and no source."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact="backlog",
+                affected_requirements=None,
+                affected_task_ids=None,
+                affected_story_ids=None,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=None,
+                learning_summary="Backlog follow-up is needed.",
+                decision_reason="Backlog impact should refine next-cycle source.",
+                idempotency_key="triage-backlog-no-source",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+            "planned_sprint_id": None,
+            "downstream_backlog_stale": False,
+            "stale_backlog_reason": None,
+            "backlog_attempts": [],
+        }
+        return result
+
+
+class _SprintCompleteTriagedNoneActiveResetReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with none triage and active-reset stale guard."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return triaged-none completed Sprint state with reset stale marker."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact="none",
+                affected_requirements=None,
+                affected_task_ids=None,
+                affected_story_ids=None,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=None,
+                learning_summary="No follow-up impact.",
+                decision_reason="Continue only if no stale guard is active.",
+                idempotency_key="triage-none-stale-reset",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+            "planned_sprint_id": None,
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "active_backlog_reset",
+            "stale_since_backlog_attempt_id": "backlog-attempt-12",
+            "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            "backlog_attempts": [],
+        }
+        return result
+
+
+class _SprintCompletePlannedSprintMissingTriageReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with a planned Sprint but no triage."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state that must triage before Sprint start."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": None,
+            "planned_sprint_id": 21,
+            "downstream_backlog_stale": False,
+            "stale_backlog_reason": None,
+            "backlog_attempts": [],
+        }
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -3748,6 +3836,50 @@ def test_workflow_next_routes_impact_multiple_to_guarded_correction_only(
     assert data["blocked_future_commands"] == []
 
 
+def test_backlog_impact_records_but_blocks_refine_record_without_source() -> None:
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedBacklogNoSourceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_backlog_refinement_available"
+    assert not any("refine-record" in command for command in data["next_valid_commands"])
+    assert data["blocked_commands"][0]["reason"] == "BACKLOG_SOURCE_UNAVAILABLE"
+
+
+def test_active_reset_stale_guard_overrides_triage_none() -> None:
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneActiveResetReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "post_sprint_blocked_by_stale_backlog"
+    assert result["data"]["blocked_commands"][0]["reason"] == (
+        "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET"
+    )
+
+
+def test_planned_sprint_start_is_blocked_until_triage_confirms_none() -> None:
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompletePlannedSprintMissingTriageReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["data"]["status"] == "post_sprint_triage_required"
+    assert result["data"]["blocked_commands"][0]["reason"] == (
+        "POST_SPRINT_TRIAGE_REQUIRED"
+    )
+
+
 def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(  # noqa: E501
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3811,7 +3943,7 @@ def test_workflow_next_sprint_complete_stale_reset_wins_before_triage_required()
 
     assert result["ok"] is True
     data = result["data"]
-    assert data["status"] == "blocked_by_stale_active_backlog_reset"
+    assert data["status"] == "post_sprint_blocked_by_stale_backlog"
     assert data["next_valid_commands"] == []
     assert "next_actions" not in data
     assert data["blocked_commands"] == [
@@ -3892,7 +4024,7 @@ def test_workflow_next_routes_sprint_complete_backlog_attempt_to_refinement() ->
     assert not any(
         command.startswith("agileforge backlog save") for command in all_commands
     )
-    assert result["data"]["status"] == "sprint_complete_backlog_refinement_available"
+    assert result["data"]["status"] == "post_sprint_backlog_refinement_available"
 
 
 def test_workflow_next_routes_pending_authority_to_review_and_decision_templates() -> (

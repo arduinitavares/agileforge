@@ -1921,6 +1921,15 @@ def _non_empty_string(value: object) -> str | None:
     return normalized or None
 
 
+def _positive_int_or_none(value: object) -> int | None:
+    """Return positive integer values while rejecting bools."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     """Return whether workflow state has the exact active-reset stale marker."""
     data = _envelope_data(envelope)
@@ -1936,6 +1945,15 @@ def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
         and stale_attempt_id is not None
         and stale_attempt_id == reset_attempt_id
     )
+
+
+def _stale_backlog_reason(envelope: dict[str, Any]) -> str | None:
+    """Return the active downstream stale reason from workflow state, if present."""
+    data = _envelope_data(envelope)
+    state = data.get("state")
+    if not isinstance(state, dict) or state.get("downstream_backlog_stale") is not True:
+        return None
+    return _non_empty_string(state.get("stale_backlog_reason"))
 
 
 def _active_backlog_reset_blocked_commands(
@@ -2924,14 +2942,20 @@ def _sprint_complete_workflow_next(
     state = _envelope_data(workflow).get("state")
     state_data = state if isinstance(state, dict) else {}
     current_triage = current_triage_for_latest_sprint(state_data)
-    if _active_backlog_reset_stale_marker(workflow):
+    stale_backlog_reason = _stale_backlog_reason(workflow)
+    if stale_backlog_reason == "active_backlog_reset":
         return _sprint_complete_next_response(
             project_id=project_id,
             workflow=workflow,
             next_valid_commands=next_valid_commands,
             blocked_commands=_active_backlog_reset_blocked_commands(),
             blocked_future_commands=blocked_future_commands,
-            status="blocked_by_stale_active_backlog_reset",
+            status="post_sprint_blocked_by_stale_backlog",
+        )
+    if stale_backlog_reason == "refined_backlog_recorded":
+        return _post_sprint_refined_backlog_recorded_next(
+            project_id=project_id,
+            workflow=workflow,
         )
     if current_triage is None and post_sprint_triage_required(state_data):
         next_actions: list[dict[str, Any]] = []
@@ -2954,7 +2978,10 @@ def _sprint_complete_workflow_next(
             project_id=project_id,
             workflow=workflow,
             next_valid_commands=next_valid_commands,
-            blocked_commands=blocked_commands,
+            blocked_commands=_post_sprint_triage_required_blocked_commands(
+                project_id=project_id,
+                workflow=workflow,
+            ),
             blocked_future_commands=blocked_future_commands,
             status="post_sprint_triage_required",
             next_actions=next_actions,
@@ -3018,6 +3045,11 @@ def _post_sprint_triage_impact_next(
             workflow=workflow,
             triage=triage,
         )
+    if triage_impact == "backlog":
+        return _post_sprint_backlog_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
     if triage_impact == "multiple":
         return _post_sprint_multiple_next(
             project_id=project_id,
@@ -3033,6 +3065,7 @@ def _post_sprint_none_next(
     workflow: dict[str, Any],
 ) -> dict[str, Any]:
     """Return next-cycle routing when triage records no follow-up impact."""
+    planned_sprint_id = _planned_sprint_id(workflow)
     commands = [
         (
             "agileforge story pending",
@@ -3042,22 +3075,45 @@ def _post_sprint_none_next(
             "agileforge sprint candidates",
             f"agileforge sprint candidates --project-id {project_id}",
         ),
-        (
-            "agileforge sprint generate",
-            f"agileforge sprint generate --project-id {project_id}",
-        ),
     ]
+    if planned_sprint_id is None:
+        commands.append(
+            (
+                "agileforge sprint generate",
+                f"agileforge sprint generate --project-id {project_id}",
+            )
+        )
+        primary_command_name = "agileforge sprint generate"
+        primary_command = f"agileforge sprint generate --project-id {project_id}"
+        status = "post_sprint_story_continuation_available"
+    else:
+        commands.append(
+            (
+                "agileforge sprint start",
+                _post_sprint_planned_sprint_start_command(
+                    project_id=project_id,
+                    planned_sprint_id=planned_sprint_id,
+                    expected_state="SPRINT_COMPLETE",
+                ),
+            )
+        )
+        primary_command_name = "agileforge sprint start"
+        primary_command = _post_sprint_planned_sprint_start_command(
+            project_id=project_id,
+            planned_sprint_id=planned_sprint_id,
+            expected_state="SPRINT_COMPLETE",
+        )
+        status = "post_sprint_planned_sprint_start_available"
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
-    sprint_generate_command = f"agileforge sprint generate --project-id {project_id}"
-    sprint_generate_installed = command_is_available("agileforge sprint generate")
+    primary_command_installed = command_is_available(primary_command_name)
     next_actions = [
         {
-            "command": sprint_generate_command,
-            "status": "post_sprint_story_continuation_available",
+            "command": primary_command,
+            "status": status,
             "reason": "Post-sprint triage recorded no follow-up impact.",
-            "runnable": sprint_generate_installed,
-            "installed": sprint_generate_installed,
-            "requires_cli_installation": not sprint_generate_installed,
+            "runnable": primary_command_installed,
+            "installed": primary_command_installed,
+            "requires_cli_installation": not primary_command_installed,
         }
     ]
     return _sprint_complete_next_response(
@@ -3066,9 +3122,201 @@ def _post_sprint_none_next(
         next_valid_commands=next_valid_commands,
         blocked_commands=[],
         blocked_future_commands=blocked_future_commands,
-        status="post_sprint_story_continuation_available",
+        status=status,
         next_actions=next_actions,
     )
+
+
+def _planned_sprint_id(workflow: dict[str, Any]) -> int | None:
+    """Return the planned Sprint id from workflow state, if present."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    return _positive_int_or_none(state_data.get("planned_sprint_id"))
+
+
+def _post_sprint_planned_sprint_start_command(
+    *,
+    project_id: int,
+    planned_sprint_id: int,
+    expected_state: str,
+) -> str:
+    """Return the guarded post-sprint planned Sprint start command."""
+    return (
+        f"agileforge sprint start --project-id {project_id} "
+        f"--sprint-id {planned_sprint_id} "
+        f"--expected-state {expected_state} "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _post_sprint_triage_required_blocked_commands(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Return Sprint bridge commands blocked until triage is recorded."""
+    planned_sprint_id = _planned_sprint_id(workflow)
+    if planned_sprint_id is None:
+        return []
+    return [
+        {
+            "command": _post_sprint_planned_sprint_start_command(
+                project_id=project_id,
+                planned_sprint_id=planned_sprint_id,
+                expected_state="SPRINT_COMPLETE",
+            ),
+            "reason": "POST_SPRINT_TRIAGE_REQUIRED",
+            "message": (
+                "Record post-sprint triage before starting the planned Sprint."
+            ),
+        }
+    ]
+
+
+def _post_sprint_backlog_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Return Backlog refinement bridge routing for backlog impact."""
+    commands = _sprint_complete_backlog_refinement_commands(
+        project_id=project_id,
+        workflow=workflow,
+    )
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    blocked_commands: list[dict[str, str]] = []
+    if not commands:
+        blocked_commands = _backlog_source_unavailable_blocked_commands()
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=blocked_commands,
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_backlog_refinement_available",
+    )
+
+
+def _backlog_source_unavailable_blocked_commands() -> list[dict[str, str]]:
+    """Return Backlog bridge blockers when no deterministic source exists."""
+    reason = ErrorCode.BACKLOG_SOURCE_UNAVAILABLE.value
+    message = (
+        "Backlog impact was recorded, but no source attempt and fingerprint are "
+        "available for a runnable refinement bridge."
+    )
+    return [
+        {
+            "command": "agileforge backlog refine-preview",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge backlog refine-record",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge backlog refine-import",
+            "reason": reason,
+            "message": message,
+        },
+    ]
+
+
+def _post_sprint_refined_backlog_recorded_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Return stale routing after a Backlog refinement was recorded."""
+    attempt_id, artifact_fingerprint = _latest_backlog_attempt_guards(workflow)
+    commands = [
+        (
+            "agileforge backlog history",
+            f"agileforge backlog history --project-id {project_id}",
+        ),
+        (
+            "agileforge backlog save",
+            (
+                f"agileforge backlog save --project-id {project_id} "
+                f"--attempt-id {attempt_id or '<attempt_id>'} "
+                f"--expected-artifact-fingerprint "
+                f"{artifact_fingerprint or '<artifact_fingerprint>'} "
+                "--expected-state BACKLOG_REVIEW "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge backlog reset-active",
+            (
+                f"agileforge backlog reset-active --project-id {project_id} "
+                f"--attempt-id {attempt_id or '<attempt_id>'} "
+                f"--expected-artifact-fingerprint "
+                f"{artifact_fingerprint or '<artifact_fingerprint>'} "
+                "--expected-state BACKLOG_REVIEW "
+                "--reset-reason <reset_reason> "
+                "--archive-all-active-stories "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+    ]
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=_post_sprint_stale_continuation_blockers(
+            reason="DOWNSTREAM_BACKLOG_STALE_AFTER_REFINED_BACKLOG_RECORDED",
+        ),
+        blocked_future_commands=blocked_future_commands,
+        status="post_sprint_blocked_by_stale_backlog",
+    )
+
+
+def _latest_backlog_attempt_guards(
+    workflow: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Return latest Backlog attempt id and fingerprint guard values."""
+    source_attempt = _latest_backlog_attempt(workflow)
+    if source_attempt is None:
+        return None, None
+    return (
+        _non_empty_string(source_attempt.get("attempt_id")),
+        _non_empty_string(source_attempt.get("artifact_fingerprint")),
+    )
+
+
+def _post_sprint_stale_continuation_blockers(
+    *,
+    reason: str,
+) -> list[dict[str, str]]:
+    """Return Story and Sprint continuation blockers for stale Backlog guards."""
+    message = (
+        "Downstream Story and Sprint work remains blocked until stale Backlog "
+        "reconciliation is resolved."
+    )
+    return [
+        {
+            "command": "agileforge story generate",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge sprint candidates",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge sprint generate",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge sprint start",
+            "reason": reason,
+            "message": message,
+        },
+    ]
 
 
 def _post_sprint_story_next(
@@ -3377,9 +3625,9 @@ def _sprint_complete_backlog_refinement_commands(
     source_attempt_id = str(source_attempt.get("attempt_id") or "").strip()
     if not source_attempt_id:
         return []
-    source_fingerprint = str(
-        source_attempt.get("artifact_fingerprint") or "<source_fingerprint>"
-    ).strip()
+    source_fingerprint = str(source_attempt.get("artifact_fingerprint") or "").strip()
+    if not source_fingerprint:
+        return []
     return [
         (
             "agileforge backlog refine-preview",
