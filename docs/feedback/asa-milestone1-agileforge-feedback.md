@@ -127,3 +127,40 @@ inside the ASA execution goal.
 - Product feedback: clarify whether `task_count` means story/workstream groups
   or actionable tasks, and expose the active sprint generation attempt in
   history or a dedicated active-sprint planning summary.
+
+### Post-sprint story reconciliation leaves saveable draft in unsaveable FSM state
+
+- Project: ASA `project_id=3`
+- Context: after closing Sprint 17 and recording post-sprint triage with
+  `impact=story` for `Canonical Process Event Record Definition and
+  Validation`.
+- Command: `agileforge workflow next --project-id 3`
+- Observed result: `status=post_sprint_story_impact_needs_reconciliation`,
+  routing to:
+  - `agileforge story pending --project-id 3`
+  - `agileforge story generate --project-id 3 --parent-requirement "Canonical
+    Process Event Record Definition and Validation"`
+- Command: `agileforge story generate --project-id 3 --parent-requirement
+  "Canonical Process Event Record Definition and Validation" --input "..."`
+- Observed result: `ok=true`, `attempt_id=attempt-2`,
+  `artifact_fingerprint=sha256:b8ef5a1dab8c392613a62dd1d0df2edc24472081c8557c30f793171d56c2c622`,
+  `is_reusable=true`, `quality.coverage_status=complete`, and zero blocking
+  findings.
+- Command: `agileforge story history --project-id 3 --parent-requirement
+  "Canonical Process Event Record Definition and Validation"`
+- Observed result: `save.available=true`, `save.expected_state=STORY_REVIEW`,
+  current draft complete, and zero quality blockers.
+- Command: `agileforge status --project-id 3`
+- Observed result: workflow FSM remained `STORY_INTERVIEW`.
+- Follow-up command: `agileforge story save ... --expected-state STORY_REVIEW`
+- Observed result: `ok=false`, error code `INVALID_COMMAND`, message
+  `story save requires FSM state STORY_REVIEW`.
+- Follow-up command: `agileforge story complete ... --expected-state
+  STORY_PERSISTENCE`
+- Observed result: `ok=false`, error code `INVALID_COMMAND`, message
+  `Story phase cannot complete unless current state is STORY_PERSISTENCE.`
+- Product feedback: post-sprint story-impact reconciliation can produce or
+  reuse a complete saveable Story draft without transitioning the session FSM
+  to the state required by the save command. The workflow becomes stuck between
+  `STORY_INTERVIEW` and `STORY_REVIEW`; `workflow next` routes to generation,
+  but generation does not expose a runnable save/complete path.
