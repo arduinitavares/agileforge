@@ -2894,14 +2894,22 @@ def _sprint_workflow_next(
             current_triage_for_latest_sprint(state_data) is None
             and post_sprint_triage_required(state_data)
         ):
+            next_actions: list[dict[str, Any]] = []
             for command_name, command_text in _post_sprint_triage_required_commands(
                 project_id=project_id,
             ):
-                if command_is_available(command_name):
+                installed = command_is_available(command_name)
+                if command_name == "agileforge sprint triage":
+                    next_actions = [
+                        _post_sprint_triage_required_next_action(
+                            command=command_text,
+                            installed=installed,
+                        )
+                    ]
+                if installed:
                     next_valid_commands.append(command_text)
                 else:
                     blocked_future_commands.append(command_text)
-            next_actions = [_post_sprint_triage_required_next_action()]
             data = {
                 "project_id": project_id,
                 "next_valid_commands": next_valid_commands,
@@ -3038,12 +3046,7 @@ def _post_sprint_triage_required_commands(
         ),
         (
             "agileforge sprint triage",
-            (
-                f"agileforge sprint triage --project-id {project_id} "
-                "--expected-state SPRINT_COMPLETE --impact <impact> "
-                "--learning-summary <summary> --decision-reason <reason> "
-                "--idempotency-key <idempotency_key>"
-            ),
+            _post_sprint_triage_required_triage_command(project_id=project_id),
         ),
         (
             "agileforge sprint history",
@@ -3052,13 +3055,29 @@ def _post_sprint_triage_required_commands(
     ]
 
 
-def _post_sprint_triage_required_next_action() -> dict[str, Any]:
+def _post_sprint_triage_required_triage_command(*, project_id: int) -> str:
+    """Return the guarded Sprint triage command template."""
+    return (
+        f"agileforge sprint triage --project-id {project_id} "
+        "--expected-state SPRINT_COMPLETE --impact <impact> "
+        "--learning-summary <summary> --decision-reason <reason> "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _post_sprint_triage_required_next_action(
+    *,
+    command: str,
+    installed: bool,
+) -> dict[str, Any]:
     """Return the structured action for required post-sprint triage."""
     return {
-        "command": "agileforge sprint triage",
+        "command": command,
         "status": "post_sprint_triage_required",
         "reason": "A completed Sprint needs learning triage before next-cycle routing.",
-        "runnable": True,
+        "runnable": installed,
+        "installed": installed,
+        "requires_cli_installation": not installed,
         "requires": [
             "expected_state",
             "impact",

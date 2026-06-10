@@ -255,6 +255,25 @@ class _SprintCompleteRequiresTriageReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintCompleteStaleRequiresTriageReadProjection(
+    _SprintCompleteRequiresTriageReadProjection
+):
+    """Fake completed Sprint state that is stale and still missing triage."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return stale completed Sprint state with missing triage."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "downstream_backlog_stale": True,
+                "stale_backlog_reason": "active_backlog_reset",
+                "stale_since_backlog_attempt_id": "backlog-attempt-12",
+                "active_backlog_reset_attempt_id": "backlog-attempt-12",
+            }
+        )
+        return result
+
+
 class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjection):
     """Fake completed Sprint state with a source Backlog attempt."""
 
@@ -3484,7 +3503,114 @@ def test_workflow_next_requires_post_sprint_triage_required_before_backlog_refin
     assert not any(
         "backlog refine" in command for command in data["next_valid_commands"]
     )
-    assert data["next_actions"][0]["status"] == "post_sprint_triage_required"
+    assert data["next_actions"] == [
+        {
+            "command": (
+                "agileforge sprint triage --project-id 7 "
+                "--expected-state SPRINT_COMPLETE --impact <impact> "
+                "--learning-summary <summary> --decision-reason <reason> "
+                "--idempotency-key <idempotency_key>"
+            ),
+            "status": "post_sprint_triage_required",
+            "reason": (
+                "A completed Sprint needs learning triage before next-cycle routing."
+            ),
+            "runnable": True,
+            "installed": True,
+            "requires_cli_installation": False,
+            "requires": [
+                "expected_state",
+                "impact",
+                "learning_summary",
+                "decision_reason",
+                "idempotency_key",
+            ],
+        }
+    ]
+
+
+def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_triage_command(command_name: str) -> bool:
+        return command_name != "agileforge sprint triage"
+
+    monkeypatch.setattr(
+        application_mod,
+        "command_is_available",
+        unavailable_triage_command,
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteRequiresTriageReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    triage_command = (
+        "agileforge sprint triage --project-id 7 "
+        "--expected-state SPRINT_COMPLETE --impact <impact> "
+        "--learning-summary <summary> --decision-reason <reason> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert triage_command not in data["next_valid_commands"]
+    assert triage_command in data["blocked_future_commands"]
+    assert data["next_actions"] == [
+        {
+            "command": triage_command,
+            "status": "post_sprint_triage_required",
+            "reason": (
+                "A completed Sprint needs learning triage before next-cycle routing."
+            ),
+            "runnable": False,
+            "installed": False,
+            "requires_cli_installation": True,
+            "requires": [
+                "expected_state",
+                "impact",
+                "learning_summary",
+                "decision_reason",
+                "idempotency_key",
+            ],
+        }
+    ]
+
+
+def test_workflow_next_sprint_complete_stale_reset_wins_before_triage_required() -> (
+    None
+):
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteStaleRequiresTriageReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "blocked_by_stale_active_backlog_reset"
+    assert data["next_valid_commands"] == []
+    assert "next_actions" not in data
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge story generate",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Story generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+        {
+            "command": "agileforge sprint save",
+            "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_ACTIVE_RESET",
+            "message": (
+                "Sprint generation remains blocked until downstream reset-stale "
+                "clearing exists."
+            ),
+        },
+    ]
 
 
 def test_workflow_next_does_not_route_sprint_complete_to_empty_history() -> None:
