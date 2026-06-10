@@ -80,6 +80,10 @@ from services.agent_workbench.authority_review import (
     build_authority_review_snapshot,
 )
 from services.agent_workbench.mutation_ledger import MutationStatus
+from services.agent_workbench.post_sprint_triage import (
+    current_triage_for_latest_sprint,
+    post_sprint_triage_required,
+)
 from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
@@ -1036,9 +1040,20 @@ def _build_sprint_runtime_summary(
         state.get("fsm_state") == OrchestratorState.SPRINT_DRAFT.value
         and bool(draft_assessment.get("is_complete"))
     )
-    can_create_next_sprint = planned is None and not has_reviewable_draft
+    latest_completed_sprint_id = completed[0].sprint_id if completed else None
+    triage_state = dict(state)
+    triage_state["latest_completed_sprint_id"] = latest_completed_sprint_id
+    current_triage = current_triage_for_latest_sprint(triage_state)
+    triage_required = post_sprint_triage_required(triage_state)
+    can_create_next_sprint = (
+        planned is None and not has_reviewable_draft and not triage_required
+    )
     disabled_reason = None
-    if has_reviewable_draft:
+    if triage_required:
+        disabled_reason = (
+            "Post-sprint triage is required before creating the next sprint."
+        )
+    elif has_reviewable_draft:
         disabled_reason = (
             "A sprint draft is waiting for review. Save or refine it before "
             "creating another sprint."
@@ -1052,9 +1067,11 @@ def _build_sprint_runtime_summary(
     summary = {
         "active_sprint_id": active.sprint_id if active else None,
         "planned_sprint_id": planned.sprint_id if planned else None,
-        "latest_completed_sprint_id": completed[0].sprint_id if completed else None,
+        "latest_completed_sprint_id": latest_completed_sprint_id,
         "can_create_next_sprint": can_create_next_sprint,
         "create_next_sprint_disabled_reason": disabled_reason,
+        "post_sprint_triage_required": triage_required,
+        "post_sprint_triage": current_triage,
     }
     if has_reviewable_draft:
         summary.update(

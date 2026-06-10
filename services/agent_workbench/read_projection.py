@@ -18,6 +18,10 @@ from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
+from services.agent_workbench.post_sprint_triage import (
+    current_triage_for_latest_sprint,
+    post_sprint_triage_required,
+)
 from services.agent_workbench.schema_readiness import (
     SchemaReadiness,
     SchemaRequirement,
@@ -479,6 +483,14 @@ def _reconcile_completed_sprint_projection(
     return reconciled
 
 
+def _project_post_sprint_triage_context(state: JsonDict) -> JsonDict:
+    """Expose only current post-sprint triage context in workflow state."""
+    projected = dict(state)
+    projected["post_sprint_triage"] = current_triage_for_latest_sprint(projected)
+    projected["post_sprint_triage_required"] = post_sprint_triage_required(projected)
+    return projected
+
+
 class ReadProjectionService:
     """Read-only projections for CLI orientation commands."""
 
@@ -649,6 +661,7 @@ class ReadProjectionService:
                 project_id=project_id,
                 state=state,
             )
+            state = _project_post_sprint_triage_context(state)
             spec_version_id = _int_or_none(state.get("latest_spec_version_id"))
             if spec_version_id is None:
                 latest_spec = _latest_approved_spec(session, project_id)

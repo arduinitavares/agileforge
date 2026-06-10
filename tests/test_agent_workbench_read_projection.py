@@ -233,6 +233,37 @@ def test_workflow_state_reconciles_completed_active_sprint(
     assert state["sprint_state_reconciled_reason"] == "active_sprint_completed"
 
 
+def test_read_projection_projects_post_sprint_triage_required(
+    session: Session,
+) -> None:
+    """Expose when a completed sprint still needs post-sprint triage."""
+    product_id, _story_id, sprint_id, _task_id = _seed_project_with_story(session)
+    sprint = session.get(Sprint, sprint_id)
+    assert sprint is not None
+    sprint.status = SprintStatus.COMPLETED
+    sprint.completed_at = datetime(2026, 5, 28, 18, tzinfo=UTC)
+    session.add(sprint)
+    session.commit()
+    reader = _FakeSessionReader(
+        {
+            "fsm_state": "SPRINT_COMPLETE",
+            "setup_status": "passed",
+            "latest_completed_sprint_id": sprint_id,
+        }
+    )
+    service = ReadProjectionService(
+        engine=_engine(session),
+        session_reader=cast("ReadOnlySessionReader", reader),
+    )
+
+    result = service.workflow_state(project_id=product_id)
+
+    assert result["ok"] is True
+    state = result["data"]["state"]
+    assert state["post_sprint_triage_required"] is True
+    assert state["post_sprint_triage"] is None
+
+
 def test_story_show_returns_validation_and_fingerprint(session: Session) -> None:
     """Verify story show exposes story details without validation side effects."""
     _product_id, story_id, _sprint_id, _task_id = _seed_project_with_story(session)

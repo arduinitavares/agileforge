@@ -24,6 +24,7 @@ from agile_sqlmodel import (
     WorkflowEventType,
 )
 from models.core import Team
+from services.agent_workbench.post_sprint_triage import build_triage_payload
 from tools.spec_tools import _compute_story_input_hash
 from utils.spec_schemas import (
     AlignmentFinding,
@@ -1407,6 +1408,8 @@ def test_list_sprints_returns_saved_sprints_newest_first(session, monkeypatch): 
         "create_next_sprint_disabled_reason": (
             "A planned sprint already exists. Modify it instead of creating another."
         ),
+        "post_sprint_triage_required": False,
+        "post_sprint_triage": None,
     }
     assert payload["data"]["items"][0]["id"] == newer_sprint.sprint_id
     assert payload["data"]["items"][0]["started_at"] is None
@@ -1459,10 +1462,77 @@ def test_list_sprints_blocks_create_next_when_reviewable_draft_exists(  # noqa: 
             "A sprint draft is waiting for review. Save or refine it before "
             "creating another sprint."
         ),
+        "post_sprint_triage_required": False,
+        "post_sprint_triage": None,
         "has_reviewable_sprint_draft": True,
         "sprint_draft_attempt_id": "sprint-attempt-2",
         "sprint_draft_artifact_fingerprint": "sha256:reviewable",
     }
+
+
+def test_sprint_runtime_summary_exposes_post_sprint_triage_context(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint_id,
+        "post_sprint_triage": build_triage_payload(
+            project_id=project_id,
+            sprint_id=completed_sprint_id,
+            impact="none",
+            affected_requirements=[],
+            affected_task_ids=[],
+            affected_story_ids=[],
+            affected_backlog_item_ids=[],
+            affected_roadmap_item_ids=[],
+            affected_layers=[],
+            learning_summary="Plan confirmed.",
+            decision_reason="No planning impact.",
+            idempotency_key="triage-api-test",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        ),
+    }
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    runtime_summary = response.json()["data"]["runtime_summary"]
+    assert runtime_summary["post_sprint_triage_required"] is False
+    assert runtime_summary["post_sprint_triage"]["impact"] == "none"
+
+
+def test_sprint_runtime_summary_blocks_next_sprint_when_post_sprint_triage_required(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint_id,
+    }
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    runtime_summary = response.json()["data"]["runtime_summary"]
+    assert runtime_summary["post_sprint_triage_required"] is True
+    assert runtime_summary["post_sprint_triage"] is None
+    assert runtime_summary["can_create_next_sprint"] is False
+    assert "triage" in runtime_summary["create_next_sprint_disabled_reason"].lower()
 
 
 def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):  # noqa: ANN001, ANN201, D103

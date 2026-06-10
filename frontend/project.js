@@ -3861,6 +3861,8 @@ function renderOverviewPanel() {
     const activeSprintId = sprintRuntimeSummary?.active_sprint_id || null;
     const plannedSprintId = sprintRuntimeSummary?.planned_sprint_id || null;
     const latestCompletedSprintId = sprintRuntimeSummary?.latest_completed_sprint_id || null;
+    const postSprintTriageRequired = Boolean(sprintRuntimeSummary?.post_sprint_triage_required);
+    const postSprintTriageImpact = sprintRuntimeSummary?.post_sprint_triage?.impact || null;
     const savedSprintCount = savedSprints.length;
     const scopedSummary = storySelectionScopeSummary();
     const overviewTitle = scopedSummary
@@ -3877,7 +3879,11 @@ function renderOverviewPanel() {
     const planningStatusText = scopedSummary
         ? `${scopedSummary.includedText}; ${scopedSummary.excludedText}.`
         : (planningComplete ? 'The one-time planning pipeline is complete for this project shell.' : 'Continue setup, vision, backlog, roadmap, stories, and sprint planning.');
-    const sprintRuntimeTitle = hasDraftToReview
+    const sprintRuntimeTitle = postSprintTriageRequired
+        ? 'Post-Sprint Triage Required'
+        : postSprintTriageImpact === 'none'
+            ? 'Sprint Learning Confirmed Plan'
+            : hasDraftToReview
         ? (scopedSummary ? 'Sprint Draft from Selection' : 'Sprint Draft Ready')
         : activeSprintId
         ? (scopedSummary ? 'Sprint Active from Selection' : 'Sprint Active')
@@ -3886,7 +3892,11 @@ function renderOverviewPanel() {
             : latestCompletedSprintId
                 ? 'Last Sprint Completed'
                 : 'No Sprint Yet';
-    const sprintRuntimeText = hasDraftToReview
+    const sprintRuntimeText = postSprintTriageRequired
+        ? 'The last sprint is closed. Record what the sprint changed before routing backlog, roadmap, Story, or Sprint work.'
+        : postSprintTriageImpact === 'none'
+            ? 'The completed sprint did not require backlog, roadmap, or Story reconciliation.'
+            : hasDraftToReview
         ? (scopedSummary
             ? `A generated sprint draft from the selected Story scope is ready for review. ${scopedSummary.includedText}.`
             : 'A generated sprint draft is ready for review and save.')
@@ -3902,7 +3912,12 @@ function renderOverviewPanel() {
                 ? 'The last sprint is closed and available as read-only history.'
                 : 'Create the first sprint to begin iterative runtime.';
 
-    const primaryActionHtml = hasDraftToReview
+    const primaryActionHtml = postSprintTriageRequired
+        ? `<button type="button" disabled class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                <span class="material-symbols-outlined text-sm">rule</span>
+                Triage Required
+           </button>`
+        : hasDraftToReview
         ? `<button type="button" onclick="openSprintPlanner()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
                 <span class="material-symbols-outlined text-sm">fact_check</span>
                 Review Sprint Draft
