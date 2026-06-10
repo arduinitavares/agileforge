@@ -107,6 +107,34 @@ def test_append_feedback_and_mark_absorbed() -> None:
     }
 
 
+def test_append_feedback_entry_persists_feedback_quality_metadata() -> None:
+    """Weak-feedback soft gate metadata should survive feedback append."""
+    state: dict[str, object] = {}
+    runtime = interview_runtime.ensure_interview_subject(
+        state,
+        phase="story",
+        subject_key="req-1",
+    )
+    feedback_quality = {
+        "needs_revision": True,
+        "forced": False,
+        "score": 12,
+        "warnings": [{"code": "FEEDBACK_TOO_VAGUE"}],
+    }
+
+    entry = interview_runtime.append_feedback_entry(
+        runtime,
+        text="Try again.",
+        created_at="2026-03-28T10:00:00Z",
+        feedback_quality=feedback_quality,
+    )
+
+    assert entry["feedback_quality"] == feedback_quality
+    assert runtime["feedback_projection"]["items"][0]["feedback_quality"] == (
+        feedback_quality
+    )
+
+
 def test_append_feedback_ids_remain_unique_across_reset() -> None:
     """Verify append feedback ids remain unique across reset."""
     state: dict[str, object] = {}
