@@ -11,6 +11,10 @@ import anyio
 from orchestrator_agent.agent_tools.product_vision_tool.tools import save_vision_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.phases.authority_guard import (
+    phase_authority_block_error,
+    structured_workbench_error_envelope,
+)
 from services.phases.vision_service import (
     VisionPhaseError,
     generate_vision_draft,
@@ -186,6 +190,8 @@ class VisionPhaseRunner:
             raise _ProjectHydrationError(
                 result.get("error", "Project hydration failed")
             )
+        if block_error := phase_authority_block_error(project_id=project_id):
+            raise _ProjectHydrationError(block_error)
         return context
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
@@ -249,6 +255,9 @@ class _ProjectHydrationError(RuntimeError):
 
 def _project_hydration_error(error: object) -> dict[str, Any]:
     """Map select_project failures onto the workbench error envelope."""
+    structured = structured_workbench_error_envelope(error)
+    if structured is not None:
+        return structured
     if not isinstance(error, dict):
         return _error_envelope(ErrorCode.INVALID_COMMAND, str(error))
 
