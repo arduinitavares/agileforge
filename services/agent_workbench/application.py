@@ -3241,7 +3241,10 @@ def _post_sprint_multiple_blocked_commands(
         "backlog": "agileforge backlog refine",
     }
     layers = triage.get("affected_layers")
-    affected_layers = set(layers if isinstance(layers, list) else [])
+    if isinstance(layers, list):
+        affected_layers = {layer for layer in layers if isinstance(layer, str)}
+    else:
+        affected_layers = set()
     blocked_commands: list[dict[str, str]] = []
     for layer in ("story", "task", "roadmap", "backlog"):
         if layer not in affected_layers:

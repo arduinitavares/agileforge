@@ -3614,6 +3614,89 @@ def test_workflow_next_routes_impact_none_to_story_and_sprint_continuation(
     } in data["next_actions"]
 
 
+def test_workflow_next_routes_impact_story_to_story_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route impact=story to affected Story generation without Sprint planning."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="story",
+            affected_requirements=["Quality Gate"],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_story_impact_needs_reconciliation"
+    assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
+    assert (
+        'agileforge story generate --project-id 7 '
+        '--parent-requirement "Quality Gate"'
+    ) in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate")
+        for command in data["next_valid_commands"]
+    )
+    all_commands = (
+        data["next_valid_commands"]
+        + data["blocked_future_commands"]
+        + [
+            item["command"]
+            for item in data["blocked_commands"]
+            if isinstance(item, dict) and isinstance(item.get("command"), str)
+        ]
+    )
+    assert not any("backlog refine" in command for command in all_commands)
+
+
+def test_workflow_next_routes_impact_task_to_carryover_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route impact=task to completed Sprint review commands and blocker."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="task",
+            affected_task_ids=[123],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_task_impact_needs_carryover"
+    assert data["next_valid_commands"] == [
+        "agileforge sprint review --project-id 7",
+        "agileforge sprint status --project-id 7 --sprint-id 13",
+        "agileforge sprint history --project-id 7",
+    ]
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge sprint task carryover",
+            "reason": "TASK_CARRYOVER_NOT_IMPLEMENTED",
+            "message": (
+                "Task carryover is not implemented yet; review the completed "
+                "Sprint before planning follow-up work."
+            ),
+            "affected_task_ids": [123],
+        }
+    ]
+
+
 def test_workflow_next_routes_impact_multiple_to_guarded_correction_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
