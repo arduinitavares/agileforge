@@ -15,6 +15,9 @@ classification, and stale-guard-aware `workflow next`
   source resolution, planned-Sprint behavior, exact persistence keys,
   stale-guard cases, command response contracts, structured `workflow next`
   actions, and runnable-command acceptance criteria.
+- 2026-06-10: Tightened triage affected-field contracts, correction history
+  persistence, backlog source blocking semantics, and mandatory bridge
+  executability wording.
 
 ## Summary
 
@@ -122,9 +125,11 @@ Storage keys:
   "sprint_id": 13,
   "impact": "story",
   "affected_requirements": ["pyrepo-check Quality Gate Integration"],
+  "affected_task_ids": [],
   "affected_story_ids": [],
   "affected_backlog_item_ids": [],
   "affected_roadmap_item_ids": [],
+  "affected_layers": [],
   "learning_summary": "The research spike confirmed the next quality-gate story.",
   "decision_reason": "No backlog-level scope change was found.",
   "request_fingerprint": "sha256:...",
@@ -151,20 +156,33 @@ Rules:
 - `decision_reason` is required and must be a non-empty text rationale for the
   selected impact.
 - `recorded_at` and `recorded_by` are host-owned fields.
-- affected item arrays default to empty arrays.
+- affected item arrays default to empty arrays and include task, Story,
+  backlog, and roadmap references.
+- `affected_task_ids` and `affected_story_ids` contain positive database ids
+  from the current project.
+- `affected_backlog_item_ids` and `affected_roadmap_item_ids` contain exact
+  host-projected item identifiers when those identifiers are available. They
+  must not accept release names, milestone names, requirement titles, or other
+  labels as substitutes.
+- `affected_layers` defaults to an empty array and is allowed only for
+  `impact=multiple`.
 - `impact=story` requires at least one affected requirement or story id.
-- `impact=roadmap` requires at least one affected requirement, roadmap item id,
-  or release/milestone reference.
+- `impact=roadmap` requires at least one affected requirement or roadmap item
+  id. Release and milestone names are not accepted as v1 routing satisfiers
+  because roadmap releases currently have names and item lists, not stable
+  release or milestone ids.
 - `impact=backlog` requires at least one affected backlog item id or a
   decision reason stating that new product backlog discovery is needed.
 - `impact=task` requires at least one affected story id, task id, or affected
   requirement.
-- `impact=none` requires all affected item arrays to be empty.
-- `impact=multiple` requires at least two affected layers to be represented in
-  the affected fields or decision reason.
+- `impact=none` requires all affected item arrays and `affected_layers` to be
+  empty.
+- `impact=multiple` requires `affected_layers` to contain at least two distinct
+  values from `task`, `story`, `roadmap`, and `backlog`. Free-form
+  `decision_reason` text cannot satisfy the routing contract.
 - `request_fingerprint` is computed from project id, sprint id, impact,
-  affected fields, learning summary, decision reason, and correction flags. It
-  excludes host-owned timestamps and actor fields.
+  affected fields, affected layers, learning summary, decision reason, and
+  correction flags. It excludes host-owned timestamps and actor fields.
 - `triage_fingerprint` is computed from the normalized stored triage payload
   excluding itself.
 - A newer Sprint close does not delete older triage decisions. It makes
@@ -279,9 +297,12 @@ Supported flags:
 - `--expected-state SPRINT_COMPLETE` required
 - `--impact` required
 - `--affected-requirement` repeatable
+- `--affected-task-id` repeatable
 - `--affected-story-id` repeatable
 - `--affected-backlog-item-id` repeatable
 - `--affected-roadmap-item-id` repeatable
+- `--affected-layer` repeatable, required only for `impact=multiple` and
+  accepted values are `task`, `story`, `roadmap`, and `backlog`
 - `--learning-summary` required
 - `--decision-reason` required
 - `--idempotency-key` required
@@ -299,6 +320,17 @@ Idempotency:
 - Correction is supported only with a new idempotency key,
   `--replace-existing`, and an `--expected-triage-fingerprint` that matches the
   currently stored triage payload.
+- On the first successful record, AgileForge stores the payload in
+  `post_sprint_triage` and appends the same payload to
+  `post_sprint_triage_history` with `history_action="recorded"`.
+- On guarded correction, AgileForge first appends the previous current payload
+  to `post_sprint_triage_history` with `history_action="superseded"`,
+  `superseded_by_request_fingerprint=<new request fingerprint>`, and
+  `superseded_at=<correction timestamp>`.
+- The corrected payload then replaces `post_sprint_triage` and is appended to
+  `post_sprint_triage_history` with `history_action="corrected"`,
+  `replaces_triage_fingerprint=<previous triage fingerprint>`, and
+  `correction_of_request_fingerprint=<previous request fingerprint>`.
 
 Successful response data:
 
@@ -312,9 +344,11 @@ Successful response data:
     "sprint_id": 13,
     "impact": "story",
     "affected_requirements": ["pyrepo-check Quality Gate Integration"],
+    "affected_task_ids": [],
     "affected_story_ids": [],
     "affected_backlog_item_ids": [],
     "affected_roadmap_item_ids": [],
+    "affected_layers": [],
     "learning_summary": "The research spike confirmed the quality-gate story.",
     "decision_reason": "The plan remains valid; only the next pending story needs the spike context.",
     "request_fingerprint": "sha256:...",
@@ -406,16 +440,18 @@ triage first.
 ## Bridge Postconditions
 
 `sprint triage` itself never changes `fsm_state`. Bridge commands are the only
-commands that may leave `SPRINT_COMPLETE`.
+commands that may leave `SPRINT_COMPLETE`. When `workflow next` advertises a
+bridge command as runnable, that command must be executable against the same
+workflow snapshot after its listed preconditions pass.
 
 | Impact | State after `sprint triage` | Bridge state transition | Preserved fields | Cleared fields | Runnable primary commands | Blocked or secondary commands |
 | --- | --- | --- | --- | --- | --- | --- |
-| `none` | `SPRINT_COMPLETE` | `story generate` may move to `STORY_INTERVIEW` or `STORY_REVIEW`; `sprint generate` may move to `SPRINT_DRAFT` only if candidates are ready and no stale guard is active; `sprint start` may move to `SPRINT_VIEW` only for an existing planned Sprint after triage confirms the plan remains valid. | backlog attempts, roadmap releases, Story runtime, Sprint history, planned Sprint id, saved Sprint drafts, stale markers | none | `story pending`; next pending `story generate`; `sprint candidates`; `sprint generate` when candidate readiness is ready; `sprint start` for an already planned Sprint confirmed by triage | backlog refinement; roadmap regeneration; Sprint generation when candidates are not ready |
+| `none` | `SPRINT_COMPLETE` | When advertised as runnable and preconditions pass, `story generate` must be allowed to move to `STORY_INTERVIEW` or `STORY_REVIEW`; `sprint generate` must be allowed to move to `SPRINT_DRAFT` only if candidates are ready and no stale guard is active; `sprint start` must be allowed to move to `SPRINT_VIEW` only for an existing planned Sprint after triage confirms the plan remains valid. | backlog attempts, roadmap releases, Story runtime, Sprint history, planned Sprint id, saved Sprint drafts, stale markers | none | `story pending`; next pending `story generate`; `sprint candidates`; `sprint generate` when candidate readiness is ready; `sprint start` for an already planned Sprint confirmed by triage | backlog refinement; roadmap regeneration; Sprint generation when candidates are not ready |
 | `task` | `SPRINT_COMPLETE` | No state transition in v1 unless a future task-carryover command exists. | all planning artifacts and Sprint history | none | `sprint review`; `sprint status --sprint-id`; `sprint history` | task carryover action with reason `TASK_CARRYOVER_NOT_IMPLEMENTED`; backlog, roadmap, Story, and Sprint planning commands unless another impact is recorded |
-| `story` | `SPRINT_COMPLETE` | `story generate` may move to `STORY_INTERVIEW` or `STORY_REVIEW`; Story save later moves to `STORY_PERSISTENCE`. | backlog attempts, roadmap releases, unaffected Story runtime, Sprint history, stale markers | none | `story pending`; `story generate` for affected pending requirements; Story retry/refinement for affected requirements with attempts | backlog refinement; roadmap regeneration; Sprint generation until affected Story work is saved or explicitly skipped |
-| `roadmap` | `SPRINT_COMPLETE` | `roadmap generate` may move to `ROADMAP_INTERVIEW` or `ROADMAP_REVIEW`; roadmap save later moves to `ROADMAP_PERSISTENCE`. | backlog attempts, Sprint history, stale markers | none | `roadmap generate --input <feedback>`; roadmap history | Story and Sprint planning commands until roadmap reconciliation is reviewed/persisted; backlog refinement unless backlog impact is also selected |
-| `backlog` | `SPRINT_COMPLETE` | `backlog refine-record` from `SPRINT_COMPLETE` moves to `BACKLOG_REVIEW` and sets `downstream_backlog_stale=true`, `stale_backlog_reason=refined_backlog_recorded`; later save/reset follows existing backlog guards. | Sprint history, source backlog evidence, roadmap/Story evidence as stale until reconciled | none at triage time | `backlog refine-preview` when a source is available; `backlog refine-record` only when source attempt id and fingerprint are available; `backlog refine-import` when source artifact and expected fingerprint are supplied | Story and Sprint planning; reset-active until replacement is explicitly guarded and approved |
-| `multiple` | `SPRINT_COMPLETE` | No layer bridge runs until the user records a guarded correction to one primary impact or an implementation supports grouped execution. | all planning artifacts and Sprint history | none | `sprint review`; guarded `sprint triage --replace-existing --expected-triage-fingerprint <fingerprint>` to select a primary impact | all layer-specific mutating bridges with reason `POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION` |
+| `story` | `SPRINT_COMPLETE` | When advertised as runnable and preconditions pass, `story generate` must be allowed to move to `STORY_INTERVIEW` or `STORY_REVIEW`; Story save later moves to `STORY_PERSISTENCE`. | backlog attempts, roadmap releases, unaffected Story runtime, Sprint history, stale markers | none | `story pending`; `story generate` for affected pending requirements; Story retry/refinement for affected requirements with attempts | backlog refinement; roadmap regeneration; Sprint generation until affected Story work is saved or explicitly skipped |
+| `roadmap` | `SPRINT_COMPLETE` | When advertised as runnable and preconditions pass, `roadmap generate` must be allowed to move to `ROADMAP_INTERVIEW` or `ROADMAP_REVIEW`; roadmap save later moves to `ROADMAP_PERSISTENCE`. | backlog attempts, Sprint history, stale markers | none | `roadmap generate --input <feedback>`; roadmap history | Story and Sprint planning commands until roadmap reconciliation is reviewed/persisted; backlog refinement unless backlog impact is also selected |
+| `backlog` | `SPRINT_COMPLETE` | When advertised as runnable and preconditions pass, `backlog refine-record` from `SPRINT_COMPLETE` must be allowed to move to `BACKLOG_REVIEW` and set `downstream_backlog_stale=true`, `stale_backlog_reason=refined_backlog_recorded`; later save/reset follows existing backlog guards. | Sprint history, source backlog evidence, roadmap/Story evidence as stale until reconciled | none at triage time | `backlog refine-preview` when a source is available; `backlog refine-record` only when source attempt id and fingerprint are available; `backlog refine-import` when source artifact and expected fingerprint are supplied | Story and Sprint planning; reset-active until replacement is explicitly guarded and approved |
+| `multiple` | `SPRINT_COMPLETE` | No layer bridge is allowed to run until the user records a guarded correction to one primary impact or an implementation supports grouped execution. | all planning artifacts and Sprint history | none | `sprint review`; guarded `sprint triage --replace-existing --expected-triage-fingerprint <fingerprint>` to select a primary impact | all layer-specific mutating bridges with reason `POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION` |
 
 Planned Sprint rule:
 
@@ -506,9 +542,11 @@ Primary bridge:
 - show reset-active only behind the existing guarded replacement path when a
   saved active backlog replacement is requested
 
-The bridge does not require a backlog attempt to pre-exist. If no suitable
-source attempt exists, the command guidance should explain which current backlog
-artifact or source attempt is needed before recording a refinement.
+The triage decision does not require a backlog attempt to pre-exist. If no
+suitable source attempt exists, `impact=backlog` triage still records
+successfully, but `workflow next` returns backlog refinement bridge actions as
+blocked with `BACKLOG_SOURCE_UNAVAILABLE` until a deterministic source artifact
+and fingerprint can be resolved.
 
 Backlog source-resolution ladder:
 
@@ -595,6 +633,11 @@ Projected fields:
     "sprint_id": 13,
     "impact": "story",
     "affected_requirements": ["pyrepo-check Quality Gate Integration"],
+    "affected_task_ids": [],
+    "affected_story_ids": [],
+    "affected_backlog_item_ids": [],
+    "affected_roadmap_item_ids": [],
+    "affected_layers": [],
     "learning_summary": "The research spike confirmed the next quality-gate story.",
     "decision_reason": "No backlog-level scope change was found.",
     "recorded_at": "2026-06-10T00:00:00Z",
@@ -666,12 +709,13 @@ Named errors:
 | `TRIAGE_FINGERPRINT_MISMATCH` | Guarded correction used a stale or wrong triage fingerprint. | Re-read `sprint review` and retry with the current fingerprint. |
 | `TRIAGE_EXPECTED_STATE_MISMATCH` | `--expected-state` is absent or does not match current `SPRINT_COMPLETE`. | Refresh `workflow state`; triage is only valid from `SPRINT_COMPLETE`. |
 | `TRIAGE_IMPACT_FIELDS_INVALID` | Required affected fields for the selected impact are missing or forbidden fields are present. | Retry with the affected fields required by the chosen impact. |
-| `BACKLOG_SOURCE_UNAVAILABLE` | Backlog impact was selected but no source attempt, canonical active snapshot, or explicit source artifact/fingerprint can be resolved. | Provide a source artifact or create/select a source backlog attempt before recording runnable refinement. |
+| `BACKLOG_SOURCE_UNAVAILABLE` | A backlog refinement bridge action cannot be advertised as runnable because no source attempt, canonical active snapshot, or explicit source artifact/fingerprint can be resolved. This does not block recording `impact=backlog` triage. | Provide a source artifact, enable deterministic active-backlog snapshotting, or create/select a source backlog attempt before running refinement. |
 
 ## Observability And Audit
 
 Recording triage creates a new `WorkflowEventType.POST_SPRINT_TRIAGE_RECORDED`
-event. A guarded correction creates another event of the same type with
+event with `metadata.action="post_sprint_triage_recorded"`. A guarded
+correction creates another event of the same type with
 `metadata.action="post_sprint_triage_corrected"`.
 
 The event includes:
@@ -684,6 +728,8 @@ The event includes:
 - request fingerprint
 - triage fingerprint
 - correction flag
+- history action
+- replaced triage fingerprint, only for corrections
 - actor
 - recorded timestamp
 
@@ -701,15 +747,27 @@ Regression coverage should prove:
 - `sprint review` returns latest completed Sprint context without mutation
 - `sprint triage` records a durable decision for the latest completed Sprint
 - idempotent replay returns the same triage response
+- `sprint triage --affected-task-id` is accepted, normalized, and projected in
+  the stored payload and command response
+- `impact=roadmap` rejects release or milestone names as v1 routing satisfiers
+  unless a structured affected requirement or roadmap item id is supplied
 - `impact=none` routes to existing Story/roadmap continuation instead of
   backlog refinement when no stale guard is active
 - `impact=story` routes to Story pending/generate/refine commands for affected
   requirements
+- `impact=multiple` requires structured `affected_layers` with at least two
+  distinct affected layers; `decision_reason` alone does not satisfy routing
 - `impact=backlog` routes to backlog refinement commands without requiring a
   pre-existing post-sprint backlog attempt
+- `impact=backlog` triage records when no source artifact exists, then
+  `workflow next` blocks runnable backlog bridge actions with
+  `BACKLOG_SOURCE_UNAVAILABLE`
 - `impact=backlog` blocks `refine-record` with `BACKLOG_SOURCE_UNAVAILABLE`
   when no source attempt id and source fingerprint can be produced
 - `impact=multiple` groups options without choosing a default layer
+- guarded correction appends the old current payload as `superseded`, replaces
+  `post_sprint_triage`, appends the new payload as `corrected`, and emits
+  correction audit metadata
 - planned Sprint start is blocked before triage and becomes runnable only after
   `impact=none`, matching planned Sprint id, and no stale guard
 - active stale guards override `none` and `story` continuation routes
