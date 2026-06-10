@@ -1,7 +1,7 @@
 # Post-Sprint Learning Triage Design
 
 **Date:** 2026-06-10
-**Status:** In Review
+**Status:** Accepted
 **Spec mode:** proposed_change
 **Scope:** `SPRINT_COMPLETE` next-cycle routing, durable sprint-learning impact
 classification, and stale-guard-aware `workflow next`
@@ -18,6 +18,7 @@ classification, and stale-guard-aware `workflow next`
 - 2026-06-10: Tightened triage affected-field contracts, correction history
   persistence, backlog source blocking semantics, and mandatory bridge
   executability wording.
+- 2026-06-10: Accepted for implementation planning.
 
 ## Summary
 
