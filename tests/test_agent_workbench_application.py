@@ -3911,6 +3911,7 @@ def test_workflow_next_routes_impact_multiple_to_guarded_correction_only(
 
 
 def test_backlog_impact_records_but_blocks_refine_record_without_source() -> None:
+    """Block Backlog refinement bridges when backlog impact has no source."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteTriagedBacklogNoSourceReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3951,6 +3952,7 @@ def test_backlog_impact_records_but_blocks_refine_record_without_source() -> Non
 
 
 def test_active_reset_stale_guard_overrides_triage_none() -> None:
+    """Keep active-reset stale guard ahead of impact=none continuation."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteTriagedNoneActiveResetReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3966,6 +3968,7 @@ def test_active_reset_stale_guard_overrides_triage_none() -> None:
 
 
 def test_planned_sprint_start_is_blocked_until_triage_confirms_none() -> None:
+    """Block planned Sprint start before post-sprint triage is recorded."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompletePlannedSprintMissingTriageReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -3983,7 +3986,8 @@ def test_planned_sprint_start_is_blocked_until_triage_confirms_none() -> None:
     )
 
 
-def test_planned_sprint_start_after_triage_none_is_blocked_until_bridge_exists() -> None:
+def test_planned_sprint_after_triage_none_blocks_start_bridge() -> None:
+    """Block non-executable planned Sprint start after impact=none."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteTriagedNonePlannedSprintReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -4026,6 +4030,7 @@ def test_planned_sprint_start_after_triage_none_is_blocked_until_bridge_exists()
 
 
 def test_refined_backlog_stale_guard_blocks_placeholder_backlog_commands() -> None:
+    """Block refined Backlog save/reset commands when guard values are missing."""
     app = AgentWorkbenchApplication(
         read_projection=_SprintCompleteRefinedBacklogRecordedNoSourceReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),

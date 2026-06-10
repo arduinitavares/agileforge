@@ -3029,34 +3029,36 @@ def _post_sprint_triage_impact_next(
         return None
     triage_impact = triage.get("impact")
     if triage_impact == "none":
-        return _post_sprint_none_next(
+        impact_next = _post_sprint_none_next(
             project_id=project_id,
             workflow=workflow,
         )
-    if triage_impact == "story":
-        return _post_sprint_story_next(
-            project_id=project_id,
-            workflow=workflow,
-            triage=triage,
-        )
-    if triage_impact == "task":
-        return _post_sprint_task_next(
+    elif triage_impact == "story":
+        impact_next = _post_sprint_story_next(
             project_id=project_id,
             workflow=workflow,
             triage=triage,
         )
-    if triage_impact == "backlog":
-        return _post_sprint_backlog_next(
-            project_id=project_id,
-            workflow=workflow,
-        )
-    if triage_impact == "multiple":
-        return _post_sprint_multiple_next(
+    elif triage_impact == "task":
+        impact_next = _post_sprint_task_next(
             project_id=project_id,
             workflow=workflow,
             triage=triage,
         )
-    return None
+    elif triage_impact == "backlog":
+        impact_next = _post_sprint_backlog_next(
+            project_id=project_id,
+            workflow=workflow,
+        )
+    elif triage_impact == "multiple":
+        impact_next = _post_sprint_multiple_next(
+            project_id=project_id,
+            workflow=workflow,
+            triage=triage,
+        )
+    else:
+        impact_next = None
+    return impact_next
 
 
 def _post_sprint_none_next(
