@@ -55,6 +55,8 @@ def build_triage_payload(
     recorded_by: str,
 ) -> dict[str, Any]:
     """Return a normalized post-sprint triage payload with stable fingerprints."""
+    normalized_project_id = _required_positive_int(project_id, field_name="project_id")
+    normalized_sprint_id = _required_positive_int(sprint_id, field_name="sprint_id")
     normalized_impact = _normalize_impact(impact)
     normalized_fields: dict[str, list[str] | list[int]] = {
         "affected_requirements": _normalize_text_list(affected_requirements),
@@ -92,8 +94,8 @@ def build_triage_payload(
     )
 
     request_fingerprint_payload: dict[str, Any] = {
-        "project_id": project_id,
-        "sprint_id": sprint_id,
+        "project_id": normalized_project_id,
+        "sprint_id": normalized_sprint_id,
         "impact": normalized_impact,
         **normalized_fields,
         "affected_layers": normalized_layers,
@@ -124,6 +126,8 @@ def current_triage_for_latest_sprint(state: dict[str, Any]) -> dict[str, Any] | 
         return None
     if triage.get("sprint_id") != latest_completed_sprint_id:
         return None
+    if not _is_valid_stored_triage(triage):
+        return None
     return triage
 
 
@@ -137,6 +141,8 @@ def post_sprint_triage_required(state: dict[str, Any]) -> bool:
 
 
 def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
     return str(value).strip()
 
 
@@ -176,6 +182,18 @@ def _positive_int_or_none(value: object) -> int | None:
     if normalized <= 0:
         return None
     return normalized
+
+
+def _required_positive_int(value: object, *, field_name: str) -> int:
+    normalized = _positive_int_or_none(value)
+    if normalized is not None:
+        return normalized
+    raise PostSprintTriageValidationError(
+        code=TRIAGE_REQUIRED_FIELD_MISSING,
+        message=f"{field_name} must be a positive integer.",
+        details={"field": field_name},
+        remediation=[f"Provide a positive integer {field_name} value."],
+    )
 
 
 def _normalize_impact(impact: str) -> str:
@@ -270,6 +288,18 @@ def _validate_impact_fields(
             )
         return
 
+    if impact != "multiple" and affected_layers:
+        _raise_invalid_impact_fields(
+            "affected_layers can only be used when impact=multiple.",
+            details={
+                "impact": impact,
+                "affected_layers": affected_layers,
+            },
+            remediation=[
+                "Clear affected_layers or set impact=multiple with at least two layers.",
+            ],
+        )
+
     if impact == "task":
         if not (affected_task_ids or affected_story_ids or affected_requirements):
             _raise_missing_impact_fields(
@@ -321,6 +351,19 @@ def _validate_impact_fields(
                 "Provide at least two affected_layers values.",
             ],
         )
+
+
+def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
+    if triage.get("schema_version") != TRIAGE_SCHEMA_VERSION:
+        return False
+    impact = triage.get("impact")
+    if not isinstance(impact, str) or impact not in VALID_TRIAGE_IMPACTS:
+        return False
+    for field_name in ("request_fingerprint", "triage_fingerprint"):
+        fingerprint = triage.get(field_name)
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return False
+    return True
 
 
 def _raise_missing_impact_fields(
