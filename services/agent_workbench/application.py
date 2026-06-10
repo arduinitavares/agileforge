@@ -3202,15 +3202,17 @@ def _post_sprint_backlog_next(
     )
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
     blocked_commands: list[dict[str, str]] = []
+    status = "post_sprint_backlog_refinement_available"
     if not commands:
         blocked_commands = _backlog_source_unavailable_blocked_commands()
+        status = "post_sprint_backlog_source_unavailable"
     return _sprint_complete_next_response(
         project_id=project_id,
         workflow=workflow,
         next_valid_commands=next_valid_commands,
         blocked_commands=blocked_commands,
         blocked_future_commands=blocked_future_commands,
-        status="post_sprint_backlog_refinement_available",
+        status=status,
     )
 
 
@@ -3251,43 +3253,73 @@ def _post_sprint_refined_backlog_recorded_next(
         (
             "agileforge backlog history",
             f"agileforge backlog history --project-id {project_id}",
-        ),
-        (
-            "agileforge backlog save",
-            (
-                f"agileforge backlog save --project-id {project_id} "
-                f"--attempt-id {attempt_id or '<attempt_id>'} "
-                f"--expected-artifact-fingerprint "
-                f"{artifact_fingerprint or '<artifact_fingerprint>'} "
-                "--expected-state BACKLOG_REVIEW "
-                "--idempotency-key <idempotency_key>"
-            ),
-        ),
-        (
-            "agileforge backlog reset-active",
-            (
-                f"agileforge backlog reset-active --project-id {project_id} "
-                f"--attempt-id {attempt_id or '<attempt_id>'} "
-                f"--expected-artifact-fingerprint "
-                f"{artifact_fingerprint or '<artifact_fingerprint>'} "
-                "--expected-state BACKLOG_REVIEW "
-                "--reset-reason <reset_reason> "
-                "--archive-all-active-stories "
-                "--idempotency-key <idempotency_key>"
-            ),
-        ),
+        )
     ]
+    blocked_commands: list[dict[str, str]] = []
+    if attempt_id is not None and artifact_fingerprint is not None:
+        commands.extend(
+            [
+                (
+                    "agileforge backlog save",
+                    (
+                        f"agileforge backlog save --project-id {project_id} "
+                        f"--attempt-id {attempt_id} "
+                        f"--expected-artifact-fingerprint {artifact_fingerprint} "
+                        "--expected-state BACKLOG_REVIEW "
+                        "--idempotency-key <idempotency_key>"
+                    ),
+                ),
+                (
+                    "agileforge backlog reset-active",
+                    (
+                        f"agileforge backlog reset-active --project-id {project_id} "
+                        f"--attempt-id {attempt_id} "
+                        f"--expected-artifact-fingerprint {artifact_fingerprint} "
+                        "--expected-state BACKLOG_REVIEW "
+                        "--reset-reason <reset_reason> "
+                        "--archive-all-active-stories "
+                        "--idempotency-key <idempotency_key>"
+                    ),
+                ),
+            ]
+        )
+    else:
+        blocked_commands.extend(_refined_backlog_source_unavailable_blocked_commands())
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    blocked_commands.extend(
+        _post_sprint_stale_continuation_blockers(
+            reason="DOWNSTREAM_BACKLOG_STALE_AFTER_REFINED_BACKLOG_RECORDED",
+        )
+    )
     return _sprint_complete_next_response(
         project_id=project_id,
         workflow=workflow,
         next_valid_commands=next_valid_commands,
-        blocked_commands=_post_sprint_stale_continuation_blockers(
-            reason="DOWNSTREAM_BACKLOG_STALE_AFTER_REFINED_BACKLOG_RECORDED",
-        ),
+        blocked_commands=blocked_commands,
         blocked_future_commands=blocked_future_commands,
         status="post_sprint_blocked_by_stale_backlog",
     )
+
+
+def _refined_backlog_source_unavailable_blocked_commands() -> list[dict[str, str]]:
+    """Return stale refined Backlog blockers when guard values are missing."""
+    reason = ErrorCode.BACKLOG_SOURCE_UNAVAILABLE.value
+    message = (
+        "Refined Backlog stale routing cannot advertise guarded Backlog commands "
+        "until the latest Backlog attempt id and fingerprint are available."
+    )
+    return [
+        {
+            "command": "agileforge backlog save",
+            "reason": reason,
+            "message": message,
+        },
+        {
+            "command": "agileforge backlog reset-active",
+            "reason": reason,
+            "message": message,
+        },
+    ]
 
 
 def _latest_backlog_attempt_guards(

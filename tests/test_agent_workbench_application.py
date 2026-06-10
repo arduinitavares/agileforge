@@ -480,6 +480,46 @@ class _SprintCompleteTriagedNonePlannedSprintReadProjection(_FakeReadProjection)
         return result
 
 
+class _SprintCompleteRefinedBacklogRecordedNoSourceReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with stale refined Backlog but no guards."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return refined-backlog stale state missing usable source guards."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact="none",
+                affected_requirements=None,
+                affected_task_ids=None,
+                affected_story_ids=None,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=None,
+                learning_summary="No new follow-up impact.",
+                decision_reason="Existing refined backlog guard still applies.",
+                idempotency_key="triage-none-refined-backlog-stale",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+            "planned_sprint_id": None,
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "refined_backlog_recorded",
+            "stale_since_backlog_attempt_id": "backlog-attempt-missing-source",
+            "backlog_attempts": [
+                {
+                    "attempt_id": "",
+                    "artifact_fingerprint": "",
+                }
+            ],
+        }
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -3880,9 +3920,34 @@ def test_backlog_impact_records_but_blocks_refine_record_without_source() -> Non
 
     assert result["ok"] is True
     data = result["data"]
-    assert data["status"] == "post_sprint_backlog_refinement_available"
-    assert not any("refine-record" in command for command in data["next_valid_commands"])
-    assert data["blocked_commands"][0]["reason"] == "BACKLOG_SOURCE_UNAVAILABLE"
+    assert data["status"] == "post_sprint_backlog_source_unavailable"
+    assert data["next_valid_commands"] == []
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge backlog refine-preview",
+            "reason": "BACKLOG_SOURCE_UNAVAILABLE",
+            "message": (
+                "Backlog impact was recorded, but no source attempt and fingerprint "
+                "are available for a runnable refinement bridge."
+            ),
+        },
+        {
+            "command": "agileforge backlog refine-record",
+            "reason": "BACKLOG_SOURCE_UNAVAILABLE",
+            "message": (
+                "Backlog impact was recorded, but no source attempt and fingerprint "
+                "are available for a runnable refinement bridge."
+            ),
+        },
+        {
+            "command": "agileforge backlog refine-import",
+            "reason": "BACKLOG_SOURCE_UNAVAILABLE",
+            "message": (
+                "Backlog impact was recorded, but no source attempt and fingerprint "
+                "are available for a runnable refinement bridge."
+            ),
+        },
+    ]
 
 
 def test_active_reset_stale_guard_overrides_triage_none() -> None:
@@ -3948,6 +4013,55 @@ def test_planned_sprint_start_after_triage_none_is_blocked_until_bridge_exists()
         action.get("command") != expected_command or action.get("runnable") is False
         for action in data["next_actions"]
     )
+    assert data["next_actions"] == [
+        {
+            "command": expected_command,
+            "status": "post_sprint_planned_sprint_start_blocked",
+            "reason": "POST_SPRINT_PLANNED_SPRINT_START_NOT_IMPLEMENTED",
+            "runnable": False,
+            "installed": True,
+            "requires_cli_installation": False,
+        }
+    ]
+
+
+def test_refined_backlog_stale_guard_blocks_placeholder_backlog_commands() -> None:
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteRefinedBacklogRecordedNoSourceReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_blocked_by_stale_backlog"
+    assert data["next_valid_commands"] == [
+        "agileforge backlog history --project-id 7"
+    ]
+    assert not any("<attempt_id>" in command for command in data["next_valid_commands"])
+    assert not any(
+        "<artifact_fingerprint>" in command
+        for command in data["next_valid_commands"]
+    )
+    assert {
+        "command": "agileforge backlog save",
+        "reason": "BACKLOG_SOURCE_UNAVAILABLE",
+        "message": (
+            "Refined Backlog stale routing cannot advertise guarded Backlog "
+            "commands until the latest Backlog attempt id and fingerprint are "
+            "available."
+        ),
+    } in data["blocked_commands"]
+    assert {
+        "command": "agileforge backlog reset-active",
+        "reason": "BACKLOG_SOURCE_UNAVAILABLE",
+        "message": (
+            "Refined Backlog stale routing cannot advertise guarded Backlog "
+            "commands until the latest Backlog attempt id and fingerprint are "
+            "available."
+        ),
+    } in data["blocked_commands"]
 
 
 def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(  # noqa: E501
