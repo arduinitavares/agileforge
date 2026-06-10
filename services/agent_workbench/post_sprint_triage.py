@@ -78,9 +78,12 @@ def build_triage_payload(
         decision_reason,
         field_name="decision_reason",
     )
-    normalized_idempotency_key = _normalize_text(idempotency_key)
-    normalized_recorded_at = _normalize_text(recorded_at)
-    normalized_recorded_by = _normalize_text(recorded_by)
+    normalized_idempotency_key = _required_text(
+        idempotency_key,
+        field_name="idempotency_key",
+    )
+    normalized_recorded_at = _required_text(recorded_at, field_name="recorded_at")
+    normalized_recorded_by = _required_text(recorded_by, field_name="recorded_by")
 
     _validate_impact_fields(
         impact=normalized_impact,
@@ -179,6 +182,8 @@ def _positive_int_or_none(value: object) -> int | None:
         normalized = int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    if not isinstance(value, (str, bytes, bytearray)) and value != normalized:
+        return None
     if normalized <= 0:
         return None
     return normalized
@@ -196,7 +201,18 @@ def _required_positive_int(value: object, *, field_name: str) -> int:
     )
 
 
-def _normalize_impact(impact: str) -> str:
+def _normalize_impact(impact: object) -> str:
+    if not isinstance(impact, str):
+        _raise_invalid_impact_fields(
+            "Unknown post-sprint triage impact.",
+            details={
+                "impact": impact,
+                "valid_impacts": sorted(VALID_TRIAGE_IMPACTS),
+            },
+            remediation=[
+                "Use one of: none, task, story, roadmap, backlog, multiple.",
+            ],
+        )
     normalized = impact.strip().lower()
     if normalized not in VALID_TRIAGE_IMPACTS:
         _raise_invalid_impact_fields(
@@ -363,7 +379,41 @@ def _is_valid_stored_triage(triage: dict[str, Any]) -> bool:
         fingerprint = triage.get(field_name)
         if not isinstance(fingerprint, str) or not fingerprint:
             return False
+    try:
+        _validate_impact_fields(
+            impact=impact,
+            affected_requirements=_normalize_text_list(
+                _stored_list(triage, "affected_requirements")
+            ),
+            affected_task_ids=_normalize_positive_int_list(
+                _stored_list(triage, "affected_task_ids")
+            ),
+            affected_story_ids=_normalize_positive_int_list(
+                _stored_list(triage, "affected_story_ids")
+            ),
+            affected_backlog_item_ids=_normalize_positive_int_list(
+                _stored_list(triage, "affected_backlog_item_ids")
+            ),
+            affected_roadmap_item_ids=_normalize_positive_int_list(
+                _stored_list(triage, "affected_roadmap_item_ids")
+            ),
+            affected_layers=_normalize_affected_layers(
+                _stored_list(triage, "affected_layers")
+            ),
+            decision_reason=_normalize_text(triage.get("decision_reason")),
+        )
+    except (PostSprintTriageValidationError, TypeError):
+        return False
     return True
+
+
+def _stored_list(triage: dict[str, Any], field_name: str) -> list[object]:
+    value = triage.get(field_name)
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    raise TypeError(f"{field_name} must be a list.")
 
 
 def _raise_missing_impact_fields(

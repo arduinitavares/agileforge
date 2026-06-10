@@ -86,12 +86,37 @@ def test_build_triage_payload_rejects_multiple_without_structured_layers() -> No
     assert excinfo.value.code == "TRIAGE_IMPACT_FIELDS_INVALID"
 
 
+def test_build_triage_payload_rejects_null_impact_as_validation_error() -> None:
+    with pytest.raises(PostSprintTriageValidationError) as excinfo:
+        build_triage_payload(**_story_triage_kwargs(impact=None))
+
+    assert excinfo.value.code == "TRIAGE_IMPACT_FIELDS_INVALID"
+
+
 @pytest.mark.parametrize("field_name", ["learning_summary", "decision_reason"])
 def test_build_triage_payload_rejects_null_required_text(
     field_name: str,
 ) -> None:
     with pytest.raises(PostSprintTriageValidationError) as excinfo:
         build_triage_payload(**_story_triage_kwargs(**{field_name: None}))
+
+    assert excinfo.value.code == "TRIAGE_REQUIRED_FIELD_MISSING"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("idempotency_key", None),
+        ("recorded_at", "  "),
+        ("recorded_by", ""),
+    ],
+)
+def test_build_triage_payload_rejects_blank_metadata_text(
+    field_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(PostSprintTriageValidationError) as excinfo:
+        build_triage_payload(**_story_triage_kwargs(**{field_name: value}))
 
     assert excinfo.value.code == "TRIAGE_REQUIRED_FIELD_MISSING"
 
@@ -125,6 +150,14 @@ def test_build_triage_payload_retains_int_convertible_positive_ids() -> None:
     )
 
     assert payload["affected_story_ids"] == [3, 4]
+
+
+def test_build_triage_payload_skips_fractional_numeric_ids() -> None:
+    payload = build_triage_payload(
+        **_story_triage_kwargs(affected_story_ids=[3.5, 4]),
+    )
+
+    assert payload["affected_story_ids"] == [4]
 
 
 def test_build_triage_payload_normalizes_top_level_ids_before_fingerprinting() -> None:
@@ -187,6 +220,30 @@ def test_current_triage_for_latest_sprint_requires_matching_sprint_id() -> None:
         "fsm_state": "SPRINT_COMPLETE",
         "latest_completed_sprint_id": 14,
         "post_sprint_triage": {"sprint_id": 13, "impact": "none"},
+    }
+
+    assert current_triage_for_latest_sprint(state) is None
+    assert post_sprint_triage_required(state) is True
+
+
+def test_current_triage_for_latest_sprint_rejects_invalid_impact_fields() -> None:
+    state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": 13,
+        "post_sprint_triage": {
+            "schema_version": TRIAGE_SCHEMA_VERSION,
+            "sprint_id": 13,
+            "impact": "story",
+            "affected_requirements": [],
+            "affected_task_ids": [],
+            "affected_story_ids": [],
+            "affected_backlog_item_ids": [],
+            "affected_roadmap_item_ids": [],
+            "affected_layers": [],
+            "decision_reason": "Story impact was selected without structured links.",
+            "request_fingerprint": "sha256:request",
+            "triage_fingerprint": "sha256:triage",
+        },
     }
 
     assert current_triage_for_latest_sprint(state) is None
