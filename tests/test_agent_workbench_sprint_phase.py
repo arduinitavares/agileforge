@@ -2023,6 +2023,152 @@ def test_sprint_triage_replays_normalized_equivalent_idempotency_request(
     )
 
 
+def test_sprint_triage_replays_before_state_guards_when_workflow_moves(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage idempotency replay should run before current state guards."""
+    product = Product(name="Triage Replay Before Guards Product")
+    team = Team(name="Triage Replay Before Guards Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Replay triage before state guards",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    newer_completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Newer completed sprint after replayed triage",
+        start_date=date(2026, 6, 10),
+        end_date=date(2026, 6, 24),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add_all([completed_sprint, newer_completed_sprint])
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+    assert newer_completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    first = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-replay-before-guards-001",
+        changed_by="cli-agent",
+    )
+    workflow.state["fsm_state"] = "SPRINT_VIEW"
+    workflow.state["latest_completed_sprint_id"] = newer_completed_sprint.sprint_id
+    replay = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-replay-before-guards-001",
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+
+
+def test_sprint_triage_reusing_key_with_changed_expected_fingerprint_is_rejected(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint triage idempotency should include correction guard inputs."""
+    product = Product(name="Triage Changed Guard Product")
+    team = Team(name="Triage Changed Guard Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Reject changed expected triage fingerprint",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(completed_sprint)
+    session.commit()
+    assert completed_sprint.sprint_id is not None
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint.sprint_id,
+    }
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    first = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="none",
+        learning_summary="No follow-up changes are needed.",
+        decision_reason="Sprint outcomes matched the current backlog.",
+        idempotency_key="triage-changed-guard-001",
+        changed_by="cli-agent",
+    )
+    first_fingerprint = first["data"]["post_sprint_triage"]["triage_fingerprint"]
+    correction = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="story",
+        affected_story_ids=[42],
+        learning_summary="One story needs acceptance criteria follow-up.",
+        decision_reason="A completed task exposed missing story-level detail.",
+        idempotency_key="triage-changed-guard-002",
+        replace_existing=True,
+        expected_triage_fingerprint=first_fingerprint,
+        changed_by="cli-agent",
+    )
+    changed_guard = runner.triage(
+        project_id=product.product_id,
+        expected_state="SPRINT_COMPLETE",
+        impact="story",
+        affected_story_ids=[42],
+        learning_summary="One story needs acceptance criteria follow-up.",
+        decision_reason="A completed task exposed missing story-level detail.",
+        idempotency_key="triage-changed-guard-002",
+        replace_existing=True,
+        expected_triage_fingerprint="sha256:different",
+        changed_by="cli-agent",
+    )
+
+    assert first["ok"] is True
+    assert correction["ok"] is True
+    assert changed_guard["ok"] is False
+    assert changed_guard["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
 def test_sprint_triage_preserves_required_field_validation_code(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,

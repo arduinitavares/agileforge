@@ -36,6 +36,7 @@ from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
 )
 from services.agent_workbench.post_sprint_triage import (
+    TRIAGE_FIELD_INVALID,
     PostSprintTriageValidationError,
     build_triage_payload,
     current_triage_for_latest_sprint,
@@ -987,13 +988,55 @@ class SprintPhaseRunner:
         if isinstance(product, dict):
             return product
 
-        state = anyio.run(self._ensure_session, str(project_id))
-        resolved_sprint_id = (
-            sprint_id
-            if sprint_id is not None
-            else _int_or_none(state.get("latest_completed_sprint_id"))
-        )
         try:
+            request_hash = _post_sprint_triage_ledger_request_hash(
+                project_id=project_id,
+                sprint_id=sprint_id,
+                expected_state=expected_state,
+                impact=impact,
+                affected_requirements=affected_requirements,
+                affected_task_ids=affected_task_ids,
+                affected_story_ids=affected_story_ids,
+                affected_backlog_item_ids=affected_backlog_item_ids,
+                affected_roadmap_item_ids=affected_roadmap_item_ids,
+                affected_layers=affected_layers,
+                learning_summary=learning_summary,
+                decision_reason=decision_reason,
+                idempotency_key=idempotency_key,
+                replace_existing=replace_existing,
+                expected_triage_fingerprint=expected_triage_fingerprint,
+                changed_by=changed_by,
+            )
+        except PostSprintTriageValidationError as exc:
+            return _post_sprint_triage_validation_error(exc)
+
+        engine = get_engine()
+        ledger = MutationLedgerRepository(engine=engine)
+        ledger_result = ledger.create_or_load(
+            command=_SPRINT_TRIAGE_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=f"sprint-triage:{uuid4()}",
+            changed_by=changed_by,
+            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
+            now=datetime.now(UTC),
+        )
+        if ledger_result.error_code is not None:
+            return _ledger_error(ledger_result)
+        if ledger_result.replayed:
+            replay = ledger_result.response or {}
+            if isinstance(replay.get("data"), dict):
+                replay["data"].setdefault("idempotency", {})["replayed"] = True
+            return replay
+
+        try:
+            state = anyio.run(self._ensure_session, str(project_id))
+            resolved_sprint_id = (
+                sprint_id
+                if sprint_id is not None
+                else _int_or_none(state.get("latest_completed_sprint_id"))
+            )
             _assert_post_sprint_triage_state(
                 state=state,
                 expected_state=expected_state,
@@ -1018,33 +1061,7 @@ class SprintPhaseRunner:
                 recorded_at=recorded_at,
                 recorded_by=changed_by,
             )
-        except PostSprintTriageValidationError as exc:
-            return _post_sprint_triage_validation_error(exc)
-        except _SprintTriageError as exc:
-            return _post_sprint_triage_error(exc)
-
-        normalized_replace_existing = bool(triage_payload["replace_existing"])
-        engine = get_engine()
-        ledger = MutationLedgerRepository(engine=engine)
-        ledger_result = ledger.create_or_load(
-            command=_SPRINT_TRIAGE_COMMAND,
-            idempotency_key=idempotency_key,
-            request_hash=str(triage_payload["request_fingerprint"]),
-            project_id=project_id,
-            correlation_id=f"sprint-triage:{uuid4()}",
-            changed_by=changed_by,
-            lease_owner=_SPRINT_TRIAGE_LEASE_OWNER,
-            now=datetime.now(UTC),
-        )
-        if ledger_result.error_code is not None:
-            return _ledger_error(ledger_result)
-        if ledger_result.replayed:
-            replay = ledger_result.response or {}
-            if isinstance(replay.get("data"), dict):
-                replay["data"].setdefault("idempotency", {})["replayed"] = True
-            return replay
-
-        try:
+            normalized_replace_existing = bool(triage_payload["replace_existing"])
             with Session(engine) as session:
                 sprint = _completed_sprint(
                     session=session,
@@ -1660,6 +1677,144 @@ def _post_sprint_review_payload(
             "story_count": len(_sorted_sprint_stories(sprint)),
         },
     }
+
+
+def _post_sprint_triage_ledger_request_hash(  # noqa: PLR0913
+    *,
+    project_id: int,
+    sprint_id: int | None,
+    expected_state: str,
+    impact: str,
+    affected_requirements: list[str] | None,
+    affected_task_ids: list[int] | None,
+    affected_story_ids: list[int] | None,
+    affected_backlog_item_ids: list[str] | None,
+    affected_roadmap_item_ids: list[str] | None,
+    affected_layers: list[str] | None,
+    learning_summary: str,
+    decision_reason: str,
+    idempotency_key: str,
+    replace_existing: bool | str,
+    expected_triage_fingerprint: str | None,
+    changed_by: str,
+) -> str:
+    """Return an idempotency hash from normalized caller inputs."""
+    return canonical_hash(
+        {
+            "project_id": _int_or_none(project_id),
+            "sprint_id": _int_or_none(sprint_id) if sprint_id is not None else None,
+            "expected_state": _triage_ledger_text(expected_state),
+            "impact": _triage_ledger_text(impact).lower(),
+            "affected_requirements": _triage_ledger_text_list(
+                affected_requirements
+            ),
+            "affected_task_ids": _triage_ledger_positive_int_list(
+                affected_task_ids
+            ),
+            "affected_story_ids": _triage_ledger_positive_int_list(
+                affected_story_ids
+            ),
+            "affected_backlog_item_ids": _triage_ledger_text_list(
+                affected_backlog_item_ids
+            ),
+            "affected_roadmap_item_ids": _triage_ledger_text_list(
+                affected_roadmap_item_ids
+            ),
+            "affected_layers": _triage_ledger_layers(affected_layers),
+            "learning_summary": _triage_ledger_text(learning_summary),
+            "decision_reason": _triage_ledger_text(decision_reason),
+            "idempotency_key": _triage_ledger_text(idempotency_key),
+            "replace_existing": _triage_ledger_replace_existing(replace_existing),
+            "expected_triage_fingerprint": (
+                _triage_ledger_text(expected_triage_fingerprint)
+                if expected_triage_fingerprint is not None
+                else None
+            ),
+            "changed_by": _triage_ledger_text(changed_by),
+        }
+    )
+
+
+def _triage_ledger_text(value: object) -> str:
+    """Normalize text for Sprint triage idempotency hashing."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _triage_ledger_text_list(values: object) -> list[str] | dict[str, str]:
+    """Normalize text-list caller inputs for Sprint triage idempotency hashing."""
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        return {"invalid_container_type": type(values).__name__}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _triage_ledger_text(value)
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def _triage_ledger_positive_int_list(values: object) -> list[int] | dict[str, str]:
+    """Normalize int-list caller inputs for Sprint triage idempotency hashing."""
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        return {"invalid_container_type": type(values).__name__}
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        item_id = _triage_ledger_positive_int_or_none(value)
+        if item_id is None or item_id in seen:
+            continue
+        normalized.append(item_id)
+        seen.add(item_id)
+    return normalized
+
+
+def _triage_ledger_layers(values: object) -> list[str] | dict[str, str]:
+    """Normalize layer-list caller inputs for Sprint triage idempotency hashing."""
+    normalized = _triage_ledger_text_list(values)
+    if isinstance(normalized, dict):
+        return normalized
+    return sorted({layer.lower() for layer in normalized if layer})
+
+
+def _triage_ledger_positive_int_or_none(value: object) -> int | None:
+    """Return a positive integer for int-shaped triage list values."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not isinstance(value, (str, bytes, bytearray)) and value != normalized:
+        return None
+    if normalized <= 0:
+        return None
+    return normalized
+
+
+def _triage_ledger_replace_existing(value: bool | str) -> bool:
+    """Parse replace_existing for Sprint triage idempotency hashing."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise PostSprintTriageValidationError(
+        code=TRIAGE_FIELD_INVALID,
+        message="replace_existing must be a boolean.",
+        details={"field": "replace_existing"},
+        remediation=["Provide replace_existing as true or false."],
+    )
 
 
 def _assert_post_sprint_triage_state(
