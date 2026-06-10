@@ -77,11 +77,26 @@ def build_triage_payload(
     normalized_sprint_id = _required_positive_int(sprint_id, field_name="sprint_id")
     normalized_impact = _normalize_impact(impact)
     normalized_fields: dict[str, list[str] | list[int]] = {
-        "affected_requirements": _normalize_text_list(affected_requirements),
-        "affected_task_ids": _normalize_positive_int_list(affected_task_ids),
-        "affected_story_ids": _normalize_positive_int_list(affected_story_ids),
-        "affected_backlog_item_ids": _normalize_text_list(affected_backlog_item_ids),
-        "affected_roadmap_item_ids": _normalize_text_list(affected_roadmap_item_ids),
+        "affected_requirements": _normalize_text_list(
+            affected_requirements,
+            field_name="affected_requirements",
+        ),
+        "affected_task_ids": _normalize_positive_int_list(
+            affected_task_ids,
+            field_name="affected_task_ids",
+        ),
+        "affected_story_ids": _normalize_positive_int_list(
+            affected_story_ids,
+            field_name="affected_story_ids",
+        ),
+        "affected_backlog_item_ids": _normalize_text_list(
+            affected_backlog_item_ids,
+            field_name="affected_backlog_item_ids",
+        ),
+        "affected_roadmap_item_ids": _normalize_text_list(
+            affected_roadmap_item_ids,
+            field_name="affected_roadmap_item_ids",
+        ),
     }
     normalized_layers = _normalize_affected_layers(affected_layers)
     normalized_learning_summary = _required_text(
@@ -164,10 +179,15 @@ def _normalize_text(value: object) -> str:
     return str(value).strip()
 
 
-def _normalize_text_list(values: list[object] | None) -> list[str]:
+def _normalize_text_list(
+    values: list[object] | None,
+    *,
+    field_name: str,
+) -> list[str]:
+    values = _affected_list_or_empty(values, field_name=field_name)
     normalized: list[str] = []
     seen: set[str] = set()
-    for value in values or []:
+    for value in values:
         if value is None:
             continue
         text = _normalize_text(value)
@@ -178,10 +198,15 @@ def _normalize_text_list(values: list[object] | None) -> list[str]:
     return normalized
 
 
-def _normalize_positive_int_list(values: list[object] | None) -> list[int]:
+def _normalize_positive_int_list(
+    values: list[object] | None,
+    *,
+    field_name: str,
+) -> list[int]:
+    values = _affected_list_or_empty(values, field_name=field_name)
     normalized: list[int] = []
     seen: set[int] = set()
-    for value in values or []:
+    for value in values:
         item_id = _positive_int_or_none(value)
         if item_id is None or item_id in seen:
             continue
@@ -244,9 +269,10 @@ def _normalize_impact(impact: object) -> str:
 
 
 def _normalize_affected_layers(values: list[object] | None) -> list[str]:
+    values = _affected_list_or_empty(values, field_name="affected_layers")
     normalized_layers: list[str] = []
     seen: set[str] = set()
-    for value in values or []:
+    for value in values:
         if value is None:
             continue
         layer = _normalize_text(value).lower()
@@ -271,6 +297,25 @@ def _normalize_affected_layers(values: list[object] | None) -> list[str]:
             ],
         )
     return sorted(normalized_layers)
+
+
+def _affected_list_or_empty(
+    values: list[object] | None,
+    *,
+    field_name: str,
+) -> list[object]:
+    if values is None:
+        return []
+    if isinstance(values, list):
+        return values
+    _raise_invalid_impact_fields(
+        f"{field_name} must be a list or null.",
+        details={
+            "field": field_name,
+            "received_type": type(values).__name__,
+        },
+        remediation=[f"Provide {field_name} as a list or null."],
+    )
 
 
 def _normalize_replace_existing(value: object) -> bool:

@@ -130,6 +130,43 @@ def test_build_triage_payload_rejects_layers_for_single_impact() -> None:
     assert excinfo.value.code == "TRIAGE_IMPACT_FIELDS_INVALID"
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("affected_requirements", "REQ-1"),
+        ("affected_task_ids", True),
+        ("affected_story_ids", "45"),
+        ("affected_layers", True),
+    ],
+)
+def test_build_triage_payload_rejects_invalid_affected_containers(
+    field_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(PostSprintTriageValidationError) as excinfo:
+        build_triage_payload(**_story_triage_kwargs(**{field_name: value}))
+
+    assert excinfo.value.code == "TRIAGE_IMPACT_FIELDS_INVALID"
+
+
+def test_build_triage_payload_accepts_normal_affected_list_containers() -> None:
+    payload = build_triage_payload(
+        **_story_triage_kwargs(
+            affected_requirements=["REQ-1"],
+            affected_task_ids=[2],
+            affected_story_ids=[4],
+            affected_backlog_item_ids=["item-001"],
+            affected_roadmap_item_ids=["roadmap-001"],
+        ),
+    )
+
+    assert payload["affected_requirements"] == ["REQ-1"]
+    assert payload["affected_task_ids"] == [2]
+    assert payload["affected_story_ids"] == [4]
+    assert payload["affected_backlog_item_ids"] == ["item-001"]
+    assert payload["affected_roadmap_item_ids"] == ["roadmap-001"]
+
+
 def test_build_triage_payload_retains_int_convertible_positive_ids() -> None:
     payload = build_triage_payload(
         project_id=7,
