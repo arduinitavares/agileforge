@@ -77,3 +77,53 @@ inside the ASA execution goal.
   candidates and pending non-refined requirements remain, `workflow next` should
   route to Story generation/refinement or explicit reconciliation, not only to
   `sprint generate`.
+
+### Story draft marked saveable despite unresolved dependency candidates
+
+- Project: ASA `project_id=3`
+- Context: generated stories for `pyrepo-check Quality Gate Integration`.
+- Command: `agileforge story generate --project-id 3 --parent-requirement "pyrepo-check Quality Gate Integration"`
+- Observed result: generated `attempt-1`, `is_complete=true`,
+  `is_reusable=true`, `quality.coverage_status=complete`, and
+  `save.available=true`.
+- Follow-up command: `agileforge story save ... --attempt-id attempt-1 ...`
+- Observed result: `ok=false`, error code `INVALID_COMMAND`, message
+  `Dependency candidate did not resolve to an active story.`
+- Cause in generated artifact: `dependency_candidates` referenced external or
+  unresolved labels such as `Python Project Scaffold and uv Management
+  Setup#...` and unqualified current-draft story names.
+- Recovery used: refined the same requirement with explicit feedback to omit
+  unresolved dependency candidates. `attempt-2` saved successfully.
+- Product feedback: the Story quality/saveability gate should catch unresolved
+  dependency candidates before reporting `save.available=true`, or the save
+  error should be surfaced as part of the draft quality findings.
+
+### Task update response can look like the task stayed open
+
+- Project: ASA `project_id=3`
+- Context: updating Sprint 16 task tickets `208-220` to `Done`.
+- Command: `agileforge sprint task update ... --status Done ...`
+- Observed result: each update returned `ok=true`, but the summarized response
+  exposed a `status=To Do` and the fingerprint for the next task ticket.
+- Follow-up verification: `agileforge sprint tasks --project-id 3` showed all
+  13 tasks were actually `Done`.
+- Product feedback: the task update response should clearly identify the
+  updated task status and separately label any next-task ticket. Otherwise a
+  CLI user can reasonably think the mutation was accepted but did not change
+  task state.
+
+### Sprint count/history summaries are inconsistent across commands
+
+- Project: ASA `project_id=3`
+- Context: Sprint 16 pyrepo-check planning and execution.
+- Command: `agileforge sprint start --project-id 3`
+- Observed result: response reported `story_count=4` and `task_count=3`.
+- Command: `agileforge sprint tasks --project-id 3`
+- Observed result: listed 13 actionable task rows for the same sprint.
+- Command: `agileforge sprint history --project-id 3` after generating
+  `sprint-attempt-1`.
+- Observed result: history summary showed `attempt_count=0` even though the
+  active draft/save path had just used `sprint-attempt-1`.
+- Product feedback: clarify whether `task_count` means story/workstream groups
+  or actionable tasks, and expose the active sprint generation attempt in
+  history or a dedicated active-sprint planning summary.
