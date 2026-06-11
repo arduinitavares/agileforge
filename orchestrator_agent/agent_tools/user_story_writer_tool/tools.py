@@ -571,6 +571,44 @@ def _dependency_candidate_warning(
     }
 
 
+def _dependency_candidate_finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    story_context: dict[str, Any],
+    candidate: StoryDependencyCandidate,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "story_id": story_context["story_id"],
+        "prerequisite_ref": candidate.prerequisite_ref,
+        "confidence": candidate.confidence,
+        "affected_story_indexes": [story_context["story_index"]],
+        "affected_story_titles": [story_context["story_title"]],
+    }
+
+
+def _dependency_candidate_failure_response_from_finding(
+    *,
+    input_data: SaveStoriesInput,
+    finding: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "error_code": finding["code"],
+        "error": finding["message"],
+        "story_id": finding["story_id"],
+        "prerequisite_ref": finding["prerequisite_ref"],
+        "confidence": finding["confidence"],
+    }
+
+
 def _resolve_dependency_candidate(
     *,
     candidate: StoryDependencyCandidate,
@@ -615,6 +653,160 @@ def _resolve_dependency_candidate(
         ]
 
     return []
+
+
+def _post_save_dependency_reference_stories(
+    session: Session,
+    *,
+    input_data: SaveStoriesInput,
+    normalized_req: str,
+    validated: list[UserStoryItem],
+    story_ids_by_slot: list[dict[str, int]] | None,
+) -> tuple[list[UserStory], dict[int, int]]:
+    active_stories = _active_stories_for_product(
+        session,
+        product_id=input_data.product_id,
+    )
+    current_active = [
+        story for story in active_stories if story.source_requirement == normalized_req
+    ]
+    existing_by_slot = {
+        story.refinement_slot: story
+        for story in current_active
+        if story.refinement_slot is not None
+    }
+    supplied_ids = {
+        int(item["slot"]): int(item["story_id"])
+        for item in story_ids_by_slot or []
+        if item.get("slot") is not None and item.get("story_id") is not None
+    }
+    reference_stories = [
+        story for story in active_stories if story.source_requirement != normalized_req
+    ]
+    dependent_story_ids: dict[int, int] = {}
+    for slot, item in enumerate(validated, start=1):
+        existing = existing_by_slot.get(slot)
+        story_id = supplied_ids.get(slot)
+        if story_id is None and existing is not None:
+            story_id = existing.story_id
+        if story_id is None:
+            story_id = -slot
+        dependent_story_ids[slot] = int(story_id)
+        synthetic = UserStory(
+            product_id=input_data.product_id,
+            title=item.story_title,
+            story_description=item.statement,
+            acceptance_criteria=_format_acceptance_criteria(item.acceptance_criteria),
+            status=StoryStatus.TO_DO,
+            story_points=_story_points_from_effort(item.estimated_effort),
+            rank=_refined_story_rank(
+                parent_rank=input_data.parent_rank,
+                existing_active=current_active,
+                slot=slot,
+            ),
+            source_requirement=normalized_req,
+            refinement_slot=slot,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+        )
+        synthetic.story_id = int(story_id)
+        reference_stories.append(synthetic)
+    return reference_stories, dependent_story_ids
+
+
+def evaluate_dependency_candidates(  # noqa: PLR0912
+    input_data: SaveStoriesInput,
+    *,
+    session: Session | None = None,
+    normalized_req: str | None = None,
+    validated: list[UserStoryItem] | None = None,
+    story_ids_by_slot: list[dict[str, int]] | None = None,
+) -> dict[str, Any]:
+    """Return read-only dependency candidate findings before persistence."""
+    owns_session = session is None
+    if validated is None:
+        validated, validation_errors = _validate_story_items(input_data.stories)
+        if validation_errors:
+            return {
+                "success": False,
+                "error": f"Validation errors: {'; '.join(validation_errors)}",
+                "blocking_findings": [],
+                "warning_findings": [],
+            }
+    if normalized_req is None:
+        normalized_req = normalize_requirement_key(input_data.parent_requirement)
+
+    active_session = session or Session(get_engine())
+    try:
+        active_stories, dependent_story_ids = _post_save_dependency_reference_stories(
+            active_session,
+            input_data=input_data,
+            normalized_req=normalized_req,
+            validated=validated,
+            story_ids_by_slot=story_ids_by_slot,
+        )
+        blocking_findings: list[dict[str, Any]] = []
+        warning_findings: list[dict[str, Any]] = []
+        for slot, item in enumerate(validated, start=1):
+            story_id = dependent_story_ids[slot]
+            for candidate in item.dependency_candidates:
+                try:
+                    matches = _resolve_dependency_candidate(
+                        candidate=candidate,
+                        active_stories=active_stories,
+                        normalized_req=normalized_req,
+                        dependent_slot=slot,
+                    )
+                except (AttributeError, ValueError) as exc:
+                    code = "STORY_DEPENDENCY_CANDIDATE_RESOLUTION_FAILED"
+                    message = f"Could not resolve dependency candidate: {exc}"
+                else:
+                    code = ""
+                    message = ""
+                    if not matches:
+                        code = "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
+                        message = (
+                            "Dependency candidate did not resolve to an active story."
+                        )
+                    elif len(matches) > 1:
+                        code = "STORY_DEPENDENCY_CANDIDATE_AMBIGUOUS"
+                        message = (
+                            "Dependency candidate resolved to multiple active stories."
+                        )
+                    elif matches[0].story_id == story_id:
+                        code = "STORY_DEPENDENCY_CANDIDATE_SELF_EDGE"
+                        message = "Dependency candidate resolves to the same story."
+                if not code:
+                    continue
+                severity = (
+                    "blocking" if candidate.confidence == "explicit" else "warning"
+                )
+                finding = _dependency_candidate_finding(
+                    code=code,
+                    severity=severity,
+                    message=message,
+                    story_context={
+                        "story_id": story_id,
+                        "story_index": slot,
+                        "story_title": item.story_title,
+                    },
+                    candidate=candidate,
+                )
+                target = (
+                    blocking_findings
+                    if candidate.confidence == "explicit"
+                    else warning_findings
+                )
+                target.append(finding)
+        return {
+            "success": True,
+            "blocking_findings": blocking_findings,
+            "warning_findings": warning_findings,
+        }
+    finally:
+        if owns_session:
+            active_session.close()
 
 
 def _purge_stale_story_writer_proposals(
@@ -662,6 +854,22 @@ def _persist_dependency_candidates(  # noqa: PLR0912, PLR0915
     slot_to_story_id = {
         item["slot"]: item["story_id"] for item in metadata.get("story_ids_by_slot", [])
     }
+    evaluation = evaluate_dependency_candidates(
+        input_data,
+        session=session,
+        normalized_req=normalized_req,
+        validated=validated,
+        story_ids_by_slot=metadata.get("story_ids_by_slot", []),
+    )
+    blocking_findings = evaluation.get("blocking_findings")
+    if isinstance(blocking_findings, list) and blocking_findings:
+        return (
+            _dependency_candidate_failure_response_from_finding(
+                input_data=input_data,
+                finding=blocking_findings[0],
+            ),
+            {},
+        )
     current_story_ids = list(slot_to_story_id.values())
     purged_count = _purge_stale_story_writer_proposals(
         session,

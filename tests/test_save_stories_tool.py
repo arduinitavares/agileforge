@@ -28,6 +28,7 @@ from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_k
 from orchestrator_agent.agent_tools.user_story_writer_tool import tools as story_tools
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     SaveStoriesInput,
+    evaluate_dependency_candidates,
     save_stories_tool,
 )
 
@@ -276,6 +277,104 @@ class TestSaveStoriesTool:
         assert result["error_code"] == "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
         rows = session.exec(select(UserStory)).all()
         assert rows == []
+
+    def test_dependency_preflight_blocks_explicit_unresolved_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Preflight reports the same explicit dependency blocker as save."""
+        _seed_product(session)
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-explicit-unresolved-preflight",
+            parent_rank=2,
+            stories=[
+                {
+                    **_valid_story(),
+                    "dependency_candidates": [
+                        {
+                            "prerequisite_ref": "Missing prerequisite",
+                            "reason": "This dependency was explicit in the source.",
+                            "confidence": "explicit",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        preflight = evaluate_dependency_candidates(payload, session=session)
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert preflight["success"] is True
+        assert preflight["blocking_findings"][0]["code"] == result["error_code"]
+        assert result["error_code"] == "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
+
+    def test_dependency_preflight_warns_for_inferred_unresolved_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Preflight warning matches persistence warning for inferred refs."""
+        _seed_product(session)
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-inferred-unresolved-preflight",
+            parent_rank=2,
+            stories=[
+                {
+                    **_valid_story(),
+                    "dependency_candidates": [
+                        {
+                            "prerequisite_ref": "Missing prerequisite",
+                            "reason": "This dependency was inferred by the model.",
+                            "confidence": "inferred",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        preflight = evaluate_dependency_candidates(payload, session=session)
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert preflight["blocking_findings"] == []
+        assert preflight["warning_findings"][0]["code"] == (
+            result["dependency_warnings"][0]["code"]
+        )
+        assert result["success"] is True
+
+    def test_dependency_preflight_accepts_resolved_candidate(
+        self,
+        session: Session,
+    ) -> None:
+        """Preflight accepts a dependency that save can resolve."""
+        _seed_product(session)
+        dependent = {
+            **_alternate_valid_story(),
+            "dependency_candidates": [
+                {
+                    "prerequisite_ref": "Enforce attestation gate",
+                    "reason": "Audit story depends on the gate existing first.",
+                    "confidence": "explicit",
+                }
+            ],
+        }
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-resolved-dependency-preflight",
+            parent_rank=2,
+            stories=[_valid_story(), dependent],
+        )
+
+        preflight = evaluate_dependency_candidates(payload, session=session)
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert preflight["blocking_findings"] == []
+        assert preflight["warning_findings"] == []
+        assert result["success"] is True
+        assert result["dependency_proposed_count"] == 1
 
     def test_save_warns_for_inferred_unresolved_dependency_candidate(
         self,

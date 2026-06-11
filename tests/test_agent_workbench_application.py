@@ -374,6 +374,40 @@ class _SprintCompleteTriagedNoneNoCandidatesReadProjection(
         }
 
 
+class _SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+    _SprintCompleteWithCurrentTriageReadProjection
+):
+    """Fake completed Sprint state with covered requirements but no candidates."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with saved but non-refined Story rows."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "roadmap_releases": [
+                    {"items": ["Requirement A", "Requirement B"]},
+                ],
+                "story_saved": {"Requirement A": True, "Requirement B": True},
+            }
+        )
+        return result
+
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return zero eligible candidates due to non-refined rows."""
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "items": [],
+                "count": 0,
+                "excluded_counts": {"non_refined": 2},
+                "source_fingerprint": CANDIDATES_FINGERPRINT,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
 class _SprintCompleteWithBacklogAttemptsReadProjection(_SprintCompleteReadProjection):
     """Fake completed Sprint state with a source Backlog attempt."""
 
@@ -4062,6 +4096,61 @@ def test_workflow_next_routes_impact_none_with_no_candidates_to_story_generation
                 "Post-sprint triage recorded no follow-up impact, but no "
                 "Sprint candidates are available and Roadmap requirements "
                 "still need saved Stories."
+            ),
+            "runnable": True,
+            "installed": True,
+            "requires_cli_installation": False,
+        }
+    ]
+
+
+def test_workflow_next_blocks_sprint_generate_when_saved_stories_not_refined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not advertise Sprint generation when no refined candidates exist."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_sprint_candidates_unavailable"
+    assert data["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        "agileforge sprint candidates --project-id 7",
+    ]
+    assert "agileforge sprint generate --project-id 7" not in data[
+        "next_valid_commands"
+    ]
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge sprint generate",
+            "reason": "NO_REFINED_SPRINT_CANDIDATES",
+            "message": (
+                "Sprint generation is blocked because no refined Story candidates "
+                "are available."
+            ),
+            "candidate_count": 0,
+            "excluded_counts": {"non_refined": 2},
+        }
+    ]
+    assert data["next_actions"] == [
+        {
+            "command": "agileforge sprint candidates --project-id 7",
+            "status": "post_sprint_sprint_candidates_unavailable",
+            "reason": (
+                "Post-sprint triage recorded no follow-up impact, but Sprint "
+                "generation has no refined candidates to plan."
             ),
             "runnable": True,
             "installed": True,

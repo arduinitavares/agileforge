@@ -18,6 +18,7 @@ from models.enums import TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
+    evaluate_dependency_candidates,
     save_stories_tool,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
@@ -300,6 +301,7 @@ class StoryPhaseRunner:
                 ),
                 now_iso=_now_iso,
                 run_story_agent_from_state=run_story_agent_from_state,
+                dependency_preflight=evaluate_dependency_candidates,
                 append_feedback_entry=append_feedback_entry,
                 set_request_projection=set_request_projection,
                 append_attempt=append_attempt,

@@ -1960,6 +1960,16 @@ def _sprint_candidate_count(candidates: dict[str, Any] | None) -> int | None:
     return None
 
 
+def _sprint_candidate_excluded_counts(
+    candidates: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return Sprint candidate exclusion counts from a read projection."""
+    if candidates is None or candidates.get("ok") is not True:
+        return {}
+    excluded = _envelope_data(candidates).get("excluded_counts")
+    return dict(excluded) if isinstance(excluded, dict) else {}
+
+
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     """Return whether workflow state has the exact active-reset stale marker."""
     data = _envelope_data(envelope)
@@ -3410,6 +3420,50 @@ def _post_sprint_none_next(
                     "runnable": story_command_installed,
                     "installed": story_command_installed,
                     "requires_cli_installation": not story_command_installed,
+                }
+            ],
+        )
+    if planned_sprint_id is None and candidate_count == 0:
+        next_valid_commands, blocked_future_commands = _installed_command_texts(
+            commands
+        )
+        candidates_command_installed = command_is_available(
+            "agileforge sprint candidates"
+        )
+        status = "post_sprint_sprint_candidates_unavailable"
+        return _sprint_complete_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=[
+                {
+                    "command": "agileforge sprint generate",
+                    "reason": "NO_REFINED_SPRINT_CANDIDATES",
+                    "message": (
+                        "Sprint generation is blocked because no refined Story "
+                        "candidates are available."
+                    ),
+                    "candidate_count": candidate_count,
+                    "excluded_counts": _sprint_candidate_excluded_counts(
+                        sprint_candidates
+                    ),
+                }
+            ],
+            blocked_future_commands=blocked_future_commands,
+            status=status,
+            next_actions=[
+                {
+                    "command": (
+                        f"agileforge sprint candidates --project-id {project_id}"
+                    ),
+                    "status": status,
+                    "reason": (
+                        "Post-sprint triage recorded no follow-up impact, but Sprint "
+                        "generation has no refined candidates to plan."
+                    ),
+                    "runnable": candidates_command_installed,
+                    "installed": candidates_command_installed,
+                    "requires_cli_installation": not candidates_command_installed,
                 }
             ],
         )

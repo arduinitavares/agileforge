@@ -1123,6 +1123,142 @@ async def test_generate_story_draft_keeps_quality_blocked_in_interview() -> None
 
 
 @pytest.mark.asyncio
+async def test_generate_story_draft_blocks_dependency_preflight() -> None:
+    """Dependency preflight blockers prevent saveable Story drafts."""
+    parent_requirement = "Requirement A"
+    artifact = _story_artifact(parent_requirement, "Needs missing prerequisite")
+    artifact["user_stories"][0]["dependency_candidates"] = [
+        {
+            "prerequisite_ref": "Missing prerequisite",
+            "reason": "The source explicitly names this prerequisite.",
+            "confidence": "explicit",
+        }
+    ]
+    artifact["quality"] = {
+        "schema_version": "agileforge.story_quality.v1",
+        "coverage_status": "complete",
+        "story_count": 1,
+        "invest_score_counts": {"High": 1, "Medium": 0, "Low": 0},
+        "requested_story_count": None,
+        "quality_findings": [],
+        "blocking_findings": [],
+        "saveable": True,
+    }
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+
+    async def fake_run_story_agent_from_state(
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> JsonDict:
+        del state_arg, project_id, parent_requirement, user_input
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "quality": artifact["quality"],
+            "request_payload": {"parent_requirement": "Requirement A"},
+            "error": None,
+        }
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input=None,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        dependency_preflight=lambda _input_data: {
+            "success": True,
+            "blocking_findings": [
+                {
+                    "code": "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED",
+                    "severity": "blocking",
+                    "message": (
+                        "Dependency candidate did not resolve to an active story."
+                    ),
+                    "affected_story_indexes": [1],
+                    "affected_story_titles": ["Needs missing prerequisite"],
+                }
+            ],
+            "warning_findings": [],
+        },
+        append_feedback_entry=lambda runtime, text, created_at: runtime[
+            "feedback_projection"
+        ]["items"].append(
+            {
+                "feedback_id": f"feedback-{len(runtime['feedback_projection']['items']) + 1}",  # noqa: E501
+                "text": text,
+                "created_at": created_at,
+                "status": "unabsorbed",
+                "absorbed_by_attempt_id": None,
+            }
+        ),
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda runtime, *, feedback_ids, attempt_id: [
+            item.update({"status": "absorbed", "absorbed_by_attempt_id": attempt_id})
+            for item in runtime["feedback_projection"]["items"]
+            if item["feedback_id"] in set(feedback_ids)
+        ],
+        failure_meta=lambda story_result, fallback_summary: {},  # noqa: ARG005
+    )
+
+    data = payload["data"]
+    interview_runtime = cast("JsonDict", state["interview_runtime"])
+    story_runtime = cast("dict[str, JsonDict]", interview_runtime["story"])
+    requirement_runtime = story_runtime[parent_requirement]
+    attempt_history = cast("list[JsonDict]", requirement_runtime["attempt_history"])
+    attempt = attempt_history[0]
+    assert payload["fsm_state"] == "STORY_INTERVIEW"
+    assert data["save"] == {"available": False}
+    assert data["quality"]["saveable"] is False
+    assert data["quality"]["blocking_findings"][0]["code"] == (
+        "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
+    )
+    assert data["current_draft"] is None
+    assert attempt["classification"] == "quality_gate_failed"
+    assert attempt["is_reusable"] is False
+    assert attempt["output_artifact"]["is_complete"] is False
+
+
+@pytest.mark.asyncio
 async def test_retry_story_draft_replays_request_projection_and_promotes_reusable_output() -> (  # noqa: E501
     None
 ):

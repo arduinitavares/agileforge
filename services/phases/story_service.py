@@ -641,6 +641,122 @@ def story_quality_saveable(artifact: dict[str, Any] | None) -> bool:
     return bool(story_quality_summary(artifact)["saveable"])
 
 
+def _quality_finding_from_dependency_preflight(
+    finding: dict[str, Any],
+) -> dict[str, Any]:
+    """Return Story quality finding fields from dependency preflight output."""
+    return {
+        "code": str(finding.get("code") or "STORY_DEPENDENCY_CANDIDATE_INVALID"),
+        "severity": str(finding.get("severity") or "blocking"),
+        "message": str(finding.get("message") or "Story dependency candidate failed."),
+        "affected_story_indexes": [
+            int(index)
+            for index in finding.get("affected_story_indexes") or []
+            if isinstance(index, int)
+        ],
+        "affected_story_titles": [
+            title
+            for title in finding.get("affected_story_titles") or []
+            if isinstance(title, str)
+        ],
+    }
+
+
+def _append_quality_findings(
+    artifact: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    quality = artifact.get("quality")
+    quality = dict(quality) if isinstance(quality, dict) else {}
+    existing = _quality_findings_from_artifact(artifact)
+    seen = {
+        (
+            finding.get("code"),
+            tuple(finding.get("affected_story_indexes") or []),
+        )
+        for finding in existing
+    }
+    for finding in findings:
+        key = (
+            finding.get("code"),
+            tuple(finding.get("affected_story_indexes") or []),
+        )
+        if key in seen:
+            continue
+        existing.append(finding)
+        seen.add(key)
+    blocking = [
+        finding for finding in existing if finding.get("severity") == "blocking"
+    ]
+    quality["quality_findings"] = existing
+    quality["blocking_findings"] = blocking
+    if blocking:
+        quality["saveable"] = False
+    else:
+        quality["saveable"] = story_quality_summary(
+            {**artifact, "quality": quality, "quality_findings": existing}
+        )["saveable"]
+    artifact["quality"] = quality
+    artifact["quality_findings"] = existing
+    return quality
+
+
+def _apply_dependency_preflight_to_story_result(
+    story_result: dict[str, Any],
+    *,
+    project_id: int,
+    parent_requirement: str,
+    parent_rank: int | None,
+    dependency_preflight: Callable[[SaveStoriesInput], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if dependency_preflight is None or not story_result.get("success"):
+        return story_result
+    artifact = story_result.get("output_artifact")
+    if not isinstance(artifact, dict):
+        return story_result
+    stories = artifact.get("user_stories")
+    if not isinstance(stories, list):
+        return story_result
+    if not any(
+        isinstance(story, dict) and story.get("dependency_candidates")
+        for story in stories
+    ):
+        return story_result
+
+    preflight = dependency_preflight(
+        SaveStoriesInput(
+            product_id=project_id,
+            parent_requirement=parent_requirement,
+            parent_rank=parent_rank,
+            idempotency_key=f"story-dependency-preflight-{project_id}",
+            stories=[story for story in stories if isinstance(story, dict)],
+        )
+    )
+    blocking = [
+        _quality_finding_from_dependency_preflight(finding)
+        for finding in preflight.get("blocking_findings") or []
+        if isinstance(finding, dict)
+    ]
+    warnings = [
+        _quality_finding_from_dependency_preflight(finding)
+        for finding in preflight.get("warning_findings") or []
+        if isinstance(finding, dict)
+    ]
+    if not blocking and not warnings:
+        return story_result
+
+    quality = _append_quality_findings(artifact, [*blocking, *warnings])
+    story_result["quality"] = quality
+    story_result["output_artifact"] = artifact
+    if blocking:
+        artifact["is_complete"] = False
+        story_result["classification"] = "quality_gate_failed"
+        story_result["draft_kind"] = "quality_blocked_draft"
+        story_result["is_reusable"] = False
+        story_result["is_complete"] = False
+    return story_result
+
+
 def _validate_story_save_required_guards(
     *,
     attempt_id: str | None,
@@ -1178,6 +1294,7 @@ async def generate_story_draft(
     promote_reusable_draft: Callable[..., dict[str, Any]],
     mark_feedback_absorbed: Callable[..., list[dict[str, Any]]],
     failure_meta: Callable[..., dict[str, Any]],
+    dependency_preflight: Callable[[SaveStoriesInput], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
     try:
@@ -1236,6 +1353,13 @@ async def generate_story_draft(
         project_id=project_id,
         parent_requirement=normalized_parent_requirement,
         user_input=None if included_feedback_ids else user_input,
+    )
+    story_result = _apply_dependency_preflight_to_story_result(
+        story_result,
+        project_id=project_id,
+        parent_requirement=normalized_parent_requirement,
+        parent_rank=story_parent_rank(state, normalized_parent_requirement),
+        dependency_preflight=dependency_preflight,
     )
 
     request_payload = _story_request_payload(story_result.get("request_payload"))
