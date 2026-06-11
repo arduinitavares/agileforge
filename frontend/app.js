@@ -147,16 +147,6 @@ async function submitNewProject() {
     const projectName = nameInput?.value?.trim() || '';
     const specFilePath = specInput?.value?.trim() || '';
 
-    if (!projectName) {
-        alert('Please enter a project name.');
-        return;
-    }
-
-    if (!specFilePath) {
-        alert('Please enter a specification file path.');
-        return;
-    }
-
     const btn = document.getElementById('btn-submit-project');
     const original = btn?.innerHTML;
     if (btn) {
