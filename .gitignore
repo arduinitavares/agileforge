@@ -26,6 +26,9 @@ wheels/
 *.db
 *.sqlite3
 
+# Local database backups and repair exports
+db/backups/
+
 # Add log files
 logs/
 
