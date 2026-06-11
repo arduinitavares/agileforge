@@ -454,6 +454,25 @@ def list_saved_sprints(
     }
 
 
+def append_sprint_execution_history(
+    history: dict[str, Any],
+    *,
+    execution_items: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return Sprint history with additive execution-history fields."""
+    attempt_items = history.get("items")
+    if not isinstance(attempt_items, list):
+        attempt_items = []
+    execution_rows = list(execution_items)
+    return {
+        **history,
+        "attempt_items": attempt_items,
+        "attempt_count": len(attempt_items),
+        "execution_items": execution_rows,
+        "execution_count": len(execution_rows),
+    }
+
+
 def get_saved_sprint_detail(
     *,
     load_sprint: Callable[[], Any | None],

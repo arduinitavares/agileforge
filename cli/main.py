@@ -567,7 +567,7 @@ class _Application(Protocol):
         ...
 
     def sprint_history(self, *, project_id: int) -> JsonObject:
-        """Return Sprint attempt history."""
+        """Return Sprint planner attempts and execution history."""
         ...
 
     def sprint_save(  # noqa: PLR0913
@@ -1633,7 +1633,7 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     sprint_history = sprint_sub.add_parser(
         "history",
-        help="Show Sprint attempt history.",
+        help="Show Sprint planner attempts and execution history.",
     )
     sprint_history.add_argument("--project-id", type=int, required=True)
     sprint_history.set_defaults(command_handler=_sprint_history)

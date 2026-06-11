@@ -17,6 +17,7 @@ from agile_sqlmodel import (
     Sprint,
     SprintStatus,
     SprintStory,
+    StoryStatus,
     Task,
     TaskStatus,
     UserStory,
@@ -986,6 +987,67 @@ def test_sprint_history_resets_stale_saved_working_set_after_completed_sprint(  
     assert state["sprint_last_input_context"] is None
     assert state["sprint_plan_assessment"] is None
     assert state["sprint_planner_owner_sprint_id"] is None
+
+
+def test_sprint_history_includes_completed_execution_summary(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    expected_elapsed_seconds = 1155600
+    expected_story_points = 5
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "sprint_attempts": [{"attempt_id": "sprint-attempt-1"}],
+    }
+    story = session.exec(
+        select(UserStory).where(UserStory.product_id == project_id)
+    ).one()
+    story.status = StoryStatus.DONE
+    story.story_points = expected_story_points
+    session.add(story)
+    session.flush()
+    session.add(
+        Task(
+            story_id=_require_id(story.story_id, "story_id"),
+            description="Finished task",
+            status=TaskStatus.DONE,
+        )
+    )
+    session.add(
+        Task(
+            story_id=_require_id(story.story_id, "story_id"),
+            description="Follow-up task",
+            status=TaskStatus.TO_DO,
+        )
+    )
+    session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/sprint/history")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    payload = response.json()["data"]
+    assert payload["count"] == 1
+    assert payload["items"] == payload["attempt_items"]
+    assert payload["attempt_count"] == 1
+    assert payload["execution_count"] == 1
+    assert len(payload["execution_items"]) == 1
+    execution = payload["execution_items"][0]
+    assert execution["sprint_id"] == completed_sprint_id
+    assert execution["status"] == "Completed"
+    assert execution["story_count"] == 1
+    assert execution["completed_story_count"] == 1
+    assert execution["task_count"] == 2  # noqa: PLR2004
+    assert execution["completed_task_count"] == 1
+    assert execution["story_points_total"] == expected_story_points
+    assert execution["story_points_done"] == expected_story_points
+    assert execution["elapsed_seconds"] == expected_elapsed_seconds
+    assert execution["history_fidelity"] == "derived"
 
 
 def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # noqa: ANN201, D103

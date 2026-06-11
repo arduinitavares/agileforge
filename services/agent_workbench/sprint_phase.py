@@ -45,6 +45,7 @@ from services.agent_workbench.post_sprint_triage import (
 from services.phases import workflow_state
 from services.phases.sprint_service import (
     SprintPhaseError,
+    append_sprint_execution_history,
     generate_sprint_plan,
     get_sprint_history,
     save_sprint_plan,
@@ -259,7 +260,7 @@ class SprintPhaseRunner:
         )
 
     def history(self, *, project_id: int) -> dict[str, Any]:
-        """Return Sprint draft attempt history."""
+        """Return Sprint planner attempts and execution history."""
         return anyio.run(self._history, project_id)
 
     def save(  # noqa: PLR0913
@@ -1258,6 +1259,22 @@ class SprintPhaseRunner:
                 ),
                 current_planned_sprint_id=self._current_planned_sprint_id(project_id),
             )
+            with Session(get_engine()) as session:
+                execution_sprints = session.exec(
+                    _saved_sprint_query().where(Sprint.product_id == project_id)
+                ).all()
+                execution_sprints = sorted(
+                    execution_sprints,
+                    key=lambda sprint: sprint.sprint_id or 0,
+                    reverse=True,
+                )
+                data = append_sprint_execution_history(
+                    data,
+                    execution_items=[
+                        _serialize_sprint_execution_history_item(sprint)
+                        for sprint in execution_sprints
+                    ],
+                )
         except SprintPhaseError as exc:
             return _phase_error(exc)
         except RuntimeError as exc:
@@ -2096,6 +2113,55 @@ def _serialize_sprint_story(story: UserStory) -> dict[str, Any]:
         "status": _enum_value(story.status),
         "story_points": story.story_points,
         "task_count": len(story.tasks),
+    }
+
+
+def _sprint_elapsed_seconds(sprint: Sprint) -> int | None:
+    """Return elapsed execution seconds when Sprint timestamps are complete."""
+    if sprint.started_at is None or sprint.completed_at is None:
+        return None
+    started_at = (
+        sprint.started_at
+        if sprint.started_at.tzinfo
+        else sprint.started_at.replace(tzinfo=UTC)
+    )
+    completed_at = (
+        sprint.completed_at
+        if sprint.completed_at.tzinfo
+        else sprint.completed_at.replace(tzinfo=UTC)
+    )
+    return int((completed_at - started_at).total_seconds())
+
+
+def _serialize_sprint_execution_history_item(sprint: Sprint) -> dict[str, Any]:
+    """Return durable Sprint execution history for CLI consumers."""
+    stories = _sorted_sprint_stories(sprint)
+    tasks = [task for story in stories for task in story.tasks]
+    completed_stories = [
+        story
+        for story in stories
+        if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
+    ]
+    return {
+        "sprint_id": sprint.sprint_id,
+        "goal": sprint.goal,
+        "status": _enum_value(sprint.status),
+        "started_at": _serialize_temporal(sprint.started_at),
+        "completed_at": _serialize_temporal(sprint.completed_at),
+        "start_date": _serialize_temporal(sprint.start_date),
+        "end_date": _serialize_temporal(sprint.end_date),
+        "story_count": len(stories),
+        "completed_story_count": len(completed_stories),
+        "task_count": len(tasks),
+        "completed_task_count": sum(
+            1 for task in tasks if task.status == TaskStatus.DONE
+        ),
+        "story_points_total": sum(story.story_points or 0 for story in stories),
+        "story_points_done": sum(
+            story.story_points or 0 for story in completed_stories
+        ),
+        "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "history_fidelity": _history_fidelity(sprint),
     }
 
 

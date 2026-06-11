@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -557,6 +557,91 @@ def test_sprint_status_without_active_sprint_guides_to_completed_id(
             "completed Sprint."
         )
     ]
+
+
+def test_sprint_runner_history_includes_execution_summary(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint history should include durable execution records for CLI agents."""
+    expected_elapsed_seconds = 600
+    expected_story_points = 8
+    product = Product(name="Execution History Product")
+    team = Team(name="Execution History Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Completed execution story",
+        story_description="As a user, I need execution history.",
+        acceptance_criteria="- Done",
+        status=StoryStatus.DONE,
+        story_points=expected_story_points,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Expose execution history",
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 15),
+        started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 6, 1, 12, 10, tzinfo=UTC),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+    session.add_all(
+        [
+            Task(
+                story_id=story.story_id,
+                description="Completed task",
+                status=TaskStatus.DONE,
+            ),
+            Task(
+                story_id=story.story_id,
+                description="Open task",
+                status=TaskStatus.TO_DO,
+            ),
+        ]
+    )
+    session.commit()
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state["sprint_attempts"] = [{"attempt_id": "sprint-attempt-1"}]
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow_service),
+    )
+
+    result = runner.history(project_id=product.product_id)
+
+    assert result["ok"] is True
+    payload = result["data"]
+    assert payload["count"] == 1
+    assert payload["items"] == payload["attempt_items"]
+    assert payload["attempt_count"] == 1
+    assert payload["execution_count"] == 1
+    execution = payload["execution_items"][0]
+    assert execution["sprint_id"] == sprint.sprint_id
+    assert execution["status"] == "Completed"
+    assert execution["story_count"] == 1
+    assert execution["completed_story_count"] == 1
+    assert execution["task_count"] == 2  # noqa: PLR2004
+    assert execution["completed_task_count"] == 1
+    assert execution["story_points_total"] == expected_story_points
+    assert execution["story_points_done"] == expected_story_points
+    assert execution["elapsed_seconds"] == expected_elapsed_seconds
+    assert execution["history_fidelity"] == "derived"
 
 
 def test_sprint_runner_tasks_include_dependency_safe_execution_metadata(

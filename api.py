@@ -132,6 +132,7 @@ from services.phases.roadmap_service import (
 )
 from services.phases.sprint_service import (
     SprintPhaseError,
+    append_sprint_execution_history,
 )
 from services.phases.sprint_service import (
     close_sprint as close_sprint_service,
@@ -1162,6 +1163,53 @@ def _serialize_sprint_list_item(
     }
 
 
+def _sprint_elapsed_seconds(sprint: Sprint) -> int | None:
+    if sprint.started_at is None or sprint.completed_at is None:
+        return None
+    started_at = (
+        sprint.started_at
+        if sprint.started_at.tzinfo
+        else sprint.started_at.replace(tzinfo=UTC)
+    )
+    completed_at = (
+        sprint.completed_at
+        if sprint.completed_at.tzinfo
+        else sprint.completed_at.replace(tzinfo=UTC)
+    )
+    return int((completed_at - started_at).total_seconds())
+
+
+def _serialize_sprint_execution_history_item(sprint: Sprint) -> dict[str, Any]:
+    stories = list(sprint.stories)
+    tasks = [task for story in stories for task in story.tasks]
+    completed_stories = [
+        story
+        for story in stories
+        if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
+    ]
+    return {
+        "sprint_id": sprint.sprint_id,
+        "goal": sprint.goal,
+        "status": _enum_value(sprint.status),
+        "started_at": _serialize_temporal(sprint.started_at),
+        "completed_at": _serialize_temporal(sprint.completed_at),
+        "start_date": _serialize_temporal(sprint.start_date),
+        "end_date": _serialize_temporal(sprint.end_date),
+        "story_count": len(stories),
+        "completed_story_count": len(completed_stories),
+        "task_count": len(tasks),
+        "completed_task_count": sum(
+            1 for task in tasks if task.status == TaskStatus.DONE
+        ),
+        "story_points_total": sum(story.story_points or 0 for story in stories),
+        "story_points_done": sum(
+            story.story_points or 0 for story in completed_stories
+        ),
+        "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "history_fidelity": _history_fidelity(sprint),
+    }
+
+
 def _serialize_sprint_detail(
     sprint: Sprint,
     *,
@@ -1210,6 +1258,11 @@ def _serialize_temporal(value: object) -> str | None:
     if isinstance(value, _SupportsIsoFormat):
         return value.isoformat()
     return str(value)
+
+
+def _enum_value(value: object) -> str | None:
+    enum_value = getattr(value, "value", value)
+    return str(enum_value) if enum_value is not None else None
 
 
 def _serialize_utc_temporal(value: object) -> str | None:
@@ -2992,7 +3045,7 @@ async def generate_project_sprint(
 
 
 async def get_project_sprint_history(project_id: int) -> dict[str, Any]:
-    """Get the history of sprint planning attempts for a project."""
+    """Get Sprint planner attempts and execution history for a project."""
     product = product_repo.get_by_id(project_id)
     if not product:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -3003,6 +3056,19 @@ async def get_project_sprint_history(project_id: int) -> dict[str, Any]:
         save_state=lambda state: _save_session_state(session_id, state),
         current_planned_sprint_id=_load_current_planned_sprint_id(project_id),
     )
+    with Session(get_engine()) as session:
+        execution_sprints = session.exec(
+            _saved_sprint_query()
+            .where(Sprint.product_id == project_id)
+            .order_by(desc(_queryable_attr(Sprint.created_at)))
+        ).all()
+        data = append_sprint_execution_history(
+            data,
+            execution_items=[
+                _serialize_sprint_execution_history_item(sprint)
+                for sprint in execution_sprints
+            ],
+        )
 
     return {
         "status": "success",

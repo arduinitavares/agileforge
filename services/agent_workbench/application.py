@@ -426,7 +426,7 @@ class _SprintPhaseRunner(Protocol):
         ...
 
     def history(self, *, project_id: int) -> dict[str, Any]:
-        """Return Sprint attempt history."""
+        """Return Sprint planner attempts and execution history."""
         ...
 
     def save(  # noqa: PLR0913
@@ -1486,7 +1486,7 @@ class AgentWorkbenchApplication:
         )
 
     def sprint_history(self, *, project_id: int) -> dict[str, Any]:
-        """Return Sprint attempt history."""
+        """Return Sprint planner attempts and execution history."""
         return self._get_sprint_runner().history(project_id=project_id)
 
     def sprint_save(  # noqa: PLR0913

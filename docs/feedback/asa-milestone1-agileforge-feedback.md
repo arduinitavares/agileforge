@@ -83,6 +83,24 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   next sprint selection, and the selection button is hidden/disabled when no
   eligible requirements remain.
 
+#### Sprint history hid completed execution records
+
+- Original feedback item: `Active sprint state hides sprint generation attempt
+  history`, plus follow-up velocity inspection where `agileforge sprint history
+  --project-id 3` returned `count=0` despite durable completed Sprint rows.
+- Product issue considered: real read-projection bug. The command exposed only
+  transient Sprint planner attempts, so completed Sprint execution evidence
+  required direct DB inspection.
+- Fix status: fixed in `dev/sprint-history-execution-projection`.
+- Why fixed: agents need completed Sprint ids, story/task counts, story points,
+  timestamps, and elapsed time from the normal CLI/API path to compute velocity
+  and summarize past execution without bypassing AgileForge.
+- Expected behavior after fix: `sprint history` preserves `items`/`count` as
+  planner-attempt history and adds `attempt_items`, `attempt_count`,
+  `execution_items`, and `execution_count`. Each execution row includes Sprint
+  status, story/task completion counts, story points, timestamps, elapsed
+  seconds, and history fidelity.
+
 ### Considered but not fixed yet
 
 #### Sprint generation validation failure details
@@ -103,14 +121,17 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 - Original feedback item: `Active sprint state hides sprint generation attempt
   history`.
-- Current status: accepted as product feedback, not fixed yet.
-- Why not fixed yet: this may be intentional planner working-set cleanup, but
-  the user need is valid. The behavior needs a product decision: either make
-  `sprint history` state-independent or add an explicit active-sprint planning
-  provenance command/projection.
-- Suggested next action: decide whether Sprint attempt history is durable
-  audit/provenance or only draft working state, then update `sprint history`
-  semantics and tests accordingly.
+- Current status: partially addressed. Completed execution records are now
+  exposed by `sprint history`; raw planner-attempt provenance remains an open
+  product decision.
+- Why not fully fixed yet: planner attempts are still treated as working-set
+  state and may be reset after a Sprint is saved/completed. That may be
+  intentional, but if users need exact model-attempt provenance after Sprint
+  start/close, that requires a durable audit/provenance design rather than a
+  read-projection fix.
+- Suggested next action: decide whether raw Sprint planner attempts should be
+  durable audit records or only draft working state. If durable, add a separate
+  provenance projection rather than overloading execution history.
 
 #### Task update response can look like the task stayed open
 
