@@ -1,0 +1,3 @@
+## 2025-05-03 - Form Wrapper and Native Validation
+**Learning:** Adding a `<form>` wrapper to modals, setting correct button types (`type="submit"`, `type="button"` for cancels), and using `pattern=".*\S+.*"` along with a `title` provides great built-in validation blocking empty/whitespace-only input, while allowing Enter-key submission behavior.
+**Action:** Always wrap input fields in a `<form>` and properly leverage HTML5 native validation before reinventing validation logic in JavaScript.
