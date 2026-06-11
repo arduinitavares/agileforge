@@ -1,0 +1,3 @@
+## 2026-05-08 - Native HTML5 Form Validation in Modals
+**Learning:** When modals contain inputs, wrapping them in a standard `<form>` element instead of a generic `<div>` allows leveraging native HTML5 validation (like `required`, `pattern`, and built-in error tooltips) and enables keyboard submission via the Enter key.
+**Action:** Always verify that input-containing modals are semantic forms. Ensure buttons use correct `type="button"` vs `type="submit"` to control behavior, and use an `onsubmit` handler calling `event.preventDefault()` to stop full page reloads while maintaining native validation.
