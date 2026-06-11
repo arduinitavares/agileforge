@@ -4,7 +4,8 @@
 **Status:** Draft for review
 **Spec mode:** proposed_change
 **Scope:** Sprint planning UI, CLI/API contracts, Sprint planner schema,
-capacity recommendation consumption, and calendar-field removal
+deterministic Sprint selection, FSM adapters, capacity recommendation
+consumption, calendar-field removal, and Sprint date persistence cleanup
 **Builds on:**
 `docs/superpowers/specs/2026-06-11-agentic-sprint-metrics-design.md`
 
@@ -13,6 +14,8 @@ capacity recommendation consumption, and calendar-field removal
 - 2026-06-11: Drafted hard-break design that removes calendar duration from
   agentic Sprint planning and makes project-specific capacity the planning
   control.
+- 2026-06-11: Clarified deterministic selection, FSM adapter, migration,
+  benchmark, and prompt-cleanup requirements before implementation planning.
 
 ## Summary
 
@@ -33,6 +36,7 @@ This design makes a hard break:
 - Remove planned start/end date fields from Sprint save surfaces.
 - Use `max_story_points` / capacity points as the only planning control.
 - Default capacity from project-specific Sprint metrics when available.
+- Remove velocity-band story-count limits from deterministic Sprint selection.
 - Treat elapsed minutes as observed telemetry only, not as a planning input.
 - Clean up persistence so new Sprints no longer require synthetic calendar
   start/end dates.
@@ -76,6 +80,10 @@ history.
 - Remove calendar duration from all normal user-facing and agent-facing
   planning contracts.
 - Remove planned start/end date collection from normal Sprint save flows.
+- Remove velocity-band story limits from deterministic Sprint selection so
+  capacity points are the only auto-selection capacity limit.
+- Update FSM deterministic adapters and FSM instructions so automated agent
+  paths use the same capacity contract as CLI, API, and UI paths.
 - Preserve execution timestamps such as `started_at` and `completed_at`; these
   are runtime evidence, not planning inputs.
 - Surface observed elapsed time, throughput, and token-metric availability as
@@ -161,7 +169,7 @@ must fail validation rather than be silently accepted.
 The generation request must keep:
 
 - `user_input`
-- `max_story_points`
+- `max_story_points`, the external request field for capacity points
 - `include_task_decomposition`
 - `selected_story_ids`
 
@@ -226,6 +234,12 @@ It must include:
 If neither source exists, Sprint generation must block before invoking the
 planner.
 
+`max_story_points` is allowed only as the external CLI/API/UI override name.
+Before invoking the planner, the service must normalize it to
+`capacity_points`. Planner input, planner output, capacity analysis, and
+model-visible prompt context must not contain a separate `max_story_points`
+field.
+
 `capacity_source` must be one of:
 
 - `user_override`
@@ -255,6 +269,50 @@ are not planning constraints. The planner must optimize selected Stories
 against capacity points, dependencies, scope coherence, and task decomposition
 quality.
 
+### Deterministic Sprint Selection
+
+The deterministic Sprint selection policy must remove velocity-band story-count
+limits.
+
+Current implementation concepts such as `_VELOCITY_STORY_LIMITS`,
+`team_velocity_assumption`, and `story_limit` are part of the old capacity
+model. They must not survive as hidden auto-selection limits.
+
+Auto-selection must use:
+
+- candidate priority/order;
+- dependency closure;
+- selected-story constraints, when the operator provides explicit story IDs;
+- `capacity_points` as the story-point capacity cap.
+
+Auto-selection must not cap the selected cohort by a Low/Medium/High story
+count. If the operator manually selects stories, selected IDs define the cohort
+subject to dependency and capacity validation. A future feature may add a
+separate explicit `max_story_count`, but this feature must not preserve story
+count caps under another name.
+
+The selection result may continue reporting diagnostic counts, selected IDs,
+excluded IDs, dependency promotions, warnings, and `story_points_used`. It must
+not report `team_velocity_assumption` or `story_limit` as active policy fields.
+
+### FSM Adapter And Instructions
+
+The automated FSM path is in scope.
+
+The deterministic adapter that calls the Sprint planner must remove
+`team_velocity_assumption` and `sprint_duration_days` from its public signature,
+state preparation, and tool-call payload. FSM instructions must stop asking for
+velocity bands, duration, Sprint start date, and Sprint duration. They must ask
+for capacity points only when project metrics cannot provide a recommendation
+or when the operator wants to override the recommendation.
+
+This requirement applies to:
+
+- deterministic Sprint planner adapter code;
+- FSM state instructions for Sprint setup, draft, and persistence;
+- command registry schemas and any generated command metadata;
+- planner input-context dumps exposed to UI or CLI users.
+
 ## Persistence Contract
 
 New Sprint records must no longer require planned `start_date` or `end_date`.
@@ -263,6 +321,19 @@ Implementation must update the domain model and migrations so `sprints.start_dat
 and `sprints.end_date` are nullable or removed from new-write requirements.
 Existing rows may retain historical values, but new code must not synthesize
 calendar dates merely to satisfy the old schema.
+
+SQLite migration is an explicit implementation requirement. Because SQLite does
+not reliably support dropping `NOT NULL` constraints in place, the migration
+must use the repository's existing migration style and either:
+
+- rebuild the `sprints` table with nullable planned-date columns while
+  preserving rows, indexes, foreign keys, and enum/status values; or
+- replace the planned-date columns with a new compatible schema that preserves
+  historical date values without requiring them for new writes.
+
+The migration must be idempotent and covered by a migration regression that
+starts from an old `sprints` table with `start_date DATE NOT NULL` and
+`end_date DATE NOT NULL`.
 
 Execution timestamps remain:
 
@@ -322,6 +393,11 @@ The only allowed compatibility is data preservation for already-saved Sprint
 rows. Existing historical rows must not be deleted or rewritten merely because
 they contain date fields.
 
+Internal scripts and benchmark helpers are not exempt from the hard break.
+Files such as `scripts/benchmark_sprint_planning.py` must be updated to the
+capacity contract instead of continuing to pass `sprint_duration_days`,
+`sprint_start_date`, or velocity assumptions.
+
 ## Testing Requirements
 
 Tests must prove the contract across layers:
@@ -336,11 +412,25 @@ Tests must prove the contract across layers:
   `recommendation.recommended_next_sprint_points`.
 - Sprint planner input schema has no duration fields.
 - Sprint planner output schema has no `duration_days`.
+- Sprint planner input/output and capacity analysis expose `capacity_points`
+  and do not expose a separate planner-facing `max_story_points` field.
+- Deterministic Sprint selection has no `_VELOCITY_STORY_LIMITS`,
+  `team_velocity_assumption`, or active `story_limit` policy.
+- FSM deterministic adapters and FSM instructions no longer reference
+  `team_velocity_assumption`, `sprint_duration_days`, `duration_days`,
+  `sprint_start_date`, or calendar-based Sprint persistence.
 - Planner prompt instructions do not mention duration as a planning input.
+- A grep-style contract test verifies planner instructions and FSM
+  instructions do not contain `sprint_duration_days`, `duration_days`,
+  `team_velocity_assumption`, `velocity assumption`, or `sprint_start_date`.
 - Persistence can save a planned Sprint without planned start/end dates.
+- Migration tests verify old SQLite `sprints.start_date` / `sprints.end_date`
+  `NOT NULL` schemas are migrated safely to the new nullable/no-planned-date
+  contract without losing rows.
 - Existing completed Sprint metrics still compute elapsed time from
   `started_at` / `completed_at`.
 - `workflow next` advertises Sprint generation without duration arguments.
+- Benchmark scripts and command-schema tests use the capacity contract.
 
 ## Acceptance Criteria
 
