@@ -1476,6 +1476,7 @@ function updateNextButton() {
     button.innerHTML = `${model.label} <span class="material-symbols-outlined text-sm">arrow_forward</span>`;
     button.disabled = !model.enabled;
     hint.innerText = model.hint;
+    button.title = model.hint;
 
     button.className = model.enabled
         ? 'inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-white font-bold transition-all shadow-sm'
@@ -1937,6 +1938,7 @@ function updateVisionSaveButton() {
     hint.innerText = canSave
         ? 'Vision is complete. Proceed to save and advance to Backlog.'
         : 'Save is disabled until latest Vision output has is_complete=true.';
+    button.title = hint.innerText;
 }
 
 async function loadVisionHistory() {
@@ -2246,6 +2248,7 @@ function updateBacklogSaveButton() {
     hint.innerText = canSave
         ? 'Backlog is complete. Proceed to save and advance to Roadmap.'
         : 'Save is disabled until latest Backlog output has is_complete=true.';
+    button.title = hint.innerText;
 }
 
 async function loadBacklogHistory() {
@@ -2572,6 +2575,7 @@ function updateRoadmapSaveButton() {
     hint.innerText = canSave
         ? 'Roadmap is complete. Proceed to save and advance to Stories.'
         : 'Save is disabled until latest Roadmap output has is_complete=true.';
+    button.title = hint.innerText;
 }
 
 async function loadRoadmapHistory() {
@@ -3386,6 +3390,7 @@ function updateStorySaveButton() {
             hint.innerText = 'Save disabled until a complete reusable draft exists.';
         }
     }
+    button.title = hint.innerText;
 }
 
 function updateCompleteStoryPhaseButton() {
@@ -5105,25 +5110,30 @@ function updateSprintSaveButton() {
 
     if (activeFsmState === 'SPRINT_PERSISTENCE') {
         hint.innerText = 'Sprint already saved for this draft.';
+        button.title = hint.innerText;
         return;
     }
 
     if (!latestSprintIsComplete) {
         hint.innerText = 'Save is disabled until the latest Sprint output is complete.';
+        button.title = hint.innerText;
         return;
     }
 
     if (!teamNameInput.value.trim()) {
         hint.innerText = 'Provide a team name to confirm this sprint.';
+        button.title = hint.innerText;
         return;
     }
 
     if (!startDateInput.value) {
         hint.innerText = 'Choose a sprint start date to confirm this sprint.';
+        button.title = hint.innerText;
         return;
     }
 
     hint.innerText = 'Sprint plan is complete. Proceed to save.';
+    button.title = hint.innerText;
 }
 
 async function deleteCurrentProject() {
