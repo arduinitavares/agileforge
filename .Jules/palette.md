@@ -1,0 +1,3 @@
+## 2024-05-18 - Replacing window.alert() with HTML5 Native Validation in Modals
+**Learning:** This app uses `window.alert()` in `submitNewProject()` for simple form validation, which is an accessibility anti-pattern (breaks flow, poor screen reader experience, blocks main thread).
+**Action:** Always wrap modal inputs in `<form onsubmit="event.preventDefault(); handler();">` and add `pattern=".*\S+.*"` along with `title` and `required` attributes to inputs to leverage native, accessible HTML5 validation tooltips instead of using `window.alert()`. Ensure submit buttons have `type="submit"` and cancel buttons have `type="button"`.
