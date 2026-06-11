@@ -140,20 +140,18 @@ function closeCreateProjectModal() {
     }
 }
 
-async function submitNewProject() {
+async function submitNewProject(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
     const nameInput = document.getElementById('modal-project-name');
     const specInput = document.getElementById('modal-spec-path');
 
     const projectName = nameInput?.value?.trim() || '';
     const specFilePath = specInput?.value?.trim() || '';
 
-    if (!projectName) {
-        alert('Please enter a project name.');
-        return;
-    }
-
-    if (!specFilePath) {
-        alert('Please enter a specification file path.');
+    if (!projectName || !specFilePath) {
         return;
     }
 
