@@ -1045,13 +1045,26 @@ def _build_sprint_runtime_summary(
     triage_state["latest_completed_sprint_id"] = latest_completed_sprint_id
     current_triage = current_triage_for_latest_sprint(triage_state)
     triage_required = post_sprint_triage_required(triage_state)
+    triage_impact = (
+        current_triage.get("impact") if isinstance(current_triage, dict) else None
+    )
+    triage_blocks_next_sprint = current_triage is not None and triage_impact != "none"
     can_create_next_sprint = (
-        planned is None and not has_reviewable_draft and not triage_required
+        planned is None
+        and not has_reviewable_draft
+        and not triage_required
+        and not triage_blocks_next_sprint
     )
     disabled_reason = None
     if triage_required:
         disabled_reason = (
             "Post-sprint triage is required before creating the next sprint."
+        )
+    elif triage_blocks_next_sprint:
+        impact_label = str(triage_impact or "follow-up")
+        disabled_reason = (
+            f"Post-sprint triage recorded {impact_label} impact. "
+            "Reconcile it before creating the next sprint."
         )
     elif has_reviewable_draft:
         disabled_reason = (

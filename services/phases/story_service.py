@@ -1855,9 +1855,14 @@ async def complete_story_phase(
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
 ) -> dict[str, Any]:
-    if expected_state != OrchestratorState.STORY_PERSISTENCE.value:
+    allowed_expected_states = {
+        OrchestratorState.STORY_PERSISTENCE.value,
+        OrchestratorState.STORY_INTERVIEW.value,
+    }
+    if expected_state not in allowed_expected_states:
         raise StoryPhaseError(
-            "story complete requires --expected-state STORY_PERSISTENCE",
+            "story complete requires --expected-state STORY_PERSISTENCE "
+            "or STORY_INTERVIEW",
             status_code=400,
         )
     if idempotency_key is None or not idempotency_key.strip():
@@ -1876,9 +1881,9 @@ async def complete_story_phase(
             return dict(existing)
 
     current_state = _normalize_fsm_state(state.get("fsm_state"))
-    if current_state != OrchestratorState.STORY_PERSISTENCE.value:
+    if current_state != expected_state:
         raise StoryPhaseError(
-            "Story phase cannot complete unless current state is STORY_PERSISTENCE.",
+            f"Story phase cannot complete unless current state is {expected_state}.",
             status_code=409,
         )
 

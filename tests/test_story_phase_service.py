@@ -1926,6 +1926,61 @@ async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_s
 
 
 @pytest.mark.asyncio
+async def test_complete_story_phase_recovers_story_interview_when_all_stories_are_saved() -> None:  # noqa: E501
+    """Allow guarded completion from stale Story interview with full coverage."""
+    state: JsonDict = {
+        "fsm_state": "STORY_INTERVIEW",
+        "roadmap_releases": [{"items": ["Enable login", "Reset password"]}],
+        "story_saved": {"Enable login": True, "Reset password": True},
+    }
+    saved_states: list[JsonDict] = []
+
+    payload = await complete_story_phase(
+        expected_state="STORY_INTERVIEW",
+        idempotency_key="complete-story-interview-recovery",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+    )
+
+    assert payload["fsm_state"] == "SPRINT_SETUP"
+    assert payload["coverage"] == {"saved": 2, "merged": 0, "total": 2}
+    assert state["fsm_state"] == "SPRINT_SETUP"
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_recovers_story_interview_with_milestone_scope() -> None:  # noqa: E501
+    """Allow stale Story interview recovery for a saved milestone scope."""
+    state: JsonDict = {
+        "fsm_state": "STORY_INTERVIEW",
+        "roadmap_releases": [
+            {"items": ["Enable login", "Reset password"]},
+            {"items": ["Export reports"]},
+        ],
+        "story_saved": {"Enable login": True, "Reset password": True},
+    }
+    saved_states: list[JsonDict] = []
+
+    payload = await complete_story_phase(
+        expected_state="STORY_INTERVIEW",
+        idempotency_key="complete-story-interview-scope",
+        scope="milestone",
+        scope_id="milestone_0",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+    )
+
+    assert payload["fsm_state"] == "SPRINT_SETUP"
+    assert payload["coverage"] == {"saved": 2, "merged": 0, "total": 2}
+    assert payload["story_completion_scope"]["scope"] == "milestone"
+    assert payload["story_completion_scope"]["scope_id"] == "milestone_0"
+    assert state["fsm_state"] == "SPRINT_SETUP"
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
 async def test_complete_story_phase_blocks_until_all_roadmap_requirements_saved() -> None:  # noqa: E501
     """Verify complete story phase blocks until every roadmap requirement is covered."""
     state: JsonDict = {
@@ -2360,7 +2415,8 @@ async def test_complete_story_phase_requires_guards() -> None:
         )
     assert wrong_expected.value.status_code == 400  # noqa: PLR2004
     assert wrong_expected.value.detail == (
-        "story complete requires --expected-state STORY_PERSISTENCE"
+        "story complete requires --expected-state STORY_PERSISTENCE "
+        "or STORY_INTERVIEW"
     )
 
     with pytest.raises(StoryPhaseError) as stale_fsm:

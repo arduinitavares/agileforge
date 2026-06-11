@@ -418,6 +418,87 @@ def test_story_generate_hydrates_spec_authority_and_roadmap(
     assert "data" not in result["data"]
 
 
+def test_story_generate_persists_story_review_for_saveable_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A saveable complete draft should persist the Story review state."""
+    workflow_service = _FakeWorkflowService()
+
+    def fake_select_project(
+        product_id: int,
+        tool_context: SimpleNamespace,
+    ) -> dict[str, Any]:
+        del product_id
+        tool_context.state["pending_spec_content"] = "HYDRATED SPEC"
+        tool_context.state["compiled_authority_cached"] = "HYDRATED AUTHORITY"
+        return {"success": True}
+
+    async def fake_run_story_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, user_input
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "parent_requirement": parent_requirement,
+                "user_stories": [
+                    {
+                        "story_title": "Review match outcomes",
+                        "statement": (
+                            "As a manager, I want reviewed match outcomes, "
+                            "so that I can improve future squads."
+                        ),
+                        "acceptance_criteria": ["A reviewed outcome is saved."],
+                        "invest_score": "High",
+                        "estimated_effort": "S",
+                        "produced_artifacts": [],
+                    }
+                ],
+                "is_complete": True,
+                "quality": {
+                    "coverage_status": "complete",
+                    "quality_findings": [],
+                    "saveable": True,
+                },
+            },
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.run_story_agent_from_state",
+        fake_run_story_agent_from_state,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["fsm_state"] == "STORY_REVIEW"
+    assert result["data"]["save"]["available"] is True
+    assert result["data"]["save"]["expected_state"] == "STORY_REVIEW"
+    assert workflow_service.state["fsm_state"] == "STORY_REVIEW"
+
+
 def test_story_generate_blocks_stale_downstream_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

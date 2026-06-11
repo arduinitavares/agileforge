@@ -1535,6 +1535,50 @@ def test_sprint_runtime_summary_blocks_next_sprint_when_post_sprint_triage_requi
     assert "triage" in runtime_summary["create_next_sprint_disabled_reason"].lower()
 
 
+def test_sprint_runtime_summary_blocks_next_sprint_for_story_triage_impact(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint_id,
+        "post_sprint_triage": build_triage_payload(
+            project_id=project_id,
+            sprint_id=completed_sprint_id,
+            impact="story",
+            affected_requirements=["Canonical Process Event Record Definition"],
+            affected_task_ids=[],
+            affected_story_ids=[],
+            affected_backlog_item_ids=[],
+            affected_roadmap_item_ids=[],
+            affected_layers=[],
+            learning_summary="Story-level follow-up is required.",
+            decision_reason="Sprint evidence changed Story details.",
+            idempotency_key="triage-api-story-impact",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        ),
+    }
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    runtime_summary = response.json()["data"]["runtime_summary"]
+    assert runtime_summary["post_sprint_triage_required"] is False
+    assert runtime_summary["post_sprint_triage"]["impact"] == "story"
+    assert runtime_summary["can_create_next_sprint"] is False
+    disabled_reason = runtime_summary["create_next_sprint_disabled_reason"].lower()
+    assert "post-sprint" in disabled_reason
+    assert "reconcile" in disabled_reason
+
+
 def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id, sprint_id = _seed_saved_sprint(

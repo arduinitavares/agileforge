@@ -2008,6 +2008,9 @@ def test_sprint_triage_guarded_correction_supersedes_previous_payload(
         changed_by="cli-agent",
     )
     first_fingerprint = first["data"]["post_sprint_triage"]["triage_fingerprint"]
+    first_request_fingerprint = first["data"]["post_sprint_triage"][
+        "request_fingerprint"
+    ]
     second = runner.triage(
         project_id=product.product_id,
         expected_state="SPRINT_COMPLETE",
@@ -2031,6 +2034,21 @@ def test_sprint_triage_guarded_correction_supersedes_previous_payload(
         entry["history_action"]
         for entry in workflow.state["post_sprint_triage_history"]
     ] == ["recorded", "superseded", "corrected"]
+    history_entries = workflow.state["post_sprint_triage_history"]
+    superseded_entry = history_entries[1]
+    corrected_entry = history_entries[2]
+    assert (
+        superseded_entry["superseded_by_request_fingerprint"]
+        == second["data"]["post_sprint_triage"]["request_fingerprint"]
+    )
+    assert superseded_entry["superseded_at"] == superseded_entry[
+        "history_recorded_at"
+    ]
+    assert corrected_entry["replaces_triage_fingerprint"] == first_fingerprint
+    assert (
+        corrected_entry["correction_of_request_fingerprint"]
+        == first_request_fingerprint
+    )
     triage_events = session.exec(
         select(WorkflowEvent)
         .where(

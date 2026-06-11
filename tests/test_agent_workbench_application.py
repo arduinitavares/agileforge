@@ -757,6 +757,54 @@ class _StoryInterviewReadProjection(_FakeReadProjection):
         return result
 
 
+class _StoryInterviewSaveableDraftReadProjection(_FakeReadProjection):
+    """Fake Story interview state that already has a saveable draft."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return Story interview state with a saveable complete draft."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "STORY_INTERVIEW",
+            "setup_status": "passed",
+            "interview_runtime": {
+                "story": {
+                    "Canonical Process Event Record Definition and Validation": {
+                        "draft_projection": {
+                            "kind": "complete_draft",
+                            "is_complete": True,
+                            "latest_reusable_attempt_id": "attempt-2",
+                            "artifact_fingerprint": "sha256:canonical",
+                        },
+                        "attempt_history": [
+                            {
+                                "attempt_id": "attempt-2",
+                                "artifact_fingerprint": "sha256:canonical",
+                                "is_reusable": True,
+                                "output_artifact": {
+                                    "is_complete": True,
+                                    "quality": {
+                                        "coverage_status": "complete",
+                                        "quality_findings": [],
+                                        "saveable": True,
+                                    },
+                                    "user_stories": [
+                                        {
+                                            "story_title": (
+                                                "Define canonical process records"
+                                            ),
+                                            "invest_score": "High",
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        return result
+
+
 class _StoryReopenedReadProjection(_FakeReadProjection):
     """Fake read projection for a reopened Story interview state."""
 
@@ -3300,6 +3348,138 @@ def test_application_workflow_next_routes_story_interview_to_pending_and_generat
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
     assert result["data"]["status"] == "next_phase_available"
+
+
+def test_workflow_next_routes_saveable_story_interview_to_guarded_save() -> None:
+    """Recover a stale Story interview state when a saveable draft exists."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StoryInterviewSaveableDraftReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge story history --project-id 7 "
+            '--parent-requirement "Canonical Process Event Record Definition '
+            'and Validation"'
+        ),
+        (
+            "agileforge story save --project-id 7 "
+            '--parent-requirement "Canonical Process Event Record Definition '
+            'and Validation" '
+            "--attempt-id attempt-2 "
+            "--expected-artifact-fingerprint sha256:canonical "
+            "--expected-state STORY_REVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge story generate --project-id 7 "
+            '--parent-requirement "Canonical Process Event Record Definition '
+            'and Validation" '
+            "--input <feedback>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+
+
+def test_workflow_next_routes_covered_story_interview_to_recovery_complete() -> None:
+    """Recover a stale Story interview state when all requirements are covered."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "STORY_INTERVIEW",
+                "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+                "story_saved": {"Requirement A": True, "Requirement B": True},
+                "interview_runtime": {
+                    "story": {
+                        "Requirement A": {
+                            "draft_projection": {
+                                "kind": "complete_draft",
+                                "is_complete": True,
+                                "latest_reusable_attempt_id": "attempt-1",
+                                "artifact_fingerprint": "sha256:a",
+                            },
+                            "attempt_history": [
+                                {
+                                    "attempt_id": "attempt-1",
+                                    "artifact_fingerprint": "sha256:a",
+                                    "is_reusable": True,
+                                    "output_artifact": {
+                                        "is_complete": True,
+                                        "quality": {
+                                            "coverage_status": "complete",
+                                            "quality_findings": [],
+                                            "saveable": True,
+                                        },
+                                        "user_stories": [
+                                            {"story_title": "Saved Story"}
+                                        ],
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_INTERVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_routes_stale_story_interview_to_stored_scope_complete() -> None:
+    """Recover stale Story interview state through its stored completion scope."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "STORY_INTERVIEW",
+                "roadmap_releases": [
+                    {"items": ["Requirement A", "Requirement B"]},
+                    {"items": ["Requirement C"]},
+                ],
+                "story_saved": {"Requirement A": True, "Requirement B": True},
+                "story_completion_scope": {
+                    "schema_version": "agileforge.story_completion_scope.v1",
+                    "scope": "milestone",
+                    "scope_id": "milestone_0",
+                    "requirements": ["Requirement A", "Requirement B"],
+                    "completed_at": "2026-06-10T20:16:52Z",
+                },
+            }
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        (
+            "agileforge story complete --project-id 7 "
+            "--expected-state STORY_INTERVIEW "
+            "--scope milestone --scope-id milestone_0 "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
 
 
 def test_workflow_next_routes_reopened_story_to_generate_not_sprint() -> None:

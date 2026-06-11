@@ -2647,7 +2647,12 @@ def _story_command_candidates(
         ),
     )
     if fsm_state == "STORY_INTERVIEW":
-        return [pending_command, generate_command]
+        return _story_interview_command_candidates(
+            project_id=project_id,
+            workflow=workflow,
+            pending_command=pending_command,
+            generate_command=generate_command,
+        )
     if fsm_state == "STORY_PERSISTENCE":
         if not _story_coverage_is_complete(workflow):
             scoped_complete_commands = _covered_story_milestone_complete_commands(
@@ -2718,6 +2723,225 @@ def _story_command_candidates(
             ),
         ),
     ]
+
+
+def _story_interview_command_candidates(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    pending_command: tuple[str, str],
+    generate_command: tuple[str, str],
+) -> list[tuple[str, str]]:
+    """Return Story commands for interview state, including recovery bridges."""
+    scoped_complete_commands = _existing_story_scope_complete_commands(
+        project_id=project_id,
+        workflow=workflow,
+        expected_state="STORY_INTERVIEW",
+    )
+    if scoped_complete_commands:
+        return [pending_command, *scoped_complete_commands]
+    if _story_coverage_is_complete(workflow):
+        return [
+            pending_command,
+            (
+                "agileforge story complete",
+                (
+                    f"agileforge story complete --project-id {project_id} "
+                    "--expected-state STORY_INTERVIEW "
+                    "--idempotency-key <idempotency_key>"
+                ),
+            ),
+        ]
+    review_candidate = _saveable_story_review_candidate(workflow)
+    if review_candidate is None:
+        return [pending_command, generate_command]
+    return _story_review_commands_for_candidate(
+        project_id=project_id,
+        review_candidate=review_candidate,
+    )
+
+
+def _story_review_commands_for_candidate(
+    *,
+    project_id: int,
+    review_candidate: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Return guarded Story review commands for one saveable draft."""
+    parent_flag = _story_parent_requirement_flag(
+        review_candidate["parent_requirement"]
+    )
+    return [
+        (
+            "agileforge story history",
+            f"agileforge story history --project-id {project_id} {parent_flag}",
+        ),
+        (
+            "agileforge story save",
+            (
+                f"agileforge story save --project-id {project_id} "
+                f"{parent_flag} "
+                f"--attempt-id {review_candidate['attempt_id']} "
+                "--expected-artifact-fingerprint "
+                f"{review_candidate['artifact_fingerprint']} "
+                "--expected-state STORY_REVIEW "
+                "--idempotency-key <idempotency_key>"
+            ),
+        ),
+        (
+            "agileforge story generate",
+            (
+                f"agileforge story generate --project-id {project_id} "
+                f"{parent_flag} "
+                "--input <feedback>"
+            ),
+        ),
+    ]
+
+
+def _saveable_story_review_candidate(
+    workflow: dict[str, Any],
+) -> dict[str, str] | None:
+    """Return a saveable Story draft from runtime state, if one exists."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    interview_runtime = state_data.get("interview_runtime")
+    if not isinstance(interview_runtime, dict):
+        return None
+    story_runtime = interview_runtime.get("story")
+    if not isinstance(story_runtime, dict):
+        return None
+
+    for parent_requirement, runtime in story_runtime.items():
+        if not isinstance(parent_requirement, str) or not parent_requirement:
+            continue
+        if not isinstance(runtime, dict):
+            continue
+        if _story_requirement_is_covered(
+            state_data,
+            parent_requirement=parent_requirement,
+        ):
+            continue
+        from services.phases.story_service import story_save_payload  # noqa: PLC0415
+
+        if story_save_payload(runtime) is None:
+            continue
+        draft_projection = runtime.get("draft_projection")
+        if not isinstance(draft_projection, dict):
+            continue
+        attempt_id = _non_empty_string(
+            draft_projection.get("latest_reusable_attempt_id")
+        )
+        artifact_fingerprint = _non_empty_string(
+            draft_projection.get("artifact_fingerprint")
+        )
+        if attempt_id is None or artifact_fingerprint is None:
+            continue
+        return {
+            "parent_requirement": parent_requirement,
+            "attempt_id": attempt_id,
+            "artifact_fingerprint": artifact_fingerprint,
+        }
+    return None
+
+
+def _existing_story_scope_complete_commands(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    expected_state: str,
+) -> list[tuple[str, str]]:
+    """Return completion commands for an already-recorded Story scope."""
+    command = _existing_story_scope_complete_command(
+        project_id=project_id,
+        workflow=workflow,
+        expected_state=expected_state,
+    )
+    return [] if command is None else [command]
+
+
+def _existing_story_scope_complete_command(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    expected_state: str,
+) -> tuple[str, str] | None:
+    """Return a completion command for an already-recorded Story scope."""
+    scope_data = _covered_existing_story_scope(workflow)
+    if scope_data is None:
+        return None
+
+    scope_name, scope_id, requirements = scope_data
+    if scope_name == "milestone" and scope_id is not None:
+        return (
+            "agileforge story complete",
+            (
+                f"agileforge story complete --project-id {project_id} "
+                f"--expected-state {expected_state} "
+                f"--scope milestone --scope-id {scope_id} "
+                "--idempotency-key <idempotency_key>"
+            ),
+        )
+    if scope_name == "selection":
+        return _story_selection_complete_command(
+            project_id=project_id,
+            requirements=requirements,
+            expected_state=expected_state,
+        )
+    return None
+
+
+def _covered_existing_story_scope(
+    workflow: dict[str, Any],
+) -> tuple[str, str | None, list[str]] | None:
+    """Return stored Story scope data when every scoped requirement is covered."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    scope = state_data.get("story_completion_scope")
+    if not isinstance(scope, dict):
+        return None
+    requirements = [
+        requirement
+        for requirement in scope.get("requirements", [])
+        if isinstance(requirement, str) and requirement
+    ]
+    if not requirements:
+        return None
+    if not all(
+        _story_requirement_is_covered(
+            state_data,
+            parent_requirement=requirement,
+        )
+        for requirement in requirements
+    ):
+        return None
+
+    scope_name = _non_empty_string(scope.get("scope"))
+    if scope_name not in {"milestone", "selection"}:
+        return None
+    return (scope_name, _non_empty_string(scope.get("scope_id")), requirements)
+
+
+def _story_selection_complete_command(
+    *,
+    project_id: int,
+    requirements: list[str],
+    expected_state: str,
+) -> tuple[str, str]:
+    """Return a Story selection completion command."""
+    parent_requirement_flags = " ".join(
+        _story_parent_requirement_flag(requirement)
+        for requirement in requirements
+    )
+    return (
+        "agileforge story complete",
+        (
+            f"agileforge story complete --project-id {project_id} "
+            f"--expected-state {expected_state} "
+            "--scope selection "
+            f"{parent_requirement_flags} "
+            "--idempotency-key <idempotency_key>"
+        ),
+    )
 
 
 def _story_requirement_is_covered(

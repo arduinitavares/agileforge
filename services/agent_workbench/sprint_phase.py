@@ -1103,6 +1103,12 @@ class SprintPhaseRunner:
                     current_fingerprint = str(
                         current_triage.get("triage_fingerprint") or ""
                     )
+                    current_request_fingerprint = str(
+                        current_triage.get("request_fingerprint") or ""
+                    )
+                    corrected_request_fingerprint = str(
+                        triage_payload.get("request_fingerprint") or ""
+                    )
                     if expected_triage_fingerprint != current_fingerprint:
                         _raise_triage_fingerprint_mismatch(
                             expected_triage_fingerprint=expected_triage_fingerprint,
@@ -1115,6 +1121,12 @@ class SprintPhaseRunner:
                             history_action="superseded",
                             recorded_at=recorded_at,
                             recorded_by=changed_by,
+                            extra_metadata={
+                                "superseded_by_request_fingerprint": (
+                                    corrected_request_fingerprint
+                                ),
+                                "superseded_at": recorded_at,
+                            },
                         )
                     )
                     state["post_sprint_triage"] = triage_payload
@@ -1124,6 +1136,12 @@ class SprintPhaseRunner:
                             history_action="corrected",
                             recorded_at=recorded_at,
                             recorded_by=changed_by,
+                            extra_metadata={
+                                "replaces_triage_fingerprint": current_fingerprint,
+                                "correction_of_request_fingerprint": (
+                                    current_request_fingerprint
+                                ),
+                            },
                         )
                     )
                     event_metadata["history_action"] = "corrected"
@@ -1921,12 +1939,15 @@ def _triage_history_entry(
     history_action: str,
     recorded_at: str,
     recorded_by: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-ready triage history entry."""
     entry = cast("dict[str, Any]", _json_ready(dict(triage_payload)))
     entry["history_action"] = history_action
     entry["history_recorded_at"] = recorded_at
     entry["history_recorded_by"] = recorded_by
+    if extra_metadata:
+        entry.update(cast("dict[str, Any]", _json_ready(extra_metadata)))
     return entry
 
 
