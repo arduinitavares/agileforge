@@ -1,0 +1,3 @@
+## 2025-02-18 - Native Tooltips for Disabled Buttons
+**Learning:** While explanatory text adjacent to disabled buttons is good for general visibility, screen readers and users who rely on hovering over the primary disabled action button can miss this context. This is especially true for workflow applications where primary actions (`Save`, `Complete`) are conditionally disabled based on complex state.
+**Action:** When dynamically disabling state-driven buttons via JavaScript, map the explanatory hint text directly to the button's native `title` attribute. This provides immediate, accessible context on hover indicating *why* the action is currently blocked without adding extra DOM clutter or custom tooltip libraries.

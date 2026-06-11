@@ -1934,9 +1934,12 @@ function updateVisionSaveButton() {
         ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
         : 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all';
 
-    hint.innerText = canSave
+    const hintText = canSave
         ? 'Vision is complete. Proceed to save and advance to Backlog.'
         : 'Save is disabled until latest Vision output has is_complete=true.';
+
+    hint.innerText = hintText;
+    button.title = hintText;
 }
 
 async function loadVisionHistory() {
@@ -2243,9 +2246,12 @@ function updateBacklogSaveButton() {
         ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
         : 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all';
 
-    hint.innerText = canSave
+    const hintText = canSave
         ? 'Backlog is complete. Proceed to save and advance to Roadmap.'
         : 'Save is disabled until latest Backlog output has is_complete=true.';
+
+    hint.innerText = hintText;
+    button.title = hintText;
 }
 
 async function loadBacklogHistory() {
@@ -2569,9 +2575,12 @@ function updateRoadmapSaveButton() {
         ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
         : 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all';
 
-    hint.innerText = canSave
+    const hintText = canSave
         ? 'Roadmap is complete. Proceed to save and advance to Stories.'
         : 'Save is disabled until latest Roadmap output has is_complete=true.';
+
+    hint.innerText = hintText;
+    button.title = hintText;
 }
 
 async function loadRoadmapHistory() {
@@ -3362,30 +3371,33 @@ function updateStorySaveButton() {
         ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
         : 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all';
 
+    let hintText = '';
     if (isSaved) {
         button.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> Saved';
-        hint.innerText = activeStoryRetryAvailable
+        hintText = activeStoryRetryAvailable
             ? 'Reusable complete draft is already saved. You can retry the latest failed input or save again to overwrite.'
             : 'Reusable complete draft is already saved. Save again to overwrite if needed.';
     } else if (isMerged) {
         const ownerRequirement = activeStoryResolutionCurrent?.owner_requirement || activeStoryResolutionRecommendation?.owner_requirement;
-        hint.innerText = ownerRequirement
+        hintText = ownerRequirement
             ? `This requirement is resolved by merging it into "${ownerRequirement}". Use Reset Draft if you want to reconsider.`
             : 'This requirement is resolved as a merged duplicate. Use Reset Draft if you want to reconsider.';
     } else {
         button.innerHTML = '<span class="material-symbols-outlined text-sm">save</span> Save Stories';
         if (activeStorySaveAvailable && activeStoryRetryAvailable) {
-            hint.innerText = 'Reusable complete draft is ready to save. You can also retry the latest failed input.';
+            hintText = 'Reusable complete draft is ready to save. You can also retry the latest failed input.';
         } else if (activeStorySaveAvailable) {
-            hint.innerText = 'Reusable complete draft is ready to save.';
+            hintText = 'Reusable complete draft is ready to save.';
         } else if (canMerge && activeStoryResolutionRecommendation?.owner_requirement) {
-            hint.innerText = `This draft recommends merging the requirement into "${activeStoryResolutionRecommendation.owner_requirement}" instead of saving duplicate stories.`;
+            hintText = `This draft recommends merging the requirement into "${activeStoryResolutionRecommendation.owner_requirement}" instead of saving duplicate stories.`;
         } else if (activeStoryRetryAvailable) {
-            hint.innerText = 'Latest attempt failed without a reusable complete draft. Retry the same input or keep refining.';
+            hintText = 'Latest attempt failed without a reusable complete draft. Retry the same input or keep refining.';
         } else {
-            hint.innerText = 'Save disabled until a complete reusable draft exists.';
+            hintText = 'Save disabled until a complete reusable draft exists.';
         }
     }
+    hint.innerText = hintText;
+    button.title = hintText;
 }
 
 function updateCompleteStoryPhaseButton() {
@@ -5103,27 +5115,21 @@ function updateSprintSaveButton() {
         ? 'inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
         : 'inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-primary/40 text-white font-bold cursor-not-allowed transition-all shadow-sm';
 
+    let hintText = '';
     if (activeFsmState === 'SPRINT_PERSISTENCE') {
-        hint.innerText = 'Sprint already saved for this draft.';
-        return;
+        hintText = 'Sprint already saved for this draft.';
+    } else if (!latestSprintIsComplete) {
+        hintText = 'Save is disabled until the latest Sprint output is complete.';
+    } else if (!teamNameInput.value.trim()) {
+        hintText = 'Provide a team name to confirm this sprint.';
+    } else if (!startDateInput.value) {
+        hintText = 'Choose a sprint start date to confirm this sprint.';
+    } else {
+        hintText = 'Sprint plan is complete. Proceed to save.';
     }
 
-    if (!latestSprintIsComplete) {
-        hint.innerText = 'Save is disabled until the latest Sprint output is complete.';
-        return;
-    }
-
-    if (!teamNameInput.value.trim()) {
-        hint.innerText = 'Provide a team name to confirm this sprint.';
-        return;
-    }
-
-    if (!startDateInput.value) {
-        hint.innerText = 'Choose a sprint start date to confirm this sprint.';
-        return;
-    }
-
-    hint.innerText = 'Sprint plan is complete. Proceed to save.';
+    hint.innerText = hintText;
+    button.title = hintText;
 }
 
 async function deleteCurrentProject() {
