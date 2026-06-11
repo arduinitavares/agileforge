@@ -570,6 +570,10 @@ class _Application(Protocol):
         """Return Sprint planner attempts and execution history."""
         ...
 
+    def sprint_metrics(self, *, project_id: int) -> JsonObject:
+        """Return Sprint metrics and planning recommendation."""
+        ...
+
     def sprint_save(  # noqa: PLR0913
         self,
         *,
@@ -1637,6 +1641,12 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     sprint_history.add_argument("--project-id", type=int, required=True)
     sprint_history.set_defaults(command_handler=_sprint_history)
+    sprint_metrics = sprint_sub.add_parser(
+        "metrics",
+        help="Show Sprint metrics and planning recommendation.",
+    )
+    sprint_metrics.add_argument("--project-id", type=int, required=True)
+    sprint_metrics.set_defaults(command_handler=_sprint_metrics)
     sprint_save = sprint_sub.add_parser(
         "save",
         help="Persist a reviewed Sprint draft.",
@@ -3132,6 +3142,43 @@ def _sprint_history(
     return "agileforge sprint history", application.sprint_history(
         project_id=args.project_id,
     )
+
+
+def _print_sprint_metrics_summary(result: JsonObject) -> None:
+    """Print a compact Sprint metrics summary for humans."""
+    if result.get("ok") is not True:
+        return
+    data = _as_mapping(result.get("data")) or {}
+    summary = _as_mapping(data.get("summary")) or {}
+    recommendation = _as_mapping(data.get("recommendation")) or {}
+    sys.stderr.write(
+        "\n".join(
+            [
+                "Sprint metrics",
+                f"  project_id: {data.get('project_id', '')}",
+                f"  status: {data.get('status', '')}",
+                (
+                    "  completed_sprint_count: "
+                    f"{summary.get('completed_sprint_count', '')}"
+                ),
+                (
+                    "  recommended_next_sprint_points: "
+                    f"{recommendation.get('recommended_next_sprint_points', '')}"
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+
+def _sprint_metrics(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Sprint metrics to the application facade."""
+    result = application.sprint_metrics(project_id=args.project_id)
+    _print_sprint_metrics_summary(result)
+    return "agileforge sprint metrics", result
 
 
 def _sprint_save(

@@ -28,6 +28,7 @@ from models.enums import (
 )
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from services.agent_workbench import sprint_phase as sprint_phase_module
+from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.phases import sprint_service
@@ -46,6 +47,11 @@ class _FakeProductRepository:
     def get_by_id(self, product_id: int) -> object:
         """Return a lightweight product sentinel."""
         return SimpleNamespace(product_id=product_id, name="Product")
+
+
+class _MissingProductRepository:
+    def get_by_id(self, _product_id: int) -> None:
+        """Return no project to exercise the existing load error envelope."""
 
 
 class _FakeWorkflowService:
@@ -1859,6 +1865,243 @@ def test_sprint_close_rejects_stale_sprint_fingerprint(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "MUTATION_FAILED"
     assert result["errors"][0]["details"]["reason_code"] == ("SPRINT_FINGERPRINT_STALE")
+
+
+def test_sprint_runner_metrics_projects_completed_sprints_and_events(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint metrics should read durable completed Sprints and events."""
+    product = Product(name="Metrics Product")
+    team = Team(name="Metrics Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    done_story = UserStory(
+        product_id=product.product_id,
+        title="Complete the durable path",
+        story_description="As an agent, I finish the durable path.",
+        acceptance_criteria="- Metrics are source backed",
+        story_points=5,
+        rank="101",
+        status=StoryStatus.DONE,
+        is_refined=True,
+    )
+    accepted_story = UserStory(
+        product_id=product.product_id,
+        title="Accept the projected path",
+        story_description="As a reviewer, I accept the projection.",
+        acceptance_criteria="- Counts accepted stories",
+        story_points=3,
+        rank="102",
+        status=StoryStatus.ACCEPTED,
+        is_refined=True,
+    )
+    open_story = UserStory(
+        product_id=product.product_id,
+        title="Leave future capacity out",
+        story_description="As an agent, I leave future work open.",
+        acceptance_criteria="- Open work is not completed",
+        story_points=13,
+        rank="103",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([done_story, accepted_story, open_story])
+    session.flush()
+    assert done_story.story_id is not None
+    assert accepted_story.story_id is not None
+    assert open_story.story_id is not None
+
+    completed_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Measure completed work",
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 14),
+        status=SprintStatus.COMPLETED,
+        started_at=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 6, 1, 11, 0, tzinfo=UTC),
+    )
+    active_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Active work should not count",
+        start_date=date(2026, 6, 15),
+        end_date=date(2026, 6, 28),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add_all([completed_sprint, active_sprint])
+    session.flush()
+    assert completed_sprint.sprint_id is not None
+    assert active_sprint.sprint_id is not None
+
+    session.add_all(
+        [
+            SprintStory(
+                sprint_id=completed_sprint.sprint_id,
+                story_id=done_story.story_id,
+            ),
+            SprintStory(
+                sprint_id=completed_sprint.sprint_id,
+                story_id=accepted_story.story_id,
+            ),
+            SprintStory(
+                sprint_id=completed_sprint.sprint_id,
+                story_id=open_story.story_id,
+            ),
+        ]
+    )
+    session.add_all(
+        [
+            Task(
+                story_id=done_story.story_id,
+                description="Build durable metrics",
+                status=TaskStatus.DONE,
+            ),
+            Task(
+                story_id=done_story.story_id,
+                description="Polish durable metrics",
+                status=TaskStatus.TO_DO,
+            ),
+            Task(
+                story_id=accepted_story.story_id,
+                description="Review durable metrics",
+                status=TaskStatus.DONE,
+            ),
+            Task(
+                story_id=open_story.story_id,
+                description="Plan next capacity",
+                status=TaskStatus.TO_DO,
+            ),
+            WorkflowEvent(
+                event_type=WorkflowEventType.SPRINT_STARTED,
+                product_id=product.product_id,
+                sprint_id=completed_sprint.sprint_id,
+                duration_seconds=12.0,
+                turn_count=2,
+            ),
+            WorkflowEvent(
+                event_type=WorkflowEventType.SPRINT_COMPLETED,
+                product_id=product.product_id,
+                sprint_id=completed_sprint.sprint_id,
+                duration_seconds=18.0,
+                turn_count=3,
+            ),
+            WorkflowEvent(
+                event_type=WorkflowEventType.SPRINT_PLAN_REVIEW,
+                product_id=product.product_id,
+                sprint_id=completed_sprint.sprint_id,
+                duration_seconds=4.0,
+                turn_count=None,
+            ),
+            WorkflowEvent(
+                event_type=WorkflowEventType.SPRINT_STARTED,
+                product_id=product.product_id,
+                sprint_id=active_sprint.sprint_id,
+                duration_seconds=99.0,
+                turn_count=9,
+            ),
+        ]
+    )
+    session.commit()
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.metrics(project_id=product.product_id)
+
+    assert result["ok"] is True
+    assert result["warnings"] == []
+    data = result["data"]
+    assert data["project_id"] == product.product_id
+    assert data["status"] == "ready"
+    expected_summary = {
+        "completed_sprint_count": 1,
+        "completed_story_count": 2,
+        "completed_task_count": 2,
+        "completed_story_points": 8,
+        "total_elapsed_seconds": 7200,
+    }
+    assert {
+        key: data["summary"][key] for key in expected_summary
+    } == expected_summary
+    assert data["recommendation"]["source_sprint_ids"] == [
+        completed_sprint.sprint_id
+    ]
+    assert data["data_quality_warnings"] == []
+
+    row = data["completed_sprints"][0]
+    expected_row = {
+        "sprint_id": completed_sprint.sprint_id,
+        "goal": "Measure completed work",
+        "status": "Completed",
+        "started_at": "2026-06-01T09:00:00",
+        "completed_at": "2026-06-01T11:00:00",
+        "start_date": "2026-06-01",
+        "end_date": "2026-06-14",
+        "story_count": 3,
+        "completed_story_count": 2,
+        "task_count": 4,
+        "completed_task_count": 2,
+        "story_points_planned": 21,
+        "story_points_completed": 8,
+        "elapsed_seconds": 7200,
+        "workflow_event_count": 3,
+        "workflow_event_duration_seconds": 34,
+        "turn_count": 5,
+        "history_fidelity": "derived",
+    }
+    assert {key: row[key] for key in expected_row} == expected_row
+
+
+def test_sprint_runner_metrics_missing_project_uses_load_error() -> None:
+    """Sprint metrics should preserve the existing missing-project envelope."""
+    missing_project_id = 404
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _MissingProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.metrics(project_id=missing_project_id)
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["warnings"] == []
+    assert result["errors"][0]["code"] == "PROJECT_NOT_FOUND"
+    assert result["errors"][0]["details"] == {"project_id": missing_project_id}
+
+
+def test_application_sprint_metrics_forwards_to_runner() -> None:
+    """The application facade should expose Sprint metrics."""
+
+    class _MetricsRunner:
+        def __init__(self) -> None:
+            self.project_ids: list[int] = []
+
+        def metrics(self, *, project_id: int) -> dict[str, Any]:
+            self.project_ids.append(project_id)
+            return {
+                "ok": True,
+                "data": {"project_id": project_id, "status": "ready"},
+                "warnings": [],
+                "errors": [],
+            }
+
+    project_id = 17
+    metrics_runner = _MetricsRunner()
+    application = AgentWorkbenchApplication(sprint_runner=cast("Any", metrics_runner))
+
+    result = application.sprint_metrics(project_id=project_id)
+
+    assert metrics_runner.project_ids == [project_id]
+    assert result["ok"] is True
+    assert result["data"] == {"project_id": project_id, "status": "ready"}
 
 
 def test_sprint_review_returns_latest_completed_sprint_without_mutation(

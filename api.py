@@ -130,6 +130,7 @@ from services.phases.roadmap_service import (
 from services.phases.roadmap_service import (
     save_roadmap_draft as save_roadmap_draft_service,
 )
+from services.phases.sprint_metrics import build_sprint_metrics
 from services.phases.sprint_service import (
     SprintPhaseError,
     append_sprint_execution_history,
@@ -1206,6 +1207,64 @@ def _serialize_sprint_execution_history_item(sprint: Sprint) -> dict[str, Any]:
             story.story_points or 0 for story in completed_stories
         ),
         "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "history_fidelity": _history_fidelity(sprint),
+    }
+
+
+def _serialize_sprint_metrics_row(
+    sprint: Sprint,
+    events: Sequence[WorkflowEvent],
+) -> dict[str, Any]:
+    stories = sorted(
+        sprint.stories,
+        key=lambda story: (
+            story.rank or "",
+            story.story_id or 0,
+        ),
+    )
+    tasks = [task for story in stories for task in story.tasks]
+    completed_stories = [
+        story
+        for story in stories
+        if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
+    ]
+    duration_values = [
+        event.duration_seconds
+        for event in events
+        if event.duration_seconds is not None
+    ]
+    turn_count_values = [
+        event.turn_count for event in events if event.turn_count is not None
+    ]
+    turn_count = sum(turn_count_values) if turn_count_values else None
+
+    return {
+        "sprint_id": sprint.sprint_id,
+        "goal": sprint.goal,
+        "status": _enum_value(sprint.status),
+        "started_at": _serialize_temporal(sprint.started_at),
+        "completed_at": _serialize_temporal(sprint.completed_at),
+        "start_date": _serialize_temporal(sprint.start_date),
+        "end_date": _serialize_temporal(sprint.end_date),
+        "story_count": len(stories),
+        "completed_story_count": len(completed_stories),
+        "task_count": len(tasks),
+        "completed_task_count": sum(
+            1 for task in tasks if task.status == TaskStatus.DONE
+        ),
+        "story_points_planned": sum(story.story_points or 0 for story in stories),
+        "story_points_completed": sum(
+            story.story_points or 0 for story in completed_stories
+        ),
+        "unestimated_completed_story_count": sum(
+            1 for story in completed_stories if story.story_points is None
+        ),
+        "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "workflow_event_count": len(events),
+        "workflow_event_duration_seconds": (
+            sum(duration_values) if duration_values else None
+        ),
+        "turn_count": turn_count,
         "history_fidelity": _history_fidelity(sprint),
     }
 
@@ -3076,6 +3135,52 @@ async def get_project_sprint_history(project_id: int) -> dict[str, Any]:
     }
 
 
+async def get_project_sprint_metrics(project_id: int) -> dict[str, Any]:
+    """Get read-only Sprint metrics for a project."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    with Session(get_engine()) as session:
+        completed_sprints = session.exec(
+            _saved_sprint_query().where(
+                Sprint.product_id == project_id,
+                Sprint.status == SprintStatus.COMPLETED,
+            )
+        ).all()
+        sprint_ids = [
+            sprint.sprint_id for sprint in completed_sprints if sprint.sprint_id
+        ]
+        events_by_sprint_id: dict[int, list[WorkflowEvent]] = {
+            sprint_id: [] for sprint_id in sprint_ids
+        }
+        if sprint_ids:
+            events = session.exec(
+                select(WorkflowEvent).where(
+                    cast("Any", WorkflowEvent.sprint_id).in_(sprint_ids)
+                )
+            ).all()
+            for event in events:
+                if event.sprint_id is not None:
+                    events_by_sprint_id.setdefault(event.sprint_id, []).append(event)
+
+        data = build_sprint_metrics(
+            project_id=project_id,
+            completed_sprints=[
+                _serialize_sprint_metrics_row(
+                    sprint,
+                    events_by_sprint_id.get(cast("int", sprint.sprint_id), []),
+                )
+                for sprint in completed_sprints
+            ],
+        )
+
+    return {
+        "status": "success",
+        "data": data,
+    }
+
+
 async def reset_project_sprint_planner(project_id: int) -> dict[str, Any]:
     """Reset the sprint planner working set for a project."""
     product = product_repo.get_by_id(project_id)
@@ -3690,6 +3795,7 @@ register_sprint_routes(
     get_project_sprint_candidates=get_project_sprint_candidates,
     generate_project_sprint=generate_project_sprint,
     get_project_sprint_history=get_project_sprint_history,
+    get_project_sprint_metrics=get_project_sprint_metrics,
     reset_project_sprint_planner=reset_project_sprint_planner,
     list_project_sprints=list_project_sprints,
     get_project_sprint=get_project_sprint,

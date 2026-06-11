@@ -43,6 +43,7 @@ from services.agent_workbench.post_sprint_triage import (
     post_sprint_triage_required,
 )
 from services.phases import workflow_state
+from services.phases.sprint_metrics import build_sprint_metrics
 from services.phases.sprint_service import (
     SprintPhaseError,
     append_sprint_execution_history,
@@ -262,6 +263,10 @@ class SprintPhaseRunner:
     def history(self, *, project_id: int) -> dict[str, Any]:
         """Return Sprint planner attempts and execution history."""
         return anyio.run(self._history, project_id)
+
+    def metrics(self, *, project_id: int) -> dict[str, Any]:
+        """Return read-only Sprint performance metrics."""
+        return anyio.run(self._metrics, project_id)
 
     def save(  # noqa: PLR0913
         self,
@@ -1281,6 +1286,50 @@ class SprintPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
+    async def _metrics(self, project_id: int) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        with Session(get_engine()) as session:
+            completed_sprints = session.exec(
+                _saved_sprint_query().where(
+                    Sprint.product_id == project_id,
+                    Sprint.status == SprintStatus.COMPLETED,
+                )
+            ).all()
+            sprint_ids = [
+                sprint.sprint_id
+                for sprint in completed_sprints
+                if sprint.sprint_id is not None
+            ]
+            events_by_sprint_id: dict[int, list[WorkflowEvent]] = {
+                sprint_id: [] for sprint_id in sprint_ids
+            }
+            if sprint_ids:
+                events = session.exec(
+                    select(WorkflowEvent).where(
+                        cast("Any", WorkflowEvent.sprint_id).in_(sprint_ids)
+                    )
+                ).all()
+                for event in events:
+                    if event.sprint_id is not None:
+                        events_by_sprint_id.setdefault(event.sprint_id, []).append(
+                            event
+                        )
+
+            data = build_sprint_metrics(
+                project_id=project_id,
+                completed_sprints=[
+                    _serialize_sprint_metrics_row(
+                        sprint,
+                        events_by_sprint_id.get(cast("int", sprint.sprint_id), []),
+                    )
+                    for sprint in completed_sprints
+                ],
+            )
+        return _data_envelope(data)
+
     async def _save(  # noqa: PLR0913
         self,
         project_id: int,
@@ -2161,6 +2210,59 @@ def _serialize_sprint_execution_history_item(sprint: Sprint) -> dict[str, Any]:
             story.story_points or 0 for story in completed_stories
         ),
         "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "history_fidelity": _history_fidelity(sprint),
+    }
+
+
+def _serialize_sprint_metrics_row(
+    sprint: Sprint,
+    events: Sequence[WorkflowEvent],
+) -> dict[str, Any]:
+    """Return pure projection input for Sprint metrics."""
+    stories = _sorted_sprint_stories(sprint)
+    tasks = [task for story in stories for task in story.tasks]
+    completed_stories = [
+        story
+        for story in stories
+        if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
+    ]
+    duration_values = [
+        event.duration_seconds
+        for event in events
+        if event.duration_seconds is not None
+    ]
+    turn_count_values = [
+        event.turn_count for event in events if event.turn_count is not None
+    ]
+    turn_count = sum(turn_count_values) if turn_count_values else None
+
+    return {
+        "sprint_id": sprint.sprint_id,
+        "goal": sprint.goal,
+        "status": _enum_value(sprint.status),
+        "started_at": _serialize_temporal(sprint.started_at),
+        "completed_at": _serialize_temporal(sprint.completed_at),
+        "start_date": _serialize_temporal(sprint.start_date),
+        "end_date": _serialize_temporal(sprint.end_date),
+        "story_count": len(stories),
+        "completed_story_count": len(completed_stories),
+        "task_count": len(tasks),
+        "completed_task_count": sum(
+            1 for task in tasks if task.status == TaskStatus.DONE
+        ),
+        "story_points_planned": sum(story.story_points or 0 for story in stories),
+        "story_points_completed": sum(
+            story.story_points or 0 for story in completed_stories
+        ),
+        "unestimated_completed_story_count": sum(
+            1 for story in completed_stories if story.story_points is None
+        ),
+        "elapsed_seconds": _sprint_elapsed_seconds(sprint),
+        "workflow_event_count": len(events),
+        "workflow_event_duration_seconds": (
+            sum(duration_values) if duration_values else None
+        ),
+        "turn_count": turn_count,
         "history_fidelity": _history_fidelity(sprint),
     }
 

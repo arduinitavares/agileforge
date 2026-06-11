@@ -80,6 +80,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story dependencies apply",
     "agileforge sprint generate",
     "agileforge sprint history",
+    "agileforge sprint metrics",
     "agileforge sprint review",
     "agileforge sprint save",
     "agileforge sprint triage",
@@ -794,6 +795,24 @@ def test_command_schema_includes_sprint_review_and_triage() -> None:
     ]
 
 
+def test_sprint_metrics_command_schema_requires_project_id() -> None:
+    """Expose Sprint metrics as a read-only project-scoped command."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert "agileforge sprint metrics" in names
+    assert command_is_available("agileforge sprint metrics") is True
+    assert capabilities["agileforge sprint metrics"]["installed"] is True
+
+    metrics = command_schema_payload("agileforge sprint metrics")
+
+    assert metrics["mutates"] is False
+    assert metrics["input"]["required"] == ["project_id"]
+    assert metrics["input"]["optional"] == []
+    assert ErrorCode.PROJECT_NOT_FOUND.value in metrics["errors"]
+    assert ErrorCode.INVALID_COMMAND.value in metrics["errors"]
+
+
 def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Sprint phase generation commands as installed CLI capabilities."""
     names = installed_command_names()
@@ -801,6 +820,7 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     sprint_command_names = {
         "agileforge sprint generate",
         "agileforge sprint history",
+        "agileforge sprint metrics",
         "agileforge sprint review",
         "agileforge sprint save",
         "agileforge sprint start",
@@ -823,6 +843,7 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
 
     generate = command_schema_payload("agileforge sprint generate")
     history = command_schema_payload("agileforge sprint history")
+    metrics = command_schema_payload("agileforge sprint metrics")
     review = command_schema_payload("agileforge sprint review")
     save = command_schema_payload("agileforge sprint save")
     start = command_schema_payload("agileforge sprint start")
@@ -848,6 +869,9 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     ]
     assert history["mutates"] is False
     assert history["input"]["required"] == ["project_id"]
+    assert metrics["mutates"] is False
+    assert metrics["input"]["required"] == ["project_id"]
+    assert metrics["input"]["optional"] == []
     assert review["mutates"] is False
     assert review["input"]["required"] == ["project_id"]
     assert review["input"]["optional"] == ["sprint_id"]
@@ -948,6 +972,7 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     for schema in (
         generate,
         history,
+        metrics,
         review,
         save,
         start,

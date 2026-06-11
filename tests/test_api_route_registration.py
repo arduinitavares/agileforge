@@ -58,6 +58,20 @@ def _sync_stub(**_kwargs: object) -> dict[str, str]:
     return {"status": "success"}
 
 
+def test_sprint_router_api_app_registers_metrics_route() -> None:
+    """Confirm the API module exposes the Sprint metrics route."""
+    routes = {
+        (route.path, tuple(sorted(route.methods or ())))
+        for route in api_module.app.routes
+        if isinstance(route, APIRoute)
+    }
+
+    assert (
+        "/api/projects/{project_id}/sprint/metrics",
+        ("GET",),
+    ) in routes
+
+
 def test_manual_sprint_router_module_registers_routes() -> None:
     """Confirm the manual sprint router helper registers its route set."""
     app = FastAPI()
@@ -122,6 +136,7 @@ def test_sprint_router_module_registers_full_sprint_surface() -> None:
         get_project_sprint_candidates=_async_stub,
         generate_project_sprint=_async_stub,
         get_project_sprint_history=_async_stub,
+        get_project_sprint_metrics=_async_stub,
         reset_project_sprint_planner=_async_stub,
         list_project_sprints=_async_stub,
         get_project_sprint=_async_stub,
@@ -147,6 +162,7 @@ def test_sprint_router_module_registers_full_sprint_surface() -> None:
         ("/api/projects/{project_id}/sprint/candidates", ("GET",)),
         ("/api/projects/{project_id}/sprint/generate", ("POST",)),
         ("/api/projects/{project_id}/sprint/history", ("GET",)),
+        ("/api/projects/{project_id}/sprint/metrics", ("GET",)),
         ("/api/projects/{project_id}/sprint/planner/reset", ("POST",)),
         ("/api/projects/{project_id}/sprint/save", ("POST",)),
         ("/api/projects/{project_id}/sprints", ("GET",)),

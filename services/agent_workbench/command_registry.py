@@ -842,6 +842,17 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge sprint metrics",
+        mutates=False,
+        phase="phase_2d",
+        input_required=("project_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge sprint save",
         mutates=True,
         phase="phase_2d",

@@ -30,6 +30,7 @@ class _SprintRouteHandlers(_ManualSprintRouteHandlers):
     get_project_sprint_candidates: Handler
     generate_project_sprint: Handler
     get_project_sprint_history: Handler
+    get_project_sprint_metrics: Handler
     reset_project_sprint_planner: Handler
     list_project_sprints: Handler
     get_project_sprint: Handler
@@ -102,6 +103,11 @@ def register_sprint_routes(
     app.add_api_route(
         "/api/projects/{project_id}/sprint/history",
         handlers["get_project_sprint_history"],
+        methods=["GET"],
+    )
+    app.add_api_route(
+        "/api/projects/{project_id}/sprint/metrics",
+        handlers["get_project_sprint_metrics"],
         methods=["GET"],
     )
     app.add_api_route(

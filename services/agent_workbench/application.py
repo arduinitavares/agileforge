@@ -429,6 +429,10 @@ class _SprintPhaseRunner(Protocol):
         """Return Sprint planner attempts and execution history."""
         ...
 
+    def metrics(self, *, project_id: int) -> dict[str, Any]:
+        """Return read-only Sprint performance metrics."""
+        ...
+
     def save(  # noqa: PLR0913
         self,
         *,
@@ -1488,6 +1492,10 @@ class AgentWorkbenchApplication:
     def sprint_history(self, *, project_id: int) -> dict[str, Any]:
         """Return Sprint planner attempts and execution history."""
         return self._get_sprint_runner().history(project_id=project_id)
+
+    def sprint_metrics(self, *, project_id: int) -> dict[str, Any]:
+        """Return read-only Sprint performance metrics."""
+        return self._get_sprint_runner().metrics(project_id=project_id)
 
     def sprint_save(  # noqa: PLR0913
         self,

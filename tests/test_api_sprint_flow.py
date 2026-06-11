@@ -326,6 +326,55 @@ def _seed_completed_sprint(
     return product_id, sprint_id
 
 
+def _seed_completed_sprint_metrics_execution(
+    session: Session,
+    repo: DummyProductRepository,
+) -> tuple[int, int]:
+    product_id, sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Metrics Sprint",
+    )
+    sprint_story = session.exec(
+        select(SprintStory).where(SprintStory.sprint_id == sprint_id)
+    ).first()
+    assert sprint_story is not None
+    story = session.get(UserStory, sprint_story.story_id)
+    assert story is not None
+    story.status = StoryStatus.DONE
+    story.story_points = 5
+    session.add(story)
+    session.add(
+        Task(
+            description="Ship metrics API",
+            status=TaskStatus.DONE,
+            story_id=sprint_story.story_id,
+        )
+    )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_STARTED,
+            product_id=product_id,
+            sprint_id=sprint_id,
+            session_id=str(product_id),
+            duration_seconds=1.25,
+            turn_count=1,
+        )
+    )
+    session.add(
+        WorkflowEvent(
+            event_type=WorkflowEventType.SPRINT_COMPLETED,
+            product_id=product_id,
+            sprint_id=sprint_id,
+            session_id=str(product_id),
+            duration_seconds=2.5,
+            turn_count=2,
+        )
+    )
+    session.commit()
+    return product_id, sprint_id
+
+
 def _seed_task_packet_context(
     session: Session,
     repo: DummyProductRepository,
@@ -1048,6 +1097,47 @@ def test_sprint_history_includes_completed_execution_summary(  # noqa: ANN201, D
     assert execution["story_points_done"] == expected_story_points
     assert execution["elapsed_seconds"] == expected_elapsed_seconds
     assert execution["history_fidelity"] == "derived"
+
+
+def test_sprint_metrics_missing_project_returns_not_found(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, _repo, _workflow = _build_client(monkeypatch)
+
+    response = client.get("/api/projects/404/sprint/metrics")
+
+    assert response.status_code == HTTP_NOT_FOUND
+    assert response.json()["detail"] == "Project not found"
+
+
+def test_sprint_metrics_returns_completed_execution_metrics(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    expected_recommended_points = 5
+    expected_event_count = 2
+    expected_event_duration_seconds = 3.75
+    expected_turn_count = 3
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id = _seed_completed_sprint_metrics_execution(session, repo)
+
+    response = client.get(f"/api/projects/{project_id}/sprint/metrics")
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    data = payload["data"]
+    assert data["summary"]["completed_sprint_count"] == 1
+    assert (
+        data["recommendation"]["recommended_next_sprint_points"]
+        == expected_recommended_points
+    )
+    assert data["token_metrics"]["status"] == "unavailable"
+    assert data["completed_sprints"][0]["sprint_id"] == sprint_id
+    assert data["completed_sprints"][0]["workflow_event_count"] == expected_event_count
+    assert (
+        data["completed_sprints"][0]["workflow_event_duration_seconds"]
+        == expected_event_duration_seconds
+    )
+    assert data["completed_sprints"][0]["turn_count"] == expected_turn_count
 
 
 def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # noqa: ANN201, D103

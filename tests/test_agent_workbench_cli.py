@@ -18,6 +18,7 @@ type JsonObject = dict[str, Any]
 PROJECT_ID = 7
 SPEC_VERSION_ID = 3
 STORY_ID = 42
+RECOMMENDED_SPRINT_POINTS = 5
 ERROR_EXIT_CODE = 5
 INVALID_COMMAND_EXIT_CODE = 2
 COMMAND_EXCEPTION_EXIT_CODE = 1
@@ -896,6 +897,32 @@ class _FakeApplication:
         return {
             "ok": True,
             "data": {"project_id": project_id, "items": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def sprint_metrics(self, *, project_id: int) -> JsonObject:
+        """Return a sprint metrics payload."""
+        self.calls.append(("sprint_metrics", {"project_id": project_id}))
+        return self.results.get("sprint_metrics") or {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "status": "ready",
+                "summary": {
+                    "completed_sprint_count": 4,
+                    "completed_story_points": 18,
+                    "average_points_per_sprint": 4.5,
+                    "median_points_per_sprint": 5,
+                    "points_per_hour": 1.8,
+                },
+                "recommendation": {
+                    "recommended_next_sprint_points": RECOMMENDED_SPRINT_POINTS,
+                },
+                "completed_sprints": [],
+                "token_metrics": {"status": "unavailable"},
+                "data_quality_warnings": [],
+            },
             "warnings": [],
             "errors": [],
         }
@@ -3029,6 +3056,29 @@ def test_sprint_history_cli_routes_to_application(
     assert exit_code == 0
     assert payload["data"]["items"] == []
     assert app.calls[-1] == ("sprint_history", {"project_id": 7})
+
+
+def test_sprint_metrics_cli_routes_and_prints_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint metrics CLI routes to the application facade and summarizes."""
+    app = _FakeApplication()
+
+    exit_code = main(["sprint", "metrics", "--project-id", "7"], application=app)
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["data"]["status"] == "ready"
+    assert (
+        payload["data"]["recommendation"]["recommended_next_sprint_points"]
+        == RECOMMENDED_SPRINT_POINTS
+    )
+    assert app.calls[-1] == ("sprint_metrics", {"project_id": 7})
+    assert "Sprint metrics" in captured.err
+    assert "project_id: 7" in captured.err
+    assert "completed_sprint_count: 4" in captured.err
+    assert "recommended_next_sprint_points: 5" in captured.err
 
 
 def test_sprint_save_cli_requires_review_guards(
