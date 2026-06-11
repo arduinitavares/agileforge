@@ -75,29 +75,31 @@
                     <span class="material-symbols-outlined">close</span>
                 </button>
             </div>
-            <div class="p-6 space-y-4">
-                <div class="space-y-2">
-                    <label for="modal-project-name" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Project Name <span class="text-red-500" aria-hidden="true">*</span></label>
-                    <input id="modal-project-name" type="text" placeholder="e.g. Project Phoenix" required
-                        class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
+            <form id="create-project-form" onsubmit="submitNewProject(event)" class="flex flex-col">
+                <div class="p-6 space-y-4">
+                    <div class="space-y-2">
+                        <label for="modal-project-name" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Project Name <span class="text-red-500" aria-hidden="true">*</span></label>
+                        <input id="modal-project-name" type="text" placeholder="e.g. Project Phoenix" required pattern=".*\S+.*" title="This field cannot be empty or just whitespace"
+                            class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
+                    </div>
+                    <div class="space-y-2">
+                        <label for="modal-spec-path" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Specification File
+                            Path <span class="text-red-500" aria-hidden="true">*</span></label>
+                        <input id="modal-spec-path" type="text" placeholder="C:\\path\\to\\spec.md" required aria-describedby="modal-spec-path-help" pattern=".*\S+.*" title="This field cannot be empty or just whitespace"
+                            class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
+                        <p id="modal-spec-path-help" class="text-xs text-slate-500 mt-1">Provide the absolute path to your markdown specification.</p>
+                    </div>
                 </div>
-                <div class="space-y-2">
-                    <label for="modal-spec-path" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Specification File
-                        Path <span class="text-red-500" aria-hidden="true">*</span></label>
-                    <input id="modal-spec-path" type="text" placeholder="C:\\path\\to\\spec.md" required aria-describedby="modal-spec-path-help"
-                        class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
-                    <p id="modal-spec-path-help" class="text-xs text-slate-500 mt-1">Provide the absolute path to your markdown specification.</p>
+                <div
+                    class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 rounded-b-xl">
+                    <button type="button" onclick="closeCreateProjectModal()"
+                        class="px-5 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Cancel</button>
+                    <button id="btn-submit-project" type="submit"
+                        class="px-6 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-white font-bold transition-all shadow-sm">
+                        Create Project
+                    </button>
                 </div>
-            </div>
-            <div
-                class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 rounded-b-xl">
-                <button onclick="closeCreateProjectModal()"
-                    class="px-5 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Cancel</button>
-                <button id="btn-submit-project" onclick="submitNewProject()"
-                    class="px-6 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-white font-bold transition-all shadow-sm">
-                    Create Project
-                </button>
-            </div>
+            </form>
         </div>
     </div>
 
