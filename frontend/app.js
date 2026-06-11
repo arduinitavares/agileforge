@@ -140,7 +140,8 @@ function closeCreateProjectModal() {
     }
 }
 
-async function submitNewProject() {
+async function submitNewProject(event) {
+    if (event) event.preventDefault();
     const nameInput = document.getElementById('modal-project-name');
     const specInput = document.getElementById('modal-spec-path');
 

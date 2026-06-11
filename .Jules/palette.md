@@ -1,0 +1,3 @@
+## 2026-05-10 - Modal Form Validation
+**Learning:** Using `<div>` for modal dialog inputs breaks native HTML5 validation (tooltips, Enter-key submission). Natively wrapping inputs in a `<form onsubmit="...">`, setting explicit `type="button"` on cancel/close buttons, and `type="submit"` on the primary action restores this functionality. Additionally, required fields should use `pattern=".*\S+.*"` and a `title` to prevent whitespace-only submissions that native validation would otherwise allow.
+**Action:** Always wrap modal inputs in a `<form>`, configure button types explicitly to prevent accidental submissions, and use `pattern`/`title` on `required` text inputs to block empty-space bypasses.
