@@ -574,6 +574,78 @@ class _SprintCompleteRefinedBacklogRecordedNoSourceReadProjection(_FakeReadProje
         return result
 
 
+class _SprintCompleteRefinedBacklogRecordedWithGuardsReadProjection(_FakeReadProjection):
+    """Fake completed Sprint state with stale refined Backlog and valid guards."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return refined-backlog stale state with runnable Backlog guard values."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "latest_completed_sprint_id": 13,
+            "post_sprint_triage": build_triage_payload(
+                project_id=project_id,
+                sprint_id=13,
+                impact="none",
+                affected_requirements=None,
+                affected_task_ids=None,
+                affected_story_ids=None,
+                affected_backlog_item_ids=None,
+                affected_roadmap_item_ids=None,
+                affected_layers=None,
+                learning_summary="No new follow-up impact.",
+                decision_reason="Existing refined backlog guard still applies.",
+                idempotency_key="triage-none-refined-backlog-stale-guards",
+                replace_existing=False,
+                recorded_at="2026-06-10T00:00:00Z",
+                recorded_by="cli-agent",
+            ),
+            "planned_sprint_id": None,
+            "downstream_backlog_stale": True,
+            "stale_backlog_reason": "refined_backlog_recorded",
+            "stale_since_backlog_attempt_id": "backlog-attempt-3",
+            "backlog_attempts": [
+                {
+                    "attempt_id": "backlog-attempt-3",
+                    "artifact_fingerprint": "sha256:refined-backlog",
+                }
+            ],
+        }
+        return result
+
+
+class _SprintCompleteTriagedNoneNoCandidatesMergeResolvedReadProjection(
+    _SprintCompleteTriagedNoneNoCandidatesReadProjection
+):
+    """Fake completed Sprint state where merge resolution covers a requirement."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return completed Sprint state with merge-resolved Story coverage."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"].update(
+            {
+                "roadmap_releases": [
+                    {
+                        "items": [
+                            "Technology and Model Research Spike",
+                            "pyrepo-check Quality Gate Integration",
+                            "Raw Data Ingestion Pipeline",
+                        ]
+                    }
+                ],
+                "story_saved": {"Technology and Model Research Spike": True},
+                "interview_runtime": {
+                    "story": {
+                        "pyrepo-check Quality Gate Integration": {
+                            "resolution_projection": {"status": "merged"},
+                        }
+                    }
+                },
+            }
+        )
+        return result
+
+
 class _VisionInterviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision interview state."""
 
@@ -3890,6 +3962,36 @@ def test_workflow_next_routes_impact_none_with_no_candidates_to_story_generation
     ]
 
 
+def test_workflow_next_none_no_candidates_skips_merge_resolved_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat merged Story resolutions as covered when routing Story generation."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoCandidatesMergeResolvedReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_story_generation_required"
+    assert (
+        "agileforge story generate --project-id 7 "
+        '--parent-requirement "Raw Data Ingestion Pipeline"'
+    ) in data["next_valid_commands"]
+    assert "pyrepo-check Quality Gate Integration" not in " ".join(
+        data["next_valid_commands"]
+    )
+
+
 def test_workflow_next_routes_impact_story_to_story_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3931,6 +4033,74 @@ def test_workflow_next_routes_impact_story_to_story_reconciliation(
         ]
     )
     assert not any("backlog refine" in command for command in all_commands)
+
+
+def test_workflow_next_story_impact_with_story_ids_only_uses_generate_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route story impact with story ids but no requirements to a guarded generate."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="story",
+            affected_story_ids=[4],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_story_impact_needs_reconciliation"
+    assert (
+        "agileforge story generate --project-id 7 "
+        "--parent-requirement <parent_requirement>"
+    ) in data["next_valid_commands"]
+
+
+def test_workflow_next_story_impact_emits_generate_per_affected_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emit one Story generate command per affected requirement."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="story",
+            affected_requirements=[
+                "Quality Gate",
+                "Canonical Process Event Record Definition and Validation",
+            ],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert (
+        'agileforge story generate --project-id 7 '
+        '--parent-requirement "Quality Gate"'
+    ) in data["next_valid_commands"]
+    assert (
+        "agileforge story generate --project-id 7 "
+        '--parent-requirement "Canonical Process Event Record Definition and Validation"'
+    ) in data["next_valid_commands"]
+    generate_commands = [
+        command
+        for command in data["next_valid_commands"]
+        if command.startswith("agileforge story generate")
+    ]
+    assert len(generate_commands) == 2
 
 
 def test_workflow_next_routes_impact_roadmap_to_roadmap_reconciliation(
@@ -4087,6 +4257,45 @@ def test_workflow_next_routes_impact_multiple_to_guarded_correction_only(
         },
     ]
     assert data["blocked_future_commands"] == []
+
+
+def test_workflow_next_multiple_impact_blocks_roadmap_and_task_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block roadmap and task bridges when multiple layers are recorded."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(
+            impact="multiple",
+            affected_layers=["roadmap", "task"],
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_multiple_impacts_need_decision"
+    assert {
+        "command": "agileforge roadmap generate",
+        "reason": "POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION",
+        "message": (
+            "Resolve the post-sprint triage decision before routing roadmap "
+            "follow-up."
+        ),
+    } in data["blocked_commands"]
+    assert {
+        "command": "agileforge sprint task carryover",
+        "reason": "POST_SPRINT_MULTIPLE_IMPACTS_NEED_DECISION",
+        "message": (
+            "Resolve the post-sprint triage decision before routing task follow-up."
+        ),
+    } in data["blocked_commands"]
 
 
 def test_backlog_impact_records_but_blocks_refine_record_without_source() -> None:
@@ -4246,6 +4455,46 @@ def test_refined_backlog_stale_guard_blocks_placeholder_backlog_commands() -> No
             "available."
         ),
     } in data["blocked_commands"]
+
+
+def test_refined_backlog_stale_guard_advertises_save_and_reset_with_guards() -> None:
+    """Advertise guarded Backlog save/reset when refined stale routing has guards."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteRefinedBacklogRecordedWithGuardsReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_blocked_by_stale_backlog"
+    assert data["next_valid_commands"] == [
+        "agileforge backlog history --project-id 7",
+        (
+            "agileforge backlog save --project-id 7 "
+            "--attempt-id backlog-attempt-3 "
+            "--expected-artifact-fingerprint sha256:refined-backlog "
+            "--expected-state BACKLOG_REVIEW "
+            "--idempotency-key <idempotency_key>"
+        ),
+        (
+            "agileforge backlog reset-active --project-id 7 "
+            "--attempt-id backlog-attempt-3 "
+            "--expected-artifact-fingerprint sha256:refined-backlog "
+            "--expected-state BACKLOG_REVIEW "
+            "--reset-reason <reset_reason> "
+            "--archive-all-active-stories "
+            "--idempotency-key <idempotency_key>"
+        ),
+    ]
+    assert {
+        "command": "agileforge story generate",
+        "reason": "DOWNSTREAM_BACKLOG_STALE_AFTER_REFINED_BACKLOG_RECORDED",
+    } in [
+        {"command": item["command"], "reason": item["reason"]}
+        for item in data["blocked_commands"]
+    ]
 
 
 def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_triage_command(  # noqa: E501
