@@ -1,0 +1,3 @@
+## 2024-05-24 - Modal Input Validation Submissions
+**Learning:** In Tailwind UI modals with floating inputs, standard `<button onclick="...">` handlers bypass HTML5 native form validation (`required`, `pattern`). Wrapping the entire modal content in a `<form>` and converting the submit button to `type="submit"` enables native browser tooltips for empty or whitespace-only inputs without needing custom JavaScript validation logic.
+**Action:** When building modals with required fields, always wrap the inner content in a `<form onsubmit="event.preventDefault(); submitLogic();">` and set explicit `type="button"` / `type="submit"` on the footer actions.
