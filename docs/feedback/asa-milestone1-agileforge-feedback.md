@@ -6,6 +6,159 @@ ASA Milestone 1 through the CLI/backend rituals.
 Scope: feedback only. Do not treat this file as an AgileForge product-fix task
 inside the ASA execution goal.
 
+## 2026-06-11 triage and product-fix status
+
+Use ASA as a regression fixture only. The product fixes below were implemented
+as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
+
+### Fixed
+
+#### Post-sprint story reconciliation can strand a saveable draft
+
+- Original feedback item: `Post-sprint story reconciliation leaves saveable
+  draft in unsaveable FSM state`.
+- Product issue considered: real bridge executability bug. `story history`
+  could report `save.available=true` and `expected_state=STORY_REVIEW`, while
+  the persisted FSM stayed in `STORY_INTERVIEW`.
+- Fix status: fixed in `d7ad6bf fix(workflow): recover post-sprint story
+  reconciliation`.
+- Why fixed: this violated the workflow contract that commands advertised as
+  runnable by `workflow next` / history must be executable from the same
+  workflow snapshot.
+- Expected behavior after fix: stale `STORY_INTERVIEW` with a saveable draft
+  routes to guarded `story save`, or already-covered Story state routes to the
+  appropriate completion/recovery command.
+
+#### Story draft saveability ignored dependency persistence blockers
+
+- Original feedback item: `Story draft marked saveable despite unresolved
+  dependency candidates`.
+- Product issue considered: real gate-contract bug. Story generation/quality
+  allowed `save.available=true`, while `story save` later rejected explicit
+  unresolved dependency candidates.
+- Fix status: fixed in `987ea0e fix(story): align dependency saveability
+  gates`.
+- Why fixed: saveability must mean "passes deterministic quality checks and
+  known persistence preconditions." Persistence remains the final authority, but
+  generation/read projections should not promise a save that dependency
+  resolution can already predict will fail.
+- Expected behavior after fix: explicit unresolved, ambiguous, self-edge, or
+  resolution-failed dependency candidates become blocking quality findings;
+  `save.available=false`; FSM remains `STORY_INTERVIEW`. Inferred unresolved
+  dependency candidates remain warnings and do not block saveability.
+
+#### Workflow next advertised sprint generation with zero candidates
+
+- Original feedback item: `Workflow next routes to sprint generation when no
+  sprint candidates remain`.
+- Product issue considered: real routing bug. `workflow next` could advertise
+  `sprint generate` after post-sprint `impact=none` even when `sprint
+  candidates` had `count=0`.
+- Fix status: partially fixed earlier in `d85e32b fix(workflow): route
+  post-sprint no-candidate story continuation`, then tightened in `987ea0e
+  fix(story): align dependency saveability gates`.
+- Why fixed: sprint generation is not runnable when no refined candidates
+  exist. `workflow next` must either route to known uncovered Story work or
+  return a blocked sprint-generation action with a concrete reason.
+- Expected behavior after fix:
+  - If candidate count is zero and uncovered requirements exist, route to
+    targeted `story generate`.
+  - If candidate count is zero but requirements are already marked covered,
+    keep `story pending` and `sprint candidates` visible, and list `sprint
+    generate` only as blocked with `NO_REFINED_SPRINT_CANDIDATES`.
+
+#### Dashboard allowed consumed Story requirements to be selected again
+
+- Source: follow-up UI observation during ASA workflow, not one of the original
+  2026-06-10 CLI field-note sections.
+- Product issue considered: real UI affordance bug. Requirements already
+  consumed by the active Story completion scope could still expose selection
+  controls for planning another sprint.
+- Fix status: fixed in `204bb75 fix(ui): block consumed story sprint
+  selection`.
+- Why fixed: UI actions must match backend scoping rules. Already consumed
+  requirements should remain visible as historical/saved work, but should not
+  present sprint-selection controls.
+- Expected behavior after fix: consumed requirements are not selectable for the
+  next sprint selection, and the selection button is hidden/disabled when no
+  eligible requirements remain.
+
+### Considered but not fixed yet
+
+#### Sprint generation validation failure details
+
+- Original feedback item: `Sprint generation validation failure was recoverable
+  but hard to diagnose`.
+- Current status: accepted as useful product feedback, not fixed in the
+  2026-06-11 bridge-contract work.
+- Why not fixed yet: this is an error-reporting and validation-detail surfacing
+  improvement, separate from command executability. It needs a small design pass
+  for the CLI/API error envelope so validation findings are actionable without
+  bloating normal responses.
+- Suggested next action: add a validation-specific `issues` or
+  `validation_details` projection for Sprint generation failures, with tests
+  proving the CLI exposes offending story/task fields.
+
+#### Active sprint state hides sprint generation attempt history
+
+- Original feedback item: `Active sprint state hides sprint generation attempt
+  history`.
+- Current status: accepted as product feedback, not fixed yet.
+- Why not fixed yet: this may be intentional planner working-set cleanup, but
+  the user need is valid. The behavior needs a product decision: either make
+  `sprint history` state-independent or add an explicit active-sprint planning
+  provenance command/projection.
+- Suggested next action: decide whether Sprint attempt history is durable
+  audit/provenance or only draft working state, then update `sprint history`
+  semantics and tests accordingly.
+
+#### Task update response can look like the task stayed open
+
+- Original feedback item: `Task update response can look like the task stayed
+  open`.
+- Current status: accepted as product feedback, not fixed yet.
+- Why not fixed yet: it is a response-shape ambiguity, not a workflow blocker.
+  The mutation did succeed; the confusing part is that the envelope emphasizes
+  the next recommended task without clearly separating it from the updated task.
+- Suggested next action: change the response payload to clearly separate
+  `updated_task` from `next_recommended_task`, and add CLI/API tests for both
+  fields.
+
+#### Sprint count/history summaries are inconsistent
+
+- Original feedback item: `Sprint count/history summaries are inconsistent
+  across commands`.
+- Current status: accepted as product feedback, not fixed yet.
+- Why not fixed yet: this overlaps with the active-sprint history/provenance
+  question and needs terminology cleanup. `story_count`, parent workstream
+  counts, and runnable leaf task counts should not share ambiguous labels.
+- Suggested next action: standardize response field names around
+  `stories_count`, `workstream_count`, and `tasks_count`, then update CLI/API
+  tests and dashboard labels.
+
+#### Guard values are correct but nested deeply
+
+- Original feedback item: `Guard values are correct but nested deeply for
+  repeated task/story updates`.
+- Current status: accepted as lower-priority ergonomics, not fixed yet.
+- Why not fixed yet: guard correctness is already intact. The remaining issue
+  is operator convenience for bulk CLI usage.
+- Suggested next action: consider a compact/porcelain mode for guard-bearing
+  read commands after higher-priority bridge executability and response-shape
+  issues are resolved.
+
+### Maintenance notes for future agents
+
+- Do not reopen fixed items only because ASA previously hit them. Reproduce on
+  current `master` first.
+- Treat every future entry as either:
+  - `Fixed`, with commit id and expected behavior;
+  - `Accepted / not fixed`, with reason and suggested next action;
+  - `Rejected / not a product bug`, with evidence; or
+  - `Needs reproduction`, with the exact missing command/output.
+- Keep ASA-specific project IDs, sprint IDs, and requirement names as evidence,
+  not as implementation assumptions.
+
 ## 2026-06-10
 
 ### Sprint generation validation failure was recoverable but hard to diagnose
