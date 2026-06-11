@@ -1403,6 +1403,14 @@ class SprintPhaseRunner:
 
     def _sync_completed_sprint_state(self, *, project_id: int, sprint_id: int) -> None:
         state = self._workflow_service.get_session_status(str(project_id)) or {}
+        current_latest_completed_sprint_id = _int_or_none(
+            state.get("latest_completed_sprint_id")
+        )
+        if (
+            current_latest_completed_sprint_id is not None
+            and current_latest_completed_sprint_id > sprint_id
+        ):
+            return
         completed_at = self._completed_sprint_timestamp(
             project_id=project_id,
             sprint_id=sprint_id,

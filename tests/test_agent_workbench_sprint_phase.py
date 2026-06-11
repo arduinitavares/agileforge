@@ -1697,6 +1697,125 @@ def test_sprint_close_marks_sprint_completed_and_updates_workflow(
     assert completion_event.product_id == product.product_id
 
 
+def test_sprint_close_replay_does_not_regress_newer_latest_completed_sprint(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replaying an older sprint close must not overwrite a newer completed sprint."""
+    product = Product(name="Sprint Close Replay Regression Product")
+    team = Team(name="Sprint Close Replay Regression Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Closed story",
+        story_points=1,
+        rank="101",
+        status=StoryStatus.DONE,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    older_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Older sprint to close",
+        start_date=date(2026, 5, 12),
+        end_date=date(2026, 5, 26),
+        status=SprintStatus.ACTIVE,
+    )
+    newer_sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Newer completed sprint",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.COMPLETED,
+    )
+    session.add_all([older_sprint, newer_sprint])
+    session.flush()
+    assert older_sprint.sprint_id is not None
+    assert newer_sprint.sprint_id is not None
+    session.add_all(
+        [
+            SprintStory(sprint_id=older_sprint.sprint_id, story_id=story.story_id),
+            SprintStory(sprint_id=newer_sprint.sprint_id, story_id=story.story_id),
+            Task(
+                story_id=story.story_id,
+                description="Ship final task",
+                status=TaskStatus.DONE,
+                metadata_json=serialize_task_metadata(
+                    TaskMetadata(checklist_items=["Final task done"])
+                ),
+            ),
+        ]
+    )
+    session.commit()
+
+    workflow = _FakeWorkflowService()
+    workflow.state = {"fsm_state": "SPRINT_VIEW"}
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    readiness = runner.close_readiness(project_id=product.product_id)
+    close = runner.close(
+        project_id=product.product_id,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint=readiness["data"]["sprint_fingerprint"],
+        idempotency_key="close-older-sprint-001",
+        completion_notes="Older sprint completed.",
+        follow_up_notes="Advance to the next sprint.",
+        changed_by="cli-agent",
+    )
+    assert close["ok"] is True
+    assert workflow.state["latest_completed_sprint_id"] == older_sprint.sprint_id
+
+    workflow.state["latest_completed_sprint_id"] = newer_sprint.sprint_id
+    workflow.state["post_sprint_triage"] = {
+        "sprint_id": newer_sprint.sprint_id,
+        "impact": "none",
+        "affected_task_ids": [],
+        "affected_story_ids": [],
+        "affected_backlog_item_ids": [],
+        "affected_roadmap_item_ids": [],
+        "affected_requirements": [],
+        "affected_layers": [],
+        "learning_summary": "Newer sprint learnings",
+        "decision_reason": "No follow-up impact",
+        "idempotency_key": "triage-newer-001",
+        "replace_existing": False,
+        "recorded_at": "2026-06-10T12:00:00+00:00",
+        "recorded_by": "cli-agent",
+        "request_fingerprint": "sha256:request",
+        "triage_fingerprint": "sha256:triage",
+    }
+
+    replay = runner.close(
+        project_id=product.product_id,
+        expected_state="SPRINT_VIEW",
+        expected_status="Active",
+        expected_sprint_fingerprint=readiness["data"]["sprint_fingerprint"],
+        idempotency_key="close-older-sprint-001",
+        completion_notes="Older sprint completed.",
+        follow_up_notes="Advance to the next sprint.",
+        changed_by="cli-agent",
+    )
+
+    assert replay["ok"] is True
+    assert replay["data"]["idempotency"]["replayed"] is True
+    assert workflow.state["latest_completed_sprint_id"] == newer_sprint.sprint_id
+    assert workflow.state["post_sprint_triage"]["sprint_id"] == newer_sprint.sprint_id
+
+
 def test_sprint_close_rejects_stale_sprint_fingerprint(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
