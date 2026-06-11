@@ -67,9 +67,26 @@ test('Story selection button state depends on selectable requirements and select
     assert.match(source, /btn-complete-story-selection/);
     assert.match(source, /const selectedCount = selectedStoryScopeNames\(\)\.length/);
     assert.match(source, /selectionBtn\.disabled = selectedCount === 0/);
-    assert.match(source, /const hasSelectableRequirements = storyRequirements\.some\(r => isResolvedStoryStatus\(r\.status\)\)/);
+    assert.match(source, /const hasSelectableRequirements = storyRequirements\.some\(r => isSelectableStoryScopeRequirement\(r\)\)/);
     assert.match(source, /selectionBtn\.className = hasSelectableRequirements/);
     assert.match(source, /: 'hidden items-center/);
+});
+
+test('Story selection excludes requirements consumed by the current scope', () => {
+    const selectedNamesSource = functionSource('selectedStoryScopeNames');
+    const toggleSource = functionSource('toggleStorySelectionRequirement');
+    const loadSource = functionSource('loadStoryRequirements');
+    const renderSource = functionSource('renderStoryRequirementsList');
+
+    assert.match(projectJsSource, /function storyCompletionScopeRequirementSet/);
+    assert.match(projectJsSource, /function isConsumedStoryRequirement/);
+    assert.match(projectJsSource, /function isSelectableStoryScopeRequirement/);
+    assert.match(projectJsSource, /!isConsumedStoryRequirement\(req\.requirement\)/);
+    assert.match(selectedNamesSource, /&& isSelectableStoryScopeRequirement\(req\)/);
+    assert.match(toggleSource, /!target \|\| !isSelectableStoryScopeRequirement\(target\)/);
+    assert.match(loadSource, /filter\(req => isSelectableStoryScopeRequirement\(req\)\)/);
+    assert.match(renderSource, /const isConsumedForScope = isConsumedStoryRequirement\(req\.requirement\)/);
+    assert.match(renderSource, /already included in the current Story completion scope/);
 });
 
 test('unresolved Story rows render non-intercepting selection placeholders', () => {
@@ -85,7 +102,7 @@ test('loadStoryRequirements prunes stale selected requirements to current resolv
     const source = functionSource('loadStoryRequirements');
 
     assert.match(source, /selectedStoryScopeRequirements = new Set\(/);
-    assert.match(source, /filter\(req => isResolvedStoryStatus\(req\.status\)\)/);
+    assert.match(source, /filter\(req => isSelectableStoryScopeRequirement\(req\)\)/);
     assert.match(source, /filter\(requirement => selectableRequirementNames\.has\(requirement\)\)/);
 });
 

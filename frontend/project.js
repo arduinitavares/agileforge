@@ -205,6 +205,32 @@ function isResolvedStoryStatus(status) {
     return status === 'Saved' || status === 'Merged';
 }
 
+function storyCompletionScopeRequirementSet() {
+    const stateScope = currentProjectState?.story_completion_scope;
+    const scope = stateScope || sprintCandidateCompletionScope;
+    const requirements = Array.isArray(scope?.requirements)
+        ? scope.requirements
+        : [];
+    return new Set(
+        requirements
+            .filter(item => typeof item === 'string' && item.trim())
+            .map(item => item.trim())
+    );
+}
+
+function isConsumedStoryRequirement(requirement) {
+    if (typeof requirement !== 'string' || !requirement.trim()) return false;
+    return storyCompletionScopeRequirementSet().has(requirement.trim());
+}
+
+function isSelectableStoryScopeRequirement(req) {
+    return Boolean(
+        req
+        && isResolvedStoryStatus(req.status)
+        && !isConsumedStoryRequirement(req.requirement)
+    );
+}
+
 function activeStorySelectionScope() {
     const stateScope = currentProjectState?.story_completion_scope;
     const scope = stateScope || sprintCandidateCompletionScope;
@@ -267,7 +293,7 @@ function selectedStoryScopeNames() {
     storyRequirements.forEach(req => {
         if (
             selectedStoryScopeRequirements.has(req.requirement)
-            && isResolvedStoryStatus(req.status)
+            && isSelectableStoryScopeRequirement(req)
             && !seen.has(req.requirement)
         ) {
             names.push(req.requirement);
@@ -279,7 +305,7 @@ function selectedStoryScopeNames() {
 
 function toggleStorySelectionRequirement(requirement) {
     const target = storyRequirements.find(req => req.requirement === requirement);
-    if (!target || !isResolvedStoryStatus(target.status)) return;
+    if (!target || !isSelectableStoryScopeRequirement(target)) return;
 
     if (selectedStoryScopeRequirements.has(target.requirement)) {
         selectedStoryScopeRequirements.delete(target.requirement);
@@ -2871,7 +2897,7 @@ async function loadStoryRequirements() {
             });
             const selectableRequirementNames = new Set(
                 storyRequirements
-                    .filter(req => isResolvedStoryStatus(req.status))
+                    .filter(req => isSelectableStoryScopeRequirement(req))
                     .map(req => req.requirement),
             );
             selectedStoryScopeRequirements = new Set(
@@ -2937,11 +2963,14 @@ function renderStoryRequirementsList() {
             }
 
             const isSelected = activeStoryReq === req.requirement;
-            const isSelectableForScope = isResolvedStoryStatus(req.status);
+            const isConsumedForScope = isConsumedStoryRequirement(req.requirement);
+            const isSelectableForScope = isSelectableStoryScopeRequirement(req);
             const isScopeSelected = isSelectableForScope && selectedStoryScopeRequirements.has(req.requirement);
             const selectionTitle = isSelectableForScope
                 ? `${isScopeSelected ? 'Remove' : 'Add'} "${req.requirement}" ${isScopeSelected ? 'from' : 'to'} sprint planning selection.`
-                : 'Save or merge this requirement before selecting it for sprint planning.';
+                : (isConsumedForScope
+                    ? 'This requirement is already included in the current Story completion scope.'
+                    : 'Save or merge this requirement before selecting it for sprint planning.');
             const selectionClasses = isSelectableForScope
                 ? (isScopeSelected
                     ? 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-primary bg-primary text-white transition-colors'
@@ -3394,7 +3423,7 @@ function updateCompleteStoryPhaseButton() {
 
     // Allow completion if at least one requirement has stories saved
     const anySaved = storyRequirements.length > 0 && storyRequirements.some(r => r.status === 'Saved');
-    const hasSelectableRequirements = storyRequirements.some(r => isResolvedStoryStatus(r.status));
+    const hasSelectableRequirements = storyRequirements.some(r => isSelectableStoryScopeRequirement(r));
     const selectedCount = selectedStoryScopeNames().length;
 
     if (btn) {
@@ -3408,7 +3437,9 @@ function updateCompleteStoryPhaseButton() {
         selectionBtn.disabled = selectedCount === 0;
         selectionBtn.title = selectedCount > 0
             ? `Plan sprint from ${selectedCount} selected ${selectedCount === 1 ? 'requirement' : 'requirements'}.`
-            : 'Select saved or merged requirements to plan a sprint.';
+            : (hasSelectableRequirements
+                ? 'Select saved or merged requirements to plan a sprint.'
+                : 'No saved or merged requirements are eligible for a new sprint selection.');
         selectionBtn.className = hasSelectableRequirements
             ? (selectedCount > 0
                 ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary hover:bg-blue-600 text-white font-bold transition-all shadow-md'
