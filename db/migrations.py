@@ -1187,6 +1187,205 @@ def migrate_sprint_lifecycle(engine: Engine) -> list[str]:
     return actions
 
 
+SPRINT_REBUILD_COLUMNS: tuple[str, ...] = (
+    "sprint_id",
+    "goal",
+    "start_date",
+    "end_date",
+    "status",
+    "started_at",
+    "completed_at",
+    "close_snapshot_json",
+    "created_at",
+    "updated_at",
+    "product_id",
+    "team_id",
+)
+
+SPRINT_REBUILD_REQUIRED_COPY_COLUMNS: frozenset[str] = frozenset(
+    {
+        "sprint_id",
+        "goal",
+        "start_date",
+        "end_date",
+        "status",
+        "created_at",
+        "updated_at",
+        "product_id",
+        "team_id",
+    }
+)
+
+
+def _sprint_date_columns_need_nullable_migration(engine: Engine) -> bool:
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info('sprints')")).mappings().all()
+    return any(
+        row["name"] in {"start_date", "end_date"} and row["notnull"] == 1
+        for row in rows
+    )
+
+
+def _sprint_index_create_sql(conn: Connection) -> list[str]:
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT name, sql
+                FROM sqlite_master
+                WHERE type = 'index'
+                  AND tbl_name = 'sprints'
+                  AND sql IS NOT NULL
+                ORDER BY name
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [str(row["sql"]) for row in rows]
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    escaped_identifier = identifier.replace('"', '""')
+    return f'"{escaped_identifier}"'
+
+
+def _sprint_foreign_key_check_tables(conn: Connection) -> list[str]:
+    table_names = conn.execute(
+        text(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        )
+    ).scalars()
+
+    check_tables = ["sprints"]
+    for table_name in table_names:
+        if table_name == "sprints":
+            continue
+        foreign_keys = conn.exec_driver_sql(
+            f"PRAGMA foreign_key_list({_quote_sqlite_identifier(str(table_name))})"
+        ).mappings()
+        if any(foreign_key["table"] == "sprints" for foreign_key in foreign_keys):
+            check_tables.append(str(table_name))
+
+    return check_tables
+
+
+def _sprint_rebuild_foreign_key_violations(
+    conn: Connection,
+    table_names: list[str],
+) -> list[object]:
+    violations: list[object] = []
+    for table_name in table_names:
+        violations.extend(
+            conn.exec_driver_sql(
+                f"PRAGMA foreign_key_check({_quote_sqlite_identifier(table_name)})"
+            ).all()
+        )
+    return violations
+
+
+def migrate_sprint_nullable_dates(engine: Engine) -> list[str]:
+    """Ensure sprints start_date and end_date columns are nullable using table rebuild."""
+    if "sprints" not in _get_existing_tables(engine):
+        return []
+
+    if not _sprint_date_columns_need_nullable_migration(engine):
+        return []
+
+    logger.info(
+        "db.migration.rebuild_table",
+        extra={"table_name": "sprints"},
+    )
+
+    existing_columns = _get_existing_columns(engine, "sprints")
+    missing_required_columns = SPRINT_REBUILD_REQUIRED_COPY_COLUMNS - existing_columns
+    if missing_required_columns:
+        missing = ", ".join(sorted(missing_required_columns))
+        raise RuntimeError(
+            "Cannot rebuild sprints table for nullable date migration; "
+            f"missing required columns: {missing}"
+        )
+
+    copy_columns = [
+        column for column in SPRINT_REBUILD_COLUMNS if column in existing_columns
+    ]
+    column_sql = ", ".join(copy_columns)
+
+    with engine.connect() as conn:
+        index_sql = _sprint_index_create_sql(conn)
+        foreign_key_check_tables = _sprint_foreign_key_check_tables(conn)
+        foreign_keys_enabled = bool(
+            conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+        )
+        conn.commit()
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+
+        try:
+            with conn.begin():
+                conn.execute(text("DROP TABLE IF EXISTS sprints__new"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE sprints__new (
+                            sprint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            goal TEXT,
+                            start_date DATE,
+                            end_date DATE,
+                            status VARCHAR NOT NULL,
+                            started_at DATETIME,
+                            completed_at DATETIME,
+                            close_snapshot_json TEXT,
+                            created_at DATETIME NOT NULL,
+                            updated_at DATETIME NOT NULL,
+                            product_id INTEGER NOT NULL,
+                            team_id INTEGER NOT NULL,
+                            FOREIGN KEY(product_id) REFERENCES products(product_id),
+                            FOREIGN KEY(team_id) REFERENCES teams(team_id)
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO sprints__new ({column_sql})
+                        SELECT {column_sql}
+                        FROM sprints
+                        """
+                    )
+                )
+                conn.execute(text("DROP TABLE sprints"))
+                conn.execute(text("ALTER TABLE sprints__new RENAME TO sprints"))
+                for create_index_sql in index_sql:
+                    conn.execute(text(create_index_sql))
+
+            violations = _sprint_rebuild_foreign_key_violations(
+                conn,
+                foreign_key_check_tables,
+            )
+            if violations:
+                raise RuntimeError(
+                    "Foreign key violations detected after rebuilding sprints table"
+                )
+        finally:
+            if conn.in_transaction():
+                conn.commit()
+            conn.exec_driver_sql(
+                f"PRAGMA foreign_keys={'ON' if foreign_keys_enabled else 'OFF'}"
+            )
+            conn.commit()
+
+    return ["migrated sprints table: made start_date and end_date nullable"]
+
+
 def migrate_task_metadata(engine: Engine) -> list[str]:
     """Ensure persisted task metadata exists and legacy rows are backfilled."""
     actions: list[str] = []
@@ -1408,6 +1607,7 @@ def ensure_schema_current(engine: Engine) -> None:
         actions.extend(migrate_user_story_archive_metadata(engine))
         actions.extend(migrate_user_story_dependencies(engine))
         actions.extend(migrate_sprint_lifecycle(engine))
+        actions.extend(migrate_sprint_nullable_dates(engine))
         actions.extend(migrate_task_metadata(engine))
         actions.extend(migrate_task_execution_logs(engine))
         actions.extend(migrate_agent_workbench_contract_tables(engine))

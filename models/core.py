@@ -166,8 +166,8 @@ class Sprint(SQLModel, table=True):
     __tablename__ = "sprints"  # type: ignore[assignment]
     sprint_id: int | None = Field(default=None, primary_key=True)
     goal: str | None = Field(default=None, sa_type=Text)
-    start_date: date = Field(sa_type=Date)
-    end_date: date = Field(sa_type=Date)
+    start_date: date | None = Field(default=None, sa_type=Date, nullable=True)
+    end_date: date | None = Field(default=None, sa_type=Date, nullable=True)
     status: SprintStatus = Field(default=SprintStatus.PLANNED, nullable=False)
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
