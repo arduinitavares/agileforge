@@ -355,3 +355,61 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   to the state required by the save command. The workflow becomes stuck between
   `STORY_INTERVIEW` and `STORY_REVIEW`; `workflow next` routes to generation,
   but generation does not expose a runnable save/complete path.
+
+### Sprint metrics can recommend capacity below the next dependency-closed cohort
+
+- Project: ASA `project_id=3`
+- Context: after Sprint 39 was closed and post-sprint triage was recorded as
+  `impact=none`.
+- Command: `agileforge workflow next --project-id 3`
+- Observed result: `status=post_sprint_story_continuation_available`, routing
+  to sprint continuation commands including `agileforge sprint generate`.
+- Command: `agileforge sprint metrics --project-id 3`
+- Observed result: `recommended_next_sprint_points=3`.
+- Command: `agileforge sprint candidates --project-id 3`
+- Observed result: the highest-priority eligible candidate was Story `182`,
+  `Build pipeline runner that executes all stages in order`, with `5` story
+  points. Other lower-priority candidates with `3` points were also listed.
+- Command:
+  `agileforge sprint generate --project-id 3 --max-story-points 3 --input "..."`
+- Actual result: `ok=false`, error code `MUTATION_FAILED`, message
+  `The highest-priority dependency-closed story cohort exceeds the explicit Sprint capacity. Increase --max-story-points or split the story.`
+- Expected behavior: the planning surfaces should reconcile this before the
+  user runs a doomed generate command. Either `sprint metrics` should recommend
+  the minimum viable capacity for the next dependency-closed cohort, or
+  `workflow next` / `sprint candidates` should explicitly say that the next
+  cohort exceeds recommended capacity and suggest the exact valid choices:
+  increase capacity to `5`, split Story `182`, or choose a lower-priority story
+  with an explicit override.
+- Why it matters: a CLI user following the recommended capacity and valid
+  `workflow next` route hits a mutation failure even though there are eligible
+  candidates. This makes the AgileForge ritual feel internally inconsistent.
+- Severity: blocker for strict capacity-following; non-blocking only if the
+  user intentionally overrides capacity to `5`.
+
+### Dashboard does not expose CLI story IDs or current Sprint draft mapping
+
+- Project: ASA `project_id=3`
+- Context: after all roadmap requirements were saved and Sprint planning
+  continued into Milestone 3 / Reproducible Pipeline Orchestration.
+- Observed UI: the dashboard shows the three roadmap milestones and saved
+  requirements. It shows story cards inside the selected requirement, but it
+  does not expose the internal AgileForge story IDs used by the CLI, such as
+  Story `180`, `181`, or `182`.
+- Observed CLI: `agileforge sprint history --project-id 3` showed the latest
+  Sprint draft attempt `sprint-attempt-2`, artifact fingerprint
+  `sha256:44a75ca35257dd194fdd52ecbc22a15edf944bb5d6d1beb8450c317ecc340ba6`,
+  selecting Story `182`, `Build pipeline runner that executes all stages in
+  order`, with five planned tasks.
+- Expected behavior: the UI should make the CLI-to-dashboard mapping explicit.
+  At minimum, each story card should show its internal `story_id`, and the
+  Sprint panel should show the active Sprint draft attempt, selected story IDs,
+  points, and task titles before the user saves the Sprint.
+- Actual behavior: a user following CLI execution sees references to Story
+  `180`, `181`, `182`, and Sprint draft attempts, but the dashboard only shows
+  milestone and requirement labels. This makes it look like the CLI is working
+  on hidden or unrelated work.
+- Why it matters: this is a traceability and confidence issue during real
+  AgileForge ritual execution. The backend state may be correct, but the UI
+  makes it hard to audit what the CLI is doing against the visible roadmap.
+- Severity: non-blocking UX/traceability issue.
