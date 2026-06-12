@@ -2610,11 +2610,15 @@ def _build_task_ticket(
             "expected_task_fingerprint": fingerprint,
         },
         "next_actions": {
-            "update": (
-                f"agileforge sprint task update --project-id {project_id} "
-                f'--task-id {task_id} --expected-status "{_enum_value(task.status)}" '
-                f"--expected-task-fingerprint {fingerprint} "
-                "--idempotency-key <idempotency_key> --status <status>"
+            "update": sprint_task_update_command_text(
+                project_id=project_id,
+                task_id=task_id,
+                status=TaskStatus.DONE.value,
+                expected_status=_enum_value(task.status),
+                expected_task_fingerprint=fingerprint,
+                idempotency_key="<idempotency_key>",
+                include_done_evidence=True,
+                artifact_targets=list(task_row.get("artifact_targets") or []),
             ),
             "history": (
                 f"agileforge sprint task history --project-id {project_id} "

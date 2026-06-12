@@ -1223,7 +1223,97 @@ def test_sprint_task_next_returns_in_progress_ticket_before_new_todo(
     assert str(ticket["guards"]["expected_task_fingerprint"]).startswith(
         TASK_FINGERPRINT_PREFIX
     )
-    assert "agileforge sprint task update" in ticket["next_actions"]["update"]
+    update_command = ticket["next_actions"]["update"]
+    assert update_command == (
+        f"agileforge sprint task update --project-id {product.product_id} "
+        f"--task-id {first.task_id} --status Done "
+        '--expected-status "In Progress" '
+        f"--expected-task-fingerprint {ticket['guards']['expected_task_fingerprint']} "
+        "--idempotency-key <idempotency_key> "
+        '--outcome-summary "<outcome_summary>" '
+        '--validation-summary "<validation_summary>" '
+        "--checklist-result fully_met "
+        "--artifact-ref <artifact_ref>"
+    )
+
+
+def test_sprint_task_next_omits_artifact_ref_when_no_targets(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task next update command should omit artifact refs without targets."""
+    product = Product(name="No Artifact Product")
+    team = Team(name="No Artifact Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Finish non-artifact work",
+        story_description="As an operator, I complete checklist-only work.",
+        acceptance_criteria="- Checklist is fully met",
+        story_points=1,
+        rank="102",
+        status=StoryStatus.IN_PROGRESS,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Close checklist-only task",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+
+    task = Task(
+        story_id=story.story_id,
+        description="Validate checklist-only completion",
+        status=TaskStatus.IN_PROGRESS,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                task_kind="validation",
+                checklist_items=["Checklist-only work is done"],
+            )
+        ),
+    )
+    session.add(task)
+    session.commit()
+    assert task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_next(project_id=product.product_id)
+
+    assert result["ok"] is True
+    ticket = result["data"]["task_ticket"]
+    assert ticket["task"]["task_id"] == task.task_id
+    update_command = ticket["next_actions"]["update"]
+    assert update_command == (
+        f"agileforge sprint task update --project-id {product.product_id} "
+        f"--task-id {task.task_id} --status Done "
+        '--expected-status "In Progress" '
+        f"--expected-task-fingerprint {ticket['guards']['expected_task_fingerprint']} "
+        "--idempotency-key <idempotency_key> "
+        '--outcome-summary "<outcome_summary>" '
+        '--validation-summary "<validation_summary>" '
+        "--checklist-result fully_met"
+    )
+    assert "--artifact-ref" not in update_command
 
 
 def test_sprint_task_update_replays_done_without_duplicate_logs(
