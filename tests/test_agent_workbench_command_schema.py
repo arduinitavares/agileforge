@@ -813,6 +813,38 @@ def test_sprint_metrics_command_schema_requires_project_id() -> None:
     assert ErrorCode.INVALID_COMMAND.value in metrics["errors"]
 
 
+def test_sprint_generate_command_schema_removes_calendar_velocity_args() -> None:
+    """Sprint generate schema exposes capacity override, not legacy inputs."""
+    generate = command_schema_payload("agileforge sprint generate")
+
+    assert generate["input"]["required"] == ["project_id"]
+    assert generate["input"]["optional"] == [
+        "input",
+        "selected_story_ids",
+        "max_story_points",
+        "include_task_decomposition",
+    ]
+    assert "team_velocity_assumption" not in generate["input"]["optional"]
+    assert "sprint_duration_days" not in generate["input"]["optional"]
+
+
+def test_sprint_save_command_schema_requires_guard_fields() -> None:
+    """Sprint save schema requires the mutation review guard contract."""
+    save = command_schema_payload("agileforge sprint save")
+
+    assert save["input"]["required"] == [
+        "project_id",
+        "team_name",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save["input"]["optional"] == []
+    assert "sprint_start_date" not in save["input"]["required"]
+    assert save["idempotency_required"] is True
+
+
 def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Sprint phase generation commands as installed CLI capabilities."""
     names = installed_command_names()
@@ -862,8 +894,6 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     assert generate["input"]["optional"] == [
         "input",
         "selected_story_ids",
-        "team_velocity_assumption",
-        "sprint_duration_days",
         "max_story_points",
         "include_task_decomposition",
     ]
@@ -879,7 +909,6 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
     assert save["input"]["required"] == [
         "project_id",
         "team_name",
-        "sprint_start_date",
         "attempt_id",
         "expected_artifact_fingerprint",
         "expected_state",

@@ -237,14 +237,12 @@ class SprintPhaseRunner:
         self._product_repo = product_repo or ProductRepository()
         self._workflow_service = workflow_service or WorkflowService()
 
-    def generate(  # noqa: PLR0913
+    def generate(
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
-        team_velocity_assumption: str = "Medium",
-        sprint_duration_days: int = 14,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -254,8 +252,6 @@ class SprintPhaseRunner:
             project_id,
             user_input,
             selected_story_ids,
-            team_velocity_assumption,
-            sprint_duration_days,
             max_story_points,
             include_task_decomposition,
         )
@@ -273,18 +269,16 @@ class SprintPhaseRunner:
         *,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Persist the current complete Sprint draft."""
+        """Persist the current Sprint draft."""
         return anyio.run(
             self._save,
             project_id,
             team_name,
-            sprint_start_date,
             attempt_id,
             expected_artifact_fingerprint,
             expected_state,
@@ -1197,19 +1191,60 @@ class SprintPhaseRunner:
         )
         return response
 
-    async def _generate(  # noqa: PLR0913
+    async def _generate(  # noqa: C901, PLR0911
         self,
         project_id: int,
         user_input: str | None,
         selected_story_ids: list[int] | None,
-        team_velocity_assumption: str,
-        sprint_duration_days: int,
         max_story_points: int | None,
         include_task_decomposition: bool,
     ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+
+        capacity_points = max_story_points
+        capacity_source = "user_override" if max_story_points is not None else None
+        capacity_basis = (
+            f"{max_story_points} points, manually specified by user."
+            if max_story_points is not None
+            else ""
+        )
+
+        if max_story_points is None:
+            metrics_envelope = await self._metrics(project_id)
+            if metrics_envelope.get("status") == "success":
+                metrics_data = metrics_envelope.get("data") or {}
+                rec = metrics_data.get("recommendation") or {}
+                capacity_points = rec.get("recommended_next_sprint_points")
+                capacity_basis = rec.get("basis") or ""
+                if capacity_points is not None:
+                    capacity_source = "project_metrics"
+
+        if capacity_points is None or capacity_source is None:
+            return _phase_error(
+                SprintPhaseError(
+                    detail="Sprint capacity in story points is required.",
+                    status_code=400,
+                    details={"error_code": "SPRINT_CAPACITY_REQUIRED"},
+                    remediation=[
+                        "Provide --max-story-points or ensure the project has "
+                        "completed sprints to derive a recommendation."
+                    ],
+                )
+            )
+        if not isinstance(capacity_points, int) or capacity_points <= 0:
+            return _phase_error(
+                SprintPhaseError(
+                    detail="Sprint capacity in story points must be positive.",
+                    status_code=400,
+                    details={"error_code": "SPRINT_CAPACITY_REQUIRED"},
+                    remediation=[
+                        "Provide a positive --max-story-points value or review "
+                        "the project Sprint metrics recommendation."
+                    ],
+                )
+            )
 
         try:
             state = await self._ensure_session(str(project_id))
@@ -1235,8 +1270,9 @@ class SprintPhaseRunner:
                         fallback_summary=fallback_summary,
                     )
                 ),
-                team_velocity_assumption=team_velocity_assumption,
-                sprint_duration_days=sprint_duration_days,
+                capacity_points=capacity_points,
+                capacity_source=capacity_source,
+                capacity_basis=capacity_basis,
                 max_story_points=max_story_points,
                 include_task_decomposition=include_task_decomposition,
                 selected_story_ids=selected_story_ids,
@@ -1334,7 +1370,6 @@ class SprintPhaseRunner:
         self,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
@@ -1357,7 +1392,6 @@ class SprintPhaseRunner:
                 build_tool_context=_build_tool_context,
                 save_plan_tool=save_sprint_plan_tool,
                 team_name=team_name,
-                sprint_start_date=sprint_start_date,
                 attempt_id=attempt_id,
                 expected_artifact_fingerprint=expected_artifact_fingerprint,
                 expected_state=expected_state,
@@ -1400,8 +1434,12 @@ class SprintPhaseRunner:
                             event_metadata=json.dumps(
                                 {
                                     "team_id": sprint.team_id,
-                                    "planned_start_date": str(sprint.start_date),
-                                    "planned_end_date": str(sprint.end_date),
+                                    "planned_start_date": _event_date_or_none(
+                                        sprint.start_date
+                                    ),
+                                    "planned_end_date": _event_date_or_none(
+                                        sprint.end_date
+                                    ),
                                 }
                             ),
                         )
@@ -3652,6 +3690,15 @@ def _dependency_closure(
 def _now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _event_date_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
 
 
 def _int_or_none(value: object) -> int | None:

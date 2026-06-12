@@ -1292,7 +1292,7 @@ def _sprint_rebuild_foreign_key_violations(
 
 
 def migrate_sprint_nullable_dates(engine: Engine) -> list[str]:
-    """Ensure sprints start_date and end_date columns are nullable using table rebuild."""
+    """Ensure sprint date columns are nullable using a table rebuild."""
     if "sprints" not in _get_existing_tables(engine):
         return []
 
@@ -1308,10 +1308,11 @@ def migrate_sprint_nullable_dates(engine: Engine) -> list[str]:
     missing_required_columns = SPRINT_REBUILD_REQUIRED_COPY_COLUMNS - existing_columns
     if missing_required_columns:
         missing = ", ".join(sorted(missing_required_columns))
-        raise RuntimeError(
+        message = (
             "Cannot rebuild sprints table for nullable date migration; "
             f"missing required columns: {missing}"
         )
+        raise RuntimeError(message)
 
     copy_columns = [
         column for column in SPRINT_REBUILD_COLUMNS if column in existing_columns
@@ -1353,15 +1354,12 @@ def migrate_sprint_nullable_dates(engine: Engine) -> list[str]:
                         """
                     )
                 )
-                conn.execute(
-                    text(
-                        f"""
-                        INSERT INTO sprints__new ({column_sql})
-                        SELECT {column_sql}
-                        FROM sprints
-                        """
-                    )
-                )
+                insert_sql = f"""
+                    INSERT INTO sprints__new ({column_sql})
+                    SELECT {column_sql}
+                    FROM sprints
+                    """  # noqa: S608  # nosec B608
+                conn.execute(text(insert_sql))
                 conn.execute(text("DROP TABLE sprints"))
                 conn.execute(text("ALTER TABLE sprints__new RENAME TO sprints"))
                 for create_index_sql in index_sql:
@@ -1372,9 +1370,10 @@ def migrate_sprint_nullable_dates(engine: Engine) -> list[str]:
                 foreign_key_check_tables,
             )
             if violations:
-                raise RuntimeError(
+                message = (
                     "Foreign key violations detected after rebuilding sprints table"
                 )
+                raise RuntimeError(message)
         finally:
             if conn.in_transaction():
                 conn.commit()

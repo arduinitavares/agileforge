@@ -1,5 +1,6 @@
 """API tests for sprint setup, candidates, and generation flow."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -212,26 +213,36 @@ def _build_sprint_assessment(
     assessment = {
         "sprint_goal": "Persist event deltas safely",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [],
         "deselected_stories": [],
         "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "4-5 stories",
+            "capacity_points": 13,
+            "capacity_source": "user_override",
             "selected_count": 0,
             "story_points_used": 0,
-            "max_story_points": 13,
+            "remaining_capacity_points": 13,
             "commitment_note": "Does this scope feel achievable in 2 weeks?",
             "reasoning": "Fits the chosen capacity.",
         },
         "is_complete": is_complete,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": artifact_fingerprint,
     }
-    if is_complete:
-        assessment["attempt_id"] = attempt_id
-        assessment["artifact_fingerprint"] = artifact_fingerprint
-        if source_fingerprint is not None:
-            assessment["source_fingerprint"] = source_fingerprint
+    if source_fingerprint is not None:
+        assessment["source_fingerprint"] = source_fingerprint
     return assessment
+
+
+def _sprint_save_guard_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "team_name": "Team Alpha",
+        "attempt_id": "sprint-attempt-1",
+        "expected_artifact_fingerprint": "sha256:reviewed",
+        "expected_state": "SPRINT_DRAFT",
+        "idempotency_key": "save-sprint-api-test",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _seed_sprint_draft_project(
@@ -263,7 +274,12 @@ def _seed_saved_sprint(
     *,
     started: bool,
     created_title: str,
+    planned_dates: tuple[date | None, date | None] = (
+        date(2026, 3, 1),
+        date(2026, 3, 15),
+    ),
 ) -> tuple[int, int]:
+    start_date, end_date = planned_dates
     product = repo.create(created_title)
     session.add(Product(product_id=product.product_id, name=product.name))
 
@@ -282,8 +298,8 @@ def _seed_saved_sprint(
 
     sprint = Sprint(
         goal=f"{created_title} Goal",
-        start_date=date(2026, 3, 1),
-        end_date=date(2026, 3, 15),
+        start_date=start_date,
+        end_date=end_date,
         status=SprintStatus.ACTIVE if started else SprintStatus.PLANNED,
         started_at=(datetime(2026, 3, 2, 9, 0, tzinfo=UTC) if started else None),
         product_id=product.product_id,
@@ -618,17 +634,42 @@ def test_sprint_candidates_endpoint_returns_normalized_items(monkeypatch):  # no
     }
 
 
-def test_sprint_generate_rejects_numeric_velocity_request(monkeypatch):  # noqa: ANN001, ANN201, D103
+@pytest.mark.parametrize(
+    "forbidden_extra",
+    ["team_velocity_assumption", "sprint_duration_days", "unknown_extra"],
+)
+def test_sprint_generate_rejects_removed_or_unknown_request_fields(  # noqa: D103
+    monkeypatch: pytest.MonkeyPatch,
+    forbidden_extra: str,
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_setup_project(repo, workflow)
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": 40,
-            "sprint_duration_days": 14,
+            "max_story_points": 9,
             "include_task_decomposition": True,
+            forbidden_extra: (
+                14 if forbidden_extra == "sprint_duration_days" else "extra"
+            ),
         },
+    )
+
+    assert response.status_code == 422  # noqa: PLR2004
+
+
+@pytest.mark.parametrize("max_story_points", [0, -1])
+def test_sprint_generate_rejects_non_positive_max_story_points(  # noqa: D103
+    monkeypatch: pytest.MonkeyPatch,
+    max_story_points: int,
+) -> None:
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_setup_project(repo, workflow)
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/generate",
+        json={"max_story_points": max_story_points},
     )
 
     assert response.status_code == 422  # noqa: PLR2004
@@ -642,8 +683,9 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
         state,  # noqa: ANN001, ARG001
         *,
         project_id,  # noqa: ANN001, ARG001
-        team_velocity_assumption,  # noqa: ANN001
-        sprint_duration_days,  # noqa: ANN001, ARG001
+        capacity_points,  # noqa: ANN001
+        capacity_source,  # noqa: ANN001
+        capacity_basis,  # noqa: ANN001
         max_story_points,  # noqa: ANN001, ARG001
         include_task_decomposition,  # noqa: ANN001, ARG001
         selected_story_ids,  # noqa: ANN001, ARG001
@@ -653,7 +695,9 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
             "success": False,
             "input_context": {
                 "available_stories": [],
-                "team_velocity_assumption": team_velocity_assumption,
+                "capacity_points": capacity_points,
+                "capacity_source": capacity_source,
+                "capacity_basis": capacity_basis,
             },
             "output_artifact": {
                 "error": "SPRINT_GENERATION_FAILED",
@@ -671,8 +715,7 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
     response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
+            "max_story_points": 9,
             "include_task_decomposition": True,
         },
     )
@@ -730,8 +773,7 @@ def test_sprint_generate_blocks_unready_candidates_before_runtime(  # noqa: ANN2
     response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
+            "max_story_points": 9,
             "include_task_decomposition": True,
         },
     )
@@ -750,8 +792,9 @@ def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypa
         state,  # noqa: ANN001
         *,
         project_id,  # noqa: ANN001
-        team_velocity_assumption,  # noqa: ANN001
-        sprint_duration_days,  # noqa: ANN001
+        capacity_points,  # noqa: ANN001
+        capacity_source,  # noqa: ANN001
+        capacity_basis,  # noqa: ANN001
         max_story_points,  # noqa: ANN001
         include_task_decomposition,  # noqa: ANN001
         selected_story_ids,  # noqa: ANN001
@@ -760,8 +803,9 @@ def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypa
         _ = (
             state,
             project_id,
-            team_velocity_assumption,
-            sprint_duration_days,
+            capacity_points,
+            capacity_source,
+            capacity_basis,
             max_story_points,
             include_task_decomposition,
             selected_story_ids,
@@ -771,7 +815,9 @@ def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypa
             "success": False,
             "input_context": {
                 "available_stories": [],
-                "team_velocity_assumption": "Medium",
+                "capacity_points": capacity_points,
+                "capacity_source": capacity_source,
+                "capacity_basis": capacity_basis,
             },
             "output_artifact": {
                 "error": "SPRINT_GENERATION_FAILED",
@@ -795,8 +841,7 @@ def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypa
     generate_response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
+            "max_story_points": 9,
             "include_task_decomposition": True,
         },
     )
@@ -916,7 +961,7 @@ def test_sprint_history_rewrites_legacy_task_kind_string_hints(monkeypatch):  # 
 
 
 def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  # noqa: ANN201, D103
-    monkeypatch,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
 ):
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_setup_project(repo, workflow)
@@ -926,15 +971,18 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
         state,  # noqa: ANN001, ARG001
         *,
         project_id,  # noqa: ANN001, ARG001
-        team_velocity_assumption,  # noqa: ANN001
-        sprint_duration_days,  # noqa: ANN001
-        max_story_points,  # noqa: ANN001
+        capacity_points,  # noqa: ANN001
+        capacity_source,  # noqa: ANN001
+        capacity_basis,  # noqa: ANN001
+        max_story_points,  # noqa: ANN001, ARG001
         include_task_decomposition,  # noqa: ANN001, ARG001
         selected_story_ids,  # noqa: ANN001
         user_input,  # noqa: ANN001, ARG001
     ):
         captured["selected_story_ids"] = selected_story_ids
-        captured["team_velocity_assumption"] = team_velocity_assumption
+        captured["capacity_points"] = capacity_points
+        captured["capacity_source"] = capacity_source
+        captured["capacity_basis"] = capacity_basis
         return {
             "success": True,
             "input_context": {
@@ -946,21 +994,21 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
                         "story_points": 3,
                     }
                 ],
-                "team_velocity_assumption": team_velocity_assumption,
-                "sprint_duration_days": sprint_duration_days,
+                "capacity_points": capacity_points,
+                "capacity_source": capacity_source,
+                "capacity_basis": capacity_basis,
             },
             "output_artifact": {
                 "sprint_goal": "Persist event deltas safely",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [],
                 "deselected_stories": [],
                 "capacity_analysis": {
-                    "velocity_assumption": team_velocity_assumption,
-                    "capacity_band": "4-5 stories",
+                    "capacity_points": capacity_points,
+                    "capacity_source": capacity_source,
                     "selected_count": 0,
                     "story_points_used": 0,
-                    "max_story_points": max_story_points,
+                    "remaining_capacity_points": capacity_points,
                     "commitment_note": "Does this scope feel achievable in 2 weeks?",
                     "reasoning": "Fits the chosen capacity.",
                 },
@@ -974,12 +1022,12 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
         api_module, "run_sprint_agent_from_state", fake_run_sprint_agent_from_state
     )
 
+    expected_capacity_points = 13
+
     response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": "High",
-            "sprint_duration_days": 14,
-            "max_story_points": 13,
+            "max_story_points": expected_capacity_points,
             "include_task_decomposition": False,
             "selected_story_ids": [12],
             "user_input": "Focus on persistence",
@@ -996,7 +1044,61 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
     sprint_plan_assessment = cast("dict[str, object]", sprint_plan_assessment)
     assert sprint_plan_assessment["is_complete"] is True
     assert captured["selected_story_ids"] == [12]
-    assert captured["team_velocity_assumption"] == "High"
+    assert captured["capacity_points"] == expected_capacity_points
+    assert captured["capacity_source"] == "user_override"
+
+
+def test_sprint_generate_uses_metrics_capacity_when_override_absent(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, _sprint_id = _seed_completed_sprint_metrics_execution(session, repo)
+    product = repo.get_by_id(project_id)
+    assert product is not None
+    product.spec_file_path = __file__
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+    workflow.states[str(project_id)] = {"fsm_state": "SPRINT_SETUP"}
+    captured: dict[str, Any] = {}
+
+    async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
+        state,  # noqa: ANN001, ARG001
+        *,
+        project_id,  # noqa: ANN001, ARG001
+        capacity_points,  # noqa: ANN001
+        capacity_source,  # noqa: ANN001
+        capacity_basis,  # noqa: ANN001
+        max_story_points,  # noqa: ANN001
+        include_task_decomposition,  # noqa: ANN001, ARG001
+        selected_story_ids,  # noqa: ANN001, ARG001
+        user_input,  # noqa: ANN001, ARG001
+    ):
+        captured["capacity_points"] = capacity_points
+        captured["capacity_source"] = capacity_source
+        captured["capacity_basis"] = capacity_basis
+        captured["max_story_points"] = max_story_points
+        return {
+            "success": True,
+            "input_context": {"available_stories": []},
+            "output_artifact": _build_sprint_assessment(is_complete=True),
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        api_module, "run_sprint_agent_from_state", fake_run_sprint_agent_from_state
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/generate",
+        json={"include_task_decomposition": True},
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    assert captured["capacity_points"] == 5  # noqa: PLR2004
+    assert captured["capacity_source"] == "project_metrics"
+    assert captured["capacity_basis"] == "last_1_completed_sprints_average"
+    assert captured["max_story_points"] is None
 
 
 def test_sprint_history_resets_stale_saved_working_set_after_completed_sprint(  # noqa: ANN201, D103
@@ -1169,8 +1271,9 @@ def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # no
         state,  # noqa: ANN001, ARG001
         *,
         project_id,  # noqa: ANN001, ARG001
-        team_velocity_assumption,  # noqa: ANN001
-        sprint_duration_days,  # noqa: ANN001, ARG001
+        capacity_points,  # noqa: ANN001
+        capacity_source,  # noqa: ANN001
+        capacity_basis,  # noqa: ANN001
         max_story_points,  # noqa: ANN001, ARG001
         include_task_decomposition,  # noqa: ANN001, ARG001
         selected_story_ids,  # noqa: ANN001
@@ -1180,7 +1283,9 @@ def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # no
             "success": True,
             "input_context": {
                 "available_stories": [],
-                "team_velocity_assumption": team_velocity_assumption,
+                "capacity_points": capacity_points,
+                "capacity_source": capacity_source,
+                "capacity_basis": capacity_basis,
                 "selected_story_ids": selected_story_ids,
             },
             "output_artifact": _build_sprint_assessment(is_complete=True),
@@ -1195,8 +1300,7 @@ def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # no
     response = client.post(
         f"/api/projects/{project_id}/sprint/generate",
         json={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
+            "max_story_points": 9,
             "include_task_decomposition": True,
         },
     )
@@ -1310,10 +1414,7 @@ def test_sprint_save_sanitizes_assessment_and_uses_tool_contract(monkeypatch):  
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={
-            "team_name": "Team Alpha",
-            "sprint_start_date": "2026-03-15",
-        },
+        json=_sprint_save_guard_payload(),
     )
 
     assert response.status_code == 200  # noqa: PLR2004
@@ -1322,10 +1423,10 @@ def test_sprint_save_sanitizes_assessment_and_uses_tool_contract(monkeypatch):  
     assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_PERSISTENCE"
     assert captured["input_data"].team_id is None
     assert captured["input_data"].team_name == "Team Alpha"
-    assert captured["input_data"].sprint_start_date == "2026-03-15"
-    assert captured["input_data"].sprint_duration_days == 14  # noqa: PLR2004
+    input_payload = captured["input_data"].model_dump()
+    assert "sprint_start_date" not in input_payload
+    assert "sprint_duration_days" not in input_payload
     assert captured["tool_context"].state["preserved"] is True
-    assert captured["tool_context"].state["sprint_plan"]["duration_days"] == 14  # noqa: PLR2004
     assert "is_complete" not in captured["tool_context"].state["sprint_plan"]
 
 
@@ -1352,38 +1453,158 @@ def test_sprint_save_api_blocks_older_complete_after_latest_failed_attempt(monke
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={
-            "team_name": "Team Alpha",
-            "sprint_start_date": "2026-03-15",
-        },
+        json=_sprint_save_guard_payload(),
     )
 
     assert response.status_code == 409  # noqa: PLR2004
     assert "latest complete Sprint attempt" in response.json()["detail"]
 
 
-def test_sprint_save_requires_team_name(monkeypatch):  # noqa: ANN001, ANN201, D103
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "team_name",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ],
+)
+def test_sprint_save_requires_guarded_mutation_fields(  # noqa: D103
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_draft_project(repo, workflow)
+    payload = _sprint_save_guard_payload()
+    payload.pop(missing_field)
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={"sprint_start_date": "2026-03-15"},
+        json=payload,
     )
 
     assert response.status_code == 422  # noqa: PLR2004
 
 
-def test_sprint_save_requires_start_date(monkeypatch):  # noqa: ANN001, ANN201, D103
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_sprint_save_rejects_blank_idempotency_key(  # noqa: D103
+    monkeypatch: pytest.MonkeyPatch,
+    idempotency_key: str,
+) -> None:
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_draft_project(repo, workflow)
+
+    def fail_if_called(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for blank API idempotency key"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, "save_sprint_plan_tool", fail_if_called)
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json=_sprint_save_guard_payload(idempotency_key=idempotency_key),
+    )
+
+    assert response.status_code == 422  # noqa: PLR2004
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    ["sprint_start_date", "unknown_extra"],
+)
+def test_sprint_save_rejects_forbidden_or_unknown_fields(  # noqa: D103
+    monkeypatch: pytest.MonkeyPatch,
+    extra_field: str,
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
     project_id = _seed_sprint_draft_project(repo, workflow)
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={"team_name": "Team Alpha"},
+        json=_sprint_save_guard_payload(
+            **{
+                extra_field: (
+                    "2026-03-15" if extra_field == "sprint_start_date" else True
+                )
+            }
+        ),
     )
 
     assert response.status_code == 422  # noqa: PLR2004
+
+
+def test_sprint_save_rejects_stale_artifact_fingerprint(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_draft_project(repo, workflow)
+
+    def fail_if_called(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for stale API sprint save"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, "save_sprint_plan_tool", fail_if_called)
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json=_sprint_save_guard_payload(
+            expected_artifact_fingerprint="sha256:stale"
+        ),
+    )
+
+    assert response.status_code == 409  # noqa: PLR2004
+    assert "guard mismatch" in response.json()["detail"]
+
+
+def test_sprint_save_rejects_stale_expected_state(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_draft_project(repo, workflow)
+    workflow.states[str(project_id)]["fsm_state"] = "SPRINT_SETUP"
+
+    def fail_if_called(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for stale API sprint save"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(api_module, "save_sprint_plan_tool", fail_if_called)
+
+    response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json=_sprint_save_guard_payload(),
+    )
+
+    assert response.status_code == 409  # noqa: PLR2004
+    assert "stale state" in response.json()["detail"]
+
+
+def test_sprint_save_replays_idempotent_guarded_request(monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id = _seed_sprint_draft_project(repo, workflow)
+    calls: list[object] = []
+
+    async def fake_hydrate_context(session_id: str, project_id: int):  # noqa: ANN202, ARG001
+        return SimpleNamespace(state={}, session_id=session_id)
+
+    def fake_save_sprint_plan_tool(input_data, tool_context):  # noqa: ANN001, ANN202, ARG001
+        calls.append(input_data)
+        return {"success": True, "sprint_id": 9}
+
+    monkeypatch.setattr(api_module, "_hydrate_context", fake_hydrate_context)
+    monkeypatch.setattr(api_module, "save_sprint_plan_tool", fake_save_sprint_plan_tool)
+
+    payload = _sprint_save_guard_payload(idempotency_key="save-sprint-replay")
+
+    first_response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json=payload,
+    )
+    second_response = client.post(
+        f"/api/projects/{project_id}/sprint/save",
+        json=payload,
+    )
+
+    assert first_response.status_code == 200  # noqa: PLR2004
+    assert second_response.status_code == 200  # noqa: PLR2004
+    assert len(calls) == 1
+    assert second_response.json()["data"] == first_response.json()["data"]
 
 
 def test_sprint_save_rejects_incomplete_assessment(monkeypatch):  # noqa: ANN001, ANN201, D103
@@ -1392,10 +1613,7 @@ def test_sprint_save_rejects_incomplete_assessment(monkeypatch):  # noqa: ANN001
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={
-            "team_name": "Team Alpha",
-            "sprint_start_date": "2026-03-15",
-        },
+        json=_sprint_save_guard_payload(),
     )
 
     assert response.status_code == 409  # noqa: PLR2004
@@ -1423,10 +1641,7 @@ def test_sprint_save_maps_open_sprint_conflict_to_http_409(monkeypatch):  # noqa
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={
-            "team_name": "Team Alpha",
-            "sprint_start_date": "2026-03-15",
-        },
+        json=_sprint_save_guard_payload(),
     )
 
     assert response.status_code == 409  # noqa: PLR2004
@@ -1451,10 +1666,7 @@ def test_sprint_save_surfaces_unexpected_persistence_tool_error(monkeypatch):  #
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json={
-            "team_name": "Team Alpha",
-            "sprint_start_date": "2026-03-15",
-        },
+        json=_sprint_save_guard_payload(),
     )
 
     assert response.status_code == 500  # noqa: PLR2004
@@ -1793,6 +2005,34 @@ def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):
         )
     ).all()
     assert len(events) == 1
+    metadata = json.loads(events[0].event_metadata or "{}")
+    assert metadata["planned_start_date"] == "2026-03-01"
+    assert metadata["planned_end_date"] == "2026-03-15"
+
+
+def test_start_sprint_logs_null_planned_dates(session, monkeypatch):  # noqa: ANN001, ANN201, D103
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, sprint_id = _seed_saved_sprint(
+        session,
+        repo,
+        started=False,
+        created_title="Dateless Sprint",
+        planned_dates=(None, None),
+    )
+    workflow.states[str(project_id)] = {"fsm_state": "SPRINT_PERSISTENCE"}
+
+    response = client.patch(f"/api/projects/{project_id}/sprints/{sprint_id}/start")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    events = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == WorkflowEventType.SPRINT_STARTED
+        )
+    ).all()
+    assert len(events) == 1
+    metadata = json.loads(events[0].event_metadata or "{}")
+    assert metadata["planned_start_date"] is None
+    assert metadata["planned_end_date"] is None
 
 
 def test_start_sprint_rejects_when_another_sprint_is_active(session, monkeypatch):  # noqa: ANN001, ANN201, D103

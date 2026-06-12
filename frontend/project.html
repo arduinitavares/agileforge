@@ -1102,21 +1102,9 @@
                                         <!-- Input Form -->
                                         <div class="flex-1 p-5 overflow-y-auto custom-scrollbar space-y-4">
                                             <div>
-                                                <label for="sprint-velocity" class="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1">Velocity Assumption</label>
-                                                <select id="sprint-velocity" class="w-full text-sm rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-900 focus:ring-2 focus:ring-teal-500 focus:border-teal-500">
-                                                    <option value="Low">Low</option>
-                                                    <option value="Medium" selected>Medium</option>
-                                                    <option value="High">High</option>
-                                                </select>
-                                                <p class="mt-1 text-[11px] text-slate-500">Heuristic bands: Low ~ 2-3 stories, Medium ~ 4-5, High ~ 6-7.</p>
-                                            </div>
-                                            <div>
-                                                <label for="sprint-duration" class="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1">Sprint Duration (Days)</label>
-                                                <input id="sprint-duration" type="number" min="1" max="30" value="14" class="w-full text-sm rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-900 focus:ring-2 focus:ring-teal-500 focus:border-teal-500">
-                                            </div>
-                                            <div>
-                                                <label for="sprint-max-story-points" class="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1">Max Story Points (Optional)</label>
-                                                <input id="sprint-max-story-points" type="number" min="1" max="21" placeholder="Leave blank to use only the velocity band" class="w-full text-sm rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-900 focus:ring-2 focus:ring-teal-500 focus:border-teal-500">
+                                                <label for="sprint-max-story-points" class="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1">Max Story Points</label>
+                                                <input id="sprint-max-story-points" type="number" min="1" max="21" placeholder="Leave blank to use project metrics recommendation" class="w-full text-sm rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-900 focus:ring-2 focus:ring-teal-500 focus:border-teal-500">
+                                                <p class="mt-1 text-[11px] text-slate-500">Capacity is points-based. Leave blank to use the project metrics recommendation.</p>
                                             </div>
                                             <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40">
                                                 <div class="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-700 px-4 py-3">
@@ -1222,17 +1210,12 @@
                                         <div
                                             class="p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800/80 shrink-0 relative z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
                                             <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                                                <div class="grid flex-1 gap-3 sm:grid-cols-2">
+                                                <div class="grid flex-1 gap-3 sm:grid-cols-1">
                                                     <div>
                                                         <label for="sprint-team-name" class="mb-1.5 block text-[10px] font-black uppercase tracking-wide text-slate-500">Team Name</label>
                                                         <input id="sprint-team-name" type="text" disabled
                                                             class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition-all placeholder:text-slate-400 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/30 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
                                                             placeholder="Team Alpha">
-                                                    </div>
-                                                    <div>
-                                                        <label for="sprint-start-date" class="mb-1.5 block text-[10px] font-black uppercase tracking-wide text-slate-500">Sprint Start Date</label>
-                                                        <input id="sprint-start-date" type="date" disabled
-                                                            class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm outline-none transition-all focus:border-teal-500 focus:ring-2 focus:ring-teal-500/30 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:disabled:bg-slate-800 dark:disabled:text-slate-500">
                                                     </div>
                                                 </div>
                                                 <div class="flex flex-col items-start gap-3 lg:items-end">

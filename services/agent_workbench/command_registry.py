@@ -817,8 +817,6 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         input_optional=(
             "input",
             "selected_story_ids",
-            "team_velocity_assumption",
-            "sprint_duration_days",
             "max_story_points",
             "include_task_decomposition",
         ),
@@ -860,7 +858,6 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         input_required=(
             "project_id",
             "team_name",
-            "sprint_start_date",
             "attempt_id",
             "expected_artifact_fingerprint",
             "expected_state",

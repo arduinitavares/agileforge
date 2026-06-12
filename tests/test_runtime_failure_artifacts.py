@@ -312,12 +312,13 @@ async def test_sprint_failure_artifact_keeps_structured_validation_details(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is False

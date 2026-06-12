@@ -411,14 +411,12 @@ class _StoryPhaseRunner(Protocol):
 class _SprintPhaseRunner(Protocol):
     """Sprint phase commands exposed through the facade."""
 
-    def generate(  # noqa: PLR0913
+    def generate(
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
-        team_velocity_assumption: str = "Medium",
-        sprint_duration_days: int = 14,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -438,7 +436,6 @@ class _SprintPhaseRunner(Protocol):
         *,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
@@ -1467,14 +1464,12 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
-    def sprint_generate(  # noqa: PLR0913
+    def sprint_generate(
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
-        team_velocity_assumption: str = "Medium",
-        sprint_duration_days: int = 14,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -1483,8 +1478,6 @@ class AgentWorkbenchApplication:
             project_id=project_id,
             user_input=user_input,
             selected_story_ids=selected_story_ids,
-            team_velocity_assumption=team_velocity_assumption,
-            sprint_duration_days=sprint_duration_days,
             max_story_points=max_story_points,
             include_task_decomposition=include_task_decomposition,
         )
@@ -1502,7 +1495,6 @@ class AgentWorkbenchApplication:
         *,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
@@ -1512,7 +1504,6 @@ class AgentWorkbenchApplication:
         return self._get_sprint_runner().save(
             project_id=project_id,
             team_name=team_name,
-            sprint_start_date=sprint_start_date,
             attempt_id=attempt_id,
             expected_artifact_fingerprint=expected_artifact_fingerprint,
             expected_state=expected_state,
@@ -4245,7 +4236,6 @@ def _sprint_command_candidates(
                 (
                     f"agileforge sprint save --project-id {project_id} "
                     "--team-name <team_name> "
-                    "--sprint-start-date <YYYY-MM-DD> "
                     "--attempt-id <attempt_id> "
                     "--expected-artifact-fingerprint <artifact_fingerprint> "
                     "--expected-state SPRINT_DRAFT "

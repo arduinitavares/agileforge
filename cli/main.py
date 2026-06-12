@@ -98,9 +98,9 @@ Examples:
     """--expected-state STORY_REVIEW --idempotency-key save-story-001
   agileforge sprint candidates --project-id 1
   agileforge sprint generate --project-id 1
-  agileforge sprint save --project-id 1 --team-name Delivery --sprint-start-date """
-    """2026-05-25 --attempt-id <attempt_id> --expected-artifact-fingerprint """
-    """<fingerprint> --expected-state SPRINT_DRAFT --idempotency-key save-sprint-001
+  agileforge sprint save --project-id 1 --team-name Delivery --attempt-id """
+    """<attempt_id> --expected-artifact-fingerprint <fingerprint> """
+    """--expected-state SPRINT_DRAFT --idempotency-key save-sprint-001
   agileforge sprint start --project-id 1 --expected-state SPRINT_PERSISTENCE """
     """--idempotency-key start-sprint-001
   agileforge sprint status --project-id 1
@@ -552,14 +552,12 @@ class _Application(Protocol):
         """Return sprint candidate projection."""
         ...
 
-    def sprint_generate(  # noqa: PLR0913
+    def sprint_generate(
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
-        team_velocity_assumption: str = "Medium",
-        sprint_duration_days: int = 14,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> JsonObject:
@@ -579,7 +577,6 @@ class _Application(Protocol):
         *,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
@@ -1620,12 +1617,9 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         type=_parse_selected_story_ids,
     )
     sprint_generate.add_argument(
-        "--team-velocity-assumption",
-        choices=("Low", "Medium", "High"),
-        default="Medium",
+        "--max-story-points",
+        type=_parse_positive_story_points,
     )
-    sprint_generate.add_argument("--sprint-duration-days", type=int, default=14)
-    sprint_generate.add_argument("--max-story-points", type=int)
     sprint_generate.add_argument(
         "--no-task-decomposition",
         action="store_false",
@@ -1653,7 +1647,6 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     sprint_save.add_argument("--project-id", type=int, required=True)
     sprint_save.add_argument("--team-name", required=True)
-    sprint_save.add_argument("--sprint-start-date", required=True)
     sprint_save.add_argument("--attempt-id", required=True)
     sprint_save.add_argument("--expected-artifact-fingerprint", required=True)
     sprint_save.add_argument("--expected-state", required=True)
@@ -2575,6 +2568,19 @@ def _parse_selected_story_ids(value: str) -> list[int]:
     return ids
 
 
+def _parse_positive_story_points(value: str) -> int:
+    """Parse a positive story-point capacity value."""
+    try:
+        points = int(value)
+    except ValueError as exc:
+        message = "--max-story-points must be a positive integer."
+        raise argparse.ArgumentTypeError(message) from exc
+    if points <= 0:
+        message = "--max-story-points must be a positive integer."
+        raise argparse.ArgumentTypeError(message)
+    return points
+
+
 def _review_data(result: JsonObject) -> Mapping[object, object] | None:
     """Return the data mapping from a review result."""
     return _as_mapping(result.get("data"))
@@ -3127,8 +3133,6 @@ def _sprint_generate(
         project_id=args.project_id,
         user_input=args.user_input,
         selected_story_ids=args.selected_story_ids,
-        team_velocity_assumption=args.team_velocity_assumption,
-        sprint_duration_days=args.sprint_duration_days,
         max_story_points=args.max_story_points,
         include_task_decomposition=args.include_task_decomposition,
     )
@@ -3186,14 +3190,37 @@ def _sprint_save(
     application: _Application,
 ) -> CommandResult:
     """Route Sprint save to the application facade."""
+    required_text_fields = (
+        "team_name",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    )
+    blank_fields = [
+        field_name
+        for field_name in required_text_fields
+        if not str(getattr(args, field_name, "")).strip()
+    ]
+    if blank_fields:
+        return _invalid_command(
+            "agileforge sprint save",
+            "Sprint save requires non-blank guard fields.",
+            details={"blank": blank_fields},
+            remediation=[
+                "Pass non-blank --team-name, --attempt-id, "
+                "--expected-artifact-fingerprint, --expected-state, and "
+                "--idempotency-key values."
+            ],
+        )
+
     return "agileforge sprint save", application.sprint_save(
         project_id=args.project_id,
-        team_name=args.team_name,
-        sprint_start_date=args.sprint_start_date,
-        attempt_id=args.attempt_id,
-        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
-        expected_state=args.expected_state,
-        idempotency_key=args.idempotency_key,
+        team_name=args.team_name.strip(),
+        attempt_id=args.attempt_id.strip(),
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint.strip(),
+        expected_state=args.expected_state.strip(),
+        idempotency_key=args.idempotency_key.strip(),
     )
 
 

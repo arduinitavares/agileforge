@@ -97,17 +97,14 @@ let currentSprintArtifactJSON = null;
 let currentSprintInputContextJSON = null;
 
 let latestSprintIsComplete = false;
+let latestSprintAttemptId = null;
+let latestSprintArtifactFingerprint = null;
+let latestSprintSaveIdempotencyKey = null;
 let sprintAttemptCount = 0;
 let sprintCandidates = [];
 let sprintCandidateReadiness = null;
 let sprintCandidateCompletionScope = null;
 let selectedSprintStoryIds = new Set();
-
-const SPRINT_VELOCITY_LIMITS = {
-    Low: 3,
-    Medium: 5,
-    High: 7,
-};
 
 window.addEventListener('DOMContentLoaded', async () => {
     // 1. Get Project ID from URL
@@ -4491,30 +4488,44 @@ async function confirmSprintClose() {
 }
 
 function attachSprintInputListeners() {
-    const velocityInput = document.getElementById('sprint-velocity');
     const maxPointsInput = document.getElementById('sprint-max-story-points');
     const teamNameInput = document.getElementById('sprint-team-name');
-    const startDateInput = document.getElementById('sprint-start-date');
 
-    velocityInput?.addEventListener('change', updateSprintCapacityWarning);
     maxPointsInput?.addEventListener('input', updateSprintCapacityWarning);
     teamNameInput?.addEventListener('input', updateSprintSaveButton);
-    startDateInput?.addEventListener('change', updateSprintSaveButton);
-
-    initializeSprintSaveForm();
 }
 
-function getTodayLocalDateValue() {
-    const now = new Date();
-    const timezoneOffsetMs = now.getTimezoneOffset() * 60 * 1000;
-    return new Date(now.getTime() - timezoneOffsetMs).toISOString().slice(0, 10);
-}
+function updateLatestSprintDraftGuards(...sources) {
+    let nextAttemptId = null;
+    let nextArtifactFingerprint = null;
 
-function initializeSprintSaveForm() {
-    const startDateInput = document.getElementById('sprint-start-date');
-    if (startDateInput && !startDateInput.value) {
-        startDateInput.value = getTodayLocalDateValue();
+    sources.forEach(source => {
+        if (!source || typeof source !== 'object') return;
+        if (!nextAttemptId && typeof source.attempt_id === 'string') {
+            nextAttemptId = source.attempt_id;
+        }
+        if (!nextArtifactFingerprint && typeof source.artifact_fingerprint === 'string') {
+            nextArtifactFingerprint = source.artifact_fingerprint;
+        }
+    });
+
+    if (
+        latestSprintAttemptId !== nextAttemptId
+        || latestSprintArtifactFingerprint !== nextArtifactFingerprint
+    ) {
+        latestSprintSaveIdempotencyKey = null;
     }
+
+    latestSprintAttemptId = nextAttemptId;
+    latestSprintArtifactFingerprint = nextArtifactFingerprint;
+}
+
+function sprintSaveIdempotencyKey() {
+    if (!latestSprintSaveIdempotencyKey) {
+        const suffix = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}`;
+        latestSprintSaveIdempotencyKey = `save-sprint-${selectedProjectId}-${latestSprintAttemptId}-${suffix}`;
+    }
+    return latestSprintSaveIdempotencyKey;
 }
 
 function clearSprintSelection() {
@@ -4670,21 +4681,15 @@ function updateSprintCapacityWarning() {
         return;
     }
 
-    const velocity = document.getElementById('sprint-velocity')?.value || 'Medium';
     const maxStoryPointsText = document.getElementById('sprint-max-story-points')?.value?.trim() || '';
     const maxStoryPoints = maxStoryPointsText ? parseInt(maxStoryPointsText, 10) : null;
     const messages = [];
-
-    const storyLimit = SPRINT_VELOCITY_LIMITS[velocity] || SPRINT_VELOCITY_LIMITS.Medium;
-    if (selected.length > storyLimit) {
-        messages.push(`Capacity Overload: ${selected.length} manually selected stories exceed the ${velocity} heuristic limit of ${storyLimit}.`);
-    }
 
     const allSelectedHavePoints = selected.every(item => Number.isFinite(item.story_points));
     if (maxStoryPoints && allSelectedHavePoints) {
         const totalPoints = selected.reduce((sum, item) => sum + item.story_points, 0);
         if (totalPoints > maxStoryPoints) {
-            messages.push(`Capacity Overload: ${totalPoints} selected story points exceed the optional cap of ${maxStoryPoints}.`);
+            messages.push(`Capacity Overload: ${totalPoints} selected story points exceed the cap of ${maxStoryPoints}.`);
         }
     }
 
@@ -4738,15 +4743,20 @@ async function loadSprintHistory() {
         if (items.length > 0) {
             const latest = items[items.length - 1];
             latestSprintIsComplete = Boolean(latest.is_complete);
+            updateLatestSprintDraftGuards(latest, latest.output_artifact || null);
             renderSprintAttemptPanels(latest.input_context || null, latest.output_artifact || null);
         } else {
             latestSprintIsComplete = false;
+            updateLatestSprintDraftGuards();
             renderSprintAttemptPanels(null, null);
         }
 
         updateSprintSaveButton();
     } catch (e) {
         console.error('Failed to load sprint history:', e);
+        latestSprintIsComplete = false;
+        updateLatestSprintDraftGuards();
+        updateSprintSaveButton();
     }
 }
 
@@ -4754,8 +4764,6 @@ async function generateSprintDraft() {
     if (!selectedProjectId) return;
 
     const userInput = document.getElementById('sprint-user-input')?.value?.trim() || '';
-    const velocityInput = document.getElementById('sprint-velocity')?.value || 'Medium';
-    const durationInput = document.getElementById('sprint-duration')?.value || 14;
     const maxPointsInput = document.getElementById('sprint-max-story-points')?.value?.trim() || '';
     const decomposeInput = document.getElementById('sprint-decompose')?.checked ?? true;
     const selectedStoryIds = Array.from(selectedSprintStoryIds);
@@ -4770,8 +4778,6 @@ async function generateSprintDraft() {
     try {
         const payload = {
             user_input: userInput,
-            team_velocity_assumption: velocityInput,
-            sprint_duration_days: parseInt(durationInput, 10),
             max_story_points: maxPointsInput ? parseInt(maxPointsInput, 10) : null,
             include_task_decomposition: decomposeInput
         };
@@ -4794,6 +4800,7 @@ async function generateSprintDraft() {
         if (data.status !== 'success') throw new Error('Sprint generation failed');
 
         latestSprintIsComplete = Boolean(data.data?.is_complete);
+        updateLatestSprintDraftGuards(data.data || null, data.data?.output_artifact || null);
         renderSprintAttemptPanels(data.data?.input_context || null, data.data?.output_artifact || null);
         setPhaseState(data.data?.fsm_state || 'SPRINT_SETUP', 'sprint');
 
@@ -4815,9 +4822,7 @@ async function saveSprintDraft() {
     if (!selectedProjectId) return;
 
     const teamNameInput = document.getElementById('sprint-team-name');
-    const startDateInput = document.getElementById('sprint-start-date');
     const teamName = teamNameInput?.value?.trim() || '';
-    const sprintStartDate = startDateInput?.value || '';
 
     if (!teamName) {
         alert('Team name is required before saving the sprint.');
@@ -4826,9 +4831,8 @@ async function saveSprintDraft() {
         return;
     }
 
-    if (!sprintStartDate) {
-        alert('Sprint start date is required before saving the sprint.');
-        startDateInput?.focus();
+    if (!latestSprintAttemptId || !latestSprintArtifactFingerprint) {
+        alert('Sprint draft guards are missing. Reload Sprint history or regenerate the sprint draft before saving.');
         updateSprintSaveButton();
         return;
     }
@@ -4847,7 +4851,10 @@ async function saveSprintDraft() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 team_name: teamName,
-                sprint_start_date: sprintStartDate,
+                attempt_id: latestSprintAttemptId,
+                expected_artifact_fingerprint: latestSprintArtifactFingerprint,
+                expected_state: 'SPRINT_DRAFT',
+                idempotency_key: sprintSaveIdempotencyKey(),
             }),
         });
 
@@ -5028,11 +5035,12 @@ function renderSprintArtifactHtml(artifact, inputContext) {
                 
                 <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600 dark:text-slate-400">
                     <div><span class="font-bold text-slate-700 dark:text-slate-300">Sprint #:</span> ${artifact.sprint_number || '?'}</div>
-                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Duration:</span> ${artifact.duration_days || '?'} days</div>
-                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Velocity:</span> ${capacity.velocity_assumption || '-'}</div>
-                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Capacity Band:</span> ${capacity.capacity_band || '-'}</div>
+                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Capacity Points:</span> ${capacity.capacity_points ?? 'N/A'}</div>
+                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Capacity Source:</span> ${capacity.capacity_source || '-'}</div>
+                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Capacity Basis:</span> ${capacity.capacity_basis || '-'}</div>
                     <div><span class="font-bold text-slate-700 dark:text-slate-300">Selected Stories:</span> ${capacity.selected_count ?? artifact.selected_stories?.length ?? 0}</div>
                     <div><span class="font-bold text-slate-700 dark:text-slate-300">Story Points Used:</span> ${capacity.story_points_used ?? 'N/A'}</div>
+                    <div><span class="font-bold text-slate-700 dark:text-slate-300">Remaining Capacity:</span> ${capacity.remaining_capacity_points ?? 'N/A'}</div>
                 </div>
                 ${capacity.commitment_note ? `<p class="mt-3 text-[11px] font-medium text-emerald-800 dark:text-emerald-300">${capacity.commitment_note}</p>` : ''}
                 ${capacity.reasoning ? `<p class="mt-2 text-[11px] text-slate-600 dark:text-slate-400">${capacity.reasoning}</p>` : ''}
@@ -5120,15 +5128,14 @@ function updateSprintSaveButton() {
     const button = document.getElementById('btn-save-sprint');
     const hint = document.getElementById('sprint-save-hint');
     const teamNameInput = document.getElementById('sprint-team-name');
-    const startDateInput = document.getElementById('sprint-start-date');
-    if (!button || !hint || !teamNameInput || !startDateInput) return;
+    if (!button || !hint || !teamNameInput) return;
 
     const savePhaseReady = Boolean(selectedProjectId) && latestSprintIsComplete && activeFsmState === 'SPRINT_DRAFT';
-    const hasRequiredFields = Boolean(teamNameInput.value.trim()) && Boolean(startDateInput.value);
+    const guardsReady = Boolean(latestSprintAttemptId && latestSprintArtifactFingerprint);
+    const hasRequiredFields = Boolean(teamNameInput.value.trim()) && guardsReady;
     const canSave = savePhaseReady && hasRequiredFields;
     button.disabled = !canSave;
     teamNameInput.disabled = !savePhaseReady;
-    startDateInput.disabled = !savePhaseReady;
 
     button.className = canSave
         ? 'inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
@@ -5144,13 +5151,13 @@ function updateSprintSaveButton() {
         return;
     }
 
-    if (!teamNameInput.value.trim()) {
-        hint.innerText = 'Provide a team name to confirm this sprint.';
+    if (!guardsReady) {
+        hint.innerText = 'Reload Sprint history or regenerate the latest draft before saving.';
         return;
     }
 
-    if (!startDateInput.value) {
-        hint.innerText = 'Choose a sprint start date to confirm this sprint.';
+    if (!teamNameInput.value.trim()) {
+        hint.innerText = 'Provide a team name to confirm this sprint.';
         return;
     }
 

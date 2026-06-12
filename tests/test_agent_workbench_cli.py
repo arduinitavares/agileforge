@@ -858,14 +858,12 @@ class _FakeApplication:
             "errors": [],
         }
 
-    def sprint_generate(  # noqa: PLR0913
+    def sprint_generate(
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
-        team_velocity_assumption: str = "Medium",
-        sprint_duration_days: int = 14,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> JsonObject:
@@ -877,8 +875,6 @@ class _FakeApplication:
                     "project_id": project_id,
                     "user_input": user_input,
                     "selected_story_ids": selected_story_ids,
-                    "team_velocity_assumption": team_velocity_assumption,
-                    "sprint_duration_days": sprint_duration_days,
                     "max_story_points": max_story_points,
                     "include_task_decomposition": include_task_decomposition,
                 },
@@ -932,7 +928,6 @@ class _FakeApplication:
         *,
         project_id: int,
         team_name: str,
-        sprint_start_date: str,
         attempt_id: str,
         expected_artifact_fingerprint: str,
         expected_state: str,
@@ -945,7 +940,6 @@ class _FakeApplication:
                 {
                     "project_id": project_id,
                     "team_name": team_name,
-                    "sprint_start_date": sprint_start_date,
                     "attempt_id": attempt_id,
                     "expected_artifact_fingerprint": expected_artifact_fingerprint,
                     "expected_state": expected_state,
@@ -3014,10 +3008,6 @@ def test_sprint_generate_cli_routes_generation_options(
             "7",
             "--selected-story-ids",
             "66,85",
-            "--team-velocity-assumption",
-            "High",
-            "--sprint-duration-days",
-            "10",
             "--max-story-points",
             "8",
             "--input",
@@ -3036,12 +3026,68 @@ def test_sprint_generate_cli_routes_generation_options(
             "project_id": 7,
             "user_input": "Focus on live command hardening.",
             "selected_story_ids": [66, 85],
-            "team_velocity_assumption": "High",
-            "sprint_duration_days": 10,
             "max_story_points": 8,
             "include_task_decomposition": False,
         },
     )
+
+
+@pytest.mark.parametrize(
+    "removed_arg",
+    ["--team-velocity-assumption", "--sprint-duration-days"],
+)
+def test_sprint_generate_cli_rejects_removed_capacity_args(
+    capsys: pytest.CaptureFixture[str],
+    removed_arg: str,
+) -> None:
+    """Sprint generate no longer accepts velocity or calendar capacity flags."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "sprint",
+            "generate",
+            "--project-id",
+            "7",
+            removed_arg,
+            "10" if removed_arg == "--sprint-duration-days" else "High",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+@pytest.mark.parametrize("max_story_points", ["0", "-1"])
+def test_sprint_generate_cli_rejects_non_positive_max_story_points(
+    capsys: pytest.CaptureFixture[str],
+    max_story_points: str,
+) -> None:
+    """Sprint generate requires positive story point capacity overrides."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "sprint",
+            "generate",
+            "--project-id",
+            "7",
+            "--max-story-points",
+            max_story_points,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert "--max-story-points" in _mapping(payload["errors"][0])["message"]
+    assert app.calls == []
 
 
 def test_sprint_history_cli_routes_to_application(
@@ -3095,8 +3141,6 @@ def test_sprint_save_cli_requires_review_guards(
             "7",
             "--team-name",
             "Delivery",
-            "--sprint-start-date",
-            "2026-05-25",
             "--attempt-id",
             "sprint-attempt-1",
             "--expected-artifact-fingerprint",
@@ -3117,13 +3161,82 @@ def test_sprint_save_cli_requires_review_guards(
         {
             "project_id": 7,
             "team_name": "Delivery",
-            "sprint_start_date": "2026-05-25",
             "attempt_id": "sprint-attempt-1",
             "expected_artifact_fingerprint": "sha256:abc",
             "expected_state": "SPRINT_DRAFT",
             "idempotency_key": "save-sprint-7-001",
         },
     )
+
+
+def test_sprint_save_cli_rejects_removed_start_date_arg(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sprint save no longer accepts caller-supplied calendar dates."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "sprint",
+            "save",
+            "--project-id",
+            "7",
+            "--team-name",
+            "Delivery",
+            "--sprint-start-date",
+            "2026-05-25",
+            "--attempt-id",
+            "sprint-attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:abc",
+            "--expected-state",
+            "SPRINT_DRAFT",
+            "--idempotency-key",
+            "save-sprint-7-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_sprint_save_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Sprint save CLI requires a non-blank idempotency key."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "sprint",
+            "save",
+            "--project-id",
+            "7",
+            "--team-name",
+            "Delivery",
+            "--attempt-id",
+            "sprint-attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:abc",
+            "--expected-state",
+            "SPRINT_DRAFT",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["errors"][0])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
 
 
 def test_sprint_start_cli_requires_expected_state_and_idempotency(

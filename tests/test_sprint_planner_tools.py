@@ -83,22 +83,24 @@ def _seed_product_team_stories(session: Session) -> tuple[int, int, list[int]]:
     return product.product_id, team.team_id, stories
 
 
-def test_save_sprint_plan_input_enforces_duration_bounds() -> None:
-    """Sprint persistence input must reject durations outside the documented range."""
+def test_save_sprint_plan_input_rejects_calendar_fields() -> None:
+    """Sprint persistence input must reject removed calendar fields."""
     with pytest.raises(ValidationError):
-        SaveSprintPlanInput(
-            product_id=1,
-            team_id=1,
-            sprint_start_date="2026-02-01",
-            sprint_duration_days=0,
+        SaveSprintPlanInput.model_validate(
+            {
+                "product_id": 1,
+                "team_id": 1,
+                "sprint_start_date": "2026-02-01",
+            }
         )
 
     with pytest.raises(ValidationError):
-        SaveSprintPlanInput(
-            product_id=1,
-            team_id=1,
-            sprint_start_date="2026-02-01",
-            sprint_duration_days=32,
+        SaveSprintPlanInput.model_validate(
+            {
+                "product_id": 1,
+                "team_id": 1,
+                "sprint_duration_days": 14,
+            }
         )
 
 
@@ -106,7 +108,6 @@ def _build_sprint_plan(story_ids: list[int]) -> dict[str, Any]:
     return {
         "sprint_goal": "Deliver authentication essentials",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [
             {
                 "story_id": story_ids[0],
@@ -142,13 +143,14 @@ def _build_sprint_plan(story_ids: list[int]) -> dict[str, Any]:
             {"story_id": story_ids[1], "reason": "Does not fit capacity"}
         ],
         "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "4-5 stories",
+            "capacity_points": 10,
+            "capacity_source": "user_override",
+            "capacity_basis": "10 points selected for the test sprint",
             "selected_count": 1,
             "story_points_used": 3,
-            "max_story_points": 10,
-            "commitment_note": "Does this scope feel achievable in 2 weeks?",
-            "reasoning": "Scope fits capacity band.",
+            "remaining_capacity_points": 7,
+            "commitment_note": "Does this point scope feel achievable?",
+            "reasoning": "Scope fits within the point capacity.",
         },
     }
 
@@ -164,8 +166,6 @@ def test_save_sprint_plan_creates_records(session: Session) -> None:
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -210,8 +210,6 @@ def test_save_sprint_plan_uses_orchestrator_duration_when_valid(
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -237,8 +235,6 @@ def test_save_sprint_plan_falls_back_to_elapsed_duration(session: Session) -> No
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -273,8 +269,6 @@ def test_save_sprint_plan_falls_back_when_state_duration_invalid(
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -316,8 +310,6 @@ def test_save_sprint_plan_rejects_story_conflict(session: Session) -> None:
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -397,8 +389,6 @@ def test_save_sprint_plan_updates_existing_planned_sprint_in_place(
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=10,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -410,8 +400,8 @@ def test_save_sprint_plan_updates_existing_planned_sprint_in_place(
     assert len(sprints) == 1
     session.refresh(existing_sprint)
     assert existing_sprint.goal == "Updated sprint goal"
-    assert existing_sprint.start_date == date(2026, 2, 1)
-    assert existing_sprint.end_date == date(2026, 2, 11)
+    assert existing_sprint.start_date is None
+    assert existing_sprint.end_date is None
 
     links = session.exec(
         select(SprintStory).where(SprintStory.sprint_id == existing_sprint.sprint_id)
@@ -480,8 +470,6 @@ def test_save_sprint_plan_handles_large_task_deletion_volume(session: Session) -
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -578,8 +566,6 @@ def test_save_sprint_plan_reconciles_selected_story_tasks_on_planned_update(
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -1049,8 +1035,6 @@ def test_save_sprint_plan_rejects_out_of_scope_task_invariants(
     input_data = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)
@@ -1104,7 +1088,6 @@ def test_save_sprint_plan_rejects_checklist_items_copied_from_story_acceptance_c
     sprint_plan = {
         "sprint_goal": "Deliver authentication essentials",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [
             {
                 "story_id": story.story_id,
@@ -1127,13 +1110,14 @@ def test_save_sprint_plan_rejects_checklist_items_copied_from_story_acceptance_c
         ],
         "deselected_stories": [],
         "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "4-5 stories",
+            "capacity_points": 10,
+            "capacity_source": "user_override",
+            "capacity_basis": "10 points selected for the test sprint",
             "selected_count": 1,
             "story_points_used": 3,
-            "max_story_points": 10,
-            "commitment_note": "Does this scope feel achievable in 2 weeks?",
-            "reasoning": "Scope fits capacity band.",
+            "remaining_capacity_points": 7,
+            "commitment_note": "Does this point scope feel achievable?",
+            "reasoning": "Scope fits within the point capacity.",
         },
     }
 
@@ -1144,8 +1128,6 @@ def test_save_sprint_plan_rejects_checklist_items_copied_from_story_acceptance_c
     input_data = SaveSprintPlanInput(
         product_id=product.product_id,
         team_id=team.team_id,
-        sprint_start_date="2026-02-01",
-        sprint_duration_days=14,
     )
 
     result = save_sprint_plan_tool(input_data, tool_context)

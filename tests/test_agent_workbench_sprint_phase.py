@@ -111,7 +111,7 @@ def test_sprint_runner_generate_wraps_keyword_only_failure_meta(
         workflow_service=cast("Any", _FakeWorkflowService()),
     )
 
-    result = runner.generate(project_id=7)
+    result = runner.generate(project_id=7, max_story_points=9)
 
     assert result["ok"] is True
     assert result["data"]["fsm_state"] == "SPRINT_DRAFT"
@@ -167,7 +167,7 @@ def test_sprint_runner_generate_blocks_stale_downstream_backlog(
         workflow_service=cast("Any", workflow_service),
     )
 
-    result = runner.generate(project_id=7)
+    result = runner.generate(project_id=7, max_story_points=9)
 
     assert result["ok"] is False
     assert result["data"] is None
@@ -184,6 +184,54 @@ def test_sprint_runner_generate_blocks_stale_downstream_backlog(
     assert workflow_service.state["stale_since_backlog_attempt_id"] == (
         "backlog-attempt-7"
     )
+
+
+def test_sprint_runner_generate_rejects_non_positive_metric_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint generate must not call planner with unusable metric capacity."""
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {
+            "success": True,
+            "input_context": {"available_stories": []},
+            "output_artifact": {"is_complete": True},
+            "is_complete": True,
+            "error": None,
+        }
+
+    async def fake_metrics(_self: object, _project_id: int) -> JsonDict:
+        return {
+            "status": "success",
+            "data": {
+                "recommendation": {
+                    "recommended_next_sprint_points": 0,
+                    "basis": "last_3_completed_sprints_average",
+                }
+            },
+        }
+
+    monkeypatch.setattr(
+        sprint_phase_module,
+        "run_sprint_agent_from_state",
+        fake_run_sprint_agent,
+    )
+    monkeypatch.setattr(SprintPhaseRunner, "_metrics", fake_metrics)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.generate(project_id=7)
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert result["errors"][0]["details"]["error_code"] == "SPRINT_CAPACITY_REQUIRED"
+    assert "positive" in result["errors"][0]["message"]
+    assert captured["agent_calls"] == 0
 
 
 def test_sprint_runner_generate_blocks_active_reset_stale_marker(
@@ -236,7 +284,7 @@ def test_sprint_runner_generate_blocks_active_reset_stale_marker(
         workflow_service=cast("Any", workflow_service),
     )
 
-    result = runner.generate(project_id=7)
+    result = runner.generate(project_id=7, max_story_points=9)
 
     assert result["ok"] is False
     assert result["data"] is None
@@ -322,7 +370,7 @@ def test_sprint_runner_generate_blocks_sprint_complete_without_impact_none_triag
             workflow_service=cast("Any", workflow_service),
         )
 
-        result = runner.generate(project_id=7)
+        result = runner.generate(project_id=7, max_story_points=9)
 
         assert result["ok"] is False
         assert result["data"] is None
@@ -394,7 +442,7 @@ def test_sprint_runner_generate_allows_sprint_complete_with_impact_none_triage(
         workflow_service=cast("Any", workflow_service),
     )
 
-    result = runner.generate(project_id=7)
+    result = runner.generate(project_id=7, max_story_points=9)
 
     assert result["ok"] is True
     assert result["data"]["fsm_state"] == "SPRINT_DRAFT"
@@ -514,6 +562,58 @@ def test_sprint_runner_start_status_and_tasks_use_persisted_sprint(
         )
     ).first()
     assert event is not None
+    metadata = json.loads(event.event_metadata or "{}")
+    assert metadata["planned_start_date"] == "2026-05-26"
+    assert metadata["planned_end_date"] == "2026-06-09"
+
+
+def test_sprint_runner_start_logs_null_planned_dates(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint runner should log dateless capacity-planned starts as JSON null."""
+    product = Product(name="Dateless Runner Product")
+    team = Team(name="Dateless Runner Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Deliver dateless workflow",
+        start_date=None,
+        end_date=None,
+        status=SprintStatus.PLANNED,
+    )
+    session.add(sprint)
+    session.commit()
+    assert sprint.sprint_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    workflow = _FakeWorkflowService()
+    workflow.state = {"fsm_state": "SPRINT_PERSISTENCE"}
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", workflow),
+    )
+
+    started = runner.start(
+        project_id=product.product_id,
+        expected_state="SPRINT_PERSISTENCE",
+        idempotency_key="start-dateless-runner-sprint-001",
+    )
+
+    assert started["ok"] is True
+    event = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == WorkflowEventType.SPRINT_STARTED
+        )
+    ).one()
+    metadata = json.loads(event.event_metadata or "{}")
+    assert metadata["planned_start_date"] is None
+    assert metadata["planned_end_date"] is None
 
 
 def test_sprint_status_without_active_sprint_guides_to_completed_id(

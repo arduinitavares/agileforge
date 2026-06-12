@@ -11,6 +11,7 @@ Validates:
 import os
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 from typing import cast
 
 # Ensure project root is on the path
@@ -137,3 +138,24 @@ class TestSprintPlannerToolRegistration:
         seen = set()
         dupes = [n for n in names if n in seen or seen.add(n)]
         assert not dupes, f"Duplicate tool names: {dupes}"
+
+    def test_sprint_draft_does_not_expose_unguarded_save_tool(self) -> None:
+        """Verify Sprint draft cannot bypass guarded command save."""
+        state_def = STATE_REGISTRY[OrchestratorState.SPRINT_DRAFT]
+        names = [
+            getattr(t, "name", None) or getattr(t, "__name__", None)
+            for t in state_def.tools
+        ]
+
+        assert "save_sprint_plan_tool" not in names
+        assert "save_sprint_plan_tool" not in state_def.instruction
+        assert "guarded" in state_def.instruction
+
+    def test_root_agent_does_not_register_unguarded_sprint_save_tool(self) -> None:
+        """Verify root agent does not expose unguarded Sprint save."""
+        agent_source = Path("orchestrator_agent/agent.py").read_text()
+        tools_block = agent_source[
+            agent_source.index("tools=[") : agent_source.index("    ],")
+        ]
+
+        assert "save_sprint_plan_tool" not in tools_block

@@ -123,32 +123,29 @@ class SprintPlannerInput(BaseModel):
     on input schemas. Validation constraints belong on output schemas.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     available_stories: Annotated[
         list[SprintPlannerStory],
         Field(description="Prioritized list of available stories for this sprint."),
     ]
-    team_velocity_assumption: Annotated[
-        Literal["Low", "Medium", "High"],
-        Field(description="Velocity band for capacity planning."),
-    ]
-    sprint_duration_days: Annotated[
+    capacity_points: Annotated[
         int,
-        Field(
-            description="Sprint duration in days (1-31).",
-        ),
+        Field(description="Story points capacity cap for this sprint."),
+    ]
+    capacity_source: Annotated[
+        Literal["user_override", "project_metrics"],
+        Field(description="Source of the capacity limit."),
+    ]
+    capacity_basis: Annotated[
+        str,
+        Field(description="Explanation of the capacity points recommendation or basis."),
     ]
     user_context: Annotated[
         str | None,
         Field(
             default=None,
             description="Optional user context or focus for the sprint.",
-        ),
-    ]
-    max_story_points: Annotated[
-        int | None,
-        Field(
-            default=None,
-            description="Optional story points cap (>= 1) for capacity planning.",
         ),
     ]
     include_task_decomposition: Annotated[
@@ -199,32 +196,31 @@ class SprintPlannerCapacityAnalysis(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    velocity_assumption: Annotated[
-        Literal["Low", "Medium", "High"],
-        Field(description="Velocity band used in the plan."),
+    capacity_points: Annotated[
+        int,
+        Field(ge=0, description="Story point capacity cap for this sprint."),
     ]
-    capacity_band: Annotated[
+    capacity_source: Annotated[
+        Literal["user_override", "project_metrics"],
+        Field(description="Source of the capacity limit."),
+    ]
+    capacity_basis: Annotated[
         str,
-        Field(description="Human-readable capacity band, e.g., '2-3 stories'."),
+        Field(min_length=3, description="Explanation of the capacity points basis."),
     ]
     selected_count: Annotated[
         int,
         Field(ge=0, description="Number of stories selected."),
     ]
     story_points_used: Annotated[
-        int | None,
-        Field(
-            default=None,
-            ge=0,
-            description="Total story points selected when available.",
-        ),
+        int,
+        Field(ge=0, description="Total selected story points."),
     ]
-    max_story_points: Annotated[
-        int | None,
+    remaining_capacity_points: Annotated[
+        int,
         Field(
-            default=None,
-            ge=1,
-            description="Optional story points cap used for planning.",
+            ge=0,
+            description="Capacity points remaining after the selected scope.",
         ),
     ]
     commitment_note: Annotated[
@@ -254,10 +250,6 @@ class SprintPlannerOutput(BaseModel):
     ]
     sprint_number: Annotated[
         int, Field(ge=1, description="Sprint number for this product.")
-    ]
-    duration_days: Annotated[
-        int,
-        Field(ge=1, le=31, description="Sprint duration in days."),
     ]
     selected_stories: Annotated[
         list[SprintPlannerSelectedStory],

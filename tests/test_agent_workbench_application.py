@@ -3807,7 +3807,6 @@ def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
         (
             "agileforge sprint save --project-id 7 "
             "--team-name <team_name> "
-            "--sprint-start-date <YYYY-MM-DD> "
             "--attempt-id <attempt_id> "
             "--expected-artifact-fingerprint <artifact_fingerprint> "
             "--expected-state SPRINT_DRAFT "

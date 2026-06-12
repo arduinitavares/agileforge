@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+RANK_GROUP_BASE = 100
+
 
 class SprintSelectionError(ValueError):
     """Raised when AgileForge cannot produce a safe locked Sprint selection."""
@@ -60,16 +62,16 @@ class _ResultDependencyMetadata:
 
 def derive_parent_group(priority: int | None) -> int | None:
     """Return the parent group encoded by rank-style priority."""
-    if priority is None or priority < 100:
+    if priority is None or priority < RANK_GROUP_BASE:
         return None
-    return priority // 100
+    return priority // RANK_GROUP_BASE
 
 
 def derive_group_slot(priority: int | None) -> int | None:
     """Return the child slot encoded by rank-style priority."""
-    if priority is None or priority < 100:
+    if priority is None or priority < RANK_GROUP_BASE:
         return None
-    slot = priority % 100
+    slot = priority % RANK_GROUP_BASE
     return slot or None
 
 
@@ -163,6 +165,17 @@ def _select_manual(
         )
 
     selected_rows = [by_id[story_id] for story_id in reordered_ids]
+    selected_points = _cohort_story_points(selected_rows)
+    if (
+        policy.max_story_points is not None
+        and selected_points > policy.max_story_points
+    ):
+        _raise_capacity_blocked(
+            story_id=reordered_ids[0],
+            required_story_ids=reordered_ids,
+            story_points=selected_points,
+            policy=policy,
+        )
     return _result(
         mode="manual",
         selected_rows=selected_rows,

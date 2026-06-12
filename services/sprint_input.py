@@ -29,8 +29,9 @@ class _SprintCandidateFetcher(Protocol):
 
 
 class _PrepareSprintInputOptions(TypedDict):
-    team_velocity_assumption: object
-    sprint_duration_days: object
+    capacity_points: object
+    capacity_source: object
+    capacity_basis: object
     user_context: str | None
     max_story_points: object
     include_task_decomposition: object
@@ -49,25 +50,6 @@ def as_text(value: object) -> str:
         return json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(value)
-
-
-def normalize_velocity(value: object) -> str:
-    """Normalize velocity input to Low/Medium/High."""
-    normalized = as_text(value).strip().lower()
-    if normalized == "low":
-        return "Low"
-    if normalized == "high":
-        return "High"
-    return "Medium"
-
-
-def normalize_duration_days(value: object) -> int:
-    """Clamp sprint duration to schema-safe bounds."""
-    try:
-        parsed = int(as_text(value).strip())
-    except ValueError:
-        return 14
-    return max(1, min(parsed, 31))
 
 
 def normalize_positive_int(value: object) -> int | None:
@@ -366,10 +348,10 @@ def normalize_selected_story_ids(value: object) -> list[int]:
 
 def velocity_story_limit(velocity: object) -> int:
     """Upper bound for the story-count heuristic used in the UI."""
-    normalized = normalize_velocity(velocity)
-    if normalized == "Low":
+    normalized = as_text(velocity).strip().lower()
+    if normalized == "low":
         return 3
-    if normalized == "High":
+    if normalized == "high":
         return 7
     return 5
 
@@ -561,12 +543,21 @@ def prepare_sprint_input_context(
                 "input_context": {},
             }
 
-    team_velocity_assumption = normalize_velocity(options["team_velocity_assumption"])
-    max_story_points = normalize_positive_int(options["max_story_points"])
+    capacity_points = normalize_positive_int(options.get("capacity_points"))
+    if capacity_points is None:
+        return {
+            "success": False,
+            "error_code": "SPRINT_CAPACITY_INVALID",
+            "message": "capacity_points must be a positive integer.",
+            "candidate_result": candidate_result,
+            "input_context": {},
+        }
+    capacity_source = as_text(options.get("capacity_source")).strip()
+    capacity_basis = as_text(options.get("capacity_basis")).strip()
     try:
         selection = select_sprint_story_rows(
             candidate_rows,
-            max_story_points=max_story_points,
+            max_story_points=capacity_points,
             selected_story_ids=normalized_selected_ids,
         )
     except SprintSelectionError as exc:
@@ -607,11 +598,9 @@ def prepare_sprint_input_context(
             for row in selection.selected_rows
             if isinstance(row, dict)
         ],
-        "team_velocity_assumption": team_velocity_assumption,
-        "sprint_duration_days": normalize_duration_days(
-            options["sprint_duration_days"]
-        ),
-        "max_story_points": max_story_points,
+        "capacity_points": capacity_points,
+        "capacity_source": capacity_source,
+        "capacity_basis": capacity_basis,
         "include_task_decomposition": bool(options["include_task_decomposition"]),
     }
 
@@ -631,6 +620,9 @@ def prepare_sprint_input_context(
             "selected_story_ids": selection.selected_story_ids,
             "excluded_story_ids": selection.excluded_story_ids,
             "story_points_used": selection.story_points_used,
+            "capacity_points": capacity_points,
+            "capacity_source": capacity_source,
+            "capacity_basis": capacity_basis,
             "max_story_points": selection.max_story_points,
             "dependency_closed": selection.dependency_closed,
             "dependency_edges": selection.dependency_edges,

@@ -12,13 +12,15 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
     validate_task_decomposition_quality,
     validate_task_invariant_bindings,
 )
+from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
+    SaveSprintPlanInput,
+)
 
 
 def _build_output_payload() -> dict[str, Any]:
     return {
         "sprint_goal": "Ship login onboarding",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [
             {
                 "story_id": 101,
@@ -52,13 +54,14 @@ def _build_output_payload() -> dict[str, Any]:
         ],
         "deselected_stories": [{"story_id": 102, "reason": "Does not fit capacity"}],
         "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "4-5 stories",
+            "capacity_points": 10,
+            "capacity_source": "user_override",
+            "capacity_basis": "User selected a 10 point capacity cap.",
             "selected_count": 1,
             "story_points_used": 3,
-            "max_story_points": 10,
-            "commitment_note": "Does this scope feel achievable in 2 weeks?",
-            "reasoning": "Scope fits the band and aligns to the goal.",
+            "remaining_capacity_points": 7,
+            "commitment_note": "Does this scope feel achievable?",
+            "reasoning": "Scope fits the point capacity and aligns to the goal.",
         },
     }
 
@@ -89,8 +92,40 @@ def test_output_schema_rejects_extra_fields() -> None:
         raise AssertionError(msg)
 
 
+def test_output_schema_rejects_legacy_output_contract_fields() -> None:
+    """Ensure old calendar and velocity output keys are rejected."""
+    payload = _build_output_payload()
+    legacy_duration_key = "duration" + "_days"
+    legacy_velocity_key = "velocity" + "_assumption"
+    legacy_band_key = "capacity" + "_band"
+    payload[legacy_duration_key] = 14
+    payload["capacity_analysis"][legacy_velocity_key] = "Medium"
+    payload["capacity_analysis"][legacy_band_key] = "4-5 stories"
+
+    try:
+        SprintPlannerOutput.model_validate(payload)
+    except ValidationError as exc:
+        error_text = str(exc)
+        assert legacy_duration_key in error_text
+        assert legacy_velocity_key in error_text
+        assert legacy_band_key in error_text
+    else:
+        msg = "Expected ValidationError for legacy output fields"
+        raise AssertionError(msg)
+
+
+def test_save_sprint_plan_input_omits_calendar_fields() -> None:
+    """Ensure the agent-facing save tool input has no calendar fields."""
+    field_names = set(SaveSprintPlanInput.model_fields)
+    assert "product_id" in field_names
+    assert "team_id" in field_names
+    assert "team_name" in field_names
+    assert "sprint" + "_start_date" not in field_names
+    assert "sprint" + "_" + "duration" + "_" + "days" not in field_names
+
+
 def test_input_schema_accepts_optional_fields() -> None:
-    """Ensure input schema accepts optional capacity and task flags."""
+    """Ensure input schema accepts capacity and task flags."""
     input_payload: dict[str, Any] = {
         "available_stories": [
             {
@@ -111,22 +146,24 @@ def test_input_schema_accepts_optional_fields() -> None:
                 "story_compliance_boundary_summaries": ["Must log in"],
             }
         ],
-        "team_velocity_assumption": "Low",
-        "sprint_duration_days": 10,
+        "capacity_points": 9,
+        "capacity_source": "project_metrics",
+        "capacity_basis": "9 points",
         "user_context": "Focus on onboarding",
-        "max_story_points": 8,
         "include_task_decomposition": False,
     }
     model = SprintPlannerInput.model_validate(input_payload)
-    assert model.max_story_points == 8  # noqa: PLR2004
+    assert model.capacity_points == 9  # noqa: PLR2004
+    assert model.capacity_source == "project_metrics"
+    assert model.capacity_basis == "9 points"
     assert model.include_task_decomposition is False
     assert model.available_stories[0].parent_group == 1
     assert model.available_stories[0].group_slot == 1
     assert model.available_stories[0].dependency_status == "ready"
 
 
-def test_input_schema_requires_duration_days() -> None:
-    """Ensure sprint duration is required in input schema."""
+def test_input_schema_requires_capacity_fields() -> None:
+    """Ensure capacity fields are required in input schema."""
     input_payload: dict[str, Any] = {
         "available_stories": [
             {
@@ -142,17 +179,18 @@ def test_input_schema_requires_duration_days() -> None:
                 "story_compliance_boundary_summaries": [],
             }
         ],
-        "team_velocity_assumption": "Low",
         "user_context": "Focus on onboarding",
-        "max_story_points": 8,
         "include_task_decomposition": False,
     }
     try:
         SprintPlannerInput.model_validate(input_payload)
     except ValidationError as exc:
-        assert "sprint_duration_days" in str(exc)  # noqa: PT017
+        error_text = str(exc)
+        assert "capacity_points" in error_text
+        assert "capacity_source" in error_text
+        assert "capacity_basis" in error_text
     else:
-        msg = "Expected ValidationError for missing sprint_duration_days"
+        msg = "Expected ValidationError for missing capacity fields"
         raise AssertionError(msg)
 
 
@@ -243,13 +281,15 @@ def test_validate_task_decomposition_quality_rejects_broad_story_completion_phra
 def test_capacity_analysis_requires_commitment_note() -> None:
     """Ensure capacity analysis includes commitment note."""
     payload: dict[str, Any] = {
-        "velocity_assumption": "High",
-        "capacity_band": "6-7 stories",
+        "capacity_points": 15,
+        "capacity_source": "user_override",
+        "capacity_basis": "User selected 15 points.",
         "selected_count": 6,
         "story_points_used": 12,
-        "max_story_points": 15,
-        "commitment_note": "Does this scope feel achievable in 2 weeks?",
-        "reasoning": "Capacity fits the high band.",
+        "remaining_capacity_points": 3,
+        "commitment_note": "Does this scope feel achievable?",
+        "reasoning": "Capacity fits the point cap.",
     }
     model = SprintPlannerCapacityAnalysis.model_validate(payload)
     assert model.selected_count == 6  # noqa: PLR2004
+    assert model.remaining_capacity_points == 3  # noqa: PLR2004

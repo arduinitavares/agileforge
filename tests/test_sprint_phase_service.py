@@ -1,5 +1,6 @@
 """Tests for sprint phase service."""
 
+import inspect
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, Never
@@ -28,6 +29,27 @@ from services.phases.sprint_service import (
 )
 
 JsonDict = dict[str, Any]
+
+
+def _capacity_analysis(
+    *,
+    capacity_points: int = 13,
+    capacity_source: str = "user_override",
+    capacity_basis: str | None = None,
+    selected_count: int = 0,
+    story_points_used: int = 0,
+) -> JsonDict:
+    basis = capacity_basis or f"{capacity_points} points"
+    return {
+        "capacity_points": capacity_points,
+        "capacity_source": capacity_source,
+        "capacity_basis": basis,
+        "selected_count": selected_count,
+        "story_points_used": story_points_used,
+        "remaining_capacity_points": max(capacity_points - story_points_used, 0),
+        "commitment_note": "Fits",
+        "reasoning": "Fits",
+    }
 
 
 def test_record_sprint_attempt_updates_working_state() -> None:
@@ -85,6 +107,19 @@ def test_reset_stale_saved_sprint_planner_working_set_keeps_current_owner() -> N
     )
 
     assert changed is False
+
+
+def test_save_sprint_plan_requires_review_guard_arguments() -> None:
+    """Verify shared Sprint save service requires reviewed-artifact guards."""
+    signature = inspect.signature(save_sprint_plan)
+
+    for guard_name in (
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ):
+        assert signature.parameters[guard_name].default is inspect.Parameter.empty
 
 
 def test_ensure_sprint_attempts_returns_existing_list() -> None:
@@ -179,12 +214,13 @@ async def test_generate_sprint_plan_updates_state_and_returns_payload() -> None:
         now_iso=lambda: "2026-04-04T00:00:00Z",
         run_sprint_agent=fake_run_sprint_agent,
         failure_meta_builder=_failure_meta_builder,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input="Focus on persistence",
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert payload["fsm_state"] == "SPRINT_DRAFT"
@@ -229,18 +265,9 @@ async def test_generate_sprint_plan_stamps_attempt_with_source_fingerprint() -> 
             "output_artifact": {
                 "sprint_goal": "Ship budget guard",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [],
                 "deselected_stories": [],
-                "capacity_analysis": {
-                    "velocity_assumption": "Medium",
-                    "capacity_band": "1 story",
-                    "selected_count": 0,
-                    "story_points_used": 0,
-                    "max_story_points": 4,
-                    "commitment_note": "Fits.",
-                    "reasoning": "Small locked scope.",
-                },
+                "capacity_analysis": _capacity_analysis(capacity_points=4),
                 "is_complete": True,
             },
             "is_complete": True,
@@ -255,8 +282,6 @@ async def test_generate_sprint_plan_stamps_attempt_with_source_fingerprint() -> 
         now_iso=lambda: "2026-04-04T00:00:00Z",
         run_sprint_agent=fake_run_sprint_agent,
         failure_meta_builder=_failure_meta_builder,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         max_story_points=4,
         include_task_decomposition=True,
         selected_story_ids=[66],
@@ -267,6 +292,9 @@ async def test_generate_sprint_plan_stamps_attempt_with_source_fingerprint() -> 
             "stories": [{"story_id": 66}],
             "readiness": {"status": "ready"},
         },
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
     )
 
     assert state["sprint_candidate_source_fingerprint"] == source_fingerprint
@@ -333,12 +361,13 @@ async def test_generate_sprint_plan_loads_candidates_with_story_completion_scope
         now_iso=lambda: "2026-06-03T12:00:00Z",
         run_sprint_agent=fake_run_sprint_agent,
         failure_meta_builder=_failure_meta_builder,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=None,
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert payload["fsm_state"] == "SPRINT_DRAFT"
@@ -400,12 +429,13 @@ async def test_generate_sprint_plan_uses_shared_fsm_transition_helper(
         now_iso=lambda: "2026-04-04T00:00:00Z",
         run_sprint_agent=fake_run_sprint_agent,
         failure_meta_builder=_failure_meta_builder,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=None,
         user_input=None,
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert payload["fsm_state"] == "SPRINT_SETUP"
@@ -436,12 +466,13 @@ async def test_generate_sprint_plan_rejects_invalid_fsm_state() -> None:
             now_iso=lambda: "2026-04-04T00:00:00Z",
             run_sprint_agent=fake_run_sprint_agent,
             failure_meta_builder=_failure_meta_builder,
-            team_velocity_assumption="Medium",
-            sprint_duration_days=14,
             max_story_points=None,
             include_task_decomposition=True,
             selected_story_ids=None,
             user_input=None,
+            capacity_points=9,
+            capacity_source="project_metrics",
+            capacity_basis="9 points",
         )
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
@@ -473,8 +504,6 @@ async def test_generate_sprint_plan_blocks_unready_candidates_before_runtime() -
             now_iso=lambda: "2026-04-04T00:00:00Z",
             run_sprint_agent=fake_run_sprint_agent,
             failure_meta_builder=_failure_meta_builder,
-            team_velocity_assumption="Medium",
-            sprint_duration_days=14,
             max_story_points=None,
             include_task_decomposition=True,
             selected_story_ids=None,
@@ -501,6 +530,9 @@ async def test_generate_sprint_plan_blocks_unready_candidates_before_runtime() -
                     "blocking_story_ids": [1],
                 },
             },
+            capacity_points=9,
+            capacity_source="project_metrics",
+            capacity_basis="9 points",
         )
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
@@ -559,8 +591,6 @@ async def test_failed_sprint_refinement_preserves_previous_complete_draft() -> N
         now_iso=lambda: "2026-04-04T00:00:00Z",
         run_sprint_agent=fake_run_sprint_agent,
         failure_meta_builder=_failure_meta_builder,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=None,
@@ -571,6 +601,9 @@ async def test_failed_sprint_refinement_preserves_previous_complete_draft() -> N
             "stories": [{"story_id": 1}],
             "readiness": {"status": "ready"},
         },
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert payload["sprint_run_success"] is False
@@ -638,18 +671,9 @@ async def test_get_sprint_history_restores_complete_draft_after_failed_refine() 
     complete_artifact: JsonDict = {
         "sprint_goal": "Ship live workflow",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [],
         "deselected_stories": [],
-        "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "4-5 stories",
-            "selected_count": 0,
-            "story_points_used": 0,
-            "max_story_points": None,
-            "commitment_note": "Fits",
-            "reasoning": "Fits",
-        },
+        "capacity_analysis": _capacity_analysis(),
         "is_complete": True,
     }
     state: JsonDict = {
@@ -933,8 +957,8 @@ def test_close_sprint_returns_completed_snapshot_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None:
-    """Verify save sprint plan sanitizes assessment and updates state."""
+async def test_save_sprint_plan_sanitizes_assessment_and_omits_calendar_dates() -> None:
+    """Verify save sprint plan sanitizes assessment and omits planned dates."""
     state: JsonDict = {
         "fsm_state": "SPRINT_DRAFT",
         "sprint_attempts": [
@@ -952,18 +976,9 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
             "source_fingerprint": "sha256:source",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1006,7 +1021,10 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
         build_tool_context=build_tool_context,
         save_plan_tool=save_plan_tool,
         team_name="Team Alpha",
-        sprint_start_date="2026-03-15",
+        attempt_id="sprint-attempt-1",
+        expected_artifact_fingerprint="sha256:reviewed",
+        expected_state="SPRINT_DRAFT",
+        idempotency_key="save-sprint-7-001",
         load_candidates=lambda: {"source_fingerprint": "sha256:source"},
     )
 
@@ -1016,8 +1034,7 @@ async def test_save_sprint_plan_sanitizes_assessment_and_updates_state() -> None
     assert state["sprint_saved_at"] == "2026-04-04T00:00:00Z"
     assert state["sprint_planner_owner_sprint_id"] == 9  # noqa: PLR2004
     assert captured["input_data"].team_name == "Team Alpha"
-    assert captured["input_data"].sprint_start_date == "2026-03-15"
-    assert captured["tool_context"].state["sprint_plan"]["duration_days"] == 14  # noqa: PLR2004
+    assert "sprint_plan" in captured["tool_context"].state
     assert "is_complete" not in captured["tool_context"].state["sprint_plan"]
     assert "source_fingerprint" not in captured["tool_context"].state["sprint_plan"]
 
@@ -1038,18 +1055,9 @@ async def test_save_sprint_plan_enforces_reviewed_attempt_guards() -> None:
             "artifact_fingerprint": "sha256:reviewed",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1074,7 +1082,6 @@ async def test_save_sprint_plan_enforces_reviewed_attempt_guards() -> None:
                 "sprint_id": 9,
             },
             team_name="Team Alpha",
-            sprint_start_date="2026-03-15",
             attempt_id="sprint-attempt-1",
             expected_artifact_fingerprint="sha256:stale",
             expected_state="SPRINT_DRAFT",
@@ -1106,18 +1113,9 @@ async def test_save_sprint_plan_blocks_when_latest_attempt_failed() -> None:
             "artifact_fingerprint": "sha256:reviewed",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1143,7 +1141,6 @@ async def test_save_sprint_plan_blocks_when_latest_attempt_failed() -> None:
             build_tool_context=lambda context: context,
             save_plan_tool=save_plan_tool,
             team_name="Team Alpha",
-            sprint_start_date="2026-03-15",
             attempt_id="sprint-attempt-4",
             expected_artifact_fingerprint="sha256:reviewed",
             expected_state="SPRINT_DRAFT",
@@ -1173,18 +1170,9 @@ async def test_save_sprint_plan_blocks_when_candidate_source_changed() -> None:
             "source_fingerprint": "sha256:old_source",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1210,7 +1198,6 @@ async def test_save_sprint_plan_blocks_when_candidate_source_changed() -> None:
             build_tool_context=lambda context: context,
             save_plan_tool=save_plan_tool,
             team_name="Team Alpha",
-            sprint_start_date="2026-03-15",
             attempt_id="sprint-attempt-4",
             expected_artifact_fingerprint="sha256:reviewed",
             expected_state="SPRINT_DRAFT",
@@ -1241,18 +1228,9 @@ async def test_save_sprint_plan_blocks_when_candidate_source_unverifiable() -> N
             "source_fingerprint": "sha256:old_source",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1278,7 +1256,6 @@ async def test_save_sprint_plan_blocks_when_candidate_source_unverifiable() -> N
             build_tool_context=lambda context: context,
             save_plan_tool=save_plan_tool,
             team_name="Team Alpha",
-            sprint_start_date="2026-03-15",
             attempt_id="sprint-attempt-4",
             expected_artifact_fingerprint="sha256:reviewed",
             expected_state="SPRINT_DRAFT",
@@ -1329,7 +1306,6 @@ async def test_save_sprint_plan_replays_matching_idempotency_key() -> None:
         build_tool_context=lambda context: context,
         save_plan_tool=save_plan_tool,
         team_name="Team Alpha",
-        sprint_start_date="2026-03-15",
         attempt_id="sprint-attempt-1",
         expected_artifact_fingerprint="sha256:reviewed",
         expected_state="SPRINT_DRAFT",
@@ -1337,6 +1313,55 @@ async def test_save_sprint_plan_replays_matching_idempotency_key() -> None:
     )
 
     assert payload == replay_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+async def test_save_sprint_plan_rejects_blank_idempotency_key_before_replay(
+    idempotency_key: str,
+) -> None:
+    """Verify blank save idempotency keys cannot replay previous results."""
+    replay_payload: JsonDict = {
+        "fsm_state": "SPRINT_PERSISTENCE",
+        "save_result": {"success": True, "sprint_id": 9},
+        "attempt_id": "sprint-attempt-1",
+        "artifact_fingerprint": "sha256:reviewed",
+        "idempotency_key": idempotency_key,
+    }
+    state: JsonDict = {
+        "fsm_state": "SPRINT_PERSISTENCE",
+        "sprint_save_idempotency_keys": {idempotency_key: replay_payload},
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> object:
+        pytest.fail("blank idempotency key should fail before hydration")
+
+    def save_plan_tool(_input_data: object, _tool_context: object) -> Never:
+        msg = "save tool should not be called for blank idempotency key"
+        raise AssertionError(msg)
+
+    with pytest.raises(SprintPhaseError) as exc_info:
+        await save_sprint_plan(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            current_planned_sprint_id=9,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_plan_tool=save_plan_tool,
+            team_name="Team Alpha",
+            attempt_id="sprint-attempt-1",
+            expected_artifact_fingerprint="sha256:reviewed",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key=idempotency_key,
+        )
+
+    assert "idempotency_key is required" in exc_info.value.detail
+    assert exc_info.value.status_code == 422  # noqa: PLR2004
 
 
 @pytest.mark.asyncio
@@ -1356,18 +1381,9 @@ async def test_save_sprint_plan_maps_open_sprint_conflict_to_phase_error() -> No
             "artifact_fingerprint": "sha256:reviewed",
             "sprint_goal": "Persist safely",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "4-5 stories",
-                "selected_count": 0,
-                "story_points_used": 0,
-                "max_story_points": 13,
-                "commitment_note": "Fits",
-                "reasoning": "Fits",
-            },
+            "capacity_analysis": _capacity_analysis(),
             "is_complete": True,
         },
     }
@@ -1399,7 +1415,10 @@ async def test_save_sprint_plan_maps_open_sprint_conflict_to_phase_error() -> No
             build_tool_context=lambda context: context,
             save_plan_tool=save_plan_tool,
             team_name="Team Alpha",
-            sprint_start_date="2026-03-15",
+            attempt_id="sprint-attempt-1",
+            expected_artifact_fingerprint="sha256:reviewed",
+            expected_state="SPRINT_DRAFT",
+            idempotency_key="save-sprint-7-001",
         )
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004

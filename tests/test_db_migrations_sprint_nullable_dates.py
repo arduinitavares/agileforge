@@ -7,10 +7,14 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from db.migrations import migrate_sprint_nullable_dates
 from models.core import Product, Sprint, Team
+
+LEGACY_PRODUCT_ID = 101
+LEGACY_TEAM_ID = 202
+LEGACY_STORY_ID = 303
 
 
 def _sqlite_engine() -> Engine:
@@ -174,6 +178,7 @@ def _sprint_index_names(engine: Engine) -> set[str]:
 
 @pytest.fixture(name="legacy_engine")
 def legacy_engine_fixture() -> Iterator[Engine]:
+    """Return an in-memory DB with the legacy NOT NULL Sprint date schema."""
     engine = _sqlite_engine()
     _create_legacy_sprint_schema(engine)
     yield engine
@@ -181,6 +186,7 @@ def legacy_engine_fixture() -> Iterator[Engine]:
 
 
 def test_fresh_sprint_persists_without_planned_dates() -> None:
+    """Verify the current Sprint model allows missing planned dates."""
     engine = _sqlite_engine()
     SQLModel.metadata.create_all(engine)
 
@@ -213,6 +219,7 @@ def test_fresh_sprint_persists_without_planned_dates() -> None:
 def test_old_not_null_sprint_dates_migrate_to_nullable(
     legacy_engine: Engine,
 ) -> None:
+    """Verify legacy NOT NULL Sprint date columns are rebuilt as nullable."""
     actions = migrate_sprint_nullable_dates(legacy_engine)
 
     assert actions == ["migrated sprints table: made start_date and end_date nullable"]
@@ -253,6 +260,7 @@ def test_old_not_null_sprint_dates_migrate_to_nullable(
 def test_migration_preserves_sprint_rows_and_product_team_foreign_keys(
     legacy_engine: Engine,
 ) -> None:
+    """Verify row data and Sprint parent foreign keys survive rebuild."""
     migrate_sprint_nullable_dates(legacy_engine)
 
     with legacy_engine.connect() as conn:
@@ -270,8 +278,8 @@ def test_migration_preserves_sprint_rows_and_product_team_foreign_keys(
     assert str(row["end_date"]) == "2026-06-14"
     assert row["status"] == "Planned"
     assert row["close_snapshot_json"] == '{"state":"planned"}'
-    assert row["product_id"] == 101
-    assert row["team_id"] == 202
+    assert row["product_id"] == LEGACY_PRODUCT_ID
+    assert row["team_id"] == LEGACY_TEAM_ID
     assert {
         (foreign_key["from"], foreign_key["table"], foreign_key["to"])
         for foreign_key in foreign_keys
@@ -280,11 +288,10 @@ def test_migration_preserves_sprint_rows_and_product_team_foreign_keys(
         ("team_id", "teams", "team_id"),
     }
 
-    with pytest.raises(IntegrityError):
-        with legacy_engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
+    with pytest.raises(IntegrityError), legacy_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
                     INSERT INTO sprints(
                         goal,
                         start_date,
@@ -306,13 +313,14 @@ def test_migration_preserves_sprint_rows_and_product_team_foreign_keys(
                         202
                     )
                     """
-                )
             )
+        )
 
 
 def test_migration_preserves_sprint_story_links_and_indexes(
     legacy_engine: Engine,
 ) -> None:
+    """Verify Sprint links and indexes survive the table rebuild."""
     migrate_sprint_nullable_dates(legacy_engine)
 
     with legacy_engine.connect() as conn:
@@ -323,7 +331,7 @@ def test_migration_preserves_sprint_story_links_and_indexes(
         )
         violations = conn.execute(text("PRAGMA foreign_key_check")).all()
 
-    assert link["story_id"] == 303
+    assert link["story_id"] == LEGACY_STORY_ID
     assert str(link["added_at"]) == "2026-05-30 12:00:00"
     assert violations == []
     assert {
@@ -334,6 +342,7 @@ def test_migration_preserves_sprint_story_links_and_indexes(
 
 
 def test_migration_is_idempotent_after_rebuild(legacy_engine: Engine) -> None:
+    """Verify rerunning the nullable-date migration becomes a no-op."""
     assert migrate_sprint_nullable_dates(legacy_engine) == [
         "migrated sprints table: made start_date and end_date nullable"
     ]

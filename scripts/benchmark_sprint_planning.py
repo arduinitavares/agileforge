@@ -171,7 +171,6 @@ def benchmark() -> None:
     sprint_plan = {
         "sprint_goal": "Benchmark Sprint",
         "sprint_number": 1,
-        "duration_days": 14,
         "selected_stories": [
             {
                 "story_id": story_id,
@@ -183,11 +182,12 @@ def benchmark() -> None:
         ],
         "deselected_stories": [],
         "capacity_analysis": {
-            "velocity_assumption": "Medium",
-            "capacity_band": "30 stories",
+            "capacity_points": len(valid_story_ids) * 3,
+            "capacity_source": "user_override",
+            "capacity_basis": "Synthetic benchmark capacity.",
             "selected_count": len(valid_story_ids),
             "story_points_used": len(valid_story_ids) * 3,
-            "max_story_points": None,
+            "remaining_capacity_points": 0,
             "commitment_note": "Benchmark commitment check.",
             "reasoning": "Synthetic benchmark plan for save-path query counting.",
         },
@@ -206,8 +206,6 @@ def benchmark() -> None:
     plan_input = SaveSprintPlanInput(
         product_id=product_id,
         team_id=team_id,
-        sprint_start_date="2026-01-01",
-        sprint_duration_days=14,
     )
 
     # Measure

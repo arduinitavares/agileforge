@@ -1032,6 +1032,51 @@ def test_dashboard_pending_review_copy_is_not_project_setup_required() -> None:
     assert "Project Setup Required" not in review_card
 
 
+def test_dashboard_sprint_planning_ui_uses_point_capacity_contract() -> None:
+    """Keep Sprint planning UI aligned with point capacity, not calendar heuristics."""
+    html = Path("frontend/project.html").read_text()
+    js = Path("frontend/project.js").read_text()
+
+    assert 'id="sprint-velocity"' not in html
+    assert 'id="sprint-duration"' not in html
+    assert "Velocity Assumption" not in html
+    assert "Sprint Duration" not in html
+    assert "sprint-velocity" not in js
+    assert "sprint-duration" not in js
+    assert "SPRINT_VELOCITY_LIMITS" not in js
+    assert "team_velocity_assumption" not in js
+    assert "sprint_duration_days" not in js
+    assert "Max Story Points" in html
+    assert "project metrics recommendation" in html
+
+
+def test_dashboard_sprint_save_uses_guarded_contract_without_start_date() -> None:
+    """Keep Sprint save UI aligned with guarded API save contract."""
+    html = Path("frontend/project.html").read_text()
+    js = Path("frontend/project.js").read_text()
+
+    assert 'id="sprint-start-date"' not in html
+    assert "Sprint Start Date" not in html
+    assert "sprint-start-date" not in js
+    assert "sprint_start_date" not in js
+    assert "attempt_id" in js
+    assert "expected_artifact_fingerprint" in js
+    assert "expected_state: 'SPRINT_DRAFT'" in js
+    assert "idempotency_key" in js
+
+
+def test_dashboard_sprint_save_reuses_idempotency_key_for_current_draft() -> None:
+    """Keep retry clicks idempotent for the same reviewed Sprint draft."""
+    js = Path("frontend/project.js").read_text()
+
+    assert "let latestSprintSaveIdempotencyKey = null;" in js
+    assert "function sprintSaveIdempotencyKey()" in js
+    assert "idempotency_key: sprintSaveIdempotencyKey()" in js
+    assert "latestSprintSaveIdempotencyKey = null;" in js
+    save_payload_index = js.index("idempotency_key: sprintSaveIdempotencyKey()")
+    assert "Date.now()" not in js[save_payload_index : save_payload_index + 120]
+
+
 def test_state_forces_setup_required_when_product_missing_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

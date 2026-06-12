@@ -31,7 +31,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import desc
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import QueryableAttribute
@@ -436,10 +436,10 @@ class StoryCompleteRequest(BaseModel):
 class SprintGenerateRequest(BaseModel):
     """Request body for generating sprint plans."""
 
+    model_config = {"extra": "forbid"}
+
     user_input: str | None = None
-    team_velocity_assumption: Literal["Low", "Medium", "High"] = "Medium"
-    sprint_duration_days: int = 14
-    max_story_points: int | None = None
+    max_story_points: int | None = Field(default=None, gt=0)
     include_task_decomposition: bool = True
     selected_story_ids: list[int] | None = None
 
@@ -447,8 +447,28 @@ class SprintGenerateRequest(BaseModel):
 class SprintSaveRequest(BaseModel):
     """Request body for saving sprint details after execution."""
 
+    model_config = {"extra": "forbid"}
+
     team_name: str = Field(min_length=1)
-    sprint_start_date: str = Field(min_length=1)
+    attempt_id: str
+    expected_artifact_fingerprint: str
+    expected_state: str
+    idempotency_key: str
+
+    @field_validator(
+        "team_name",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    )
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            message = "must not be blank"
+            raise ValueError(message)
+        return normalized
 
 
 WORKFLOW_STEPS: list[dict[str, Any]] = [
@@ -532,6 +552,15 @@ AUTHORITY_EXPLICIT_GUARD_FIELDS: tuple[str, ...] = (
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _event_date_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
 
 
 def _normalize_fsm_state(value: str | None) -> str:
@@ -3072,6 +3101,31 @@ async def generate_project_sprint(
         product=product,
         session_id=session_id,
     )
+    capacity_points = req.max_story_points
+    capacity_source = "user_override" if req.max_story_points is not None else None
+    capacity_basis = (
+        f"{req.max_story_points} points, manually specified by user."
+        if req.max_story_points is not None
+        else ""
+    )
+    if capacity_points is None:
+        metrics_payload = await get_project_sprint_metrics(project_id)
+        metrics_data = metrics_payload.get("data") or {}
+        recommendation = metrics_data.get("recommendation") or {}
+        capacity_points = recommendation.get("recommended_next_sprint_points")
+        capacity_basis = recommendation.get("basis") or ""
+        if capacity_points is not None:
+            capacity_source = "project_metrics"
+    if capacity_points is None or capacity_source is None:
+        raise HTTPException(
+            status_code=422,
+            detail="max_story_points is required for Sprint capacity planning",
+        )
+    if not isinstance(capacity_points, int) or capacity_points <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Sprint capacity in story points must be positive",
+        )
     try:
         data = await generate_sprint_plan_service(
             project_id=project_id,
@@ -3084,8 +3138,9 @@ async def generate_project_sprint(
                 cast("dict[str, Any] | None", source),
                 fallback_summary=fallback_summary,
             ),
-            team_velocity_assumption=req.team_velocity_assumption,
-            sprint_duration_days=req.sprint_duration_days,
+            capacity_points=capacity_points,
+            capacity_source=capacity_source,
+            capacity_basis=capacity_basis,
             max_story_points=req.max_story_points,
             include_task_decomposition=req.include_task_decomposition,
             selected_story_ids=req.selected_story_ids,
@@ -3674,7 +3729,10 @@ async def save_project_sprint(
             build_tool_context=_build_tool_context,
             save_plan_tool=save_sprint_plan_tool,
             team_name=req.team_name,
-            sprint_start_date=req.sprint_start_date,
+            attempt_id=req.attempt_id,
+            expected_artifact_fingerprint=req.expected_artifact_fingerprint,
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
         )
     except SprintPhaseError as exc:
         raise HTTPException(
@@ -3714,8 +3772,12 @@ async def start_project_sprint(project_id: int, sprint_id: int) -> dict[str, Any
                         event_metadata=json.dumps(
                             {
                                 "team_id": sprint.team_id,
-                                "planned_start_date": str(sprint.start_date),
-                                "planned_end_date": str(sprint.end_date),
+                                "planned_start_date": _event_date_or_none(
+                                    sprint.start_date
+                                ),
+                                "planned_end_date": _event_date_or_none(
+                                    sprint.end_date
+                                ),
                             }
                         ),
                     )

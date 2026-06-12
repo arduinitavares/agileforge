@@ -10,9 +10,6 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeGuard, cast
 
-from orchestrator_agent.agent_tools.sprint_planner_tool.schemes import (
-    SprintPlannerOutput,
-)
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     SaveSprintPlanInput,
 )
@@ -257,8 +254,9 @@ async def generate_sprint_plan(
     failure_meta_builder: Callable[
         [dict[str, object] | None, str | None], dict[str, object]
     ],
-    team_velocity_assumption: str,
-    sprint_duration_days: int,
+    capacity_points: int,
+    capacity_source: str,
+    capacity_basis: str,
     max_story_points: int | None,
     include_task_decomposition: bool,
     selected_story_ids: list[int] | None,
@@ -312,8 +310,9 @@ async def generate_sprint_plan(
     sprint_result = await run_sprint_agent(
         state,
         project_id=project_id,
-        team_velocity_assumption=team_velocity_assumption,
-        sprint_duration_days=sprint_duration_days,
+        capacity_points=capacity_points,
+        capacity_source=capacity_source,
+        capacity_basis=capacity_basis,
         max_story_points=max_story_points,
         include_task_decomposition=include_task_decomposition,
         selected_story_ids=selected_story_ids,
@@ -586,7 +585,7 @@ def close_sprint(
     }
 
 
-async def save_sprint_plan(  # noqa: C901
+async def save_sprint_plan(
     *,
     project_id: int,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
@@ -597,13 +596,24 @@ async def save_sprint_plan(  # noqa: C901
     build_tool_context: Callable[[Any], Any],
     save_plan_tool: Callable[[SaveSprintPlanInput, Any], dict[str, Any]],
     team_name: str,
-    sprint_start_date: str,
-    attempt_id: str | None = None,
-    expected_artifact_fingerprint: str | None = None,
-    expected_state: str | None = None,
-    idempotency_key: str | None = None,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+    expected_state: str,
+    idempotency_key: str,
     load_candidates: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    normalized_team_name = _require_non_blank_save_text(team_name, "team_name")
+    attempt_id = _require_non_blank_save_text(attempt_id, "attempt_id")
+    expected_artifact_fingerprint = _require_non_blank_save_text(
+        expected_artifact_fingerprint,
+        "expected_artifact_fingerprint",
+    )
+    expected_state = _require_non_blank_save_text(expected_state, "expected_state")
+    idempotency_key = _require_non_blank_save_text(
+        idempotency_key,
+        "idempotency_key",
+    )
+
     state = await load_state()
     if reset_stale_saved_sprint_planner_working_set(
         state,
@@ -619,19 +629,13 @@ async def save_sprint_plan(  # noqa: C901
     if not isinstance(assessment, dict):
         raise SprintPhaseError("No sprint draft available to save")
 
-    if _guarded_save_requested(
+    _assert_save_expected_state(state, expected_state)
+    _assert_save_guards(
+        state=state,
+        assessment=assessment,
         attempt_id=attempt_id,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
-        expected_state=expected_state,
-        idempotency_key=idempotency_key,
-    ):
-        _assert_save_expected_state(state, expected_state)
-        _assert_save_guards(
-            state=state,
-            assessment=assessment,
-            attempt_id=attempt_id,
-            expected_artifact_fingerprint=expected_artifact_fingerprint,
-        )
+    )
     if not bool(assessment.get("is_complete", False)):
         raise SprintPhaseError("Sprint cannot be saved until is_complete is true")
 
@@ -647,38 +651,21 @@ async def save_sprint_plan(  # noqa: C901
         load_candidates=load_candidates,
     )
 
-    normalized_team_name = team_name.strip()
-    normalized_start_date = sprint_start_date.strip()
-    if not normalized_team_name:
-        raise SprintPhaseError("team_name is required", status_code=422)
-    if not normalized_start_date:
-        raise SprintPhaseError("sprint_start_date is required", status_code=422)
-
     assessment_payload = dict(assessment)
     assessment_payload.pop("is_complete", None)
     assessment_payload.pop("attempt_id", None)
     assessment_payload.pop("artifact_fingerprint", None)
     assessment_payload.pop("source_fingerprint", None)
 
-    try:
-        sprint_data = SprintPlannerOutput.model_validate(assessment_payload)
-    except Exception as exc:
-        raise SprintPhaseError(
-            f"Invalid sprint data in session: {exc!s}",
-            status_code=500,
-        ) from exc
-
     session_id = str(project_id)
     context = await hydrate_context(session_id, project_id)
-    context.state["sprint_plan"] = sprint_data.model_dump(exclude_none=True)
+    context.state["sprint_plan"] = assessment_payload
 
     result = save_plan_tool(
         SaveSprintPlanInput(
             product_id=project_id,
             team_id=None,
             team_name=normalized_team_name,
-            sprint_start_date=normalized_start_date,
-            sprint_duration_days=sprint_data.duration_days,
         ),
         build_tool_context(context),
     )
@@ -704,8 +691,7 @@ async def save_sprint_plan(  # noqa: C901
         "artifact_fingerprint": expected_artifact_fingerprint,
         "idempotency_key": idempotency_key,
     }
-    if idempotency_key is not None:
-        _record_sprint_save_replay(state, idempotency_key, payload)
+    _record_sprint_save_replay(state, idempotency_key, payload)
     save_state(state)
     return payload
 
@@ -795,30 +781,13 @@ def _attach_attempt_source_fingerprint(
 
 def _sprint_save_replay(
     state: dict[str, Any],
-    idempotency_key: str | None,
+    idempotency_key: str,
 ) -> dict[str, Any] | None:
-    if idempotency_key is None:
-        return None
     saves = state.get("sprint_save_idempotency_keys")
     if not isinstance(saves, dict):
         return None
     payload = saves.get(idempotency_key)
     return dict(payload) if isinstance(payload, dict) else None
-
-
-def _guarded_save_requested(
-    *,
-    attempt_id: str | None,
-    expected_artifact_fingerprint: str | None,
-    expected_state: str | None,
-    idempotency_key: str | None,
-) -> bool:
-    return (
-        attempt_id is not None
-        or expected_artifact_fingerprint is not None
-        or expected_state is not None
-        or idempotency_key is not None
-    )
 
 
 def _record_sprint_save_replay(
@@ -879,7 +848,7 @@ def _assert_sprint_start_expected_state(
 
 def _assert_save_expected_state(
     state: dict[str, Any],
-    expected_state: str | None,
+    expected_state: str,
 ) -> None:
     if expected_state != OrchestratorState.SPRINT_DRAFT.value:
         raise SprintPhaseError("Sprint save expected_state must be SPRINT_DRAFT")
@@ -890,12 +859,19 @@ def _assert_save_expected_state(
         )
 
 
+def _require_non_blank_save_text(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise SprintPhaseError(f"{field_name} is required", status_code=422)
+    return normalized
+
+
 def _assert_save_guards(
     *,
     state: dict[str, Any],
     assessment: dict[str, Any],
-    attempt_id: str | None,
-    expected_artifact_fingerprint: str | None,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
 ) -> None:
     selected_attempt = _find_sprint_attempt(state, attempt_id)
     if (
@@ -915,7 +891,7 @@ def _assert_save_guards(
 def _assert_latest_complete_sprint_attempt(
     *,
     state: dict[str, Any],
-    attempt_id: str | None,
+    attempt_id: str,
     assessment: dict[str, Any],
 ) -> None:
     attempts = ensure_sprint_attempts(state)

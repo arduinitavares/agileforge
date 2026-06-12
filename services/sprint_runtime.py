@@ -58,8 +58,9 @@ type ValidationErrors = list[ValidationErrorItem]
 
 
 class _RequiredSprintRunOptions(TypedDict):
-    team_velocity_assumption: str
-    sprint_duration_days: int
+    capacity_points: int
+    capacity_source: str
+    capacity_basis: str
     include_task_decomposition: bool
 
 
@@ -341,7 +342,11 @@ def _locked_capacity_validation_errors(
     expected_story_points_used = sum(
         story.story_points or 0 for story in prepared.payload.available_stories
     )
-    expected_max_story_points = prepared.payload.max_story_points
+    expected_capacity_points = prepared.payload.capacity_points
+    expected_remaining_capacity_points = max(
+        expected_capacity_points - expected_story_points_used,
+        0,
+    )
     errors: ValidationErrors = []
 
     if capacity.selected_count != expected_selected_count:
@@ -370,17 +375,57 @@ def _locked_capacity_validation_errors(
                 "actual": capacity.story_points_used,
             }
         )
-    if capacity.max_story_points != expected_max_story_points:
+    if capacity.capacity_points != expected_capacity_points:
         errors.append(
             {
                 "msg": (
                     "capacity analysis does not match locked Sprint selection: "
-                    f"max_story_points expected {expected_max_story_points}, "
-                    f"actual {capacity.max_story_points}"
+                    f"capacity_points expected {expected_capacity_points}, "
+                    f"actual {capacity.capacity_points}"
                 ),
-                "field": "capacity_analysis.max_story_points",
-                "expected": expected_max_story_points,
-                "actual": capacity.max_story_points,
+                "field": "capacity_analysis.capacity_points",
+                "expected": expected_capacity_points,
+                "actual": capacity.capacity_points,
+            }
+        )
+    if capacity.capacity_source != prepared.payload.capacity_source:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    f"capacity_source expected {prepared.payload.capacity_source}, "
+                    f"actual {capacity.capacity_source}"
+                ),
+                "field": "capacity_analysis.capacity_source",
+                "expected": prepared.payload.capacity_source,
+                "actual": capacity.capacity_source,
+            }
+        )
+    if capacity.capacity_basis != prepared.payload.capacity_basis:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    f"capacity_basis expected {prepared.payload.capacity_basis}, "
+                    f"actual {capacity.capacity_basis}"
+                ),
+                "field": "capacity_analysis.capacity_basis",
+                "expected": prepared.payload.capacity_basis,
+                "actual": capacity.capacity_basis,
+            }
+        )
+    if capacity.remaining_capacity_points != expected_remaining_capacity_points:
+        errors.append(
+            {
+                "msg": (
+                    "capacity analysis does not match locked Sprint selection: "
+                    "remaining_capacity_points expected "
+                    f"{expected_remaining_capacity_points}, "
+                    f"actual {capacity.remaining_capacity_points}"
+                ),
+                "field": "capacity_analysis.remaining_capacity_points",
+                "expected": expected_remaining_capacity_points,
+                "actual": capacity.remaining_capacity_points,
             }
         )
     return errors
@@ -491,8 +536,9 @@ def _prepare_sprint_payload(
 ) -> _PreparedSprintPayload | dict[str, Any]:
     prepared = prepare_sprint_input_context(
         product_id=project_id,
-        team_velocity_assumption=options["team_velocity_assumption"],
-        sprint_duration_days=options["sprint_duration_days"],
+        capacity_points=options["capacity_points"],
+        capacity_source=options["capacity_source"],
+        capacity_basis=options["capacity_basis"],
         user_context=options.get("user_input"),
         max_story_points=options.get("max_story_points"),
         include_task_decomposition=options["include_task_decomposition"],
@@ -812,8 +858,9 @@ async def run_sprint_agent_from_state(
 ) -> dict[str, Any]:
     """Run the sprint agent from prepared project state and normalize failures."""
     run_options: _SprintRunOptions = {
-        "team_velocity_assumption": options["team_velocity_assumption"],
-        "sprint_duration_days": options["sprint_duration_days"],
+        "capacity_points": options["capacity_points"],
+        "capacity_source": options["capacity_source"],
+        "capacity_basis": options["capacity_basis"],
         "include_task_decomposition": options["include_task_decomposition"],
         "max_story_points": options.get("max_story_points"),
         "selected_story_ids": options.get("selected_story_ids"),

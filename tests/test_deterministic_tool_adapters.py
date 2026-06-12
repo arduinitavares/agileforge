@@ -273,16 +273,21 @@ async def test_sprint_adapter_injects_refined_candidates_from_state(
 
     context = make_tool_context({"active_project": {"product_id": 7}})
     _ = await adapters.sprint_planner_tool(
-        team_velocity_assumption="high",
-        sprint_duration_days=40,
+        capacity_points=8,
+        capacity_source="user_override",
+        capacity_basis="8 points from explicit test capacity",
+        max_story_points=8,
         selected_story_ids=[12],
         include_task_decomposition=False,
         tool_context=context,
     )
 
     assert captured["tool_context"] is context
-    assert captured["args"]["team_velocity_assumption"] == "High"
-    assert captured["args"]["sprint_duration_days"] == 31  # noqa: PLR2004
+    assert captured["args"]["capacity_points"] == 8  # noqa: PLR2004
+    assert captured["args"]["capacity_source"] == "user_override"
+    assert captured["args"]["capacity_basis"] == (
+        "8 points from explicit test capacity"
+    )
     assert captured["args"]["include_task_decomposition"] is False
     assert captured["args"]["available_stories"] == [
         {
@@ -318,7 +323,12 @@ async def test_sprint_adapter_fail_fast_without_active_project(
     monkeypatch.setattr(adapters._SPRINT_PLANNER_TOOL, "run_async", fail_if_called)
 
     context = make_tool_context({})
-    result = await adapters.sprint_planner_tool(tool_context=context)
+    result = await adapters.sprint_planner_tool(
+        capacity_points=8,
+        capacity_source="user_override",
+        capacity_basis="8 points from explicit test capacity",
+        tool_context=context,
+    )
 
     assert result["is_complete"] is False
     assert result["error"] == "SPRINT_CONTEXT_MISSING"
@@ -357,6 +367,9 @@ async def test_sprint_adapter_rejects_non_eligible_selected_story_ids(
 
     context = make_tool_context({"active_project": {"product_id": 1}})
     result = await adapters.sprint_planner_tool(
+        capacity_points=8,
+        capacity_source="user_override",
+        capacity_basis="8 points from explicit test capacity",
         selected_story_ids=[999],
         tool_context=context,
     )
@@ -411,6 +424,9 @@ async def test_sprint_adapter_preserves_dependency_missing_selection_details(
 
     context = make_tool_context({"active_project": {"product_id": 7}})
     result = await adapters.sprint_planner_tool(
+        capacity_points=8,
+        capacity_source="user_override",
+        capacity_basis="8 points from explicit test capacity",
         selected_story_ids=[dependent_story_id],
         tool_context=context,
     )

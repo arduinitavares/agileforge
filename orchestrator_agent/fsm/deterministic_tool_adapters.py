@@ -161,25 +161,6 @@ def _derive_requirement_context(
     return None
 
 
-def _normalize_velocity(value: Any) -> str:
-    """Normalize velocity input to Low/Medium/High."""
-    normalized = _as_text(value).strip().lower()
-    if normalized == "low":
-        return "Low"
-    if normalized == "high":
-        return "High"
-    return "Medium"
-
-
-def _normalize_duration_days(value: Any) -> int:
-    """Normalize sprint duration into schema-safe bounds (1..31)."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 14
-    return max(1, min(parsed, 31))
-
-
 def _normalize_positive_int(value: Any) -> int | None:
     """Normalize optional positive integer fields."""
     if value is None:
@@ -411,8 +392,9 @@ async def roadmap_builder_tool(
 
 
 async def sprint_planner_tool(
-    team_velocity_assumption: str = "Medium",
-    sprint_duration_days: int = 14,
+    capacity_points: int,
+    capacity_source: str,
+    capacity_basis: str,
     user_context: str = "",
     max_story_points: Optional[int] = None,
     include_task_decomposition: bool = True,
@@ -442,8 +424,9 @@ async def sprint_planner_tool(
 
     prepared = prepare_sprint_input_context(
         product_id=product_id,
-        team_velocity_assumption=team_velocity_assumption,
-        sprint_duration_days=sprint_duration_days,
+        capacity_points=capacity_points,
+        capacity_source=capacity_source,
+        capacity_basis=capacity_basis,
         user_context=user_context,
         max_story_points=max_story_points,
         include_task_decomposition=include_task_decomposition,

@@ -6,7 +6,7 @@ import inspect
 
 import pytest
 
-import services.sprint_selection as sprint_selection
+from services import sprint_selection
 from services.sprint_selection import (
     SprintSelectionError,
     derive_group_slot,
@@ -57,7 +57,7 @@ def test_auto_selection_uses_priority_prefix_and_capacity() -> None:
     assert result.excluded_story_ids == [67]
 
 
-def test_auto_selection_can_exceed_legacy_high_story_limit_when_capacity_allows() -> None:
+def test_auto_selection_exceeds_legacy_story_limit_when_capacity_allows() -> None:
     """Verify auto mode uses story points capacity instead of story count limits."""
     rows = [
         _row(story_id, RANK_PRIORITY_BASE + story_id, 1)
@@ -135,6 +135,23 @@ def test_manual_selection_preserves_explicit_story_order() -> None:
     assert [row["story_id"] for row in result.selected_rows] == [3, 1]
     assert result.mode == "manual"
     assert result.story_points_used == EXPECTED_MANUAL_POINTS_USED
+
+
+def test_manual_selection_blocks_explicit_capacity_overflow() -> None:
+    """Verify manual mode enforces the explicit point capacity."""
+    rows = [_row(1, 101, 5), _row(2, 102, 5)]
+
+    with pytest.raises(SprintSelectionError) as exc_info:
+        select_sprint_story_rows(
+            rows,
+            max_story_points=5,
+            selected_story_ids=[1, 2],
+        )
+
+    assert exc_info.value.code == "SPRINT_SELECTION_CAPACITY_BLOCKED"
+    assert exc_info.value.details["required_story_ids"] == [1, 2]
+    assert exc_info.value.details["story_points"] == 10  # noqa: PLR2004
+    assert exc_info.value.details["max_story_points"] == 5  # noqa: PLR2004
 
 
 def test_manual_selection_raises_structured_error_for_missing_story_id() -> None:

@@ -23,10 +23,10 @@ Example:
       "evaluated_invariant_ids": ["INV-123"]
     }
   ],
-  "team_velocity_assumption": "Medium",
-  "sprint_duration_days": 14,
+  "capacity_points": 10,
+  "capacity_source": "user_override",
+  "capacity_basis": "User selected a 10 point capacity cap.",
   "user_context": "Focus on onboarding",
-  "max_story_points": 10,
   "include_task_decomposition": true
 }
 
@@ -37,12 +37,11 @@ Example:
     * Draft a **Sprint Goal**: A short, business-focused sentence explaining *why* we are running this sprint.
 
 2.  **Capacity Check (Page 88):**
-    * Treat the input `available_stories` as the fixed Sprint scope and estimate the "size" of the locked cohort based on their `invest_score` or T-shirt size.
-    * *Heuristic:*
-        * **Low Velocity:** ~2-3 stories per sprint.
-        * **Medium Velocity:** ~4-5 stories per sprint.
-        * **High Velocity:** ~6-7 stories per sprint.
-    * If `max_story_points` is provided, include it in capacity analysis when summing `story_points`.
+    * Treat the input `available_stories` as the fixed Sprint scope.
+    * Use `capacity_points` as the Sprint capacity cap.
+    * Echo `capacity_source` and `capacity_basis` in the output capacity analysis.
+    * Sum selected story points as `story_points_used`; treat missing story points as 0.
+    * Calculate `remaining_capacity_points` as capacity minus selected points, never below 0.
     * *Constraint:* Do not use capacity to change scope. Explain capacity fit or risk for the locked cohort.
 
 3.  **Locked Dependency-Safe Selection Contract:**
@@ -97,7 +96,6 @@ Example:
 {
   "sprint_goal": "Deliver onboarding-ready login flow",
   "sprint_number": 1,
-  "duration_days": 14,
   "selected_stories": [
     {
       "story_id": 123,
@@ -125,13 +123,14 @@ Example:
   ],
   "deselected_stories": [],
   "capacity_analysis": {
-    "velocity_assumption": "Medium",
-    "capacity_band": "4-5 stories",
+    "capacity_points": 10,
+    "capacity_source": "user_override",
+    "capacity_basis": "User selected a 10 point capacity cap.",
     "selected_count": 4,
     "story_points_used": 10,
-    "max_story_points": 10,
-    "commitment_note": "Does this scope feel achievable in 2 weeks?",
-    "reasoning": "Selection matches the sprint goal and fits the capacity band."
+    "remaining_capacity_points": 0,
+    "commitment_note": "Does this scope feel achievable?",
+    "reasoning": "Selection matches the sprint goal and uses the full point capacity."
   }
 }
 

@@ -3,11 +3,10 @@
 import json
 import re
 import time
-from datetime import date, timedelta
 from typing import Any, Optional, cast
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete
 from sqlmodel import Session, col, select
 
@@ -28,6 +27,8 @@ from .schemes import (
 class SaveSprintPlanInput(BaseModel):
     """Input schema for save_sprint_plan_tool."""
 
+    model_config = ConfigDict(extra="forbid")
+
     product_id: int = Field(description="Product ID for the sprint.")
     team_id: Optional[int] = Field(  # noqa: UP045
         default=None,
@@ -36,13 +37,6 @@ class SaveSprintPlanInput(BaseModel):
     team_name: Optional[str] = Field(  # noqa: UP045
         default=None,
         description="Team name to lookup or create. Used if team_id is not provided.",
-    )
-    sprint_start_date: str = Field(description="Sprint start date (YYYY-MM-DD).")
-    sprint_duration_days: int = Field(
-        default=14,
-        ge=1,
-        le=31,
-        description="Sprint duration in days (default 14, min 1, max 31).",
     )
 
 
@@ -295,18 +289,6 @@ def save_sprint_plan_tool(
                 + "; ".join(decomposition_errors),
             }
 
-        try:
-            start_date = date.fromisoformat(input_data.sprint_start_date)
-        except ValueError:
-            return {
-                "success": False,
-                "error": (
-                    f"Invalid date format: {input_data.sprint_start_date}. "
-                    "Use YYYY-MM-DD."
-                ),
-            }
-
-        end_date = start_date + timedelta(days=input_data.sprint_duration_days)
         sprint = existing_planned_sprint
         team_id = team.team_id
         if team_id is None:
@@ -317,8 +299,8 @@ def save_sprint_plan_tool(
         if sprint is None:
             sprint = Sprint(
                 goal=validated_plan.sprint_goal,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=None,
+                end_date=None,
                 status=SprintStatus.PLANNED,
                 started_at=None,
                 product_id=input_data.product_id,
@@ -328,8 +310,8 @@ def save_sprint_plan_tool(
             session.flush()
         else:
             sprint.goal = validated_plan.sprint_goal
-            sprint.start_date = start_date
-            sprint.end_date = end_date
+            sprint.start_date = None
+            sprint.end_date = None
             sprint.team_id = team_id
             sprint.status = SprintStatus.PLANNED
             sprint.started_at = None

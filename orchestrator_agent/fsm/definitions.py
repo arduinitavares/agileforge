@@ -5,9 +5,6 @@ from pydantic import BaseModel, Field
 from orchestrator_agent.agent_tools.backlog_primer.tools import save_backlog_tool
 from orchestrator_agent.agent_tools.product_vision_tool.tools import save_vision_tool
 from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
-from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
-    save_sprint_plan_tool,
-)
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,
 )
@@ -158,7 +155,7 @@ ROUTING_INSTRUCTION = """
 9. **Sprint Planning Request (After Stories):** User says "plan sprint", "sprint planning", or "sprint backlog"
    - If roadmap is missing: route to Roadmap flow first.
    - If user stories are missing (no saved stories for the project): route to Story Decomposition first.
-   - If stories exist, ask for candidate story selection and velocity assumptions, then call `sprint_planner_tool`.
+   - If stories exist, ask for point capacity, optional max-story-points/focus, and any candidate story selection, then call `sprint_planner_tool`.
 """
 
 VISION_INTERVIEW_INSTRUCTION = """
@@ -408,13 +405,11 @@ SPRINT_SETUP_INSTRUCTION = """
 
 **Behavior:**
 1. **Gather Inputs:** Ask the user for:
-   - `team_velocity_assumption` (Low/Medium/High).
-   - `sprint_duration_days` (default 14).
-   - Optional constraints: `max_story_points`, focus/context, and optional `selected_story_ids`.
+   - Sprint point capacity (`capacity_points`) or permission to use project metrics.
+   - Optional constraints: max-story-points, focus/context, and optional `selected_story_ids`.
 2. **Call Tool:** Call `sprint_planner_tool` with:
-   - `team_velocity_assumption`: User choice or default Medium.
-   - `sprint_duration_days`: User choice or default 14.
-   - Optional: `user_context`, `max_story_points`, `include_task_decomposition`, `selected_story_ids`.
+   - `capacity_points`, `capacity_source`, and `capacity_basis` when the user provides or confirms capacity.
+   - Optional: `user_context`, max-story-points, `include_task_decomposition`, `selected_story_ids`.
    - IMPORTANT: Do NOT pass `available_stories`; sprint candidates are injected deterministically from refined volatile/DB state.
 3. **STOP.**
 """
@@ -425,12 +420,9 @@ SPRINT_DRAFT_INSTRUCTION = """
 **Behavior:**
 1. **Display:** Present `sprint_goal`, `selected_stories` with tasks, and `capacity_analysis`.
 2. **Prompt:** Ask: "Does this sprint scope feel achievable?" and request approval to save.
-3. **On Approval:** Call `save_sprint_plan_tool` with:
-   - `product_id`: active project product_id
-   - `team_id`: user-provided team_id
-   - `team_name`: user-provided team name (if ID unknown)
-   - `sprint_start_date`: user-provided start date
-   - `sprint_duration_days`: from sprint plan or user override
+3. **On Approval:** Do not call a raw persistence tool. Tell the operator to
+   save through the guarded Sprint save command/API path, which requires
+   attempt_id, expected_artifact_fingerprint, expected_state, and idempotency_key.
 4. **On Changes:**
    - Collect updated inputs/constraints.
    - Re-call `sprint_planner_tool` with updated intent fields only.
@@ -609,7 +601,7 @@ STATE_REGISTRY = {
         name=OrchestratorState.SPRINT_DRAFT,
         phase=OrchestratorPhase.SPRINT,
         instruction=COMMON_HEADER + SPRINT_DRAFT_INSTRUCTION,
-        tools=[sprint_planner_tool, save_sprint_plan_tool, fetch_product_backlog],
+        tools=[sprint_planner_tool, fetch_product_backlog],
         allowed_transitions={
             OrchestratorState.SPRINT_SETUP,
             OrchestratorState.SPRINT_DRAFT,

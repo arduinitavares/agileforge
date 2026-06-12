@@ -28,9 +28,6 @@ from orchestrator_agent.agent_tools.roadmap_builder.tools import (
 from orchestrator_agent.agent_tools.sprint_planner_tool.agent import (
     root_agent as sprint_planner_agent,
 )
-from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
-    save_sprint_plan_tool,
-)
 from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
     root_agent as story_writer_agent,
 )
@@ -105,8 +102,6 @@ orchestrator_agent = Agent(
         save_backlog_tool,
         # Roadmap tools
         save_roadmap_tool,
-        # Sprint tools
-        save_sprint_plan_tool,
         # Story tools
         save_stories_tool,
         # Agent tools

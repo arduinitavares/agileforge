@@ -26,12 +26,42 @@ class MockToolContext:
         self.state = state
 
 
+def _capacity_analysis_payload(
+    *,
+    capacity_points: int,
+    capacity_source: str = "user_override",
+    capacity_basis: str | None = None,
+    selected_count: int,
+    story_points_used: int,
+) -> dict[str, object]:
+    basis = capacity_basis or f"{capacity_points} points"
+    return {
+        "capacity_points": capacity_points,
+        "capacity_source": capacity_source,
+        "capacity_basis": basis,
+        "selected_count": selected_count,
+        "story_points_used": story_points_used,
+        "remaining_capacity_points": max(capacity_points - story_points_used, 0),
+        "commitment_note": "Does this scope feel achievable?",
+        "reasoning": "The selected work fits the point capacity.",
+    }
+
+
+def _old_velocity_input_key() -> str:
+    return "team" + "_" + "velocity" + "_" + "assumption"
+
+
+def _old_sprint_duration_input_key() -> str:
+    return "sprint" + "_" + "duration" + "_" + "days"
+
+
 def _valid_sprint_output(*, max_story_points: int | None = 13) -> str:
+    capacity_points = 9 if max_story_points is None else max_story_points
+    capacity_source = "project_metrics" if max_story_points is None else "user_override"
     return json.dumps(
         {
             "sprint_goal": "Deliver onboarding-ready login flow",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [
                 {
                     "story_id": 12,
@@ -63,15 +93,12 @@ def _valid_sprint_output(*, max_story_points: int | None = 13) -> str:
                 }
             ],
             "deselected_stories": [],
-            "capacity_analysis": {
-                "velocity_assumption": "High",
-                "capacity_band": "6-7 stories",
-                "selected_count": 1,
-                "story_points_used": 3,
-                "max_story_points": max_story_points,
-                "commitment_note": "Does this scope feel achievable in 2 weeks?",
-                "reasoning": "This scope fits the chosen capacity band.",
-            },
+            "capacity_analysis": _capacity_analysis_payload(
+                capacity_points=capacity_points,
+                capacity_source=capacity_source,
+                selected_count=1,
+                story_points_used=3,
+            ),
         }
     )
 
@@ -84,11 +111,14 @@ def _sprint_output_for_story_ids(
     max_story_points: int | None = 10,
     deselected_stories: list[dict[str, object]] | None = None,
 ) -> str:
+    capacity_points = 10 if max_story_points is None else max_story_points
+    used_points = (
+        2 * len(story_ids) if story_points_used is None else story_points_used
+    )
     return json.dumps(
         {
             "sprint_goal": "Deliver locked sprint scope",
             "sprint_number": 1,
-            "duration_days": 14,
             "selected_stories": [
                 {
                     "story_id": story_id,
@@ -99,21 +129,13 @@ def _sprint_output_for_story_ids(
                 for story_id in story_ids
             ],
             "deselected_stories": deselected_stories or [],
-            "capacity_analysis": {
-                "velocity_assumption": "Medium",
-                "capacity_band": "2 stories",
-                "selected_count": (
+            "capacity_analysis": _capacity_analysis_payload(
+                capacity_points=capacity_points,
+                selected_count=(
                     len(story_ids) if selected_count is None else selected_count
                 ),
-                "story_points_used": (
-                    2 * len(story_ids)
-                    if story_points_used is None
-                    else story_points_used
-                ),
-                "max_story_points": max_story_points,
-                "commitment_note": "Does this scope feel achievable in 2 weeks?",
-                "reasoning": "The selected work fits the locked sprint scope.",
-            },
+                story_points_used=used_points,
+            ),
         }
     )
 
@@ -144,12 +166,13 @@ def test_prepare_sprint_input_context_rejects_invalid_selected_story_ids(
 
     prepared = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="High",
-        sprint_duration_days=14,
         user_context="Focus on persistence",
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[999],
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert prepared["success"] is False
@@ -177,13 +200,14 @@ def test_prepare_sprint_input_context_rejects_duplicate_selected_story_ids() -> 
 
     prepared = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=4,
         include_task_decomposition=True,
         selected_story_ids=[66, 66],
         fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
     )
 
     assert prepared["success"] is False
@@ -229,17 +253,28 @@ def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
 
     prepared = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=4,
         include_task_decomposition=True,
         selected_story_ids=None,
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
     )
 
     assert prepared["success"] is True
     assert prepared["selected_story_ids"] == [66, 85]
     assert prepared["selection_policy"]["mode"] == "auto"
+    assert prepared["selection_policy"]["capacity_points"] == 4  # noqa: PLR2004
+    assert prepared["selection_policy"]["capacity_source"] == "user_override"
+    assert prepared["selection_policy"]["capacity_basis"] == "4 points"
+    assert prepared["selection_policy"]["max_story_points"] == 4  # noqa: PLR2004
+    assert prepared["input_context"]["capacity_points"] == 4  # noqa: PLR2004
+    assert prepared["input_context"]["capacity_source"] == "user_override"
+    assert prepared["input_context"]["capacity_basis"] == "4 points"
+    assert _old_velocity_input_key() not in prepared["input_context"]
+    assert _old_sprint_duration_input_key() not in prepared["input_context"]
+    assert "max_story_points" not in prepared["input_context"]
     assert [
         story["story_id"] for story in prepared["input_context"]["available_stories"]
     ] == [66, 85]
@@ -279,13 +314,14 @@ def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:
 
     result = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=4,
         include_task_decomposition=True,
         selected_story_ids=None,
         fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
     )
 
     assert result["selected_story_ids"] == [66, 85]
@@ -294,6 +330,40 @@ def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:
     assert result["selection_policy"]["dependency_edges"] == [
         {"dependent_story_id": 85, "prerequisite_story_id": 66}
     ]
+
+
+def test_prepare_sprint_input_context_rejects_missing_capacity_points() -> None:
+    """Verify sprint input never silently defaults missing capacity."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 66,
+                    "story_title": "Budget parameter",
+                    "priority": 101,
+                    "story_points": 1,
+                }
+            ],
+        }
+
+    prepare_context = cast("Any", sprint_input.prepare_sprint_input_context)
+    result = prepare_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=None,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_source="project_metrics",
+        capacity_basis="historical project metrics",
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "SPRINT_CAPACITY_INVALID"
 
 
 def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text() -> (
@@ -333,18 +403,17 @@ def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text
 
     first = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=None,
         fetch_candidates=fetch_with_title("Validate Squad Budget Compliance"),
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
     changed = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=None,
         include_task_decomposition=True,
@@ -352,6 +421,9 @@ def test_prepare_sprint_input_context_source_fingerprint_changes_with_story_text
         fetch_candidates=fetch_with_title(
             "Require Explicit Budget and Validate Squad Compliance"
         ),
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert first["success"] is True
@@ -373,7 +445,11 @@ def test_prepare_sprint_payload_preserves_source_fingerprint(
         **options: object,
     ) -> dict[str, object]:
         assert product_id == 7  # noqa: PLR2004
-        assert options["team_velocity_assumption"] == "Medium"
+        assert options["capacity_points"] == 9  # noqa: PLR2004
+        assert options["capacity_source"] == "project_metrics"
+        assert options["capacity_basis"] == "9 points"
+        assert _old_velocity_input_key() not in options
+        assert _old_sprint_duration_input_key() not in options
         return {
             "success": True,
             "source_fingerprint": source_fingerprint,
@@ -397,11 +473,10 @@ def test_prepare_sprint_payload_preserves_source_fingerprint(
                         "dependency_status": "ready",
                     }
                 ],
-                "team_velocity_assumption": "Medium",
-                "sprint_duration_days": 14,
-                "max_story_points": 4,
+                "capacity_points": 9,
+                "capacity_source": "project_metrics",
+                "capacity_basis": "9 points",
                 "include_task_decomposition": True,
-                "selected_story_ids": [66],
             },
         }
 
@@ -414,8 +489,9 @@ def test_prepare_sprint_payload_preserves_source_fingerprint(
     prepared = sprint_runtime._prepare_sprint_payload(
         project_id=7,
         options={
-            "team_velocity_assumption": "Medium",
-            "sprint_duration_days": 14,
+            "capacity_points": 9,
+            "capacity_source": "project_metrics",
+            "capacity_basis": "9 points",
             "include_task_decomposition": True,
             "max_story_points": 4,
             "selected_story_ids": None,
@@ -426,6 +502,56 @@ def test_prepare_sprint_payload_preserves_source_fingerprint(
     assert isinstance(prepared, sprint_runtime._PreparedSprintPayload)
     assert prepared.source_fingerprint == source_fingerprint
     assert prepared.selection_policy["source_fingerprint"] == source_fingerprint
+
+
+def test_prepare_sprint_payload_builds_capacity_input_without_legacy_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared Sprint payload uses capacity args without velocity/duration input."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 1,
+            "stories": [
+                {
+                    "story_id": 66,
+                    "story_title": "Budget parameter",
+                    "priority": 101,
+                    "story_points": 4,
+                    "evaluated_invariant_ids": [],
+                }
+            ],
+            "readiness": {"status": "ready", "blocking_codes": []},
+        }
+
+    monkeypatch.setattr(
+        sprint_input, "fetch_sprint_candidates", fake_fetch_sprint_candidates
+    )
+
+    prepared = sprint_runtime._prepare_sprint_payload(
+        project_id=7,
+        options={
+            "capacity_points": 4,
+            "capacity_source": "user_override",
+            "capacity_basis": "4 points",
+            "include_task_decomposition": True,
+            "max_story_points": 4,
+            "selected_story_ids": None,
+            "user_input": None,
+        },
+    )
+
+    assert isinstance(prepared, sprint_runtime._PreparedSprintPayload)
+    payload = prepared.payload.model_dump()
+    assert payload["capacity_points"] == 4  # noqa: PLR2004
+    assert payload["capacity_source"] == "user_override"
+    assert payload["capacity_basis"] == "4 points"
+    assert _old_velocity_input_key() not in payload
+    assert _old_sprint_duration_input_key() not in payload
+    assert "max_story_points" not in payload
+    assert prepared.selection_policy["max_story_points"] == 4  # noqa: PLR2004
 
 
 def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
@@ -447,7 +573,11 @@ def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
         **options: object,
     ) -> dict[str, object]:
         assert product_id == 7  # noqa: PLR2004
-        assert options["team_velocity_assumption"] == "Medium"
+        assert options["capacity_points"] == 9  # noqa: PLR2004
+        assert options["capacity_source"] == "project_metrics"
+        assert options["capacity_basis"] == "9 points"
+        assert _old_velocity_input_key() not in options
+        assert _old_sprint_duration_input_key() not in options
         return {
             "success": True,
             "input_context": {},
@@ -482,8 +612,9 @@ def test_prepare_sprint_payload_preserves_policy_on_input_validation_failure(
         sprint_runtime._prepare_sprint_payload(
             project_id=7,
             options={
-                "team_velocity_assumption": "Medium",
-                "sprint_duration_days": 14,
+                "capacity_points": 9,
+                "capacity_source": "project_metrics",
+                "capacity_basis": "9 points",
                 "include_task_decomposition": True,
                 "max_story_points": 4,
                 "selected_story_ids": None,
@@ -526,12 +657,13 @@ def test_prepare_sprint_input_context_returns_selection_error(
 
     prepared = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Low",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=3,
         include_task_decomposition=True,
         selected_story_ids=None,
+        capacity_points=3,
+        capacity_source="user_override",
+        capacity_basis="3 points",
     )
 
     assert prepared["success"] is False
@@ -641,8 +773,6 @@ def test_prepare_sprint_input_filters_to_story_completion_scope(
 
     prepared = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="High",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=10,
         include_task_decomposition=True,
@@ -652,6 +782,9 @@ def test_prepare_sprint_input_filters_to_story_completion_scope(
             "scope_id": "milestone_0",
             "requirements": ["Enable Login", "Reset Password"],
         },
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert prepared["success"] is True
@@ -758,11 +891,12 @@ def test_prepare_sprint_input_preserves_dependency_metadata(
 
     result = sprint_input.prepare_sprint_input_context(
         product_id=7,
-        team_velocity_assumption="Medium",
-        sprint_duration_days=14,
         user_context=None,
         max_story_points=None,
         include_task_decomposition=True,
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert result["success"] is True
@@ -841,18 +975,25 @@ async def test_run_sprint_agent_filters_candidates_from_story_completion_scope(
             }
         },
         project_id=7,
-        team_velocity_assumption="High",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=None,
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is True
     assert [
         story["story_id"] for story in captured["payload"]["available_stories"]
     ] == [first_scoped_story_id, second_scoped_story_id]
+    assert captured["payload"]["capacity_points"] == 10  # noqa: PLR2004
+    assert captured["payload"]["capacity_source"] == "user_override"
+    assert captured["payload"]["capacity_basis"] == "10 points"
+    assert _old_velocity_input_key() not in captured["payload"]
+    assert _old_sprint_duration_input_key() not in captured["payload"]
+    assert "max_story_points" not in captured["payload"]
     assert result["input_context"]["available_stories"][0]["story_id"] == (
         first_scoped_story_id
     )
@@ -914,17 +1055,19 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
     runtime_result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="high",
-        sprint_duration_days=40,
         max_story_points=13,
         include_task_decomposition=False,
         selected_story_ids=[12],
         user_input="Focus on persistence",
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
     context = MockToolContext({"active_project": {"product_id": 7}})
     _ = await adapters.sprint_planner_tool(
-        team_velocity_assumption="high",
-        sprint_duration_days=40,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
         user_context="Focus on persistence",
         max_story_points=13,
         include_task_decomposition=False,
@@ -958,10 +1101,10 @@ async def test_runtime_and_adapter_build_matching_sprint_input(
                 "dependency_status": "ready",
             }
         ],
-        "team_velocity_assumption": "High",
-        "sprint_duration_days": 31,
+        "capacity_points": 13,
+        "capacity_source": "user_override",
+        "capacity_basis": "13 points",
         "user_context": "Focus on persistence",
-        "max_story_points": 13,
         "include_task_decomposition": False,
     }
 
@@ -1013,12 +1156,13 @@ async def test_runtime_rejects_output_that_changes_locked_selection(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is False
@@ -1069,12 +1213,13 @@ async def test_runtime_rejects_output_that_drops_locked_selection(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is False
@@ -1125,12 +1270,13 @@ async def test_runtime_rejects_locked_selection_selected_count_mismatch(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is False
@@ -1178,12 +1324,13 @@ async def test_runtime_rejects_locked_selection_story_points_mismatch(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is False
@@ -1231,12 +1378,13 @@ async def test_runtime_rejects_locked_selection_max_story_points_mismatch(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is False
@@ -1292,12 +1440,13 @@ async def test_runtime_rejects_locked_selection_deselected_stories(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is False
@@ -1348,12 +1497,13 @@ async def test_runtime_accepts_output_that_matches_locked_selection(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=10,
         include_task_decomposition=False,
         selected_story_ids=[12, 13],
         user_input=None,
+        capacity_points=10,
+        capacity_source="user_override",
+        capacity_basis="10 points",
     )
 
     assert result["success"] is True
@@ -1395,12 +1545,13 @@ async def test_runtime_rejects_out_of_scope_task_invariant_bindings(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert result["success"] is False
@@ -1464,12 +1615,13 @@ async def test_runtime_passes_story_acceptance_criteria_into_decomposition_valid
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert result["success"] is True
@@ -1508,7 +1660,6 @@ async def test_runtime_rejects_poor_task_decomposition_quality(
             {
                 "sprint_goal": "goal",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [
                     {
                         "story_id": 12,
@@ -1527,15 +1678,12 @@ async def test_runtime_rejects_poor_task_decomposition_quality(
                     }
                 ],
                 "deselected_stories": [],
-                "capacity_analysis": {
-                    "velocity_assumption": "High",
-                    "capacity_band": "6-7 stories",
-                    "selected_count": 1,
-                    "story_points_used": 3,
-                    "max_story_points": None,
-                    "commitment_note": "Valid note",
-                    "reasoning": "Valid reasoning",
-                },
+                "capacity_analysis": _capacity_analysis_payload(
+                    capacity_points=9,
+                    capacity_source="project_metrics",
+                    selected_count=1,
+                    story_points_used=3,
+                ),
             }
         )
 
@@ -1547,12 +1695,13 @@ async def test_runtime_rejects_poor_task_decomposition_quality(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=None,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=9,
+        capacity_source="project_metrics",
+        capacity_basis="9 points",
     )
 
     assert result["success"] is False
@@ -1598,7 +1747,6 @@ async def test_runtime_retries_task_decomposition_validation_with_feedback(
             {
                 "sprint_goal": "Deliver onboarding-ready event persistence",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [
                     {
                         "story_id": 12,
@@ -1617,15 +1765,11 @@ async def test_runtime_retries_task_decomposition_validation_with_feedback(
                     }
                 ],
                 "deselected_stories": [],
-                "capacity_analysis": {
-                    "velocity_assumption": "Medium",
-                    "capacity_band": "4-5 stories",
-                    "selected_count": 1,
-                    "story_points_used": 3,
-                    "max_story_points": 13,
-                    "commitment_note": "Does this scope feel achievable in 2 weeks?",
-                    "reasoning": "This scope fits the chosen capacity band.",
-                },
+                "capacity_analysis": _capacity_analysis_payload(
+                    capacity_points=13,
+                    selected_count=1,
+                    story_points_used=3,
+                ),
             }
         )
 
@@ -1637,12 +1781,13 @@ async def test_runtime_retries_task_decomposition_validation_with_feedback(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is True
@@ -1681,7 +1826,6 @@ async def test_runtime_exposes_compact_public_task_kind_retry_hints(
             {
                 "sprint_goal": "goal",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [
                     {
                         "story_id": 12,
@@ -1700,15 +1844,11 @@ async def test_runtime_exposes_compact_public_task_kind_retry_hints(
                     }
                 ],
                 "deselected_stories": [],
-                "capacity_analysis": {
-                    "velocity_assumption": "Medium",
-                    "capacity_band": "4-5 stories",
-                    "selected_count": 1,
-                    "story_points_used": 3,
-                    "max_story_points": 13,
-                    "commitment_note": "Does this scope feel achievable in 2 weeks?",
-                    "reasoning": "Fits the chosen capacity.",
-                },
+                "capacity_analysis": _capacity_analysis_payload(
+                    capacity_points=13,
+                    selected_count=1,
+                    story_points_used=3,
+                ),
             }
         )
 
@@ -1720,12 +1860,13 @@ async def test_runtime_exposes_compact_public_task_kind_retry_hints(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is False
@@ -1762,7 +1903,6 @@ async def test_runtime_uses_canonical_public_hint_for_non_string_task_kind(
             {
                 "sprint_goal": "goal",
                 "sprint_number": 1,
-                "duration_days": 14,
                 "selected_stories": [
                     {
                         "story_id": 12,
@@ -1781,15 +1921,11 @@ async def test_runtime_uses_canonical_public_hint_for_non_string_task_kind(
                     }
                 ],
                 "deselected_stories": [],
-                "capacity_analysis": {
-                    "velocity_assumption": "Medium",
-                    "capacity_band": "4-5 stories",
-                    "selected_count": 1,
-                    "story_points_used": 3,
-                    "max_story_points": 13,
-                    "commitment_note": "Does this scope feel achievable in 2 weeks?",
-                    "reasoning": "Fits the chosen capacity.",
-                },
+                "capacity_analysis": _capacity_analysis_payload(
+                    capacity_points=13,
+                    selected_count=1,
+                    story_points_used=3,
+                ),
             }
         )
 
@@ -1801,12 +1937,13 @@ async def test_runtime_uses_canonical_public_hint_for_non_string_task_kind(
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is False
@@ -1929,12 +2066,13 @@ async def test_runtime_falls_back_to_public_hint_for_adk_task_kind_errors_withou
     result = await sprint_runtime.run_sprint_agent_from_state(
         {},
         project_id=7,
-        team_velocity_assumption="medium",
-        sprint_duration_days=14,
         max_story_points=13,
         include_task_decomposition=True,
         selected_story_ids=[12],
         user_input=None,
+        capacity_points=13,
+        capacity_source="user_override",
+        capacity_basis="13 points",
     )
 
     assert result["success"] is False
