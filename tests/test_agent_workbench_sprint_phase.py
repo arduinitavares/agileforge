@@ -1421,6 +1421,198 @@ def test_sprint_task_update_replays_done_without_duplicate_logs(
     assert logs[0].acceptance_result == TaskAcceptanceResult.FULLY_MET
 
 
+def _seed_active_task_for_evidence_tests(
+    session: Session,
+    *,
+    artifact_targets: list[str] | None = None,
+) -> tuple[Product, Task, str]:
+    product = Product(name="Evidence Contract Product")
+    team = Team(name="Evidence Contract Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    story = UserStory(
+        product_id=product.product_id,
+        title="Close sprint task with evidence",
+        story_description="As an agent, I close a task with the required evidence.",
+        acceptance_criteria="- Done closure includes required evidence",
+        story_points=1,
+        rank="111",
+        status=StoryStatus.IN_PROGRESS,
+        is_refined=True,
+    )
+    session.add(story)
+    session.flush()
+    assert story.story_id is not None
+
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Verify Done evidence contract",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+
+    task = Task(
+        story_id=story.story_id,
+        description="Close task with structured evidence",
+        status=TaskStatus.IN_PROGRESS,
+        metadata_json=serialize_task_metadata(
+            TaskMetadata(
+                task_kind="validation",
+                artifact_targets=list(artifact_targets or []),
+                checklist_items=["Evidence contract is satisfied"],
+            )
+        ),
+    )
+    session.add(task)
+    session.commit()
+    assert task.task_id is not None
+
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+    show = runner.task_show(project_id=product.product_id, task_id=task.task_id)
+    fingerprint = show["data"]["task_ticket"]["guards"]["expected_task_fingerprint"]
+    return product, task, str(fingerprint)
+
+
+def test_sprint_task_update_rejects_done_without_outcome_summary(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done updates require a nonblank outcome summary."""
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    product, task, fingerprint = _seed_active_task_for_evidence_tests(session)
+    assert product.product_id is not None
+    assert task.task_id is not None
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=fingerprint,
+        idempotency_key="close-task-missing-outcome-001",
+        checklist_result="fully_met",
+        validation_summary="uv run pytest tests/test_contract.py -q",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert details["reason_code"] == "TASK_CLOSE_EVIDENCE_REQUIRED"
+    assert details["missing_fields"] == ["outcome_summary"]
+
+
+def test_sprint_task_update_rejects_done_without_checklist_result(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done updates require an explicit checklist result."""
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    product, task, fingerprint = _seed_active_task_for_evidence_tests(session)
+    assert product.product_id is not None
+    assert task.task_id is not None
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=fingerprint,
+        idempotency_key="close-task-missing-checklist-001",
+        outcome_summary="Closed the task with complete implementation evidence.",
+        validation_summary="uv run pytest tests/test_contract.py -q",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert details["reason_code"] == "TASK_CLOSE_EVIDENCE_REQUIRED"
+    assert details["missing_fields"] == ["checklist_result"]
+
+
+def test_sprint_task_update_rejects_done_with_not_checked_result(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done updates reject the not_checked checklist result."""
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    product, task, fingerprint = _seed_active_task_for_evidence_tests(session)
+    assert product.product_id is not None
+    assert task.task_id is not None
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=fingerprint,
+        idempotency_key="close-task-not-checked-001",
+        outcome_summary="Closed the task with complete implementation evidence.",
+        checklist_result="not_checked",
+        validation_summary="uv run pytest tests/test_contract.py -q",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert details["reason_code"] == "TASK_CLOSE_EVIDENCE_REQUIRED"
+    assert details["missing_fields"] == ["checklist_result"]
+
+
+def test_sprint_task_update_done_accepts_complete_evidence_without_artifact_targets(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done updates accept complete close evidence when no artifacts are targeted."""
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    product, task, fingerprint = _seed_active_task_for_evidence_tests(session)
+    assert product.product_id is not None
+    assert task.task_id is not None
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.task_update(
+        project_id=product.product_id,
+        task_id=task.task_id,
+        status="Done",
+        expected_status="In Progress",
+        expected_task_fingerprint=fingerprint,
+        idempotency_key="close-task-complete-evidence-001",
+        outcome_summary="Closed the task with complete implementation evidence.",
+        checklist_result="fully_met",
+        validation_summary="uv run pytest tests/test_contract.py -q",
+        changed_by="cli-agent",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["execution"]["current_status"] == "Done"
+
+
 def test_sprint_task_update_rejects_blocked_task_start(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,

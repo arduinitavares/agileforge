@@ -2594,12 +2594,7 @@ def _build_task_ticket(
                 task_row.get("relevant_invariant_ids") or []
             ),
             "workstream_tags": list(task_row.get("workstream_tags") or []),
-            "done_requires": {
-                "outcome_summary": True,
-                "checklist_result": True,
-                "artifact_refs": "required_if_artifact_targets_present",
-                "validation_summary": True,
-            },
+            "done_requires": _done_requires_contract(),
         },
         "history": {
             "latest_entry": history.get("latest_entry"),
@@ -2721,6 +2716,16 @@ def _task_execution_notes(
     return "\n".join(parts) if parts else None
 
 
+def _done_requires_contract() -> dict[str, object]:
+    """Return the published evidence requirements for task Done transitions."""
+    return {
+        "outcome_summary": True,
+        "checklist_result": True,
+        "artifact_refs": "required_if_artifact_targets_present",
+        "validation_summary": True,
+    }
+
+
 def _task_execution_write_request(  # noqa: PLR0913
     *,
     new_status: TaskStatus,
@@ -2732,11 +2737,24 @@ def _task_execution_write_request(  # noqa: PLR0913
     changed_by: str,
 ) -> TaskExecutionWriteRequest:
     """Build and validate a task execution write request."""
-    if new_status == TaskStatus.DONE and not (
-        validation_summary and validation_summary.strip()
-    ):
-        message = "validation_summary is required when marking a task Done."
-        raise ValueError(message)
+    if new_status == TaskStatus.DONE:
+        missing_fields: list[str] = []
+        if not (validation_summary and validation_summary.strip()):
+            missing_fields.append("validation_summary")
+        if not (outcome_summary and outcome_summary.strip()):
+            missing_fields.append("outcome_summary")
+        if acceptance_result in {None, TaskAcceptanceResult.NOT_CHECKED}:
+            missing_fields.append("checklist_result")
+        if missing_fields:
+            message = "TASK_CLOSE_EVIDENCE_REQUIRED: task Done requires close evidence."
+            raise _SprintTaskUpdateError(
+                message,
+                details={
+                    "reason_code": "TASK_CLOSE_EVIDENCE_REQUIRED",
+                    "missing_fields": missing_fields,
+                    "done_requires": _done_requires_contract(),
+                },
+            )
     return TaskExecutionWriteRequest(
         new_status=new_status,
         outcome_summary=outcome_summary,
