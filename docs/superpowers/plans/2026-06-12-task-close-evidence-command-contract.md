@@ -53,8 +53,8 @@ Replace the current task update command assertion with this exact expected comma
             '--expected-status "<expected_status>" '
             "--expected-task-fingerprint <task_fingerprint> "
             "--idempotency-key <idempotency_key> "
-            "--outcome-summary <outcome_summary> "
-            "--validation-summary <validation_summary> "
+            '--outcome-summary "<outcome_summary>" '
+            '--validation-summary "<validation_summary>" '
             "--checklist-result fully_met "
             "--artifact-ref <artifact_ref>"
         ),
@@ -104,8 +104,8 @@ def sprint_task_update_command_text(
     if include_done_evidence:
         parts.extend(
             [
-                "--outcome-summary <outcome_summary>",
-                "--validation-summary <validation_summary>",
+                '--outcome-summary "<outcome_summary>"',
+                '--validation-summary "<validation_summary>"',
                 "--checklist-result fully_met",
             ]
         )
@@ -189,8 +189,8 @@ with:
         '--expected-status "In Progress" '
         f"--expected-task-fingerprint {ticket['guards']['expected_task_fingerprint']} "
         "--idempotency-key <idempotency_key> "
-        "--outcome-summary <outcome_summary> "
-        "--validation-summary <validation_summary> "
+        '--outcome-summary "<outcome_summary>" '
+        '--validation-summary "<validation_summary>" '
         "--checklist-result fully_met "
         "--artifact-ref <artifact_ref>"
     )
@@ -266,8 +266,8 @@ def test_sprint_task_next_omits_artifact_ref_when_no_targets(
     assert result["ok"] is True
     ticket = result["data"]["task_ticket"]
     update_command = ticket["next_actions"]["update"]
-    assert "--outcome-summary <outcome_summary>" in update_command
-    assert "--validation-summary <validation_summary>" in update_command
+    assert '--outcome-summary "<outcome_summary>"' in update_command
+    assert '--validation-summary "<validation_summary>"' in update_command
     assert "--checklist-result fully_met" in update_command
     assert "--artifact-ref" not in update_command
 ```

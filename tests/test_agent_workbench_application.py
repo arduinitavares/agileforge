@@ -3912,10 +3912,14 @@ def test_workflow_next_routes_sprint_view_to_execution_commands() -> None:
         "agileforge sprint task show --project-id 7 --task-id <task_id>",
         (
             "agileforge sprint task update --project-id 7 "
-            "--task-id <task_id> --status <status> "
-            "--expected-status <expected_status> "
+            "--task-id <task_id> --status Done "
+            '--expected-status "<expected_status>" '
             "--expected-task-fingerprint <task_fingerprint> "
-            "--idempotency-key <idempotency_key>"
+            "--idempotency-key <idempotency_key> "
+            '--outcome-summary "<outcome_summary>" '
+            '--validation-summary "<validation_summary>" '
+            "--checklist-result fully_met "
+            "--artifact-ref <artifact_ref>"
         ),
         ("agileforge sprint story readiness --project-id 7 --story-id <story_id>"),
         (

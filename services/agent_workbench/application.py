@@ -4266,6 +4266,10 @@ def _sprint_command_candidates(
             ),
         ]
     if fsm_state == "SPRINT_VIEW":
+        from services.agent_workbench.sprint_phase import (  # noqa: PLC0415
+            sprint_task_update_command_text,
+        )
+
         return [
             (
                 "agileforge sprint task next",
@@ -4288,12 +4292,15 @@ def _sprint_command_candidates(
             ),
             (
                 "agileforge sprint task update",
-                (
-                    f"agileforge sprint task update --project-id {project_id} "
-                    "--task-id <task_id> --status <status> "
-                    "--expected-status <expected_status> "
-                    "--expected-task-fingerprint <task_fingerprint> "
-                    "--idempotency-key <idempotency_key>"
+                sprint_task_update_command_text(
+                    project_id=project_id,
+                    task_id="<task_id>",
+                    status="Done",
+                    expected_status="<expected_status>",
+                    expected_task_fingerprint="<task_fingerprint>",
+                    idempotency_key="<idempotency_key>",
+                    include_done_evidence=True,
+                    artifact_targets=None,
                 ),
             ),
             (

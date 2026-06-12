@@ -81,8 +81,8 @@ Behavior:
 
 - Always include the guard arguments.
 - When `include_done_evidence=true`, append:
-  - `--outcome-summary <outcome_summary>`
-  - `--validation-summary <validation_summary>`
+  - `--outcome-summary "<outcome_summary>"`
+  - `--validation-summary "<validation_summary>"`
   - `--checklist-result fully_met`
   - `--artifact-ref <artifact_ref>` when artifact targets are unknown or
     present.
@@ -120,8 +120,8 @@ it should use placeholders:
 - `--expected-task-fingerprint <task_fingerprint>`
 - `--idempotency-key <idempotency_key>`
 - `--status Done`
-- `--outcome-summary <outcome_summary>`
-- `--validation-summary <validation_summary>`
+- `--outcome-summary "<outcome_summary>"`
+- `--validation-summary "<validation_summary>"`
 - `--checklist-result fully_met`
 - `--artifact-ref <artifact_ref>`
 

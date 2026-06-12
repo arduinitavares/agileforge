@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -2488,6 +2489,41 @@ def _next_task_ticket(
         ),
         "in_progress_task" if in_progress else "next_unblocked_todo",
     )
+
+
+def sprint_task_update_command_text(  # noqa: PLR0913
+    *,
+    project_id: int,
+    task_id: int | str,
+    status: str,
+    expected_status: str,
+    expected_task_fingerprint: str,
+    idempotency_key: str,
+    include_done_evidence: bool,
+    artifact_targets: Sequence[object] | None,
+) -> str:
+    """Return a guarded Sprint task update command for CLI agents."""
+    parts = [
+        f"agileforge sprint task update --project-id {project_id}",
+        f"--task-id {task_id}",
+        f"--status {status}",
+        f'--expected-status "{expected_status}"',
+        f"--expected-task-fingerprint {expected_task_fingerprint}",
+        f"--idempotency-key {idempotency_key}",
+    ]
+    if include_done_evidence:
+        parts.extend(
+            [
+                '--outcome-summary "<outcome_summary>"',
+                '--validation-summary "<validation_summary>"',
+                "--checklist-result fully_met",
+            ]
+        )
+        targets_known = artifact_targets is not None
+        has_targets = bool(list(artifact_targets or []))
+        if not targets_known or has_targets:
+            parts.append("--artifact-ref <artifact_ref>")
+    return " ".join(parts)
 
 
 def _build_task_ticket(
