@@ -163,8 +163,7 @@ agileforge sprint save --project-id <id> \
 ### API
 
 `POST /api/projects/{project_id}/sprint/generate` removes
-`sprint_duration_days` from the request schema. Requests containing this field
-must fail validation rather than be silently accepted.
+`sprint_duration_days` and `team_velocity_assumption` from the request schema. Requests containing these removed fields must fail validation rather than be silently accepted. All Pydantic request schemas for sprint operations must forbid extra fields (`extra = Extra.forbid` or `model_config = ConfigDict(extra="forbid")`) so that requests containing removed fields return HTTP 422.
 
 The generation request must keep:
 
@@ -173,12 +172,15 @@ The generation request must keep:
 - `include_task_decomposition`
 - `selected_story_ids`
 
-The generation request must remove `team_velocity_assumption`. Requests
-containing this field must fail validation.
+`POST /api/projects/{project_id}/sprint/save` replaces the old `team_name` and `sprint_start_date` request body fields. It requires:
 
-`POST /api/projects/{project_id}/sprint/save` removes `sprint_start_date` from
-the request schema. Requests containing this field must fail validation. New
-planned Sprints must no longer require planned calendar dates.
+- `team_name` (string, min_length=1)
+- `attempt_id` (string)
+- `expected_artifact_fingerprint` (string)
+- `expected_state` (string)
+- `idempotency_key` (string)
+
+It rejects `sprint_start_date` and all removed calendar fields with HTTP 422 validation. New planned Sprints must no longer require planned calendar dates.
 
 ### Dashboard UI
 
@@ -344,6 +346,12 @@ Read projections must prefer execution timestamps for runtime evidence. If a
 legacy row has `start_date` / `end_date`, those fields may be returned only as
 historical data and must not be labeled as planning controls.
 
+When returning or rendering sprint projections (API history/runtime/UI) where planned dates `start_date` and `end_date` are null, they must project clean null/empty values (e.g. `None` in Python payloads or empty strings in HTML tables) and not render synthetic date values, `"None"`, or misleading ranges.
+
+### Save Sprint Tool Input
+
+`SaveSprintPlanInput` schema (used by `save_sprint_plan_tool`) drops the `sprint_start_date` and `sprint_duration_days` fields. The save tool persists the sprint to the database without executing date validations.
+
 ## Workflow Behavior
 
 `workflow next` and Sprint runtime summaries must expose metrics-informed
@@ -377,7 +385,9 @@ choose one of these explicit paths:
 
 - use user-provided `max_story_points`;
 - use metrics-derived `recommended_next_sprint_points`;
-- block generation with a capacity-required error.
+- block generation with a capacity-required error (`SPRINT_CAPACITY_REQUIRED`).
+
+If candidate selection or dependency closure results in selected stories exceeding the capacity points constraint, the selection flow must fail cleanly with a named error or validation response (e.g., `CAPACITY_OVERFLOW`).
 
 ## Compatibility Decision
 
