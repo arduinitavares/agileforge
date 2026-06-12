@@ -566,7 +566,6 @@ def prepare_sprint_input_context(
     try:
         selection = select_sprint_story_rows(
             candidate_rows,
-            team_velocity_assumption=team_velocity_assumption,
             max_story_points=max_story_points,
             selected_story_ids=normalized_selected_ids,
         )
@@ -633,8 +632,6 @@ def prepare_sprint_input_context(
             "excluded_story_ids": selection.excluded_story_ids,
             "story_points_used": selection.story_points_used,
             "max_story_points": selection.max_story_points,
-            "team_velocity_assumption": selection.team_velocity_assumption,
-            "story_limit": selection.story_limit,
             "dependency_closed": selection.dependency_closed,
             "dependency_edges": selection.dependency_edges,
             "dependency_promoted_story_ids": selection.dependency_promoted_story_ids,

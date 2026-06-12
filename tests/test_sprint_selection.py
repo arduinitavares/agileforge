@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
+import services.sprint_selection as sprint_selection
 from services.sprint_selection import (
     SprintSelectionError,
     derive_group_slot,
@@ -18,7 +21,7 @@ EXPECTED_MANUAL_POINTS_USED = 3
 EXPECTED_DEPENDENCY_POINTS_USED = 4
 DEPENDENT_STORY_ID = 85
 RANK_PRIORITY_BASE = 100
-STORY_COUNT_WITH_EXCESS = 9
+STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT = 9
 
 
 def _row(story_id: int, priority: int, points: int) -> dict[str, object]:
@@ -44,7 +47,6 @@ def test_auto_selection_uses_priority_prefix_and_capacity() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=4,
         selected_story_ids=[],
     )
@@ -55,31 +57,39 @@ def test_auto_selection_uses_priority_prefix_and_capacity() -> None:
     assert result.excluded_story_ids == [67]
 
 
-@pytest.mark.parametrize(
-    ("velocity", "expected_count"),
-    [("Low", 3), ("Medium", 5), ("High", 7)],
-)
-def test_auto_selection_applies_velocity_story_limit(
-    velocity: str,
-    expected_count: int,
-) -> None:
-    """Verify auto mode bounds selected story count by velocity assumption."""
+def test_auto_selection_can_exceed_legacy_high_story_limit_when_capacity_allows() -> None:
+    """Verify auto mode uses story points capacity instead of story count limits."""
     rows = [
         _row(story_id, RANK_PRIORITY_BASE + story_id, 1)
-        for story_id in range(1, STORY_COUNT_WITH_EXCESS)
+        for story_id in range(1, STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT + 1)
     ]
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption=velocity,
         max_story_points=20,
         selected_story_ids=[],
     )
 
-    assert result.selected_story_ids == list(range(1, expected_count + 1))
-    assert result.story_limit == expected_count
-    assert result.excluded_story_ids == list(
-        range(expected_count + 1, STORY_COUNT_WITH_EXCESS)
+    assert result.selected_story_ids == list(
+        range(1, STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT + 1)
+    )
+    assert result.story_points_used == STORY_COUNT_ABOVE_LEGACY_HIGH_LIMIT
+    assert result.excluded_story_ids == []
+
+
+def test_sprint_selection_exposes_no_story_limit_contract() -> None:
+    """Verify the removed velocity story-limit path stays absent."""
+    rows = [_row(1, 101, 1)]
+
+    result = select_sprint_story_rows(
+        rows,
+        max_story_points=1,
+        selected_story_ids=[],
+    )
+
+    assert "story_limit" not in result.__dataclass_fields__
+    assert "SPRINT_SELECTION_STORY_LIMIT_BLOCKED" not in inspect.getsource(
+        sprint_selection
     )
 
 
@@ -89,7 +99,6 @@ def test_auto_selection_stops_instead_of_skipping_over_capacity_story() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="High",
         max_story_points=3,
         selected_story_ids=[],
     )
@@ -105,7 +114,6 @@ def test_auto_selection_blocks_when_first_story_exceeds_explicit_capacity() -> N
     with pytest.raises(SprintSelectionError) as exc_info:
         select_sprint_story_rows(
             rows,
-            team_velocity_assumption="Low",
             max_story_points=3,
             selected_story_ids=[],
         )
@@ -120,7 +128,6 @@ def test_manual_selection_preserves_explicit_story_order() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=3,
         selected_story_ids=[3, 1],
     )
@@ -137,7 +144,6 @@ def test_manual_selection_raises_structured_error_for_missing_story_id() -> None
     with pytest.raises(SprintSelectionError) as exc_info:
         select_sprint_story_rows(
             rows,
-            team_velocity_assumption="Medium",
             max_story_points=5,
             selected_story_ids=[2, 9],
         )
@@ -153,7 +159,6 @@ def test_manual_selection_raises_structured_error_for_duplicate_story_id() -> No
     with pytest.raises(SprintSelectionError) as exc_info:
         select_sprint_story_rows(
             rows,
-            team_velocity_assumption="Medium",
             max_story_points=5,
             selected_story_ids=[1, 1],
         )
@@ -190,7 +195,6 @@ def test_auto_selection_promotes_prerequisite_before_dependent() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=4,
         selected_story_ids=[],
     )
@@ -211,7 +215,6 @@ def test_auto_selection_promotes_transitive_prerequisites() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=5,
         selected_story_ids=[],
     )
@@ -229,7 +232,6 @@ def test_auto_selection_ignores_unparseable_candidate_prerequisite_ids() -> None
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=4,
         selected_story_ids=[],
     )
@@ -248,7 +250,6 @@ def test_manual_selection_blocks_missing_prerequisite() -> None:
     with pytest.raises(SprintSelectionError) as exc_info:
         select_sprint_story_rows(
             rows,
-            team_velocity_assumption="Medium",
             max_story_points=4,
             selected_story_ids=[85],
         )
@@ -267,7 +268,6 @@ def test_manual_selection_reorders_to_dependency_safe_order() -> None:
 
     result = select_sprint_story_rows(
         rows,
-        team_velocity_assumption="Medium",
         max_story_points=4,
         selected_story_ids=[85, 66],
     )

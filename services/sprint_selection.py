@@ -6,14 +6,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-_VELOCITY_STORY_LIMITS: dict[str, int] = {
-    "Low": 3,
-    "Medium": 5,
-    "High": 7,
-}
-_DEFAULT_STORY_LIMIT = 5
-_RANK_PRIORITY_BASE = 100
-
 
 class SprintSelectionError(ValueError):
     """Raised when AgileForge cannot produce a safe locked Sprint selection."""
@@ -41,8 +33,6 @@ class SprintSelectionResult:
     excluded_story_ids: list[int]
     story_points_used: int
     max_story_points: int | None
-    team_velocity_assumption: str
-    story_limit: int
     warnings: list[dict[str, Any]] = field(default_factory=list)
     dependency_closed: bool = True
     dependency_edges: list[dict[str, int]] = field(default_factory=list)
@@ -52,8 +42,6 @@ class SprintSelectionResult:
 @dataclass(frozen=True)
 class _SelectionPolicy:
     max_story_points: int | None
-    team_velocity_assumption: str
-    story_limit: int
 
 
 @dataclass(frozen=True)
@@ -72,35 +60,28 @@ class _ResultDependencyMetadata:
 
 def derive_parent_group(priority: int | None) -> int | None:
     """Return the parent group encoded by rank-style priority."""
-    if priority is None or priority < _RANK_PRIORITY_BASE:
+    if priority is None or priority < 100:
         return None
-    return priority // _RANK_PRIORITY_BASE
+    return priority // 100
 
 
 def derive_group_slot(priority: int | None) -> int | None:
     """Return the child slot encoded by rank-style priority."""
-    if priority is None or priority < _RANK_PRIORITY_BASE:
+    if priority is None or priority < 100:
         return None
-    slot = priority % _RANK_PRIORITY_BASE
+    slot = priority % 100
     return slot or None
 
 
 def select_sprint_story_rows(
     rows: list[dict[str, Any]],
     *,
-    team_velocity_assumption: str,
     max_story_points: int | None,
     selected_story_ids: list[int],
 ) -> SprintSelectionResult:
     """Select the locked Sprint cohort before the LLM runs."""
-    story_limit = _VELOCITY_STORY_LIMITS.get(
-        team_velocity_assumption,
-        _DEFAULT_STORY_LIMIT,
-    )
     policy = _SelectionPolicy(
         max_story_points=max_story_points,
-        team_velocity_assumption=team_velocity_assumption,
-        story_limit=story_limit,
     )
 
     if selected_story_ids:
@@ -220,14 +201,6 @@ def _select_auto(
             priority_index=priority_index,
         )
 
-        if len(selected_rows) + len(cohort.rows) > policy.story_limit:
-            if not selected_rows:
-                _raise_story_limit_blocked(
-                    story_id=story_id,
-                    required_story_ids=cohort.story_ids,
-                    policy=policy,
-                )
-            break
         if (
             policy.max_story_points is not None
             and used_points + cohort.story_points > policy.max_story_points
@@ -308,26 +281,6 @@ def _cohort_story_points(rows: list[dict[str, Any]]) -> int:
             )
         story_points += row_points
     return story_points
-
-
-def _raise_story_limit_blocked(
-    *,
-    story_id: int,
-    required_story_ids: list[int],
-    policy: _SelectionPolicy,
-) -> None:
-    raise SprintSelectionError(
-        code="SPRINT_SELECTION_STORY_LIMIT_BLOCKED",
-        message=(
-            "The highest-priority dependency-closed story cohort exceeds "
-            "the velocity story limit."
-        ),
-        details={
-            "blocking_story_id": story_id,
-            "required_story_ids": required_story_ids,
-            "story_limit": policy.story_limit,
-        },
-    )
 
 
 def _raise_capacity_blocked(
@@ -520,8 +473,6 @@ def _result(
         excluded_story_ids=excluded_ids,
         story_points_used=sum(_story_points(row) for row in selected_rows),
         max_story_points=policy.max_story_points,
-        team_velocity_assumption=policy.team_velocity_assumption,
-        story_limit=policy.story_limit,
         warnings=dependency_metadata.warnings,
         dependency_edges=dependency_metadata.edges,
         dependency_promoted_story_ids=dependency_metadata.promoted_story_ids,
