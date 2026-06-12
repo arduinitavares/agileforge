@@ -845,7 +845,7 @@ def test_sprint_save_command_schema_requires_guard_fields() -> None:
     assert save["idempotency_required"] is True
 
 
-def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
+def test_sprint_commands_are_registered() -> None:  # noqa: PLR0915
     """Expose Sprint phase generation commands as installed CLI capabilities."""
     names = installed_command_names()
     capabilities = _capability_by_name()
@@ -998,6 +998,12 @@ def test_sprint_phase_commands_are_registered_and_available() -> None:  # noqa: 
         "notes",
         "changed_by",
     ]
+    assert {
+        "outcome_summary",
+        "artifact_ref",
+        "checklist_result",
+        "validation_summary",
+    }.issubset(set(task_update["input"]["optional"]))
     for schema in (
         generate,
         history,

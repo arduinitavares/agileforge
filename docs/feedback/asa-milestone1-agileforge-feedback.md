@@ -101,6 +101,23 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   status, story/task completion counts, story points, timestamps, elapsed
   seconds, and history fidelity.
 
+#### Sprint task update command omits required close-evidence arguments
+
+- Original feedback item: `Sprint task update command omits required
+  close-evidence arguments`.
+- Product issue considered: real command-contract bug. `workflow next` and
+  `sprint task next/show` could advertise `sprint task update` commands for
+  `Done` transitions without the close evidence that mutation validation
+  requires.
+- Fix status: fixed in `dev/task-close-evidence-contract` for issue #137.
+- Why fixed: advertised runnable commands must include the evidence fields
+  required to complete the same mutation from the same workflow snapshot.
+- Expected behavior after fix: Done update command projections include
+  `--outcome-summary`, `--validation-summary`, `--checklist-result fully_met`,
+  and conditional `--artifact-ref` placeholders; mutation validation returns
+  structured `TASK_CLOSE_EVIDENCE_REQUIRED` details when required close evidence
+  is missing.
+
 ### Considered but not fixed yet
 
 #### Sprint generation validation failure details
