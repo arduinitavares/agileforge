@@ -2546,6 +2546,7 @@ def _build_task_ticket(
         task_id=task_id,
     )
     fingerprint = _task_row_fingerprint(sprint=sprint, task_row=task_row)
+    current_status = _enum_value(task.status) or ""
     return {
         "ticket_type": "sprint_task",
         "project_id": project_id,
@@ -2553,7 +2554,7 @@ def _build_task_ticket(
         "task": {
             "task_id": task_id,
             "description": task.description,
-            "status": _enum_value(task.status),
+            "status": current_status,
             "task_kind": task_row.get("task_kind"),
             "task_execution_order": task_row.get("task_execution_order"),
             "task_fingerprint": fingerprint,
@@ -2601,7 +2602,7 @@ def _build_task_ticket(
             "log_count": len(cast("list[Any]", history.get("history") or [])),
         },
         "guards": {
-            "expected_status": _enum_value(task.status),
+            "expected_status": current_status,
             "expected_task_fingerprint": fingerprint,
         },
         "next_actions": {
@@ -2609,7 +2610,7 @@ def _build_task_ticket(
                 project_id=project_id,
                 task_id=task_id,
                 status=TaskStatus.DONE.value,
-                expected_status=_enum_value(task.status),
+                expected_status=current_status,
                 expected_task_fingerprint=fingerprint,
                 idempotency_key="<idempotency_key>",
                 include_done_evidence=True,

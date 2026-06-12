@@ -1282,7 +1282,7 @@ def test_sprint_task_next_omits_artifact_ref_when_no_targets(
         status=TaskStatus.IN_PROGRESS,
         metadata_json=serialize_task_metadata(
             TaskMetadata(
-                task_kind="validation",
+                task_kind="testing",
                 checklist_items=["Checklist-only work is done"],
             )
         ),
@@ -1466,7 +1466,7 @@ def _seed_active_task_for_evidence_tests(
         status=TaskStatus.IN_PROGRESS,
         metadata_json=serialize_task_metadata(
             TaskMetadata(
-                task_kind="validation",
+                task_kind="testing",
                 artifact_targets=list(artifact_targets or []),
                 checklist_items=["Evidence contract is satisfied"],
             )
