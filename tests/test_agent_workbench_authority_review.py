@@ -24,6 +24,7 @@ from utils.agileforge_spec_profile import (
     canonical_spec_json,
 )
 from utils.spec_schemas import (
+    AuthorityQualityReport,
     Invariant,
     InvariantType,
     RequiredFieldParams,
@@ -395,6 +396,125 @@ def test_review_text_format_returns_ok_packet_with_human_text(
     assert "ACCEPT:" in data["text"]
     assert "REJECT:" in data["text"]
     assert "--idempotency-key <idempotency_key>" in data["text"]
+
+
+def test_review_text_format_summarizes_human_acceptance_decision(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Text format answers the human accept/reject review questions."""
+    spec_content = _agileforge_spec_profile_payload(
+        requirement_statement=(
+            "The product has exactly two user-visible consent decisions."
+        ),
+        acceptance=[
+            "The authority review preserves the two-consent model.",
+        ],
+    )
+    authority_quality = AuthorityQualityReport.model_validate(
+        {
+            "schema_version": "agileforge.authority_quality.v1",
+            "summary": {
+                "original_invariant_count": 4,
+                "final_invariant_count": 3,
+                "merged_invariant_count": 1,
+                "merged_assumption_count": 0,
+                "review_group_count": 1,
+                "near_duplicate_group_count": 0,
+                "over_split_group_count": 1,
+                "noisy_assumption_group_count": 0,
+            },
+            "merged_items": [],
+            "review_groups": [
+                {
+                    "group_id": "AQ-GROUP-001",
+                    "group_type": "over_split_invariants",
+                    "severity": "warning",
+                    "member_ids": [INVARIANT_ID],
+                    "reason": "duplicate/over-split consent invariant noise",
+                    "merge_allowed": False,
+                    "truncated": False,
+                }
+            ],
+        }
+    )
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority review"],
+        domain="agent workbench",
+        invariants=[
+            Invariant(
+                id=INVARIANT_ID,
+                type=InvariantType.REQUIRED_FIELD,
+                parameters=RequiredFieldParams(field_name="consent_decisions"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[
+            "operator confirms export boundary before review-state export",
+        ],
+        source_map=[
+            SourceMapEntry(
+                invariant_id=INVARIANT_ID,
+                excerpt="The product has exactly two user-visible consent decisions.",
+                location="REQ.guard-tokens.statement",
+            )
+        ],
+        compiler_version=COMPILER_VERSION,
+        prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
+        authority_quality=authority_quality,
+    )
+    project_id, _spec_version_id, authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            artifact_json=_stored_compiled_success_json_from_success(success),
+        )
+    )
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    assert authority is not None
+    authority.rejected_features = json.dumps(
+        [
+            {
+                "id": "NON_GOAL-training",
+                "text": (
+                    "NON_GOAL: future training automation is excluded from "
+                    "current authority."
+                ),
+                "support": "direct",
+                "source_refs": ["NON_GOAL.training"],
+                "source_excerpt": "Future training automation is not current behavior.",
+            }
+        ]
+    )
+    session.add(authority)
+    session.commit()
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id,
+        output_format="text",
+    )
+
+    assert result["ok"] is True
+    text = result["data"]["text"]
+    assert "Recommendation: accept" in text
+    assert "Preserved requirements:" in text
+    assert "two user-visible consent decisions" in text
+    assert "Gaps:" in text
+    assert "No blocking gaps found." in text
+    assert "Assumptions:" in text
+    assert "operator confirms export boundary" in text
+    assert "Excluded/non-current scope:" in text
+    assert "NON_GOAL" in text
+    assert "future training automation" in text
+    assert "Warnings:" in text
+    assert "duplicate/over-split" in text
+    assert "ACCEPT:" in text
+    assert "REJECT:" in text
 
 
 def test_review_preserves_rejected_features_from_valid_compiled_authority(

@@ -73,6 +73,8 @@ AUTHORITY_REVIEW_COMMAND: Final[str] = "agileforge authority review"
 REVIEW_TOKEN_SCHEMA: Final[str] = "agileforge.authority_review.v1"  # noqa: S105
 COVERAGE_SCHEMA: Final[str] = "agileforge.authority_coverage_summary.v1"
 DEFAULT_REVIEW_SOURCE_LIMIT_BYTES: Final[int] = 262_144
+AUTHORITY_REVIEW_TEXT_ITEM_LIMIT: Final[int] = 7
+AUTHORITY_REVIEW_TEXT_LINE_LIMIT: Final[int] = 220
 STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "GOAL.",
     "NON_GOAL.",
@@ -1164,14 +1166,25 @@ def _render_review_text(packet: JsonDict) -> str:
     spec = _mapping_or_none(packet.get("spec"))
     pending = _mapping_or_none(packet.get("pending_authority"))
     guards = _mapping_or_none(packet.get("guard_tokens"))
+    summary = _mapping_or_none(packet.get("review_summary")) or {}
+    artifact = _mapping_or_none(_mapping_value(pending, "artifact")) or {}
     next_actions = packet.get("next_actions")
     actions = next_actions if isinstance(next_actions, list) else []
+    acceptance_status = str(summary.get("acceptance_status") or "unknown")
+    recommendation = (
+        "accept"
+        if acceptance_status == "accept_ready"
+        else "reject or resolve blocking findings"
+    )
     lines = [
-        "Authority review",
+        f"Authority review for project {_mapping_value(project, 'project_id')}",
         f"Project: {_mapping_value(project, 'project_id')}",
         f"Project name: {_mapping_value(project, 'name')}",
         f"FSM state: {_mapping_value(project, 'fsm_state')}",
         f"Setup status: {_mapping_value(project, 'setup_status')}",
+        f"Status: {acceptance_status}",
+        f"Recommendation: {recommendation}",
+        f"Spec version: {_mapping_value(spec, 'spec_version_id')}",
         f"Pending authority: {_mapping_value(pending, 'authority_id')}",
         (
             "Authority fingerprint: "
@@ -1184,10 +1197,190 @@ def _render_review_text(packet: JsonDict) -> str:
             f"{_mapping_value(guards, 'expected_omission_assessment')}"
         ),
         f"Review token: {_mapping_value(guards, 'review_token')}",
-        f"ACCEPT: {_action_command(actions, index=0)}",
-        f"REJECT: {_action_command(actions, index=1)}",
+        (
+            "Counts: "
+            f"invariants={summary.get('compiler_invariant_count', 0)}, "
+            f"gaps={summary.get('compiler_gap_count', 0)}, "
+            f"assumptions={summary.get('compiler_assumption_count', 0)}, "
+            f"excluded={summary.get('compiler_rejected_feature_count', 0)}"
+        ),
+        "",
+        "Preserved requirements:",
     ]
+    _append_text_item_lines(
+        lines,
+        artifact.get("invariants"),
+        empty_line="No preserved requirements found.",
+    )
+    lines.append("")
+    lines.append("Gaps:")
+    _append_text_item_lines(
+        lines,
+        artifact.get("gaps"),
+        empty_line="No blocking gaps found.",
+    )
+    lines.append("")
+    lines.append("Assumptions:")
+    _append_text_item_lines(
+        lines,
+        artifact.get("assumptions"),
+        empty_line="No assumptions recorded.",
+    )
+    lines.append("")
+    lines.append("Excluded/non-current scope:")
+    _append_text_item_lines(
+        lines,
+        artifact.get("rejected_features"),
+        empty_line="No NON_GOAL or future-scope exclusions recorded.",
+    )
+    lines.append("")
+    lines.append("Warnings:")
+    _append_warning_lines(lines, summary=summary, artifact=artifact)
+    lines.extend(
+        [
+            "",
+            "Commands:",
+            f"ACCEPT: {_action_command(actions, index=0)}",
+            f"REJECT: {_action_command(actions, index=1)}",
+        ]
+    )
     return "\n".join(lines)
+
+
+def _append_text_item_lines(
+    lines: list[str],
+    value: object,
+    *,
+    empty_line: str,
+) -> None:
+    """Append a capped bullet list from review artifact items."""
+    item_lines = [
+        item
+        for item in (_text_item_summary(item) for item in _as_list(value))
+        if item
+    ]
+    if not item_lines:
+        lines.append(f"- {empty_line}")
+        return
+    lines.extend(
+        f"- {_truncate_review_text_line(item)}"
+        for item in item_lines[:AUTHORITY_REVIEW_TEXT_ITEM_LIMIT]
+    )
+    remaining = len(item_lines) - AUTHORITY_REVIEW_TEXT_ITEM_LIMIT
+    if remaining > 0:
+        lines.append(f"- ... {remaining} more")
+
+
+def _text_item_summary(item: object) -> str:
+    """Return a compact human text summary for a review artifact item."""
+    if isinstance(item, Mapping):
+        item_mapping = cast("Mapping[object, object]", item)
+        item_id = str(item_mapping.get("id") or "").strip()
+        source_excerpt = _first_text_field(item_mapping, ("source_excerpt",))
+        text = _first_text_field(
+            item_mapping,
+            ("text", "description", "summary", "title"),
+        )
+        if source_excerpt and text and source_excerpt != text:
+            text = f"{source_excerpt} ({text})"
+        elif source_excerpt:
+            text = source_excerpt
+        if item_id and text:
+            return f"{item_id}: {text}"
+        return text or item_id
+    if isinstance(item, str):
+        return item.strip()
+    return ""
+
+
+def _first_text_field(item: Mapping[object, object], keys: tuple[str, ...]) -> str:
+    """Return the first non-empty text field from a mapping."""
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _truncate_review_text_line(text: str) -> str:
+    """Keep review text compact enough for comments and issues."""
+    if len(text) <= AUTHORITY_REVIEW_TEXT_LINE_LIMIT:
+        return text
+    return f"{text[: AUTHORITY_REVIEW_TEXT_LINE_LIMIT - 4].rstrip()} ..."
+
+
+def _int_mapping_value(mapping: Mapping[object, object], key: str) -> int:
+    """Return an integer mapping value, defaulting invalid input to zero."""
+    value = mapping.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _append_warning_lines(
+    lines: list[str],
+    *,
+    summary: Mapping[object, object],
+    artifact: Mapping[object, object],
+) -> None:
+    """Append duplicate and over-split authority-quality warning summaries."""
+    warning_count = _int_mapping_value(summary, "quality_review_group_count")
+    near_duplicate_count = _int_mapping_value(
+        summary,
+        "quality_near_duplicate_group_count",
+    )
+    over_split_count = _int_mapping_value(summary, "quality_over_split_group_count")
+    noisy_assumption_count = _int_mapping_value(
+        summary,
+        "quality_noisy_assumption_group_count",
+    )
+    merged_invariant_count = _int_mapping_value(
+        summary,
+        "quality_merged_invariant_count",
+    )
+    merged_assumption_count = _int_mapping_value(
+        summary,
+        "quality_merged_assumption_count",
+    )
+    if not any(
+        (
+            warning_count,
+            near_duplicate_count,
+            over_split_count,
+            noisy_assumption_count,
+            merged_invariant_count,
+            merged_assumption_count,
+        )
+    ):
+        lines.append("- No duplicate/over-split authority-quality warnings recorded.")
+        return
+    lines.append(
+        "- duplicate/over-split groups: "
+        f"{near_duplicate_count + over_split_count}; "
+        f"merged invariants: {merged_invariant_count}; "
+        f"merged assumptions: {merged_assumption_count}; "
+        f"noisy assumptions: {noisy_assumption_count}"
+    )
+    quality = _mapping_or_none(artifact.get("authority_quality")) or {}
+    review_groups = _as_list(quality.get("review_groups"))
+    for group in review_groups[:AUTHORITY_REVIEW_TEXT_ITEM_LIMIT]:
+        group_mapping = _mapping_or_none(group)
+        if group_mapping is None:
+            continue
+        group_type = str(group_mapping.get("group_type") or "quality_warning")
+        reason = _first_text_field(group_mapping, ("reason", "summary", "text"))
+        suffix = f": {reason}" if reason else ""
+        lines.append(
+            f"- {_truncate_review_text_line(group_type.replace('_', '-') + suffix)}"
+        )
+    remaining = len(review_groups) - AUTHORITY_REVIEW_TEXT_ITEM_LIMIT
+    if remaining > 0:
+        lines.append(f"- ... {remaining} more warning groups")
 
 
 def _action_command(actions: list[object], *, index: int) -> str:

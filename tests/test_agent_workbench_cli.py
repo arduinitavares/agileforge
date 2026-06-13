@@ -147,6 +147,39 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def authority_review(
+        self,
+        *,
+        project_id: int,
+        include_spec: str = "auto",
+        output_format: str = "json",
+    ) -> JsonObject:
+        """Return an authority review payload."""
+        self.calls.append(
+            (
+                "authority_review",
+                {
+                    "project_id": project_id,
+                    "include_spec": include_spec,
+                    "output_format": output_format,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "text": (
+                    f"Authority review for project {project_id}\n"
+                    "Recommendation: accept\n"
+                    "Preserved requirements:\n"
+                    "- guard-token review evidence"
+                ),
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def authority_invariants(
         self,
         *,
@@ -4087,6 +4120,43 @@ def test_top_level_help_describes_agent_workbench_commands(
         "agileforge sprint status --project-id 1 --sprint-id <completed_sprint_id>"
         in captured.out
     )
+
+
+def test_cli_authority_review_text_format_prints_human_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Authority review text format prints text instead of JSON."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "review",
+            "--project-id",
+            str(PROJECT_ID),
+            "--format",
+            "text",
+        ],
+        application=app,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+    assert captured.out.startswith("Authority review for project")
+    assert "Recommendation:" in captured.out
+    assert "Preserved requirements:" in captured.out
+    assert not captured.out.lstrip().startswith("{")
+    assert app.calls == [
+        (
+            "authority_review",
+            {
+                "project_id": PROJECT_ID,
+                "include_spec": "auto",
+                "output_format": "text",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
