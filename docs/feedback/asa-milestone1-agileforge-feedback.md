@@ -13,6 +13,32 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 
 ### Fixed
 
+#### Project create / authority compile split
+
+- Source: issue #128 and ASA setup/scope-extension feedback.
+- Decision: accepted and implemented as a hard split.
+- Fix status: fixed in `dev/project-create-authority-compile-split`.
+- What changed:
+  - `agileforge project create` now persists project/spec metadata and returns
+    `authority_compile_required`.
+  - Authority compilation is now the explicit guarded mutation
+    `agileforge authority compile`.
+  - `workflow next` routes setup projects through compile-required, compiling,
+    compile-failed, and pending-review states.
+  - Dashboard/API creation no longer hides a long-running authority compile
+    operation.
+- Why fixed: project creation should be observable and fast. Compiler failure
+  recovery belongs to the compiler command, not project metadata creation.
+  Future scope-extension and brownfield setup workflows need the same
+  spec-registration-to-compile boundary.
+- Expected behavior after fix: project creation completes without compiling
+  authority, returns a guarded compile action, and the dashboard/CLI/API route
+  the user through compile before authority review.
+- Out of scope:
+  - #129 brownfield setup.
+  - #130 authority compiler source-map/model repair.
+  - Product Goal / scope-extension workflow.
+
 #### Post-sprint story reconciliation can strand a saveable draft
 
 - Original feedback item: `Post-sprint story reconciliation leaves saveable
