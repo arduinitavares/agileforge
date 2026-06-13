@@ -46,6 +46,7 @@ from services.agent_workbench.post_sprint_triage import (
 from services.phases import workflow_state
 from services.phases.sprint_metrics import build_sprint_metrics
 from services.phases.sprint_service import (
+    SPRINT_GENERATION_MODEL_RESPONSE_INVALID,
     SprintPhaseError,
     append_sprint_execution_history,
     generate_sprint_plan,
@@ -3970,20 +3971,45 @@ def _sprint_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str,
     message = str(
         data.get("failure_summary") or data.get("error") or "Sprint generation failed."
     )
+    safe_retry_command = f"agileforge sprint generate --project-id {project_id}"
+    code = (
+        ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID
+        if data.get("error_code") == SPRINT_GENERATION_MODEL_RESPONSE_INVALID
+        else ErrorCode.MUTATION_FAILED
+    )
     details = {
         "project_id": project_id,
         "sprint_run_success": False,
         "failure_stage": data.get("failure_stage"),
         "failure_artifact_id": data.get("failure_artifact_id"),
         "attempt_count": data.get("attempt_count"),
+        "attempt_id": data.get("attempt_id"),
+        "attempt_persisted": data.get("attempt_persisted"),
         "fsm_state": data.get("fsm_state"),
+        "safe_retry_command": (
+            safe_retry_command if code != ErrorCode.MUTATION_FAILED else None
+        ),
     }
-    return _error_envelope(
-        ErrorCode.MUTATION_FAILED,
-        message,
-        details={key: value for key, value in details.items() if value is not None},
-        remediation=[
+    remediation = (
+        [
+            "Inspect agileforge sprint history --project-id <project_id>.",
+            (
+                "Inspect the recorded failure artifact when failure_artifact_id "
+                "is present."
+            ),
+            (
+                f"Retry {safe_retry_command} from the current workflow next route."
+            ),
+        ]
+        if code == ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID
+        else [
             "Inspect agileforge sprint history --project-id <project_id>.",
             "Fix the Sprint runtime/provider configuration or refine the input.",
-        ],
+        ]
+    )
+    return _error_envelope(
+        code,
+        message,
+        details={key: value for key, value in details.items() if value is not None},
+        remediation=remediation,
     )

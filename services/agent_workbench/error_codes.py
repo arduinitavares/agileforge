@@ -52,6 +52,9 @@ class ErrorCode(StrEnum):
     ACTIVE_STATE_BLOCKS_DELETE = "ACTIVE_STATE_BLOCKS_DELETE"
     SCHEMA_VERSION_MISMATCH = "SCHEMA_VERSION_MISMATCH"
     MUTATION_FAILED = "MUTATION_FAILED"
+    SPRINT_GENERATION_MODEL_RESPONSE_INVALID = (
+        "SPRINT_GENERATION_MODEL_RESPONSE_INVALID"
+    )
     MUTATION_ROLLBACK = "MUTATION_ROLLBACK"
     MUTATION_IN_PROGRESS = "MUTATION_IN_PROGRESS"
     MUTATION_RECOVERY_REQUIRED = "MUTATION_RECOVERY_REQUIRED"
@@ -261,6 +264,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=1,
         retryable=False,
         description="The mutation failed.",
+    ),
+    ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID: ErrorMetadata(
+        code=ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID.value,
+        default_exit_code=1,
+        retryable=True,
+        description="Sprint generation produced an invalid model response.",
     ),
     ErrorCode.MUTATION_ROLLBACK: ErrorMetadata(
         code=ErrorCode.MUTATION_ROLLBACK.value,

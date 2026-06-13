@@ -701,11 +701,16 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
             },
             "output_artifact": {
                 "error": "SPRINT_GENERATION_FAILED",
-                "message": "No eligible stories.",
+                "message": "Sprint response is not valid JSON.",
                 "is_complete": False,
             },
             "is_complete": None,
-            "error": "No eligible stories.",
+            "error": "Sprint response is not valid JSON.",
+            "failure_artifact_id": "sprint-failure-api-001",
+            "failure_stage": "invalid_json",
+            "failure_summary": "Sprint response is not valid JSON.",
+            "raw_output_preview": "",
+            "has_full_artifact": True,
         }
 
     monkeypatch.setattr(
@@ -724,6 +729,8 @@ def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch)
     payload = response.json()
     assert payload["data"]["is_complete"] is False
     assert payload["data"]["fsm_state"] == "SPRINT_SETUP"
+    assert payload["data"]["error_code"] == "SPRINT_GENERATION_MODEL_RESPONSE_INVALID"
+    assert payload["data"]["attempt_persisted"] is True
     assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_SETUP"
     attempts = workflow.states[str(project_id)]["sprint_attempts"]
     assert isinstance(attempts, list)

@@ -826,6 +826,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.INVALID_COMMAND.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID.value,
         ),
     ),
     CommandMetadata(

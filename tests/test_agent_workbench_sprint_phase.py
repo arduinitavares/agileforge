@@ -118,6 +118,73 @@ def test_sprint_runner_generate_wraps_keyword_only_failure_meta(
     assert result["data"]["attempt_id"] == "sprint-attempt-1"
 
 
+def test_sprint_runner_generate_normalizes_invalid_model_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-response Sprint failures should be retryable structured errors."""
+
+    async def fake_run_sprint_agent(_state: object, **_kwargs: object) -> JsonDict:
+        return {
+            "success": False,
+            "input_context": {"available_stories": []},
+            "output_artifact": {
+                "error": "SPRINT_GENERATION_FAILED",
+                "message": "Sprint response is not valid JSON",
+                "is_complete": False,
+            },
+            "is_complete": None,
+            "error": "Sprint response is not valid JSON",
+            "failure_artifact_id": "sprint-failure-001",
+            "failure_stage": "invalid_json",
+            "failure_summary": "Sprint response is not valid JSON",
+            "raw_output_preview": "",
+            "has_full_artifact": True,
+        }
+
+    monkeypatch.setattr(
+        sprint_phase_module,
+        "run_sprint_agent_from_state",
+        fake_run_sprint_agent,
+    )
+    monkeypatch.setattr(
+        sprint_service,
+        "load_sprint_candidates",
+        lambda _project_id, **_kwargs: {
+            "success": True,
+            "count": 1,
+            "stories": [{"story_id": 1}],
+            "readiness": {"status": "ready"},
+        },
+    )
+    monkeypatch.setattr(
+        SprintPhaseRunner,
+        "_current_planned_sprint_id",
+        lambda _self, _project_id: None,
+    )
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    result = runner.generate(project_id=7, max_story_points=9)
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "SPRINT_GENERATION_MODEL_RESPONSE_INVALID"
+    assert error["message"] == "Sprint response is not valid JSON"
+    assert error["details"]["failure_stage"] == "invalid_json"
+    assert error["details"]["failure_artifact_id"] == "sprint-failure-001"
+    assert error["details"]["attempt_id"] == "sprint-attempt-1"
+    assert error["details"]["attempt_count"] == 1
+    assert error["details"]["attempt_persisted"] is True
+    assert error["details"]["fsm_state"] == "SPRINT_SETUP"
+    assert (
+        error["details"]["safe_retry_command"]
+        == "agileforge sprint generate --project-id 7"
+    )
+    assert "Retry agileforge sprint generate" in error["remediation"][-1]
+
+
 def test_sprint_runner_generate_blocks_stale_downstream_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

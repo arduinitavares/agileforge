@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, TypeGuard, cast
+from typing import Any, Final, TypeGuard, cast
 
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     SaveSprintPlanInput,
@@ -26,6 +26,14 @@ VALID_SPRINT_GENERATION_STATES = {
     OrchestratorState.SPRINT_PERSISTENCE.value,
 }
 VALID_FSM_STATES = {state.value for state in OrchestratorState}
+RETRYABLE_SPRINT_MODEL_FAILURE_STAGES: Final[set[str]] = {
+    "invalid_json",
+    "output_validation",
+    "invocation_exception",
+}
+SPRINT_GENERATION_MODEL_RESPONSE_INVALID: Final[str] = (
+    "SPRINT_GENERATION_MODEL_RESPONSE_INVALID"
+)
 
 
 class SprintPhaseError(Exception):
@@ -342,6 +350,12 @@ async def generate_sprint_plan(
         created_at=now_iso(),
     )
     attempt_id = f"sprint-attempt-{attempt_count}"
+    model_response_error_code = (
+        SPRINT_GENERATION_MODEL_RESPONSE_INVALID
+        if not bool(sprint_result.get("success"))
+        and failure_meta.get("failure_stage") in RETRYABLE_SPRINT_MODEL_FAILURE_STAGES
+        else None
+    )
     _attach_attempt_guards(
         state,
         attempt_id=attempt_id,
@@ -380,7 +394,13 @@ async def generate_sprint_plan(
         "output_artifact": normalized_output_artifact,
         "attempt_count": attempt_count,
         "attempt_id": attempt_id,
+        "attempt_persisted": attempt_count > 0,
         "artifact_fingerprint": artifact_fingerprint,
+        **(
+            {"error_code": model_response_error_code}
+            if model_response_error_code is not None
+            else {}
+        ),
         **failure_meta,
         "fsm_state": next_state,
     }

@@ -1027,6 +1027,9 @@ def test_sprint_commands_are_registered() -> None:  # noqa: PLR0915
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
+    assert ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID.value in generate[
+        "errors"
+    ]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in start["errors"]
