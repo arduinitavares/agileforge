@@ -205,6 +205,46 @@ def _latest_spec_for_product(
     ).first()
 
 
+def _guarded_spec_version_for_product(
+    session: Session,
+    *,
+    product_id: int,
+    spec_path: Path,
+    expected_spec_version_id: int,
+    expected_spec_hash: str,
+) -> PendingAuthorityResult:
+    """Return the exact spec version guarded by the compile command."""
+    spec_version = session.get(SpecRegistry, expected_spec_version_id)
+    if spec_version is None or spec_version.product_id != product_id:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=spec_path,
+            error_code="STALE_SPEC_VERSION",
+            spec_hash=expected_spec_hash,
+            spec_version_id=expected_spec_version_id,
+            error="Guarded spec version is no longer current for this project.",
+        )
+    if spec_version.spec_hash != expected_spec_hash:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=spec_path,
+            error_code="STALE_SPEC_HASH",
+            spec_hash=spec_version.spec_hash,
+            spec_version_id=expected_spec_version_id,
+            error="Guarded spec hash no longer matches the registry row.",
+        )
+    return _result(
+        ok=True,
+        product_id=product_id,
+        spec_path=spec_version.content_ref or spec_path,
+        spec_hash=spec_version.spec_hash,
+        spec_version_id=expected_spec_version_id,
+        authority_id=None,
+    )
+
+
 def _normalize_compiler_failure(
     *,
     product_id: int,
@@ -456,16 +496,37 @@ def compile_pending_authority_for_project(  # noqa: PLR0913
     compile_authority: PendingAuthorityCompiler,
     lease_guard: Callable[[str], bool],
     record_progress: Callable[[str], bool],
+    expected_spec_version_id: int | None = None,
+    expected_spec_hash: str | None = None,
 ) -> PendingAuthorityResult:
     """Compile a reviewable authority artifact without accepting it."""
-    registered = ensure_pending_spec_version_for_project(
-        session=session,
-        product_id=product_id,
-        spec_path=spec_path,
-        approved_by=approved_by,
-        lease_guard=lease_guard,
-        record_progress=record_progress,
-    )
+    if expected_spec_version_id is not None and expected_spec_hash is not None:
+        registered = _guarded_spec_version_for_product(
+            session,
+            product_id=product_id,
+            spec_path=spec_path,
+            expected_spec_version_id=expected_spec_version_id,
+            expected_spec_hash=expected_spec_hash,
+        )
+    elif expected_spec_version_id is None and expected_spec_hash is None:
+        registered = ensure_pending_spec_version_for_project(
+            session=session,
+            product_id=product_id,
+            spec_path=spec_path,
+            approved_by=approved_by,
+            lease_guard=lease_guard,
+            record_progress=record_progress,
+        )
+    else:
+        registered = _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=spec_path,
+            error_code="MUTATION_FAILED",
+            spec_hash=expected_spec_hash,
+            spec_version_id=expected_spec_version_id,
+            error="Expected spec version and hash must be provided together.",
+        )
     if not registered.ok:
         return registered
 

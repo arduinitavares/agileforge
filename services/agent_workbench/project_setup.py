@@ -756,6 +756,8 @@ class ProjectSetupMutationRunner:
         authority_result = self._ensure_pending_authority(
             project_id=request.project_id,
             resolved_spec_path=resolved_spec_path,
+            expected_spec_hash=spec_hash,
+            expected_spec_version_id=spec_version_id,
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
         )
@@ -1392,6 +1394,8 @@ class ProjectSetupMutationRunner:
         *,
         project_id: int,
         resolved_spec_path: Path,
+        expected_spec_hash: str,
+        expected_spec_version_id: int,
         mutation_event_id: int,
         lease_owner: str,
     ) -> dict[str, Any]:
@@ -1433,6 +1437,8 @@ class ProjectSetupMutationRunner:
                 compile_authority=engine_bound_compiler,
                 lease_guard=lease_guard,
                 record_progress=record_progress,
+                expected_spec_hash=expected_spec_hash,
+                expected_spec_version_id=expected_spec_version_id,
             )
         if not result.ok:
             return {

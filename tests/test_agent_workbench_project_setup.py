@@ -908,6 +908,109 @@ def test_authority_compile_succeeds_from_compile_required(
     assert workflow_state["setup_compile_mutation_event_id"] == data["mutation_event_id"]
 
 
+def test_authority_compile_pins_guarded_spec_version(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    compiler_calls: list[int] = []
+
+    from services.agent_workbench import project_setup
+
+    def compile_tracking(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del force_recompile, tool_context
+        if lease_guard is not None:
+            assert lease_guard("compiled_authority_persisted")
+        compiler_calls.append(spec_version_id)
+        with Session(engine) as session:
+            authority = CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version="test-compiler",
+                prompt_hash="sha256:test",
+                compiled_artifact_json='{"ok":true}',
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+            session.add(authority)
+            session.commit()
+            session.refresh(authority)
+            authority_id = authority.authority_id
+        if record_progress is not None:
+            assert record_progress("compiled_authority_persisted")
+            assert record_progress("product_authority_cache_persisted")
+        return {
+            "success": True,
+            "authority_id": authority_id,
+            "spec_version_id": spec_version_id,
+            "compiler_version": "test-compiler",
+            "prompt_hash": "sha256:test",
+        }
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_tracking,
+    )
+
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Guarded Spec Pin Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-pin-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    guarded_spec_version_id = created["data"]["spec_version_id"]
+
+    with Session(engine) as session:
+        newer_spec = SpecRegistry(
+            product_id=created["data"]["project_id"],
+            spec_hash="sha256:newer",
+            content='{"schema_version":"newer"}',
+            content_ref=str(spec_file),
+            status="approved",
+            approved_at=datetime.now(UTC),
+            approved_by="test",
+            approval_notes="newer unrelated registry row",
+        )
+        session.add(newer_spec)
+        session.commit()
+        session.refresh(newer_spec)
+        assert newer_spec.spec_version_id != guarded_spec_version_id
+
+    compiled = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=created["data"]["project_id"],
+            spec_version_id=guarded_spec_version_id,
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-pin-001",
+            changed_by="agent",
+        )
+    )
+
+    assert compiled["ok"] is True
+    assert compiler_calls == [guarded_spec_version_id]
+    assert compiled["data"]["spec_version_id"] == guarded_spec_version_id
+
+
 def test_authority_compile_marks_compiling_before_invocation(
     engine: Engine,
     tmp_path: Path,
