@@ -171,6 +171,40 @@ class _SprintReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintSetupStaleStoryScopeReadProjection(_SprintReadyReadProjection):
+    """Fake read projection for stale Story completion scope in Sprint setup."""
+
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return zero candidates excluded by stale completion scope."""
+        result = super().sprint_candidates(project_id=project_id)
+        result["data"].update(
+            {
+                "count": 0,
+                "message": "Found 0 sprint candidates for milestone Story scope.",
+                "excluded_counts": {
+                    "story_completion_scope": 28,
+                    "superseded": 9,
+                },
+                "readiness": {
+                    "status": "ready",
+                    "blocking_codes": [],
+                    "blocking_story_ids": [],
+                    "default_priority_count": 0,
+                    "unsized_count": 0,
+                },
+                "story_completion_scope": {
+                    "scope": "milestone",
+                    "scope_id": "milestone_1",
+                    "requirements": [
+                        "State Window Feature Generation",
+                        "Delayed Temperature Reward Scoring",
+                    ],
+                },
+            }
+        )
+        return result
+
+
 class _SprintDraftReadProjection(_FakeReadProjection):
     """Fake read projection for a reviewed Sprint draft state."""
 
@@ -3777,6 +3811,52 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
         "errors": [],
     }
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_blocks_generate_for_stale_story_scope() -> None:
+    """Route stale Story scope in Sprint setup to guarded readiness repair."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintSetupStaleStoryScopeReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "sprint_setup_story_scope_repair_required"
+    assert "agileforge sprint generate --project-id 7" not in data[
+        "next_valid_commands"
+    ]
+    assert (
+        "agileforge story repair-readiness --project-id 7 "
+        "--expected-state SPRINT_SETUP "
+        "--idempotency-key <idempotency_key>"
+    ) in data["next_valid_commands"]
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge sprint generate",
+            "reason": "STALE_STORY_COMPLETION_SCOPE",
+            "message": (
+                "Sprint generation is blocked because the active Story "
+                "completion scope excludes all current Sprint candidates. Run "
+                "story repair-readiness to refresh Story planning metadata."
+            ),
+            "candidate_count": 0,
+            "excluded_counts": {
+                "story_completion_scope": 28,
+                "superseded": 9,
+            },
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_1",
+                "requirements": [
+                    "State Window Feature Generation",
+                    "Delayed Temperature Reward Scoring",
+                ],
+            },
+        }
+    ]
 
 
 def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:

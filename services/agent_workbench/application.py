@@ -817,6 +817,11 @@ class AgentWorkbenchApplication:
                 sprint_candidates=sprint_candidates,
             )
 
+        sprint_candidates_for_setup = (
+            self.sprint_candidates(project_id=project_id)
+            if fsm_state == "SPRINT_SETUP"
+            else None
+        )
         phase_next_handlers = (
             _vision_workflow_next,
             _backlog_workflow_next,
@@ -826,7 +831,15 @@ class AgentWorkbenchApplication:
             _uninstalled_phase_workflow_next,
         )
         for phase_next_handler in phase_next_handlers:
-            phase_next = phase_next_handler(project_id=project_id, workflow=workflow)
+            phase_next = (
+                phase_next_handler(
+                    project_id=project_id,
+                    workflow=workflow,
+                    sprint_candidates=sprint_candidates_for_setup,
+                )
+                if phase_next_handler is _sprint_workflow_next
+                else phase_next_handler(project_id=project_id, workflow=workflow)
+            )
             if phase_next is not None:
                 return phase_next
 
@@ -1967,6 +1980,35 @@ def _sprint_candidate_excluded_counts(
         return {}
     excluded = _envelope_data(candidates).get("excluded_counts")
     return dict(excluded) if isinstance(excluded, dict) else {}
+
+
+def _sprint_setup_stale_story_scope_blocker(
+    candidates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return blocker when a stale Story scope excludes all Sprint candidates."""
+    if _sprint_candidate_count(candidates) != 0:
+        return None
+    excluded_counts = _sprint_candidate_excluded_counts(candidates)
+    scoped_exclusion_count = _positive_int_or_none(
+        excluded_counts.get("story_completion_scope")
+    )
+    if scoped_exclusion_count is None:
+        return None
+    scope = _envelope_data(candidates or {}).get("story_completion_scope")
+    if not isinstance(scope, dict):
+        return None
+    return {
+        "command": "agileforge sprint generate",
+        "reason": "STALE_STORY_COMPLETION_SCOPE",
+        "message": (
+            "Sprint generation is blocked because the active Story completion "
+            "scope excludes all current Sprint candidates. Run story "
+            "repair-readiness to refresh Story planning metadata."
+        ),
+        "candidate_count": 0,
+        "excluded_counts": excluded_counts,
+        "story_completion_scope": scope,
+    }
 
 
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
@@ -3136,6 +3178,7 @@ def _sprint_workflow_next(
     *,
     project_id: int,
     workflow: dict[str, Any],
+    sprint_candidates: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return Sprint phase commands for Sprint workflow states."""
     fsm_state = _fsm_state_from_envelope(workflow)
@@ -3159,6 +3202,11 @@ def _sprint_workflow_next(
     save_blocker = (
         _sprint_save_blocker(workflow) if fsm_state == "SPRINT_DRAFT" else None
     )
+    stale_scope_blocker = (
+        _sprint_setup_stale_story_scope_blocker(sprint_candidates)
+        if fsm_state == "SPRINT_SETUP"
+        else None
+    )
     for command_name, command_text in _sprint_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
@@ -3171,23 +3219,49 @@ def _sprint_workflow_next(
                 }
             )
             continue
+        if (
+            command_name == "agileforge sprint generate"
+            and stale_scope_blocker is not None
+        ):
+            blocked_commands.append(stale_scope_blocker)
+            continue
         if command_is_available(command_name):
             next_valid_commands.append(command_text)
         else:
             blocked_future_commands.append(command_text)
+
+    if stale_scope_blocker is not None:
+        repair_command = (
+            f"agileforge story repair-readiness --project-id {project_id} "
+            "--expected-state SPRINT_SETUP "
+            "--idempotency-key <idempotency_key>"
+        )
+        if command_is_available("agileforge story repair-readiness"):
+            next_valid_commands.append(repair_command)
+        else:
+            blocked_future_commands.append(repair_command)
 
     data: dict[str, Any] = {
         "project_id": project_id,
         "next_valid_commands": next_valid_commands,
         "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
-        "status": "next_phase_available" if next_valid_commands else None,
+        "status": (
+            "sprint_setup_story_scope_repair_required"
+            if stale_scope_blocker is not None
+            else ("next_phase_available" if next_valid_commands else None)
+        ),
     }
     data["source_fingerprint"] = canonical_hash(
         {
             "command": WORKFLOW_NEXT_COMMAND,
             "project_id": project_id,
             "workflow": _fingerprint_input(_envelope_data(workflow)),
+            "sprint_candidates": (
+                _fingerprint_input(_envelope_data(sprint_candidates))
+                if sprint_candidates is not None
+                else None
+            ),
             "installed_command_names": sorted(installed_command_names()),
             "next_valid_commands": data["next_valid_commands"],
             "blocked_commands": data["blocked_commands"],
