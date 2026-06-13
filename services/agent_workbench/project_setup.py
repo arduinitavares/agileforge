@@ -62,6 +62,16 @@ AUTHORITY_PENDING_REVIEW = "authority_pending_review"
 MUTATION_RECOVERY_INVALID = "MUTATION_RECOVERY_INVALID"
 SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
 WORKFLOW_SESSION_FAILED = "WORKFLOW_SESSION_FAILED"
+AUTHORITY_COMPILE_FAILURE_FIELDS = (
+    "setup_failure_stage",
+    "setup_failure_summary",
+    "setup_failure_artifact_id",
+    "failure_artifact_stage",
+    "setup_failure_first_error",
+    "raw_output_preview",
+    "has_full_artifact",
+    "setup_failure_blocking_gaps",
+)
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_COMMAND: Any = CliMutationLedger.command
@@ -127,6 +137,44 @@ class ProjectSetupRetryRequest(BaseModel):
                 "expected_state": self.expected_state,
                 "expected_context_fingerprint": self.expected_context_fingerprint,
                 "recovery_mutation_event_id": self.recovery_mutation_event_id,
+                "changed_by": self.changed_by,
+            }
+        )
+
+
+class AuthorityCompileRequest(BaseModel):
+    """Validated request for `agileforge authority compile`."""
+
+    project_id: int
+    spec_version_id: int
+    expected_spec_hash: str = Field(min_length=1)
+    expected_state: str = Field(min_length=1)
+    expected_setup_status: str = Field(min_length=1)
+    idempotency_key: str | None = None
+    dry_run: bool = False
+    dry_run_id: str | None = None
+    correlation_id: str | None = None
+    changed_by: str = "cli-agent"
+
+    @model_validator(mode="after")
+    def _validate_mutation_keys(self) -> AuthorityCompileRequest:
+        _validate_key_mode(
+            dry_run=self.dry_run,
+            idempotency_key=self.idempotency_key,
+            dry_run_id=self.dry_run_id,
+        )
+        return self
+
+    def normalized_request_hash(self) -> str:
+        """Return a stable hash including stale-guard inputs."""
+        return canonical_hash(
+            {
+                "command": PROJECT_AUTHORITY_COMPILE_COMMAND,
+                "project_id": self.project_id,
+                "spec_version_id": self.spec_version_id,
+                "expected_spec_hash": self.expected_spec_hash,
+                "expected_state": self.expected_state,
+                "expected_setup_status": self.expected_setup_status,
                 "changed_by": self.changed_by,
             }
         )
@@ -291,6 +339,10 @@ class ProjectSetupMutationRunner:
     def retry_setup(self, request: ProjectSetupRetryRequest) -> dict[str, Any]:
         """Retry interrupted setup work with stale guards."""
         return self._run_retry(request)
+
+    def compile_authority(self, request: AuthorityCompileRequest) -> dict[str, Any]:
+        """Compile pending authority with project/spec stale guards."""
+        return self._run_authority_compile(request)
 
     def _run_create(self, request: ProjectCreateRequest) -> dict[str, Any]:
         resolved_spec_path = Path(request.spec_file).expanduser().resolve()
@@ -574,6 +626,201 @@ class ProjectSetupMutationRunner:
             )
         return retry_response
 
+    def _run_authority_compile(self, request: AuthorityCompileRequest) -> dict[str, Any]:
+        if not self._project_exists(request.project_id):
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND.value,
+                details={"project_id": request.project_id},
+                remediation=["Create the project before compiling authority."],
+            )
+
+        workflow_result = self._authority_compile_workflow_state_or_error(request)
+        if not workflow_result["ok"]:
+            return workflow_result
+        workflow_state = cast("dict[str, Any]", workflow_result["state"])
+        stale_guard = _authority_compile_stale_guard(
+            request=request,
+            workflow_state=workflow_state,
+        )
+        if stale_guard is not None:
+            code, details = stale_guard
+            if request.dry_run:
+                return _error(
+                    code,
+                    details=details,
+                    remediation=["Refresh authority compile stale guards before retrying."],
+                )
+            return self._guard_rejected_authority_compile(
+                request=request,
+                code=code,
+                details=details,
+            )
+
+        resolved_spec_path = Path(str(workflow_state["setup_spec_file_path"])).expanduser().resolve()
+        spec_hash = str(workflow_state["setup_spec_hash"])
+        spec_version_id = int(str(workflow_state["setup_spec_version_id"]))
+        live_spec_hash_result = _spec_hash_or_error(resolved_spec_path)
+        if not isinstance(live_spec_hash_result, str):
+            return live_spec_hash_result
+        if (
+            live_spec_hash_result != request.expected_spec_hash
+            or live_spec_hash_result != spec_hash
+        ):
+            details = {
+                "expected_spec_hash": request.expected_spec_hash,
+                "workflow_spec_hash": spec_hash,
+                "actual_spec_hash": live_spec_hash_result,
+            }
+            if request.dry_run:
+                return _error(
+                    ErrorCode.STALE_SPEC_HASH.value,
+                    details=details,
+                    remediation=["Refresh authority compile stale guards before retrying."],
+                )
+            return self._guard_rejected_authority_compile(
+                request=request,
+                code=ErrorCode.STALE_SPEC_HASH.value,
+                details=details,
+            )
+
+        if request.dry_run:
+            return _success(
+                {
+                    "preview_available": True,
+                    "project_id": request.project_id,
+                    "resolved_spec_path": str(resolved_spec_path),
+                    "spec_hash": spec_hash,
+                    "spec_version_id": spec_version_id,
+                    "setup_status": str(workflow_state["setup_status"]),
+                    "fsm_state": str(workflow_state["fsm_state"]),
+                    "next_actions": [
+                        _authority_compile_action(
+                            project_id=request.project_id,
+                            spec_version_id=spec_version_id,
+                            spec_hash=spec_hash,
+                            expected_setup_status=request.expected_setup_status,
+                        )
+                    ],
+                }
+            )
+
+        lease_owner = _lease_owner(
+            command=PROJECT_AUTHORITY_COMPILE_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            correlation_id=request.correlation_id,
+        )
+        loaded = self._ledger.create_or_load(
+            command=PROJECT_AUTHORITY_COMPILE_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            request_hash=request.normalized_request_hash(),
+            project_id=request.project_id,
+            correlation_id=_correlation_id(request.correlation_id),
+            changed_by=request.changed_by,
+            lease_owner=lease_owner,
+            now=_now(),
+            lease_seconds=self._lease_seconds,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
+            return _authority_compile_recovery_required_response(
+                loaded.ledger,
+                project_id=request.project_id,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                expected_setup_status=request.expected_setup_status,
+            )
+        if loaded.error_code is not None:
+            return _error_for_ledger(loaded.error_code, loaded.ledger)
+
+        mutation_event_id = _event_id(loaded.ledger)
+        try:
+            self._write_authority_compile_workflow_state(
+                project_id=request.project_id,
+                status="authority_compiling",
+                resolved_spec_path=resolved_spec_path,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                mutation_event_id=mutation_event_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._mark_authority_compile_recovery_required(
+                request=request,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                workflow_error=str(exc),
+            )
+
+        authority_result = self._ensure_pending_authority(
+            project_id=request.project_id,
+            resolved_spec_path=resolved_spec_path,
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+        )
+        if not authority_result.get("ok"):
+            return self._mark_authority_compile_validation_failed(
+                request=request,
+                resolved_spec_path=resolved_spec_path,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                authority_result=authority_result,
+            )
+
+        compiled_spec_hash = str(authority_result.get("spec_hash") or spec_hash)
+        compiled_spec_version_id = int(
+            str(authority_result.get("spec_version_id") or spec_version_id)
+        )
+        authority_id = _optional_int(authority_result.get("authority_id"))
+        try:
+            self._write_authority_compile_workflow_state(
+                project_id=request.project_id,
+                status=AUTHORITY_PENDING_REVIEW,
+                resolved_spec_path=resolved_spec_path,
+                spec_hash=compiled_spec_hash,
+                spec_version_id=compiled_spec_version_id,
+                mutation_event_id=mutation_event_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._mark_authority_compile_recovery_required(
+                request=request,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                spec_hash=compiled_spec_hash,
+                spec_version_id=compiled_spec_version_id,
+                workflow_error=str(exc),
+            )
+
+        data = {
+            "project_id": request.project_id,
+            "resolved_spec_path": str(resolved_spec_path),
+            "spec_hash": compiled_spec_hash,
+            "spec_version_id": compiled_spec_version_id,
+            "pending_authority_id": authority_id,
+            "compiled_authority_id": authority_id,
+            "setup_status": AUTHORITY_PENDING_REVIEW,
+            "fsm_state": "SETUP_REQUIRED",
+            "mutation_event_id": mutation_event_id,
+            "next_actions": [_authority_review_action(request.project_id)],
+        }
+        response = _success(data)
+        if not self._ledger.finalize_success(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            after=data,
+            response=response,
+            now=_now(),
+        ):
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT.value,
+                details={"mutation_event_id": mutation_event_id},
+                remediation=["Re-read mutation state before retrying authority compile."],
+            )
+        return response
+
     def _workflow_state_or_error(
         self,
         request: ProjectSetupRetryRequest,
@@ -611,6 +858,293 @@ class ProjectSetupMutationRunner:
                     ],
                 },
             )
+
+    def _authority_compile_workflow_state_or_error(
+        self,
+        request: AuthorityCompileRequest,
+    ) -> dict[str, Any]:
+        try:
+            return {
+                "ok": True,
+                "state": self._workflow.get_session_status(str(request.project_id)),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return _error(
+                WORKFLOW_SESSION_FAILED,
+                details={
+                    "project_id": request.project_id,
+                    "workflow_error": str(exc),
+                },
+                remediation=[
+                    "Restore workflow session storage, refresh authority compile "
+                    "guards, then rerun authority compile."
+                ],
+                data={
+                    "project_id": request.project_id,
+                    "next_actions": [
+                        _authority_compile_action(
+                            project_id=request.project_id,
+                            spec_version_id=request.spec_version_id,
+                            spec_hash=request.expected_spec_hash,
+                            expected_setup_status=request.expected_setup_status,
+                        )
+                    ],
+                },
+            )
+
+    def _write_authority_compile_workflow_state(
+        self,
+        *,
+        project_id: int,
+        status: str,
+        resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
+        mutation_event_id: int,
+        failure_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": status,
+            "setup_error": None if failure_data is None else failure_data.get("setup_error"),
+            "setup_spec_file_path": str(resolved_spec_path),
+            "setup_spec_hash": spec_hash,
+            "setup_spec_version_id": spec_version_id,
+            "setup_compile_mutation_event_id": mutation_event_id,
+        }
+        if status in {"authority_compiling", AUTHORITY_PENDING_REVIEW}:
+            state.update(_cleared_authority_compile_failure_metadata())
+        if status == "authority_compiling":
+            state["setup_compile_started_at"] = _now().isoformat()
+            state["setup_next_actions"] = [
+                {
+                    "command": "agileforge mutation show",
+                    "args": {"mutation_event_id": mutation_event_id},
+                    "reason": "Inspect the active authority compile mutation.",
+                }
+            ]
+        if status == AUTHORITY_PENDING_REVIEW:
+            state["setup_next_actions"] = [_authority_review_action(project_id)]
+        if status == AUTHORITY_COMPILE_FAILED and failure_data is not None:
+            state.update(failure_data)
+            state["setup_next_actions"] = [
+                _authority_compile_action(
+                    project_id=project_id,
+                    spec_version_id=spec_version_id,
+                    spec_hash=spec_hash,
+                    expected_setup_status=AUTHORITY_COMPILE_FAILED,
+                )
+            ]
+        self._workflow.update_session_status(str(project_id), state)
+        return {"ok": True, "state": self._workflow.get_session_status(str(project_id))}
+
+    def _guard_rejected_authority_compile(
+        self,
+        *,
+        request: AuthorityCompileRequest,
+        code: str,
+        details: dict[str, Any],
+    ) -> dict[str, Any]:
+        loaded = self._ledger.create_or_load(
+            command=PROJECT_AUTHORITY_COMPILE_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            request_hash=request.normalized_request_hash(),
+            project_id=request.project_id,
+            correlation_id=_correlation_id(request.correlation_id),
+            changed_by=request.changed_by,
+            lease_owner=_lease_owner(
+                command=PROJECT_AUTHORITY_COMPILE_COMMAND,
+                idempotency_key=_required(request.idempotency_key),
+                correlation_id=request.correlation_id,
+            ),
+            now=_now(),
+            lease_seconds=self._lease_seconds,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
+            expected_setup_status = self._current_authority_compile_setup_status(
+                project_id=request.project_id,
+                fallback=request.expected_setup_status,
+            )
+            return _authority_compile_recovery_required_response(
+                loaded.ledger,
+                project_id=request.project_id,
+                spec_hash=request.expected_spec_hash,
+                spec_version_id=request.spec_version_id,
+                expected_setup_status=expected_setup_status,
+            )
+        if loaded.error_code is not None:
+            return _error_for_ledger(loaded.error_code, loaded.ledger)
+
+        response = _error(
+            code,
+            details=details,
+            remediation=["Refresh authority compile stale guards before retrying."],
+        )
+        self._mark_simple_status(
+            mutation_event_id=_event_id(loaded.ledger),
+            lease_owner=_required(loaded.ledger.lease_owner),
+            status=MutationStatus.GUARD_REJECTED,
+            response=response,
+        )
+        return response
+
+    def _mark_authority_compile_recovery_required(
+        self,
+        *,
+        request: AuthorityCompileRequest,
+        mutation_event_id: int,
+        lease_owner: str,
+        spec_hash: str,
+        spec_version_id: int,
+        workflow_error: str,
+    ) -> dict[str, Any]:
+        expected_setup_status = self._current_authority_compile_setup_status(
+            project_id=request.project_id,
+            fallback=request.expected_setup_status,
+        )
+        last_error = {
+            "code": WORKFLOW_SESSION_FAILED,
+            "project_id": request.project_id,
+            "spec_version_id": spec_version_id,
+            "spec_hash": spec_hash,
+            "mutation_event_id": mutation_event_id,
+            "workflow_error": workflow_error,
+        }
+        marked = self._ledger.mark_recovery_required(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            recovery_action=RecoveryAction.RESUME_FROM_STEP,
+            safe_to_auto_resume=True,
+            last_error=last_error,
+            now=_now(),
+        )
+        row = self._must_get_ledger(mutation_event_id)
+        if marked or row.status == MutationStatus.RECOVERY_REQUIRED.value:
+            return _authority_compile_recovery_required_response(
+                row,
+                project_id=request.project_id,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                expected_setup_status=expected_setup_status,
+            )
+        return _error_for_ledger(MUTATION_IN_PROGRESS, row)
+
+    def _current_authority_compile_setup_status(
+        self,
+        *,
+        project_id: int,
+        fallback: str,
+    ) -> str:
+        try:
+            state = self._workflow.get_session_status(str(project_id))
+        except Exception:  # noqa: BLE001
+            return fallback
+        return str(state.get("setup_status") or fallback)
+
+    def _mark_authority_compile_validation_failed(
+        self,
+        *,
+        request: AuthorityCompileRequest,
+        resolved_spec_path: Path,
+        mutation_event_id: int,
+        lease_owner: str,
+        spec_hash: str,
+        spec_version_id: int,
+        authority_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        error_code = str(authority_result.get("error_code") or SPEC_COMPILE_FAILED)
+        failure_summary = str(
+            authority_result.get("failure_summary")
+            or authority_result.get("error")
+            or "Spec authority compile failed."
+        )
+        artifact_failure_stage = _optional_str(authority_result.get("failure_stage"))
+        blocking_gaps = authority_result.get("blocking_gaps")
+        setup_failure_first_error = _first_failure_error(
+            blocking_gaps,
+            failure_summary,
+        )
+        response_spec_hash = str(authority_result.get("spec_hash") or spec_hash)
+        response_spec_version_id = int(
+            str(authority_result.get("spec_version_id") or spec_version_id)
+        )
+        failure_data = {
+            "setup_error": error_code,
+            "setup_failure_stage": "authority_compile",
+            "setup_failure_summary": failure_summary,
+            "setup_failure_artifact_id": _optional_str(
+                authority_result.get("failure_artifact_id")
+            ),
+            "failure_artifact_stage": artifact_failure_stage,
+            "setup_failure_first_error": setup_failure_first_error,
+            "raw_output_preview": _optional_str(authority_result.get("raw_output_preview")),
+            "has_full_artifact": _optional_bool(authority_result.get("has_full_artifact")),
+        }
+        if isinstance(blocking_gaps, list):
+            failure_data["setup_failure_blocking_gaps"] = [
+                str(item) for item in blocking_gaps
+            ]
+        try:
+            workflow_result = self._write_authority_compile_workflow_state(
+                project_id=request.project_id,
+                status=AUTHORITY_COMPILE_FAILED,
+                resolved_spec_path=resolved_spec_path,
+                spec_hash=response_spec_hash,
+                spec_version_id=response_spec_version_id,
+                mutation_event_id=mutation_event_id,
+                failure_data=failure_data,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._mark_authority_compile_recovery_required(
+                request=request,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                spec_hash=response_spec_hash,
+                spec_version_id=response_spec_version_id,
+                workflow_error=str(exc),
+            )
+        next_actions = cast("dict[str, Any]", workflow_result["state"])[
+            "setup_next_actions"
+        ]
+        data = {
+            "project_id": request.project_id,
+            "resolved_spec_path": str(resolved_spec_path),
+            "spec_hash": response_spec_hash,
+            "spec_version_id": response_spec_version_id,
+            "setup_status": AUTHORITY_COMPILE_FAILED,
+            "fsm_state": "SETUP_REQUIRED",
+            **failure_data,
+            "mutation_event_id": mutation_event_id,
+            "next_actions": next_actions,
+        }
+        response = _error(
+            error_code,
+            details={
+                "project_id": request.project_id,
+                "mutation_event_id": mutation_event_id,
+                "spec_version_id": response_spec_version_id,
+                "failure_artifact_id": failure_data["setup_failure_artifact_id"],
+                "first_error": setup_failure_first_error,
+            },
+            remediation=[
+                "Inspect the compiler/setup error, then rerun agileforge authority compile."
+            ],
+            data=data,
+        )
+        if not self._mark_simple_status(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            status=MutationStatus.VALIDATION_FAILED,
+            response=response,
+        ):
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT.value,
+                details={"mutation_event_id": mutation_event_id},
+                remediation=["Re-read mutation state before retrying authority compile."],
+            )
+        return response
 
     def _run_setup_steps(
         self,
@@ -1424,6 +1958,10 @@ class ProjectSetupMutationRunner:
     def _project_id_for_event(self, mutation_event_id: int) -> int | None:
         return self._must_get_ledger(mutation_event_id).project_id
 
+    def _project_exists(self, project_id: int) -> bool:
+        with Session(self._engine) as session:
+            return session.get(Product, project_id) is not None
+
     def _product_name_exists(self, name: str) -> bool:
         with Session(self._engine) as session:
             return session.exec(select(Product).where(Product.name == name)).first() is not None
@@ -1609,6 +2147,51 @@ def _workflow_has_required_setup_state(
     )
 
 
+def _authority_compile_stale_guard(
+    *,
+    request: AuthorityCompileRequest,
+    workflow_state: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    current_state = str(workflow_state.get("fsm_state") or "SETUP_REQUIRED")
+    if current_state != request.expected_state:
+        return (
+            ErrorCode.STALE_STATE.value,
+            {"expected_state": request.expected_state, "actual_state": current_state},
+        )
+
+    current_setup_status = str(workflow_state.get("setup_status") or "")
+    if current_setup_status != request.expected_setup_status:
+        return (
+            ErrorCode.STALE_SETUP_STATUS.value,
+            {
+                "expected_setup_status": request.expected_setup_status,
+                "actual_setup_status": current_setup_status,
+            },
+        )
+
+    current_spec_hash = str(workflow_state.get("setup_spec_hash") or "")
+    if current_spec_hash != request.expected_spec_hash:
+        return (
+            ErrorCode.STALE_SPEC_HASH.value,
+            {
+                "expected_spec_hash": request.expected_spec_hash,
+                "actual_spec_hash": current_spec_hash,
+            },
+        )
+
+    current_spec_version_id = _optional_int(workflow_state.get("setup_spec_version_id"))
+    if current_spec_version_id != request.spec_version_id:
+        return (
+            ErrorCode.STALE_SPEC_VERSION.value,
+            {
+                "expected_spec_version_id": request.spec_version_id,
+                "actual_spec_version_id": current_spec_version_id,
+            },
+        )
+
+    return None
+
+
 def _setup_failure_requires_recovery(error_code: str) -> bool:
     """Return true for mutation-fencing failures that need ledger recovery."""
     return error_code in {MUTATION_IN_PROGRESS, MUTATION_RECOVERY_REQUIRED}
@@ -1689,6 +2272,37 @@ def _recovery_required_response(
     )
 
 
+def _authority_compile_recovery_required_response(
+    row: CliMutationLedger,
+    *,
+    project_id: int,
+    spec_hash: str,
+    spec_version_id: int,
+    expected_setup_status: str,
+) -> dict[str, Any]:
+    data = {
+        "project_id": project_id,
+        "mutation_event_id": row.mutation_event_id,
+        "status": MutationStatus.RECOVERY_REQUIRED.value,
+        "spec_hash": spec_hash,
+        "spec_version_id": spec_version_id,
+        "next_actions": [
+            _authority_compile_action(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=spec_hash,
+                expected_setup_status=expected_setup_status,
+            )
+        ],
+    }
+    return _error(
+        MUTATION_RECOVERY_REQUIRED,
+        details={"mutation_event_id": row.mutation_event_id, "project_id": project_id},
+        remediation=["Run agileforge authority compile with refreshed stale guards."],
+        data=data,
+    )
+
+
 def _retry_pre_side_effect_failure_data(
     *,
     request: ProjectSetupRetryRequest,
@@ -1761,9 +2375,13 @@ def _authority_compile_action(
     }
 
 
-def _authority_status_action(project_id: int) -> dict[str, Any]:
+def _cleared_authority_compile_failure_metadata() -> dict[str, None]:
+    return dict.fromkeys(AUTHORITY_COMPILE_FAILURE_FIELDS, None)
+
+
+def _authority_review_action(project_id: int) -> dict[str, Any]:
     return {
-        "command": "agileforge authority status",
+        "command": "agileforge authority review",
         "args": {"project_id": project_id},
         "reason": "Review pending compiled authority before acceptance.",
     }

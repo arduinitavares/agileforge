@@ -31,6 +31,7 @@ from services.agent_workbench.mutation_ledger import (
     _row_payload,
 )
 from services.agent_workbench.project_setup import (
+    AuthorityCompileRequest,
     ProjectCreateRequest,
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
@@ -58,6 +59,47 @@ def _expected_authority_compile_action(
         },
         "reason": "Compile pending authority before authority review.",
     }
+
+
+def _expected_authority_review_action(project_id: int) -> dict[str, Any]:
+    return {
+        "command": "agileforge authority review",
+        "args": {"project_id": project_id},
+        "reason": "Review pending compiled authority before acceptance.",
+    }
+
+
+def _assert_authority_compile_action(
+    action: dict[str, Any],
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    expected_setup_status: str = "authority_compile_required",
+) -> None:
+    assert action["command"] == "agileforge authority compile"
+    assert action["command"] != "agileforge mutation show"
+    assert action["command"] != "agileforge project setup retry"
+    assert action["args"] == {
+        "project_id": project_id,
+        "spec_version_id": spec_version_id,
+        "expected_spec_hash": spec_hash,
+        "expected_state": "SETUP_REQUIRED",
+        "expected_setup_status": expected_setup_status,
+    }
+
+
+def _authority_compile_failure_metadata_fields() -> tuple[str, ...]:
+    return (
+        "setup_failure_stage",
+        "setup_failure_summary",
+        "setup_failure_artifact_id",
+        "failure_artifact_stage",
+        "setup_failure_first_error",
+        "raw_output_preview",
+        "has_full_artifact",
+        "setup_failure_blocking_gaps",
+    )
 
 
 def _assert_compile_required_workflow_state(
@@ -704,6 +746,47 @@ def test_project_create_request_validation_rules() -> None:
         )
 
 
+def test_authority_compile_request_validation_rules() -> None:
+    project_id = 1
+    spec_version_id = 2
+    request = AuthorityCompileRequest(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        expected_spec_hash="sha256:" + "a" * 64,
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="compile-project-001",
+    )
+
+    assert request.project_id == project_id
+    assert request.spec_version_id == spec_version_id
+    assert request.normalized_request_hash()
+
+    with pytest.raises(ValidationError, match="idempotency_key is not allowed with dry_run"):
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            expected_spec_hash="sha256:" + "a" * 64,
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            dry_run=True,
+            dry_run_id="compile-preview-001",
+            idempotency_key="compile-project-001",
+        )
+
+    preview = AuthorityCompileRequest(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        expected_spec_hash="sha256:" + "a" * 64,
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        dry_run=True,
+        dry_run_id="compile-preview-001",
+    )
+    assert preview.dry_run is True
+    assert preview.dry_run_id == "compile-preview-001"
+
+
 def test_project_create_success_registers_spec_without_compiling_authority(
     engine: Engine,
     tmp_path: Path,
@@ -762,6 +845,682 @@ def test_project_create_success_registers_spec_without_compiling_authority(
         spec_hash=data["spec_hash"],
         spec_version_id=data["spec_version_id"],
     )
+
+
+def test_authority_compile_succeeds_from_compile_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-success-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+
+    compiled = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=created["data"]["project_id"],
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-success-001",
+            changed_by="agent",
+        )
+    )
+
+    assert compiled["ok"] is True
+    data = compiled["data"]
+    assert data["project_id"] == created["data"]["project_id"]
+    assert data["spec_version_id"] == created["data"]["spec_version_id"]
+    assert data["spec_hash"] == created["data"]["spec_hash"]
+    assert data["pending_authority_id"] == data["compiled_authority_id"]
+    assert data["setup_status"] == "authority_pending_review"
+    assert data["fsm_state"] == "SETUP_REQUIRED"
+    assert data["mutation_event_id"] != created["data"]["mutation_event_id"]
+    assert data["next_actions"] == [_expected_authority_review_action(data["project_id"])]
+
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        assert len(authorities) == 1
+        assert authorities[0].authority_id == data["compiled_authority_id"]
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.command == "agileforge authority compile"
+        assert ledger.status == MutationStatus.SUCCEEDED.value
+        payload = _row_payload(ledger)
+        assert "pending_authority_compiled" in payload["completed_steps"]
+        assert payload["after"]["compiled_authority_id"] == data["compiled_authority_id"]
+
+    workflow_state = workflow.sessions[str(data["project_id"])]
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert workflow_state["fsm_state"] == "SETUP_REQUIRED"
+    assert workflow_state["setup_compile_mutation_event_id"] == data["mutation_event_id"]
+
+
+def test_authority_compile_marks_compiling_before_invocation(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Compile State Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-state-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    project_id = created["data"]["project_id"]
+    captured_state: dict[str, Any] = {}
+
+    from services.agent_workbench import project_setup
+
+    def compile_and_capture(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del force_recompile, tool_context
+        captured_state.update(workflow.get_session_status(str(project_id)))
+        if lease_guard is not None and not lease_guard("compiled_authority_persisted"):
+            return {
+                "success": False,
+                "error_code": "MUTATION_IN_PROGRESS",
+                "boundary": "compiled_authority_persisted",
+            }
+        with Session(engine) as session:
+            authority = CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version="test-compiler",
+                prompt_hash="sha256:test",
+                compiled_artifact_json='{"ok":true}',
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+            session.add(authority)
+            session.commit()
+            session.refresh(authority)
+            authority_id = authority.authority_id
+        if record_progress is not None:
+            assert record_progress("compiled_authority_persisted")
+            assert record_progress("product_authority_cache_persisted")
+        return {
+            "success": True,
+            "authority_id": authority_id,
+            "spec_version_id": spec_version_id,
+            "compiler_version": "test-compiler",
+            "prompt_hash": "sha256:test",
+        }
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_and_capture,
+    )
+
+    compiled = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-state-001",
+            changed_by="agent",
+        )
+    )
+
+    assert compiled["ok"] is True
+    assert captured_state["setup_status"] == "authority_compiling"
+    assert captured_state["setup_compile_mutation_event_id"] == compiled["data"]["mutation_event_id"]
+    assert captured_state["setup_next_actions"][0]["command"] == "agileforge mutation show"
+
+
+def test_authority_compile_failure_records_retryable_compile_failed(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Failure Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-failure-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    _install_failing_compiler(
+        monkeypatch,
+        failure_artifact_id="artifact-compile-failure-001",
+        blocking_gaps=["First compiler validation gap."],
+    )
+
+    failed = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=created["data"]["project_id"],
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-failure-001",
+            changed_by="agent",
+        )
+    )
+
+    assert failed["ok"] is False
+    assert _error_code(failed) == "SPEC_COMPILE_FAILED"
+    assert failed["errors"][0]["retryable"] is True
+    data = failed["data"]
+    assert data["setup_status"] == "authority_compile_failed"
+    assert data["setup_failure_stage"] == "authority_compile"
+    assert data["setup_failure_artifact_id"] == "artifact-compile-failure-001"
+    assert data["failure_artifact_stage"] == "output_validation"
+    assert data["setup_failure_first_error"] == "First compiler validation gap."
+    assert data["next_actions"][0]["command"] == "agileforge authority compile"
+    assert data["next_actions"][0]["args"]["expected_setup_status"] == "authority_compile_failed"
+
+    workflow_state = workflow.sessions[str(created["data"]["project_id"])]
+    assert workflow_state["setup_status"] == "authority_compile_failed"
+    assert workflow_state["setup_error"] == "SPEC_COMPILE_FAILED"
+    assert workflow_state["setup_failure_stage"] == "authority_compile"
+    assert workflow_state["setup_failure_artifact_id"] == "artifact-compile-failure-001"
+    assert workflow_state["setup_next_actions"] == data["next_actions"]
+
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
+        assert ledger is not None
+        assert ledger.command == "agileforge authority compile"
+        assert ledger.status == MutationStatus.VALIDATION_FAILED.value
+
+
+def test_authority_compile_rejects_live_spec_hash_change_before_compiler(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Stale File Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-stale-file-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    _write_spec(
+        tmp_path,
+        requirement_statement="The changed system MUST not bypass compile guards.",
+    )
+    compiler_calls: list[int] = []
+
+    from services.agent_workbench import project_setup
+
+    def compile_unexpected(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del engine, force_recompile, tool_context
+        del lease_guard, record_progress
+        compiler_calls.append(spec_version_id)
+        return {
+            "success": True,
+            "authority_id": 777,
+            "spec_version_id": spec_version_id,
+            "compiler_version": "unexpected-test-compiler",
+            "prompt_hash": "sha256:unexpected",
+        }
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_unexpected,
+    )
+
+    result = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=created["data"]["project_id"],
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-stale-file-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "STALE_SPEC_HASH"
+    assert compiler_calls == []
+    with Session(engine) as session:
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_authority_compile_final_workflow_failure_marks_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    original_update_session_status = workflow.update_session_status
+    workflow_error = "final workflow write failed"
+
+    def fail_final_pending_review_write(
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        if partial_update.get("setup_status") == "authority_pending_review":
+            raise RuntimeError(workflow_error)
+        original_update_session_status(session_id, partial_update)
+
+    monkeypatch.setattr(
+        workflow,
+        "update_session_status",
+        fail_final_pending_review_write,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Workflow Recovery Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-final-workflow-fails-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    project_id = created["data"]["project_id"]
+    request = AuthorityCompileRequest(
+        project_id=project_id,
+        spec_version_id=created["data"]["spec_version_id"],
+        expected_spec_hash=created["data"]["spec_hash"],
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="compile-final-workflow-fails-001",
+        changed_by="agent",
+    )
+
+    result = runner.compile_authority(request)
+
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_RECOVERY_REQUIRED"
+    _assert_authority_compile_action(
+        result["data"]["next_actions"][0],
+        project_id=project_id,
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+        expected_setup_status="authority_compiling",
+    )
+    mutation_event_id = result["data"]["mutation_event_id"]
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, mutation_event_id)
+        assert ledger is not None
+        assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+        payload = _row_payload(ledger)
+        assert payload["last_error"]["code"] == "WORKFLOW_SESSION_FAILED"
+        assert payload["last_error"]["project_id"] == created["data"]["project_id"]
+        assert payload["last_error"]["spec_version_id"] == created["data"]["spec_version_id"]
+        assert payload["last_error"]["spec_hash"] == created["data"]["spec_hash"]
+        assert payload["last_error"]["mutation_event_id"] == mutation_event_id
+        assert payload["last_error"]["workflow_error"] == workflow_error
+
+    stale_replay = runner.compile_authority(request)
+
+    assert stale_replay["ok"] is False
+    assert _error_code(stale_replay) == "MUTATION_RECOVERY_REQUIRED"
+    assert (
+        stale_replay["data"]["next_actions"][0]["args"]["expected_setup_status"]
+        != "authority_compile_required"
+    )
+    _assert_authority_compile_action(
+        stale_replay["data"]["next_actions"][0],
+        project_id=project_id,
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+        expected_setup_status="authority_compiling",
+    )
+
+    workflow.sessions[str(project_id)]["setup_status"] = "authority_compile_required"
+    replay = runner.compile_authority(request)
+
+    assert replay["ok"] is False
+    assert _error_code(replay) == "MUTATION_RECOVERY_REQUIRED"
+    _assert_authority_compile_action(
+        replay["data"]["next_actions"][0],
+        project_id=project_id,
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+    )
+
+
+def test_authority_compile_initial_workflow_failure_marks_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    original_update_session_status = workflow.update_session_status
+    workflow_error = "initial compile workflow write failed"
+    compiler_calls: list[int] = []
+
+    from services.agent_workbench import project_setup
+
+    def compile_unexpected(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del engine, force_recompile, tool_context, lease_guard, record_progress
+        compiler_calls.append(spec_version_id)
+        return {"success": True, "authority_id": 999, "spec_version_id": spec_version_id}
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_unexpected,
+    )
+
+    def fail_initial_compiling_write(
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        if partial_update.get("setup_status") == "authority_compiling":
+            raise RuntimeError(workflow_error)
+        original_update_session_status(session_id, partial_update)
+
+    monkeypatch.setattr(
+        workflow,
+        "update_session_status",
+        fail_initial_compiling_write,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Initial Workflow Recovery Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-initial-workflow-fails-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+
+    result = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=created["data"]["project_id"],
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-initial-workflow-fails-001",
+            changed_by="agent",
+        )
+    )
+
+    assert compiler_calls == []
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_RECOVERY_REQUIRED"
+    _assert_authority_compile_action(
+        result["data"]["next_actions"][0],
+        project_id=created["data"]["project_id"],
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+    )
+    mutation_event_id = result["data"]["mutation_event_id"]
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, mutation_event_id)
+        assert ledger is not None
+        assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+        payload = _row_payload(ledger)
+        assert payload["last_error"]["code"] == "WORKFLOW_SESSION_FAILED"
+        assert payload["last_error"]["workflow_error"] == workflow_error
+
+
+def test_authority_compile_validation_workflow_failure_marks_recovery_required(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_failing_compiler(
+        monkeypatch,
+        failure_artifact_id="artifact-validation-workflow-fails-001",
+        blocking_gaps=["Workflow failure should force recovery."],
+    )
+    workflow = FakeWorkflowPort()
+    original_update_session_status = workflow.update_session_status
+    workflow_error = "compile failed workflow write failed"
+
+    def fail_compile_failed_write(
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        if partial_update.get("setup_status") == "authority_compile_failed":
+            raise RuntimeError(workflow_error)
+        original_update_session_status(session_id, partial_update)
+
+    monkeypatch.setattr(
+        workflow,
+        "update_session_status",
+        fail_compile_failed_write,
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Validation Workflow Recovery Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-validation-workflow-fails-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    request = AuthorityCompileRequest(
+        project_id=created["data"]["project_id"],
+        spec_version_id=created["data"]["spec_version_id"],
+        expected_spec_hash=created["data"]["spec_hash"],
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="compile-validation-workflow-fails-001",
+        changed_by="agent",
+    )
+
+    result = runner.compile_authority(request)
+
+    assert result["ok"] is False
+    assert _error_code(result) == "MUTATION_RECOVERY_REQUIRED"
+    _assert_authority_compile_action(
+        result["data"]["next_actions"][0],
+        project_id=created["data"]["project_id"],
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+        expected_setup_status="authority_compiling",
+    )
+    mutation_event_id = result["data"]["mutation_event_id"]
+    with Session(engine) as session:
+        ledger = session.get(CliMutationLedger, mutation_event_id)
+        assert ledger is not None
+        assert ledger.status == MutationStatus.RECOVERY_REQUIRED.value
+        payload = _row_payload(ledger)
+        assert payload["last_error"]["code"] == "WORKFLOW_SESSION_FAILED"
+        assert payload["last_error"]["workflow_error"] == workflow_error
+
+    stale_replay = runner.compile_authority(request)
+
+    assert stale_replay["ok"] is False
+    assert _error_code(stale_replay) == "MUTATION_RECOVERY_REQUIRED"
+    assert (
+        stale_replay["data"]["next_actions"][0]["args"]["expected_setup_status"]
+        != "authority_compile_required"
+    )
+    _assert_authority_compile_action(
+        stale_replay["data"]["next_actions"][0],
+        project_id=created["data"]["project_id"],
+        spec_version_id=created["data"]["spec_version_id"],
+        spec_hash=created["data"]["spec_hash"],
+        expected_setup_status="authority_compiling",
+    )
+
+
+def test_authority_compile_retry_success_clears_failure_metadata(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name="Authority Compile Retry Project",
+            spec_file=str(spec_file),
+            idempotency_key="create-compile-retry-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    _install_failing_compiler(
+        monkeypatch,
+        failure_artifact_id="artifact-compile-retry-001",
+        blocking_gaps=["Retry compiler validation gap."],
+    )
+    project_id = created["data"]["project_id"]
+
+    failed = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-retry-failure-001",
+            changed_by="agent",
+        )
+    )
+    assert failed["ok"] is False
+    failed_state = workflow.sessions[str(project_id)]
+    assert failed_state["setup_status"] == "authority_compile_failed"
+    assert failed_state["setup_failure_stage"] == "authority_compile"
+    assert failed_state["setup_failure_blocking_gaps"] == [
+        "Retry compiler validation gap."
+    ]
+
+    _install_fast_compiler(monkeypatch)
+    retried = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_failed",
+            idempotency_key="compile-retry-success-001",
+            changed_by="agent",
+        )
+    )
+
+    assert retried["ok"] is True
+    assert retried["data"]["setup_status"] == "authority_pending_review"
+    final_state = workflow.sessions[str(project_id)]
+    assert final_state["setup_status"] == "authority_pending_review"
+    assert final_state["setup_error"] is None
+    assert final_state["setup_next_actions"] == [
+        _expected_authority_review_action(project_id)
+    ]
+    for field_name in _authority_compile_failure_metadata_fields():
+        assert final_state.get(field_name) is None
+
+
+@pytest.mark.parametrize(
+    ("request_update", "expected_code"),
+    [
+        ({"expected_state": "SPRINT_PLANNING"}, "STALE_STATE"),
+        ({"expected_setup_status": "authority_pending_review"}, "STALE_SETUP_STATUS"),
+        ({"expected_spec_hash": "sha256:" + "b" * 64}, "STALE_SPEC_HASH"),
+        ({"spec_version_id": 999}, "STALE_SPEC_VERSION"),
+    ],
+)
+def test_authority_compile_rejects_stale_guards(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_update: dict[str, Any],
+    expected_code: str,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        ProjectCreateRequest(
+            name=f"Stale Guard Project {expected_code}",
+            spec_file=str(spec_file),
+            idempotency_key=f"create-stale-{expected_code.lower().replace('_', '-')}-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    request_data: dict[str, Any] = {
+        "project_id": created["data"]["project_id"],
+        "spec_version_id": created["data"]["spec_version_id"],
+        "expected_spec_hash": created["data"]["spec_hash"],
+        "expected_state": "SETUP_REQUIRED",
+        "expected_setup_status": "authority_compile_required",
+        "idempotency_key": f"compile-stale-{expected_code.lower().replace('_', '-')}-001",
+        "changed_by": "agent",
+    }
+    request_data.update(request_update)
+
+    result = runner.compile_authority(AuthorityCompileRequest(**request_data))
+
+    assert result["ok"] is False
+    assert _error_code(result) == expected_code
+    with Session(engine) as session:
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_event_159_style_long_compile_survives_past_original_lease(

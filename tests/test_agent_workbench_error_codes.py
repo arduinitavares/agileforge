@@ -36,6 +36,9 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.AUTHORITY_GUARD_INCOMPLETE: (2, False),
     ErrorCode.SCHEMA_VERSION_MISMATCH: (5, True),
     ErrorCode.STALE_STATE: (3, True),
+    ErrorCode.STALE_SETUP_STATUS: (3, True),
+    ErrorCode.STALE_SPEC_HASH: (3, True),
+    ErrorCode.STALE_SPEC_VERSION: (3, True),
     ErrorCode.STALE_ARTIFACT_FINGERPRINT: (3, True),
     ErrorCode.STALE_CONTEXT_FINGERPRINT: (3, True),
     ErrorCode.STALE_AUTHORITY_VERSION: (3, True),
@@ -104,6 +107,23 @@ def test_compiled_authority_schema_unsupported_error_is_registered() -> None:
     assert metadata.default_exit_code == expected_exit_code
     assert metadata.retryable is False
     assert metadata.description == "Compiled authority artifact schema is unsupported."
+
+
+def test_authority_compile_stale_guard_error_codes_are_registered() -> None:
+    """Expose stable metadata for authority compile stale guards."""
+    expected_exit_code = 3
+
+    assert ErrorCode.STALE_SETUP_STATUS.value == "STALE_SETUP_STATUS"
+    assert ErrorCode.STALE_SPEC_HASH.value == "STALE_SPEC_HASH"
+    assert ErrorCode.STALE_SPEC_VERSION.value == "STALE_SPEC_VERSION"
+    for code in (
+        ErrorCode.STALE_SETUP_STATUS,
+        ErrorCode.STALE_SPEC_HASH,
+        ErrorCode.STALE_SPEC_VERSION,
+    ):
+        metadata = error_metadata(code)
+        assert metadata.default_exit_code == expected_exit_code
+        assert metadata.retryable is True
 
 
 @pytest.mark.parametrize(

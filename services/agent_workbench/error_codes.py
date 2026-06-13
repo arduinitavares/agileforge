@@ -45,6 +45,9 @@ class ErrorCode(StrEnum):
     AUTHORITY_REVIEW_INCOMPLETE = "AUTHORITY_REVIEW_INCOMPLETE"
     AUTHORITY_GUARD_INCOMPLETE = "AUTHORITY_GUARD_INCOMPLETE"
     STALE_STATE = "STALE_STATE"
+    STALE_SETUP_STATUS = "STALE_SETUP_STATUS"
+    STALE_SPEC_HASH = "STALE_SPEC_HASH"
+    STALE_SPEC_VERSION = "STALE_SPEC_VERSION"
     STALE_ARTIFACT_FINGERPRINT = "STALE_ARTIFACT_FINGERPRINT"
     STALE_CONTEXT_FINGERPRINT = "STALE_CONTEXT_FINGERPRINT"
     STALE_AUTHORITY_VERSION = "STALE_AUTHORITY_VERSION"
@@ -222,6 +225,24 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=3,
         retryable=True,
         description="Expected workflow state did not match.",
+    ),
+    ErrorCode.STALE_SETUP_STATUS: ErrorMetadata(
+        code=ErrorCode.STALE_SETUP_STATUS.value,
+        default_exit_code=3,
+        retryable=True,
+        description="Expected setup status did not match.",
+    ),
+    ErrorCode.STALE_SPEC_HASH: ErrorMetadata(
+        code=ErrorCode.STALE_SPEC_HASH.value,
+        default_exit_code=3,
+        retryable=True,
+        description="Expected setup spec hash did not match.",
+    ),
+    ErrorCode.STALE_SPEC_VERSION: ErrorMetadata(
+        code=ErrorCode.STALE_SPEC_VERSION.value,
+        default_exit_code=3,
+        retryable=True,
+        description="Expected setup spec version did not match.",
     ),
     ErrorCode.STALE_ARTIFACT_FINGERPRINT: ErrorMetadata(
         code=ErrorCode.STALE_ARTIFACT_FINGERPRINT.value,
