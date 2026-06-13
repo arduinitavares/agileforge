@@ -392,6 +392,66 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
+def test_project_create_then_authority_compile_cli_flow(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI setup flow should require explicit authority compile after create."""
+    spec_file = _write_structured_spec(tmp_path)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    app = AgentWorkbenchApplication(project_setup_runner=runner)
+    _install_compiler(monkeypatch, success=True)
+
+    create_rc = main(
+        [
+            "project",
+            "create",
+            "--name",
+            "Split Setup CLI Project",
+            "--spec-file",
+            str(spec_file),
+            "--idempotency-key",
+            "split-setup-create-001",
+        ],
+        application=app,
+    )
+    create = _captured_payload(capsys)
+    assert create_rc == 0
+    create_data = create["data"]
+    compile_action = create_data["next_actions"][0]
+    compile_args = compile_action["args"]
+    assert compile_action["command"] == "agileforge authority compile"
+
+    compile_rc = main(
+        [
+            "authority",
+            "compile",
+            "--project-id",
+            str(compile_args["project_id"]),
+            "--spec-version-id",
+            str(compile_args["spec_version_id"]),
+            "--expected-spec-hash",
+            compile_args["expected_spec_hash"],
+            "--expected-state",
+            compile_args["expected_state"],
+            "--expected-setup-status",
+            compile_args["expected_setup_status"],
+            "--idempotency-key",
+            "split-setup-compile-001",
+        ],
+        application=app,
+    )
+    compiled = _captured_payload(capsys)
+
+    assert compile_rc == 0
+    assert compiled["ok"] is True
+    assert compiled["data"]["setup_status"] == "authority_pending_review"
+    assert compiled["data"]["pending_authority_id"] is not None
+
+
 def test_project_create_cli_returns_error_envelope_for_invalid_structured_spec(
     engine: Engine,
     tmp_path: Path,
