@@ -5119,6 +5119,148 @@ def test_workflow_next_routes_failed_setup_to_retry_action() -> None:
     ]
 
 
+def test_workflow_next_routes_compile_required_to_authority_compile() -> None:
+    """Setup projects without pending authority should route to compile."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compile_required",
+                "setup_spec_file_path": "/tmp/agileforge/spec.json",  # noqa: S108
+                "setup_spec_hash": "a" * 64,
+                "setup_spec_version_id": SPEC_VERSION_ID,
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "authority_compile_required"
+    assert data["next_valid_commands"] == [
+        "agileforge authority compile "
+        f"--project-id {PROJECT_ID} "
+        f"--spec-version-id {SPEC_VERSION_ID} "
+        f"--expected-spec-hash {'a' * 64} "
+        "--expected-state SETUP_REQUIRED "
+        "--expected-setup-status authority_compile_required"
+    ]
+    assert data["next_actions"][0]["command"] == data["next_valid_commands"][0]
+
+
+def test_workflow_next_routes_compile_required_without_spec_path_to_blocked() -> None:
+    """Compile setup routing must not advertise unrunnable commands."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compile_required",
+                "setup_spec_hash": "a" * 64,
+                "setup_spec_version_id": SPEC_VERSION_ID,
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["next_valid_commands"] == []
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge authority compile",
+            "installed": True,
+            "reason": (
+                "Authority compile requires setup_spec_file_path in workflow state."
+            ),
+        }
+    ]
+
+
+def test_workflow_next_routes_compile_required_with_bool_version_to_blocked() -> None:
+    """Compile setup routing must reject bool spec version ids."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compile_required",
+                "setup_spec_file_path": "spec.json",
+                "setup_spec_hash": "a" * 64,
+                "setup_spec_version_id": True,
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["next_valid_commands"] == []
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge authority compile",
+            "installed": True,
+            "reason": (
+                "Authority compile requires setup_spec_version_id in workflow state."
+            ),
+        }
+    ]
+
+
+def test_workflow_next_routes_compile_failed_to_authority_compile_retry() -> None:
+    """Failed compiler setup should retry compile, not project setup retry."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compile_failed",
+                "setup_spec_file_path": "/tmp/agileforge/spec.json",  # noqa: S108
+                "setup_spec_hash": "b" * 64,
+                "setup_spec_version_id": SPEC_VERSION_ID,
+                "setup_failure_stage": "authority_compile",
+                "setup_failure_summary": "Compiler output failed validation.",
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "authority_compile_failed"
+    assert data["next_valid_commands"][0].endswith(
+        "--expected-setup-status authority_compile_failed"
+    )
+    assert "project setup retry" not in data["next_valid_commands"][0]
+
+
+def test_workflow_next_routes_compiling_to_mutation_inspection() -> None:
+    """Active compile state should expose mutation inspection commands."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compiling",
+                "setup_compile_mutation_event_id": 123,
+                "setup_spec_hash": "c" * 64,
+                "setup_spec_version_id": SPEC_VERSION_ID,
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "authority_compiling"
+    assert data["next_valid_commands"] == [
+        "agileforge mutation show --mutation-event-id 123",
+        f"agileforge mutation list --project-id {PROJECT_ID} --status pending",
+        f"agileforge authority status --project-id {PROJECT_ID}",
+    ]
+
+
 def test_workflow_next_failed_setup_publishes_runnable_retry_guards(
     tmp_path: Path,
 ) -> None:

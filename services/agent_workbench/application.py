@@ -779,13 +779,16 @@ class AgentWorkbenchApplication:
 
         setup_status = _setup_status(workflow)
         if _fsm_state_from_envelope(workflow) == "SETUP_REQUIRED" and setup_status in {
+            "authority_compile_failed",
+            "authority_compile_required",
+            "authority_compiling",
             "authority_pending_review",
             "authority_rejected",
             "failed",
         }:
             authority = (
                 self.authority_status(project_id=project_id)
-                if setup_status != "failed"
+                if setup_status in {"authority_pending_review", "authority_rejected"}
                 else None
             )
             effective_setup_status = (
@@ -2134,114 +2137,48 @@ def _setup_workflow_next(
 
     data: dict[str, Any] = {
         "project_id": project_id,
+        "status": setup_status,
         "next_valid_commands": [],
         "blocked_commands": [],
         "blocked_future_commands": [],
     }
-    review_summary = _authority_review_summary(review)
     if setup_status == "authority_pending_review":
-        data["next_actions"] = [
-            {
-                "command": (
-                    f"agileforge authority review --project-id {project_id} --open"
-                ),
-                "installed": True,
-                "requires_cli_installation": False,
-                "reason": "Review pending authority before accepting or rejecting it.",
-            }
-        ]
-        accept_reason = "Record accepted authority only after review passes."
-        accept_action: dict[str, Any] = {
-            "command": f"agileforge authority accept --project-id {project_id}",
-            "installed": True,
-            "requires_cli_installation": False,
-            "after_review": True,
-            "requires": [],
-        }
-        if review_summary is not None:
-            data["authority_review_summary"] = review_summary
-            if review_summary.get("acceptance_status") == "blocked":
-                codes = [
-                    str(code)
-                    for code in _as_list(review_summary.get("blocking_finding_codes"))
-                    if str(code)
-                ]
-                accept_action["blocked"] = True
-                accept_action["review_summary"] = review_summary
-                accept_action["requires"] = ["fatal_review_resolution"]
-                accept_reason = (
-                    "Authority review has fatal blocking findings; resolve them "
-                    "and run authority review again before accepting. "
-                    f"Blocking codes: {', '.join(codes)}."
-                )
-        accept_action["reason"] = accept_reason
-        data["decision_actions_after_review"] = [
-            accept_action,
-            {
-                "command": (
-                    f"agileforge authority reject --project-id {project_id} "
-                    "--review-token <review_token> "
-                    "--reason <reason> --idempotency-key <idempotency_key>"
-                ),
-                "installed": True,
-                "requires_cli_installation": False,
-                "after_review": True,
-                "requires": ["review_token", "reason", "idempotency_key"],
-            },
-        ]
+        _apply_authority_pending_review_routing(
+            data=data,
+            project_id=project_id,
+            review=review,
+        )
     elif setup_status == "authority_rejected":
-        spec_version_id = _rejected_spec_version_id(authority)
-        if spec_version_id is not None:
-            command = _authority_regenerate_command(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-            )
-            data["next_valid_commands"] = [command]
-            data["next_actions"] = [_authority_regenerate_next_action(command)]
-            data["manual_remediation"] = []
-        else:
-            data["next_actions"] = []
-            data["blocked_commands"] = [
-                {
-                    "command": AUTHORITY_REGENERATE_COMMAND,
-                    "installed": True,
-                    "reason": (
-                        "Authority rejection requires regeneration, but the "
-                        "rejected spec version could not be determined."
-                    ),
-                }
-            ]
-            data["manual_remediation"] = [
-                "Inspect authority status for rejected_spec_version_id.",
-            ]
+        _apply_authority_rejected_routing(
+            data=data,
+            project_id=project_id,
+            authority=authority,
+        )
     elif setup_status == "failed":
-        retry_command = _failed_setup_retry_command(
+        _apply_failed_setup_routing(
+            data=data,
             project_id=project_id,
             workflow=workflow,
         )
-        if retry_command.get("runnable"):
-            data["next_valid_commands"] = [str(retry_command["command"])]
-            data["next_actions"] = [
-                {
-                    "command": retry_command["command"],
-                    "installed": True,
-                    "requires_cli_installation": False,
-                    "reason": "Retry project setup after fixing the setup failure.",
-                }
-            ]
-        else:
-            data["blocked_commands"] = [
-                {
-                    "command": retry_command["command"],
-                    "installed": True,
-                    "reason": retry_command["reason"],
-                }
-            ]
+    elif setup_status in {"authority_compile_required", "authority_compile_failed"}:
+        _apply_authority_compile_routing(
+            data=data,
+            project_id=project_id,
+            workflow=workflow,
+            setup_status=setup_status,
+        )
+    elif setup_status == "authority_compiling":
+        _apply_authority_compiling_routing(
+            data=data,
+            project_id=project_id,
+            workflow=workflow,
+        )
 
     data["source_fingerprint"] = canonical_hash(
         {
             "command": WORKFLOW_NEXT_COMMAND,
             "project_id": project_id,
+            "status": data["status"],
             "workflow": _fingerprint_input(_envelope_data(workflow)),
             "authority": (
                 _fingerprint_input(_envelope_data(authority))
@@ -2290,6 +2227,265 @@ def _setup_workflow_next(
             ),
         ],
         "errors": [],
+    }
+
+
+def _apply_authority_pending_review_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    review: dict[str, Any] | None,
+) -> None:
+    """Publish review and decision commands for pending setup authority."""
+    data["next_actions"] = [
+        {
+            "command": f"agileforge authority review --project-id {project_id} --open",
+            "installed": True,
+            "requires_cli_installation": False,
+            "reason": "Review pending authority before accepting or rejecting it.",
+        }
+    ]
+    review_summary = _authority_review_summary(review)
+    accept_reason = "Record accepted authority only after review passes."
+    accept_action: dict[str, Any] = {
+        "command": f"agileforge authority accept --project-id {project_id}",
+        "installed": True,
+        "requires_cli_installation": False,
+        "after_review": True,
+        "requires": [],
+    }
+    if review_summary is not None:
+        data["authority_review_summary"] = review_summary
+        if review_summary.get("acceptance_status") == "blocked":
+            codes = [
+                str(code)
+                for code in _as_list(review_summary.get("blocking_finding_codes"))
+                if str(code)
+            ]
+            accept_action["blocked"] = True
+            accept_action["review_summary"] = review_summary
+            accept_action["requires"] = ["fatal_review_resolution"]
+            accept_reason = (
+                "Authority review has fatal blocking findings; resolve them "
+                "and run authority review again before accepting. "
+                f"Blocking codes: {', '.join(codes)}."
+            )
+    accept_action["reason"] = accept_reason
+    data["decision_actions_after_review"] = [
+        accept_action,
+        {
+            "command": (
+                f"agileforge authority reject --project-id {project_id} "
+                "--review-token <review_token> "
+                "--reason <reason> --idempotency-key <idempotency_key>"
+            ),
+            "installed": True,
+            "requires_cli_installation": False,
+            "after_review": True,
+            "requires": ["review_token", "reason", "idempotency_key"],
+        },
+    ]
+
+
+def _apply_authority_rejected_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    authority: dict[str, Any] | None,
+) -> None:
+    """Publish regeneration commands for rejected setup authority."""
+    spec_version_id = _rejected_spec_version_id(authority)
+    if spec_version_id is not None:
+        command = _authority_regenerate_command(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        )
+        data["next_valid_commands"] = [command]
+        data["next_actions"] = [_authority_regenerate_next_action(command)]
+        data["manual_remediation"] = []
+        return
+
+    data["next_actions"] = []
+    data["blocked_commands"] = [
+        {
+            "command": AUTHORITY_REGENERATE_COMMAND,
+            "installed": True,
+            "reason": (
+                "Authority rejection requires regeneration, but the "
+                "rejected spec version could not be determined."
+            ),
+        }
+    ]
+    data["manual_remediation"] = [
+        "Inspect authority status for rejected_spec_version_id.",
+    ]
+
+
+def _apply_failed_setup_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    workflow: dict[str, Any],
+) -> None:
+    """Publish retry commands for failed setup."""
+    retry_command = _failed_setup_retry_command(
+        project_id=project_id,
+        workflow=workflow,
+    )
+    if retry_command.get("runnable"):
+        data["next_valid_commands"] = [str(retry_command["command"])]
+        data["next_actions"] = [
+            {
+                "command": retry_command["command"],
+                "installed": True,
+                "requires_cli_installation": False,
+                "reason": "Retry project setup after fixing the setup failure.",
+            }
+        ]
+        return
+
+    data["blocked_commands"] = [
+        {
+            "command": retry_command["command"],
+            "installed": True,
+            "reason": retry_command["reason"],
+        }
+    ]
+
+
+def _apply_authority_compile_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    workflow: dict[str, Any],
+    setup_status: str,
+) -> None:
+    """Publish guarded authority compile commands for setup states."""
+    compile_command = _authority_compile_command_from_workflow(
+        project_id=project_id,
+        workflow=workflow,
+        expected_setup_status=setup_status,
+    )
+    if compile_command.get("runnable"):
+        command = str(compile_command["command"])
+        status_command = f"agileforge authority status --project-id {project_id}"
+        data["next_valid_commands"] = [command]
+        data["next_actions"] = [
+            {
+                "command": command,
+                "installed": True,
+                "requires_cli_installation": False,
+                "reason": "Compile project authority with guarded setup inputs.",
+            },
+            {
+                "command": status_command,
+                "installed": True,
+                "requires_cli_installation": False,
+                "reason": "Inspect setup authority status after compile completes.",
+            },
+        ]
+        return
+
+    data["blocked_commands"] = [
+        {
+            "command": compile_command["command"],
+            "installed": True,
+            "reason": compile_command["reason"],
+        }
+    ]
+
+
+def _apply_authority_compiling_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    workflow: dict[str, Any],
+) -> None:
+    """Publish mutation inspection commands for an active authority compile."""
+    state = _envelope_data(workflow).get("state")
+    workflow_state = state if isinstance(state, dict) else {}
+    mutation_event_id = workflow_state.get("setup_compile_mutation_event_id")
+    is_mutation_event_id = isinstance(mutation_event_id, int) and not isinstance(
+        mutation_event_id,
+        bool,
+    )
+    if is_mutation_event_id:
+        commands = [
+            f"agileforge mutation show --mutation-event-id {mutation_event_id}",
+            f"agileforge mutation list --project-id {project_id} --status pending",
+            f"agileforge authority status --project-id {project_id}",
+        ]
+        data["next_valid_commands"] = commands
+        data["next_actions"] = [
+            {
+                "command": command,
+                "installed": True,
+                "requires_cli_installation": False,
+                "reason": "Inspect the active authority compile mutation.",
+            }
+            for command in commands
+        ]
+        return
+
+    data["blocked_commands"] = [
+        {
+            "command": (
+                "agileforge mutation show "
+                "--mutation-event-id <mutation_event_id>"
+            ),
+            "installed": True,
+            "reason": (
+                "Active authority compile inspection requires "
+                "setup_compile_mutation_event_id in workflow state."
+            ),
+        }
+    ]
+
+
+def _authority_compile_command_from_workflow(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    expected_setup_status: str,
+) -> dict[str, Any]:
+    """Build a guarded authority compile command from workflow setup fields."""
+    state = _envelope_data(workflow).get("state")
+    workflow_state = state if isinstance(state, dict) else {}
+    spec_file_path = workflow_state.get("setup_spec_file_path")
+    spec_hash = workflow_state.get("setup_spec_hash")
+    spec_version_id = workflow_state.get("setup_spec_version_id")
+    if not isinstance(spec_file_path, str) or not spec_file_path.strip():
+        return {
+            "command": "agileforge authority compile",
+            "runnable": False,
+            "reason": (
+                "Authority compile requires setup_spec_file_path in workflow state."
+            ),
+        }
+    if not isinstance(spec_hash, str) or not spec_hash.strip():
+        return {
+            "command": "agileforge authority compile",
+            "runnable": False,
+            "reason": "Authority compile requires setup_spec_hash in workflow state.",
+        }
+    if not isinstance(spec_version_id, int) or isinstance(spec_version_id, bool):
+        return {
+            "command": "agileforge authority compile",
+            "runnable": False,
+            "reason": (
+                "Authority compile requires setup_spec_version_id in workflow state."
+            ),
+        }
+    return {
+        "command": (
+            "agileforge authority compile "
+            f"--project-id {project_id} "
+            f"--spec-version-id {spec_version_id} "
+            f"--expected-spec-hash {quote(spec_hash)} "
+            "--expected-state SETUP_REQUIRED "
+            f"--expected-setup-status {expected_setup_status}"
+        ),
+        "runnable": True,
     }
 
 
