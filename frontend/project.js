@@ -31,6 +31,20 @@ const STEP_ICONS = {
 
 const PHASE_ORDER = ['setup', 'vision', 'backlog', 'roadmap', 'story', 'sprint'];
 const PANEL_ORDER = ['overview', ...PHASE_ORDER];
+const PRE_REVIEW_SETUP_STATUSES = new Set([
+    'failed',
+    'authority_compile_required',
+    'authority_compiling',
+    'authority_compile_failed',
+]);
+const WORKFLOW_CONTROL_SETUP_STATUSES = new Set(['authority_pending_review', 'passed']);
+const AUTHORITY_COMPILE_REQUIRED_ARGS = [
+    'project_id',
+    'spec_version_id',
+    'expected_spec_hash',
+    'expected_state',
+    'expected_setup_status',
+];
 const NEXT_PHASE = {
     setup: 'vision',
     vision: 'backlog',
@@ -417,7 +431,7 @@ function isPlanningCompleteState(stateKey) {
 }
 
 function getNextIncompletePlanningPhase(stateKey) {
-    if (currentProjectState.setup_status === 'failed') {
+    if (!canShowWorkflowControls()) {
         return 'setup';
     }
 
@@ -464,11 +478,24 @@ function getCompletedPhaseCount() {
 }
 
 function shouldHideWorkflowFooter() {
+    if (!canShowWorkflowControls()) {
+        return viewPhaseId !== 'setup' || !hasSetupFooterAction();
+    }
+
     return viewPhaseId === 'overview'
         || (viewPhaseId === 'sprint'
             && currentSprintId
             && !showSprintPlanner
             && !hasReviewableSprintDraft());
+}
+
+function shouldHideNextPhaseControls() {
+    return !canShowWorkflowControls();
+}
+
+function hasSetupFooterAction() {
+    return currentProjectState.setup_status === 'failed'
+        || Boolean(getRunnableAuthorityCompileAction());
 }
 
 function applyResolvedLanding(stateKey, landing) {
@@ -508,12 +535,25 @@ function applyResolvedLanding(stateKey, landing) {
 
 function updateRetryButton() {
     const retryBtn = document.getElementById('btn-retry-setup');
-    if (!retryBtn) return;
+    if (retryBtn) {
+        if (currentProjectState.setup_status === 'failed') {
+            retryBtn.classList.remove('hidden');
+        } else {
+            retryBtn.classList.add('hidden');
+        }
+    }
 
-    if (currentProjectState.setup_status === 'failed') {
-        retryBtn.classList.remove('hidden');
+    const compileBtn = ensureAuthorityCompileButton();
+    const action = getRunnableAuthorityCompileAction();
+    if (compileBtn && action) {
+        const isRetry = currentProjectState.setup_status === 'authority_compile_failed';
+        compileBtn.innerHTML = isRetry
+            ? '<span class="material-symbols-outlined text-sm">refresh</span> Retry Compile'
+            : '<span class="material-symbols-outlined text-sm">build</span> Compile Authority';
+        compileBtn.disabled = false;
+        compileBtn.classList.remove('hidden');
     } else {
-        retryBtn.classList.add('hidden');
+        compileBtn?.classList.add('hidden');
     }
 }
 
@@ -527,6 +567,34 @@ function updateSetupStatusBanner() {
         banner.innerText = 'Setup passed. Specification linked and authority compiled.';
         updateSetupPanelCopy('Project Setup', 'Project setup is complete.');
         renderAuthorityReviewCard(true);
+        renderSetupStateGuidance();
+        return;
+    }
+
+    if (currentProjectState.setup_status === 'authority_compile_required') {
+        banner.className = 'text-sm rounded-lg border px-4 py-3 border-amber-200 bg-amber-50 text-amber-700';
+        banner.innerText = 'Project and spec are saved. Compile pending authority before review.';
+        updateSetupPanelCopy('Authority compile required', 'Project and spec are saved. Compile pending authority before review.');
+        renderAuthorityReviewCard(false);
+        renderSetupStateGuidance();
+        return;
+    }
+
+    if (currentProjectState.setup_status === 'authority_compiling') {
+        banner.className = 'text-sm rounded-lg border px-4 py-3 border-sky-200 bg-sky-50 text-sky-700';
+        banner.innerText = 'Authority compilation is in progress. Inspect the mutation before retrying.';
+        updateSetupPanelCopy('Authority compile running', 'Authority compilation is in progress. Inspect the mutation before retrying.');
+        renderAuthorityReviewCard(false);
+        renderSetupStateGuidance();
+        return;
+    }
+
+    if (currentProjectState.setup_status === 'authority_compile_failed') {
+        banner.className = 'text-sm rounded-lg border px-4 py-3 border-rose-200 bg-rose-50 text-rose-700';
+        banner.innerText = currentProjectState.setup_error || 'Authority compile failed.';
+        updateSetupPanelCopy('Authority compile failed', 'Authority compilation failed. Inspect failure metadata, then retry compile when guards are current.');
+        renderAuthorityReviewCard(false);
+        renderSetupStateGuidance();
         return;
     }
 
@@ -535,6 +603,7 @@ function updateSetupStatusBanner() {
         banner.innerText = 'Pending Authority Review. Review the compiled authority before Vision is unlocked.';
         updateSetupPanelCopy('Pending Authority Review', 'Review the compiled authority and either accept or reject it.');
         renderAuthorityReviewCard(true);
+        renderSetupStateGuidance();
         return;
     }
 
@@ -543,6 +612,7 @@ function updateSetupStatusBanner() {
         banner.innerText = currentProjectState.setup_error || 'Authority Rejected. Update the specification or recompile authority before continuing.';
         updateSetupPanelCopy('Authority Rejected', 'Vision remains locked until authority is reviewed again and accepted.');
         renderAuthorityReviewCard(false);
+        renderSetupStateGuidance();
         return;
     }
 
@@ -550,6 +620,7 @@ function updateSetupStatusBanner() {
     banner.innerText = currentProjectState.setup_error || 'Setup is required before Vision.';
     updateSetupPanelCopy('Project Setup', 'Project setup requires a valid specification file path and successful authority compile before proceeding.');
     renderAuthorityReviewCard(false);
+    renderSetupStateGuidance();
 }
 
 function updateSetupPanelCopy(title, description) {
@@ -557,6 +628,218 @@ function updateSetupPanelCopy(title, description) {
     const descriptionEl = document.getElementById('setup-panel-description');
     if (titleEl) titleEl.innerText = title;
     if (descriptionEl) descriptionEl.innerText = description;
+}
+
+function canShowWorkflowControls(status = currentProjectState.setup_status) {
+    return WORKFLOW_CONTROL_SETUP_STATUSES.has(status);
+}
+
+function isPreReviewSetupStatus(status = currentProjectState.setup_status) {
+    return PRE_REVIEW_SETUP_STATUSES.has(status);
+}
+
+function getSetupActionList() {
+    const nextActions = safeArray(currentProjectState.next_actions);
+    if (nextActions.length > 0) return nextActions;
+    return safeArray(currentProjectState.setup_next_actions);
+}
+
+function getSetupBlockedCommands() {
+    return safeArray(currentProjectState.blocked_commands);
+}
+
+function isAuthorityCompileAction(action) {
+    return typeof action?.command === 'string'
+        && action.command.trim().startsWith('agileforge authority compile');
+}
+
+function hasCompleteAuthorityCompileArgs(action) {
+    if (!isPlainObject(action?.args)) return false;
+    return AUTHORITY_COMPILE_REQUIRED_ARGS.every((key) => {
+        const value = action.args[key];
+        return value !== null && value !== undefined && String(value).trim() !== '';
+    });
+}
+
+function getAuthorityCompileAction() {
+    return getSetupActionList().find(isAuthorityCompileAction) || null;
+}
+
+function getRunnableAuthorityCompileAction() {
+    const action = getAuthorityCompileAction();
+    if (!action || !hasCompleteAuthorityCompileArgs(action)) return null;
+    return action;
+}
+
+function coerceActionInteger(value) {
+    const numberValue = Number(value);
+    return Number.isInteger(numberValue) && numberValue > 0 ? numberValue : null;
+}
+
+function ensureAuthorityCompileButton() {
+    let button = document.getElementById('btn-authority-compile');
+    if (button) return button;
+
+    const retryBtn = document.getElementById('btn-retry-setup');
+    const parent = retryBtn?.parentElement;
+    if (!parent) return null;
+
+    parent.classList.add('flex', 'flex-wrap', 'items-center', 'gap-2');
+    button = document.createElement('button');
+    button.id = 'btn-authority-compile';
+    button.type = 'button';
+    button.className = 'hidden inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-white font-bold transition-all shadow-sm';
+    button.addEventListener('click', compileProjectAuthority);
+    parent.appendChild(button);
+    return button;
+}
+
+function ensureSetupStateGuidancePanel() {
+    let panel = document.getElementById('setup-state-guidance');
+    if (panel) return panel;
+
+    const descriptionEl = document.getElementById('setup-panel-description');
+    if (!descriptionEl?.parentElement) return null;
+
+    panel = document.createElement('div');
+    panel.id = 'setup-state-guidance';
+    panel.className = 'hidden mt-4 space-y-3 rounded-lg border border-slate-200 bg-white/80 p-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-200';
+    descriptionEl.insertAdjacentElement('afterend', panel);
+    return panel;
+}
+
+function createSetupCommandElement(action) {
+    const item = document.createElement('div');
+    item.className = 'rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/50';
+
+    const command = document.createElement('code');
+    command.className = 'block break-all font-mono text-xs text-slate-800 dark:text-slate-100';
+    command.textContent = renderActionCommand(action);
+    item.appendChild(command);
+
+    if (action?.reason) {
+        const reason = document.createElement('p');
+        reason.className = 'mt-2 text-xs text-slate-500 dark:text-slate-400';
+        reason.textContent = action.reason;
+        item.appendChild(reason);
+    }
+
+    return item;
+}
+
+function renderActionCommand(action) {
+    if (typeof action?.command !== 'string') return 'Command unavailable';
+    if (!isPlainObject(action.args)) return action.command;
+    if (isAuthorityCompileAction(action) && !hasCompleteAuthorityCompileArgs(action)) {
+        return `${action.command} (guard args incomplete; inspect setup state before retrying)`;
+    }
+    const args = Object.entries(action.args)
+        .filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
+        .map(([key, value]) => `--${key.replaceAll('_', '-')} ${String(value)}`);
+    return [action.command, ...args].join(' ');
+}
+
+function createFailureMetadataElement() {
+    const fields = [
+        ['Error', currentProjectState.setup_error],
+        ['Error code', currentProjectState.setup_error_code],
+        ['Failure stage', currentProjectState.setup_failure_stage],
+        ['Artifact id', currentProjectState.setup_failure_artifact_id],
+        ['Artifact stage', currentProjectState.failure_artifact_stage],
+        ['First error', currentProjectState.setup_failure_first_error],
+        ['Summary', currentProjectState.setup_failure_summary],
+        ['Raw output', currentProjectState.setup_raw_output_preview],
+    ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'rounded-lg border border-rose-200 bg-rose-50/70 p-3 dark:border-rose-900 dark:bg-rose-950/30';
+
+    const title = document.createElement('div');
+    title.className = 'text-xs font-black uppercase tracking-wide text-rose-700 dark:text-rose-200';
+    title.textContent = 'Failure metadata';
+    wrapper.appendChild(title);
+
+    if (fields.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'mt-2 text-xs text-rose-700 dark:text-rose-200';
+        empty.textContent = 'No failure metadata was provided by the setup state.';
+        wrapper.appendChild(empty);
+        return wrapper;
+    }
+
+    const list = document.createElement('dl');
+    list.className = 'mt-2 grid grid-cols-1 gap-2 text-xs md:grid-cols-2';
+    fields.forEach(([label, value]) => {
+        const item = document.createElement('div');
+        item.className = 'min-w-0';
+
+        const term = document.createElement('dt');
+        term.className = 'font-bold text-rose-800 dark:text-rose-100';
+        term.textContent = label;
+        item.appendChild(term);
+
+        const details = document.createElement('dd');
+        details.className = 'mt-0.5 break-words font-mono text-rose-900 dark:text-rose-50';
+        details.textContent = String(value);
+        item.appendChild(details);
+
+        list.appendChild(item);
+    });
+    wrapper.appendChild(list);
+    return wrapper;
+}
+
+function renderSetupStateGuidance() {
+    const panel = ensureSetupStateGuidancePanel();
+    if (!panel) return;
+
+    const status = currentProjectState.setup_status;
+    if (!['authority_compile_required', 'authority_compiling', 'authority_compile_failed'].includes(status)) {
+        panel.replaceChildren();
+        panel.classList.add('hidden');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+    const actions = getSetupActionList();
+    const blockedCommands = getSetupBlockedCommands();
+    const compileAction = getAuthorityCompileAction();
+    const hasRunnableCompile = Boolean(getRunnableAuthorityCompileAction());
+
+    const title = document.createElement('div');
+    title.className = 'text-xs font-black uppercase tracking-wide text-slate-500 dark:text-slate-400';
+    title.textContent = status === 'authority_compiling' ? 'Mutation guidance' : 'Next action';
+
+    const body = document.createElement('p');
+    body.className = 'text-sm text-slate-600 dark:text-slate-300';
+    if (status === 'authority_compiling') {
+        body.textContent = actions.length > 0
+            ? 'Inspect the active compile mutation before retrying authority compilation.'
+            : 'Compile is marked running, but no mutation inspection action was provided. Inspect mutation status before retrying.';
+    } else if (hasRunnableCompile) {
+        body.textContent = status === 'authority_compile_failed'
+            ? 'Retry authority compile with the guarded action from the setup state.'
+            : 'Compile authority with the guarded action from the setup state.';
+    } else if (compileAction) {
+        body.textContent = 'Authority compile action is present, but required structured guard args are missing. Inspect the command before retrying.';
+    } else {
+        body.textContent = 'No safe authority compile action is available. Inspect setup state or authority status before retrying.';
+    }
+
+    const children = [title, body];
+    if (status === 'authority_compile_failed') {
+        children.push(createFailureMetadataElement());
+    }
+
+    const actionItems = actions.length > 0 ? actions : blockedCommands;
+    if (actionItems.length > 0) {
+        const commandList = document.createElement('div');
+        commandList.className = 'space-y-2';
+        actionItems.forEach((action) => commandList.appendChild(createSetupCommandElement(action)));
+        children.push(commandList);
+    }
+
+    panel.replaceChildren(...children);
 }
 
 let currentAuthorityReviewActiveTab = 'overview';
@@ -1484,6 +1767,11 @@ function updateFooterVisibility() {
     const footer = document.getElementById('setup-selected-actions');
     if (!footer) return;
 
+    const nextControls = document.getElementById('next-phase-hint')?.parentElement;
+    if (nextControls) {
+        nextControls.classList.toggle('hidden', shouldHideNextPhaseControls());
+    }
+
     if (shouldHideWorkflowFooter()) {
         footer.classList.add('hidden');
     } else {
@@ -1609,6 +1897,7 @@ function runAutoLoadForVisiblePhase() {
 
 function isPhaseNavigable(phaseId) {
     if (phaseId === 'setup') return true;
+    if (!canShowWorkflowControls()) return false;
     if (phaseId === 'sprint') {
         return (
             isPhaseReady('story')
@@ -1623,7 +1912,7 @@ function isPhaseNavigable(phaseId) {
 }
 
 function navigateToOverview() {
-    if (currentProjectState.setup_status === 'failed') return;
+    if (!canShowWorkflowControls()) return;
     if (!isPlanningCompleteState(activeFsmState) && savedSprints.length === 0) return;
 
     viewPhaseId = 'overview';
@@ -1673,7 +1962,7 @@ function attachPhaseNavigation() {
 }
 
 function updateProjectNavUI() {
-    const showOverviewNav = currentProjectState.setup_status !== 'failed'
+    const showOverviewNav = canShowWorkflowControls()
         && (isPlanningCompleteState(activeFsmState) || savedSprints.length > 0);
     document.getElementById('desktop-overview-nav')?.classList.toggle('hidden', !showOverviewNav);
     document.getElementById('mobile-overview-nav')?.classList.toggle('hidden', !showOverviewNav);
@@ -1719,7 +2008,7 @@ async function fetchProjectFSMState(projectId, options = {}) {
             }
         }
 
-        if (currentProjectState.setup_status === 'failed') {
+        if (isPreReviewSetupStatus()) {
             currentSprintId = null;
             sprintMode = null;
             showSprintPlanner = false;
@@ -1806,6 +2095,61 @@ async function retryProjectSetup() {
     } finally {
         if (btn) {
             btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">refresh</span> Try Setup Again';
+            btn.disabled = false;
+        }
+    }
+}
+
+async function compileProjectAuthority() {
+    const action = getRunnableAuthorityCompileAction();
+    if (!action) {
+        renderSetupStateGuidance();
+        alert('Authority compile action is missing required guarded args. Inspect setup guidance before retrying.');
+        return;
+    }
+
+    const args = action.args;
+    const projectId = coerceActionInteger(args.project_id);
+    const specVersionId = coerceActionInteger(args.spec_version_id);
+    if (projectId === null || specVersionId === null) {
+        renderSetupStateGuidance();
+        alert('Authority compile action has invalid project or spec version metadata.');
+        return;
+    }
+
+    const btn = document.getElementById('btn-authority-compile');
+    const original = btn?.innerHTML;
+    if (btn) {
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm animate-spin">refresh</span> Compiling...';
+        btn.disabled = true;
+    }
+
+    try {
+        const response = await fetch(`/api/projects/${projectId}/authority/compile`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                spec_version_id: specVersionId,
+                expected_spec_hash: String(args.expected_spec_hash),
+                expected_state: String(args.expected_state),
+                expected_setup_status: String(args.expected_setup_status),
+                idempotency_key: `ui-authority-compile-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            }),
+        });
+
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+            throw data;
+        }
+
+        await fetchProjectFSMState(projectId);
+    } catch (error) {
+        console.error('Authority compile error:', error);
+        alert(authorityApiErrorMessage(error, 'Authority compile failed.'));
+        await fetchProjectFSMState(projectId);
+    } finally {
+        if (btn) {
+            btn.innerHTML = original || '<span class="material-symbols-outlined text-sm">build</span> Compile Authority';
             btn.disabled = false;
         }
     }
