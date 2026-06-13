@@ -1166,7 +1166,7 @@ def test_authority_compile_api_failure_uses_dashboard_error_envelope(
     project_id = 10
     repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
     fake_app = FakeAuthorityApplication()
-    result = {
+    result: dict[str, object] = {
         "ok": False,
         "data": {
             "project_id": project_id,

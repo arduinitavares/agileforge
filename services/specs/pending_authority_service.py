@@ -472,14 +472,15 @@ def compile_pending_authority_for_project(  # noqa: PLR0913
     resolved_path = Path(registered.spec_path)
     spec_hash = registered.spec_hash
     spec_version_id = registered.spec_version_id
-    if spec_version_id is None:
+    if spec_hash is None or spec_version_id is None:
+        missing_field = "content hash" if spec_hash is None else "primary key"
         return _result(
             ok=False,
             product_id=product_id,
             spec_path=resolved_path,
             error_code="MUTATION_FAILED",
             spec_hash=spec_hash,
-            error="Spec registry row did not receive a primary key",
+            error=f"Spec registry row did not receive a {missing_field}",
         )
 
     existing_acceptance_ids = _matching_acceptance_ids(

@@ -5126,7 +5126,7 @@ def test_workflow_next_routes_compile_required_to_authority_compile() -> None:
             {
                 "fsm_state": "SETUP_REQUIRED",
                 "setup_status": "authority_compile_required",
-                "setup_spec_file_path": "/tmp/agileforge/spec.json",  # noqa: S108
+                "setup_spec_file_path": "/workspace/agileforge/spec.json",
                 "setup_spec_hash": "a" * 64,
                 "setup_spec_version_id": SPEC_VERSION_ID,
             }
@@ -5215,7 +5215,7 @@ def test_workflow_next_routes_compile_failed_to_authority_compile_retry() -> Non
             {
                 "fsm_state": "SETUP_REQUIRED",
                 "setup_status": "authority_compile_failed",
-                "setup_spec_file_path": "/tmp/agileforge/spec.json",  # noqa: S108
+                "setup_spec_file_path": "/workspace/agileforge/spec.json",
                 "setup_spec_hash": "b" * 64,
                 "setup_spec_version_id": SPEC_VERSION_ID,
                 "setup_failure_stage": "authority_compile",

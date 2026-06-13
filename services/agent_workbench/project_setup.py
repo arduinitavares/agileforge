@@ -1070,7 +1070,7 @@ class ProjectSetupMutationRunner:
         response_spec_version_id = int(
             str(authority_result.get("spec_version_id") or spec_version_id)
         )
-        failure_data = {
+        failure_data: dict[str, Any] = {
             "setup_error": error_code,
             "setup_failure_stage": "authority_compile",
             "setup_failure_summary": failure_summary,
