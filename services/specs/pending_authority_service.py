@@ -9,7 +9,7 @@ import hashlib
 from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlmodel import Session, select
@@ -301,17 +301,16 @@ def _matching_acceptance_ids(
     }
 
 
-def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
+def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     *,
     session: Session,
     product_id: int,
     spec_path: Path,
     approved_by: str,
-    compile_authority: PendingAuthorityCompiler,
     lease_guard: Callable[[str], bool],
     record_progress: Callable[[str], bool],
 ) -> PendingAuthorityResult:
-    """Compile a reviewable authority artifact without accepting it."""
+    """Register the pending authority source spec without compiling authority."""
     loaded = _load_spec_file(spec_path)
     if isinstance(loaded, PendingAuthorityResult):
         return _result(
@@ -437,6 +436,51 @@ def compile_pending_authority_for_project(  # noqa: C901, PLR0911, PLR0912, PLR0
     )
     if progress_error is not None:
         return progress_error
+
+    return _result(
+        ok=True,
+        product_id=product_id,
+        spec_path=resolved_path,
+        spec_hash=spec_hash,
+        spec_version_id=spec_version_id,
+        authority_id=None,
+    )
+
+
+def compile_pending_authority_for_project(  # noqa: PLR0913
+    *,
+    session: Session,
+    product_id: int,
+    spec_path: Path,
+    approved_by: str,
+    compile_authority: PendingAuthorityCompiler,
+    lease_guard: Callable[[str], bool],
+    record_progress: Callable[[str], bool],
+) -> PendingAuthorityResult:
+    """Compile a reviewable authority artifact without accepting it."""
+    registered = ensure_pending_spec_version_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by=approved_by,
+        lease_guard=lease_guard,
+        record_progress=record_progress,
+    )
+    if not registered.ok:
+        return registered
+
+    resolved_path = Path(registered.spec_path)
+    spec_hash = registered.spec_hash
+    spec_version_id = registered.spec_version_id
+    if spec_version_id is None:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=resolved_path,
+            error_code="MUTATION_FAILED",
+            spec_hash=spec_hash,
+            error="Spec registry row did not receive a primary key",
+        )
 
     existing_acceptance_ids = _matching_acceptance_ids(
         session,

@@ -114,6 +114,86 @@ def test_pending_authority_public_contract_is_keyword_only() -> None:
     assert function_hints["spec_path"] is Path
 
 
+def test_ensure_pending_spec_version_links_product_without_compiling(
+    session: Session, tmp_path: Path
+) -> None:
+    """Spec registration should persist project/spec metadata only."""
+    service = _pending_service()
+    product = _create_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec_path = _write_spec(tmp_path)
+    compile_calls: list[dict[str, object]] = []
+
+    result = service.ensure_pending_spec_version_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by="cli-project-create",
+        lease_guard=lambda boundary: boundary != "never-called",
+        record_progress=lambda boundary: boundary != "never-called",
+    )
+
+    assert result.ok is True
+    assert result.spec_hash is not None
+    assert result.spec_version_id is not None
+    assert result.authority_id is None
+    assert compile_calls == []
+
+    session.expire_all()
+    saved_product = session.get(Product, product_id)
+    assert saved_product is not None
+    assert saved_product.spec_file_path == str(spec_path.resolve())
+    assert saved_product.spec_loaded_at is not None
+
+    specs = session.exec(
+        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+    ).all()
+    assert len(specs) == 1
+    assert specs[0].status == "approved"
+    assert specs[0].approved_by == "cli-project-create"
+    assert specs[0].approval_notes == EXPECTED_APPROVAL_NOTES
+
+    authorities = session.exec(select(CompiledSpecAuthority)).all()
+    assert authorities == []
+    acceptances = session.exec(select(SpecAuthorityAcceptance)).all()
+    assert acceptances == []
+
+
+def test_ensure_pending_spec_version_reuses_same_hash_registry_row(
+    session: Session, tmp_path: Path
+) -> None:
+    """Re-registering the same spec hash should reuse the latest registry row."""
+    service = _pending_service()
+    product = _create_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec_path = _write_spec(tmp_path)
+
+    first = service.ensure_pending_spec_version_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by="cli-project-create",
+        lease_guard=lambda _boundary: True,
+        record_progress=lambda _boundary: True,
+    )
+    second = service.ensure_pending_spec_version_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by="cli-project-create",
+        lease_guard=lambda _boundary: True,
+        record_progress=lambda _boundary: True,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.spec_version_id == first.spec_version_id
+    specs = session.exec(
+        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+    ).all()
+    assert len(specs) == 1
+
+
 def test_compile_pending_authority_creates_artifact_without_acceptance(
     session: Session, tmp_path: Path
 ) -> None:
