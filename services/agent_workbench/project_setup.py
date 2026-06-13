@@ -43,6 +43,7 @@ from services.agent_workbench.project_setup_fingerprints import (
 )
 from services.specs.pending_authority_service import (
     compile_pending_authority_for_project,
+    ensure_pending_spec_version_for_project,
 )
 from services.specs.profile_content import (
     SpecContentNormalizationError,
@@ -53,7 +54,11 @@ if TYPE_CHECKING:
     from services.workflow import WorkflowService
 
 PROJECT_CREATE_COMMAND = "agileforge project create"
+PROJECT_AUTHORITY_COMPILE_COMMAND = "agileforge authority compile"
 PROJECT_ALREADY_EXISTS = "PROJECT_ALREADY_EXISTS"
+AUTHORITY_COMPILE_FAILED = "authority_compile_failed"
+AUTHORITY_COMPILE_REQUIRED = "authority_compile_required"
+AUTHORITY_PENDING_REVIEW = "authority_pending_review"
 MUTATION_RECOVERY_INVALID = "MUTATION_RECOVERY_INVALID"
 SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
 WORKFLOW_SESSION_FAILED = "WORKFLOW_SESSION_FAILED"
@@ -151,6 +156,8 @@ class ProjectSetupWorkflowPort(Protocol):
         *,
         project_id: int,
         resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
         lease_guard: Callable[[str], bool],
         record_progress: Callable[[str], bool],
     ) -> dict[str, Any]:
@@ -194,6 +201,8 @@ class SyncProjectSetupWorkflowAdapter:
         *,
         project_id: int,
         resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
         lease_guard: Callable[[str], bool],
         record_progress: Callable[[str], bool],
     ) -> dict[str, Any]:
@@ -211,9 +220,19 @@ class SyncProjectSetupWorkflowAdapter:
 
         required_state = {
             "fsm_state": "SETUP_REQUIRED",
-            "setup_status": "authority_pending_review",
+            "setup_status": AUTHORITY_COMPILE_REQUIRED,
             "setup_error": None,
             "setup_spec_file_path": str(resolved_spec_path),
+            "setup_spec_hash": str(spec_hash),
+            "setup_spec_version_id": int(spec_version_id),
+            "setup_next_actions": [
+                _authority_compile_action(
+                    project_id=project_id,
+                    spec_version_id=int(spec_version_id),
+                    spec_hash=str(spec_hash),
+                    expected_setup_status=AUTHORITY_COMPILE_REQUIRED,
+                )
+            ],
         }
         merged = {**current, **required_state}
         if current != merged:
@@ -266,7 +285,7 @@ class ProjectSetupMutationRunner:
         self.fail_retry_after_side_effects_for_test: bool = False
 
     def create_project(self, request: ProjectCreateRequest) -> dict[str, Any]:
-        """Create a project and pending compiled authority."""
+        """Create project/spec metadata and require authority compilation."""
         return self._run_create(request)
 
     def retry_setup(self, request: ProjectSetupRetryRequest) -> dict[str, Any]:
@@ -344,7 +363,10 @@ class ProjectSetupMutationRunner:
         original = self._validate_original_recovery_row(request)
         if isinstance(original, dict):
             return original
-        workflow_state = self._workflow.get_session_status(str(request.project_id))
+        workflow_result = self._workflow_state_or_error(request)
+        if not workflow_result["ok"]:
+            return workflow_result
+        workflow_state = cast("dict[str, Any]", workflow_result["state"])
         current_state = str(workflow_state.get("fsm_state") or "SETUP_REQUIRED")
         if current_state != request.expected_state:
             if request.dry_run:
@@ -552,6 +574,44 @@ class ProjectSetupMutationRunner:
             )
         return retry_response
 
+    def _workflow_state_or_error(
+        self,
+        request: ProjectSetupRetryRequest,
+    ) -> dict[str, Any]:
+        try:
+            return {
+                "ok": True,
+                "state": self._workflow.get_session_status(str(request.project_id)),
+            }
+        except Exception as exc:  # noqa: BLE001
+            retry_request = request.model_copy(
+                update={
+                    "expected_context_fingerprint": "<refresh-context-fingerprint>",
+                }
+            )
+            return _error(
+                WORKFLOW_SESSION_FAILED,
+                details={
+                    "project_id": request.project_id,
+                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
+                    "workflow_error": str(exc),
+                },
+                remediation=[
+                    "Restore workflow session storage, refresh retry guards, "
+                    "then rerun project setup retry."
+                ],
+                data={
+                    "project_id": request.project_id,
+                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
+                    "next_actions": [
+                        _retry_action(
+                            retry_request,
+                            request.recovery_mutation_event_id,
+                        )
+                    ],
+                },
+            )
+
     def _run_setup_steps(
         self,
         *,
@@ -593,14 +653,14 @@ class ProjectSetupMutationRunner:
                 remediation=["Re-read mutation state before retrying recovery."],
             )
 
-        authority_result = self._ensure_pending_authority(
+        spec_result = self._ensure_pending_spec_version(
             project_id=project_id,
             resolved_spec_path=resolved_spec_path,
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
         )
-        if not authority_result.get("ok"):
-            error_code = str(authority_result["error_code"])
+        if not spec_result.get("ok"):
+            error_code = str(spec_result["error_code"])
             if (
                 _setup_failure_requires_recovery(error_code)
                 or not finalize_domain_failures
@@ -612,7 +672,7 @@ class ProjectSetupMutationRunner:
                     code=error_code,
                     spec_file=requested_spec_file,
                     safe_to_auto_resume=False,
-                    spec_version_id=authority_result.get("spec_version_id"),
+                    spec_version_id=spec_result.get("spec_version_id"),
                 )
                 if isinstance(marked, dict):
                     return marked
@@ -625,21 +685,23 @@ class ProjectSetupMutationRunner:
                 resolved_spec_path=resolved_spec_path,
                 error_code=error_code,
                 error_summary=str(
-                    authority_result.get("error") or "Spec authority compile failed."
+                    spec_result.get("error") or "Spec registration failed."
                 ),
-                spec_hash=authority_result.get("spec_hash"),
-                spec_version_id=authority_result.get("spec_version_id"),
-                failure_artifact_id=authority_result.get("failure_artifact_id"),
-                failure_stage=authority_result.get("failure_stage"),
-                failure_summary=authority_result.get("failure_summary"),
-                raw_output_preview=authority_result.get("raw_output_preview"),
-                has_full_artifact=authority_result.get("has_full_artifact"),
-                blocking_gaps=authority_result.get("blocking_gaps"),
+                spec_hash=spec_result.get("spec_hash"),
+                spec_version_id=spec_result.get("spec_version_id"),
+                failure_artifact_id=spec_result.get("failure_artifact_id"),
+                failure_stage=spec_result.get("failure_stage"),
+                failure_summary=spec_result.get("failure_summary"),
+                raw_output_preview=spec_result.get("raw_output_preview"),
+                has_full_artifact=spec_result.get("has_full_artifact"),
+                blocking_gaps=spec_result.get("blocking_gaps"),
             )
 
         workflow_result = self._ensure_workflow_setup(
             project_id=project_id,
             resolved_spec_path=resolved_spec_path,
+            spec_hash=str(spec_result["spec_hash"]),
+            spec_version_id=int(spec_result["spec_version_id"]),
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
         )
@@ -651,7 +713,7 @@ class ProjectSetupMutationRunner:
                 code=WORKFLOW_SESSION_FAILED,
                 spec_file=requested_spec_file,
                 safe_to_auto_resume=True,
-                spec_version_id=authority_result.get("spec_version_id"),
+                spec_version_id=spec_result.get("spec_version_id"),
             )
             if isinstance(marked, dict):
                 return marked
@@ -661,16 +723,19 @@ class ProjectSetupMutationRunner:
             "project_id": project_id,
             "name": self._project_name(project_id),
             "resolved_spec_path": str(resolved_spec_path),
-            "spec_hash": authority_result["spec_hash"],
-            "spec_version_id": authority_result["spec_version_id"],
-            "authority_id": None,
-            "pending_authority_id": authority_result["authority_id"],
-            "compiled_authority_id": authority_result["authority_id"],
-            "pending_compiled_spec_version_id": authority_result["spec_version_id"],
-            "setup_status": "authority_pending_review",
+            "spec_hash": spec_result["spec_hash"],
+            "spec_version_id": spec_result["spec_version_id"],
+            "setup_status": AUTHORITY_COMPILE_REQUIRED,
             "fsm_state": "SETUP_REQUIRED",
             "mutation_event_id": mutation_event_id,
-            "next_actions": [_authority_status_action(project_id)],
+            "next_actions": [
+                _authority_compile_action(
+                    project_id=project_id,
+                    spec_version_id=int(spec_result["spec_version_id"]),
+                    spec_hash=str(spec_result["spec_hash"]),
+                    expected_setup_status=AUTHORITY_COMPILE_REQUIRED,
+                )
+            ],
         }
         response = _success(data)
         if finalize and not self._ledger.finalize_success(
@@ -721,13 +786,72 @@ class ProjectSetupMutationRunner:
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
                 step="product_created",
-                next_step="pending_authority_compiled",
+                next_step="product_spec_linked",
                 now=now,
             ):
                 session.rollback()
                 raise RuntimeError("Failed to record product creation progress.")
             session.commit()
             return project_id
+
+    def _ensure_pending_spec_version(
+        self,
+        *,
+        project_id: int,
+        resolved_spec_path: Path,
+        mutation_event_id: int,
+        lease_owner: str,
+    ) -> dict[str, Any]:
+        completed_steps = self._completed_steps(mutation_event_id)
+        if (
+            "spec_registry_written" in completed_steps
+            and "spec_marked_approved" in completed_steps
+        ):
+            existing = self._existing_spec_version(project_id)
+            if existing is not None:
+                return {"ok": True, **existing}
+
+        def lease_guard(boundary: str) -> bool:
+            del boundary
+            return self._ledger.require_active_owner(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                now=_now(),
+                lease_seconds=self._lease_seconds,
+            )
+
+        def record_progress(boundary: str) -> bool:
+            return self._ledger.mark_step_complete(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                step=boundary,
+                next_step=boundary,
+                now=_now(),
+            )
+
+        with Session(self._engine) as session:
+            result = ensure_pending_spec_version_for_project(
+                session=session,
+                product_id=project_id,
+                spec_path=resolved_spec_path,
+                approved_by="cli-project-create",
+                lease_guard=lease_guard,
+                record_progress=record_progress,
+            )
+        if not result.ok:
+            return {
+                "ok": False,
+                "error_code": result.error_code or "SPEC_FILE_INVALID",
+                "error": result.error,
+                "spec_hash": result.spec_hash,
+                "spec_version_id": result.spec_version_id,
+                "reason": result.reason,
+            }
+        return {
+            "ok": True,
+            "spec_hash": result.spec_hash,
+            "spec_version_id": result.spec_version_id,
+        }
 
     def _ensure_pending_authority(
         self,
@@ -811,13 +935,28 @@ class ProjectSetupMutationRunner:
         *,
         project_id: int,
         resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
         mutation_event_id: int,
         lease_owner: str,
     ) -> dict[str, Any]:
         completed_steps = self._completed_steps(mutation_event_id)
         if "workflow_session_initialized" in completed_steps:
-            state = self._workflow.get_session_status(str(project_id))
-            if _workflow_has_required_setup_state(state, resolved_spec_path):
+            try:
+                state = self._workflow.get_session_status(str(project_id))
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "error_code": WORKFLOW_SESSION_FAILED,
+                    "error": str(exc),
+                }
+            if _workflow_has_required_setup_state(
+                state,
+                resolved_spec_path,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                project_id=project_id,
+            ):
                 return {"ok": True, "state": state}
 
         def lease_guard(boundary: str) -> bool:
@@ -838,12 +977,21 @@ class ProjectSetupMutationRunner:
                 now=_now(),
             )
 
-        result = self._workflow.ensure_setup_state(
-            project_id=project_id,
-            resolved_spec_path=resolved_spec_path,
-            lease_guard=lease_guard,
-            record_progress=record_progress,
-        )
+        try:
+            result = self._workflow.ensure_setup_state(
+                project_id=project_id,
+                resolved_spec_path=resolved_spec_path,
+                spec_hash=spec_hash,
+                spec_version_id=spec_version_id,
+                lease_guard=lease_guard,
+                record_progress=record_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error_code": WORKFLOW_SESSION_FAILED,
+                "error": str(exc),
+            }
         if not result.get("ok"):
             return result
         if not self._ledger.mark_step_complete(
@@ -1287,6 +1435,24 @@ class ProjectSetupMutationRunner:
                 raise ValueError(f"Project {project_id} not found.")
             return product.name
 
+    def _existing_spec_version(self, project_id: int) -> dict[str, Any] | None:
+        with Session(self._engine) as session:
+            spec = session.exec(
+                select(SpecRegistry)
+                .where(_SPEC_PRODUCT_ID == project_id)
+                .order_by(_SPEC_VERSION_ID.desc())
+            ).first()
+            if (
+                spec is None
+                or spec.spec_version_id is None
+                or spec.status != "approved"
+            ):
+                return None
+            return {
+                "spec_hash": spec.spec_hash,
+                "spec_version_id": spec.spec_version_id,
+            }
+
     def _existing_authority(self, project_id: int) -> dict[str, Any] | None:
         with Session(self._engine) as session:
             spec = session.exec(
@@ -1418,12 +1584,28 @@ def _spec_hash_or_error(path: Path) -> str | dict[str, Any]:
         return normalized.spec_hash
 
 
-def _workflow_has_required_setup_state(state: dict[str, Any], spec_path: Path) -> bool:
+def _workflow_has_required_setup_state(
+    state: dict[str, Any],
+    spec_path: Path,
+    *,
+    spec_hash: str,
+    spec_version_id: int,
+    project_id: int,
+) -> bool:
+    expected_action = _authority_compile_action(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        spec_hash=spec_hash,
+        expected_setup_status=AUTHORITY_COMPILE_REQUIRED,
+    )
     return (
         state.get("fsm_state") == "SETUP_REQUIRED"
-        and state.get("setup_status") == "authority_pending_review"
+        and state.get("setup_status") == AUTHORITY_COMPILE_REQUIRED
         and state.get("setup_error") is None
         and state.get("setup_spec_file_path") == str(spec_path)
+        and state.get("setup_spec_hash") == spec_hash
+        and state.get("setup_spec_version_id") == spec_version_id
+        and state.get("setup_next_actions") == [expected_action]
     )
 
 
@@ -1556,6 +1738,26 @@ def _retry_action(
             "recovery_mutation_event_id": recovery_mutation_event_id,
         },
         "reason": "Retry setup with a new idempotency key after fixing the reported error.",
+    }
+
+
+def _authority_compile_action(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    expected_setup_status: str,
+) -> dict[str, Any]:
+    return {
+        "command": PROJECT_AUTHORITY_COMPILE_COMMAND,
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "expected_spec_hash": spec_hash,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": expected_setup_status,
+        },
+        "reason": "Compile pending authority before authority review.",
     }
 
 

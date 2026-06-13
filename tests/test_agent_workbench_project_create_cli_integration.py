@@ -23,7 +23,6 @@ from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.mutation_ledger import MutationStatus
 from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
-    _retry_context_fingerprint,
 )
 
 
@@ -57,6 +56,8 @@ class FakeWorkflowPort:
         *,
         project_id: int,
         resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
         lease_guard: Any,
         record_progress: Any,
     ) -> dict[str, Any]:
@@ -72,9 +73,24 @@ class FakeWorkflowPort:
 
         required_state = {
             "fsm_state": "SETUP_REQUIRED",
-            "setup_status": "authority_pending_review",
+            "setup_status": "authority_compile_required",
             "setup_error": None,
             "setup_spec_file_path": str(resolved_spec_path),
+            "setup_spec_hash": str(spec_hash),
+            "setup_spec_version_id": int(spec_version_id),
+            "setup_next_actions": [
+                {
+                    "command": "agileforge authority compile",
+                    "args": {
+                        "project_id": project_id,
+                        "spec_version_id": int(spec_version_id),
+                        "expected_spec_hash": str(spec_hash),
+                        "expected_state": "SETUP_REQUIRED",
+                        "expected_setup_status": "authority_compile_required",
+                    },
+                    "reason": "Compile pending authority before authority review.",
+                }
+            ],
         }
         merged = {**current, **required_state}
         if current != merged:
@@ -352,11 +368,27 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
     assert project_id
     assert Path(data["resolved_spec_path"]) == spec_file.resolve()
     assert spec_file.resolve().is_relative_to(caller_dir.resolve())
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["fsm_state"] == "SETUP_REQUIRED"
+    assert "pending_authority_id" not in data
+    assert "compiled_authority_id" not in data
+    assert data["next_actions"][0]["command"] == "agileforge authority compile"
+    assert data["next_actions"][0]["args"]["project_id"] == project_id
+    assert data["next_actions"][0]["args"]["spec_version_id"] == data["spec_version_id"]
+    assert (
+        data["next_actions"][0]["args"]["expected_spec_hash"]
+        == data["spec_hash"]
+    )
+    assert (
+        data["next_actions"][0]["args"]["expected_setup_status"]
+        == "authority_compile_required"
+    )
 
     with Session(_business_engine(business_db_path)) as session:
         project = session.get(Product, project_id)
         assert project is not None
         assert project.name == "Outside Repo Project"
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
@@ -441,7 +473,7 @@ def test_project_create_rejects_markdown_spec_source(
         assert session.exec(select(Product)).all() == []
 
 
-def test_project_setup_retry_cli_supersedes_original_create_recovery(
+def test_project_create_cli_defers_compiler_failure_to_authority_compile(
     engine: Engine,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -471,55 +503,32 @@ def test_project_setup_retry_cli_supersedes_original_create_recovery(
         application=app,
     )
     create_payload = _captured_payload(capsys)
-    assert create_rc == 1
-    assert create_payload["ok"] is False
-    assert create_payload["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
-    project_id = create_payload["data"]["project_id"]
-    original_event_id = create_payload["data"]["mutation_event_id"]
-
-    _install_compiler(monkeypatch, success=True)
-    expected_fingerprint = _retry_context_fingerprint(
-        project_id=project_id,
-        resolved_spec_path=spec_file.resolve(),
-        workflow_state=workflow.get_session_status(str(project_id)),
+    assert create_rc == 0
+    assert create_payload["ok"] is True
+    data = create_payload["data"]
+    project_id = data["project_id"]
+    mutation_event_id = data["mutation_event_id"]
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["fsm_state"] == "SETUP_REQUIRED"
+    assert "pending_authority_id" not in data
+    assert "compiled_authority_id" not in data
+    assert data["next_actions"][0]["command"] == "agileforge authority compile"
+    assert workflow.sessions[str(project_id)]["setup_status"] == (
+        "authority_compile_required"
     )
-
-    retry_rc = main(
-        [
-            "project",
-            "setup",
-            "retry",
-            "--project-id",
-            str(project_id),
-            "--spec-file",
-            str(spec_file),
-            "--expected-state",
-            "SETUP_REQUIRED",
-            "--expected-context-fingerprint",
-            expected_fingerprint,
-            "--recovery-mutation-event-id",
-            str(original_event_id),
-            "--idempotency-key",
-            "retry-project-setup-001",
-        ],
-        application=app,
+    assert workflow.sessions[str(project_id)]["setup_spec_hash"] == data["spec_hash"]
+    assert (
+        workflow.sessions[str(project_id)]["setup_spec_version_id"]
+        == data["spec_version_id"]
     )
-    retry_payload = _captured_payload(capsys)
-    assert retry_rc == 0
-    assert retry_payload["ok"] is True
-    retry_event_id = retry_payload["data"]["mutation_event_id"]
 
     with Session(engine) as session:
         projects = session.exec(select(Product)).all()
-        original = session.get(CliMutationLedger, original_event_id)
-        retry = session.get(CliMutationLedger, retry_event_id)
+        ledger = session.get(CliMutationLedger, mutation_event_id)
         assert len(projects) == 1
-        assert original is not None
-        assert retry is not None
-        assert original.status == MutationStatus.SUPERSEDED.value
-        assert original.superseded_by_mutation_event_id == retry_event_id
-        assert retry.status == MutationStatus.SUCCEEDED.value
-        assert retry.recovers_mutation_event_id == original_event_id
+        assert ledger is not None
+        assert ledger.status == MutationStatus.SUCCEEDED.value
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
 
     replay_rc = main(
         [
@@ -537,4 +546,4 @@ def test_project_setup_retry_cli_supersedes_original_create_recovery(
     replay_payload = _captured_payload(capsys)
     assert replay_rc == 0
     assert replay_payload["ok"] is True
-    assert replay_payload["data"]["mutation_event_id"] == retry_event_id
+    assert replay_payload["data"]["mutation_event_id"] == mutation_event_id

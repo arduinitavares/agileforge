@@ -38,6 +38,49 @@ from services.agent_workbench.project_setup import (
 from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
+from services.specs.profile_content import normalize_spec_content_for_registry
+
+
+def _expected_authority_compile_action(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+) -> dict[str, Any]:
+    return {
+        "command": "agileforge authority compile",
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "expected_spec_hash": spec_hash,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+        },
+        "reason": "Compile pending authority before authority review.",
+    }
+
+
+def _assert_compile_required_workflow_state(
+    state: dict[str, Any],
+    *,
+    project_id: int,
+    spec_file: Path,
+    spec_hash: str,
+    spec_version_id: int,
+) -> None:
+    assert state["fsm_state"] == "SETUP_REQUIRED"
+    assert state["setup_status"] == "authority_compile_required"
+    assert state["setup_error"] is None
+    assert state["setup_spec_file_path"] == str(spec_file.resolve())
+    assert state["setup_spec_hash"] == spec_hash
+    assert state["setup_spec_version_id"] == spec_version_id
+    assert state["setup_next_actions"] == [
+        _expected_authority_compile_action(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            spec_hash=spec_hash,
+        )
+    ]
 
 
 class FakeWorkflowPort:
@@ -74,6 +117,8 @@ class FakeWorkflowPort:
         *,
         project_id: int,
         resolved_spec_path: Path,
+        spec_hash: str,
+        spec_version_id: int,
         lease_guard: Any,
         record_progress: Any,
     ) -> dict[str, Any]:
@@ -92,9 +137,18 @@ class FakeWorkflowPort:
 
         required_state = {
             "fsm_state": "SETUP_REQUIRED",
-            "setup_status": "authority_pending_review",
+            "setup_status": "authority_compile_required",
             "setup_error": None,
             "setup_spec_file_path": str(resolved_spec_path),
+            "setup_spec_hash": str(spec_hash),
+            "setup_spec_version_id": int(spec_version_id),
+            "setup_next_actions": [
+                _expected_authority_compile_action(
+                    project_id=project_id,
+                    spec_version_id=int(spec_version_id),
+                    spec_hash=str(spec_hash),
+                )
+            ],
         }
         merged = {**current, **required_state}
         if current != merged:
@@ -107,6 +161,15 @@ class FakeWorkflowPort:
         if not record_progress("workflow_session_status_written"):
             return {"ok": False, "error_code": "MUTATION_RECOVERY_REQUIRED"}
         return {"ok": True, "session_id": session_id, "state": self.get_session_status(session_id)}
+
+
+class UnavailableWorkflowPort(FakeWorkflowPort):
+    """Workflow port that simulates unavailable workflow storage."""
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        del session_id
+        message = "workflow storage unavailable"
+        raise RuntimeError(message)
 
 
 def _structured_spec_payload(
@@ -294,6 +357,34 @@ def _install_failing_compiler(
     )
 
 
+def _install_unexpected_compiler(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    from services.agent_workbench import project_setup
+
+    compiler_calls: list[int] = []
+
+    def compile_unexpected(
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: Any | None = None,
+        record_progress: Any | None = None,
+    ) -> dict[str, Any]:
+        del engine, force_recompile, tool_context
+        del lease_guard, record_progress
+        compiler_calls.append(spec_version_id)
+        message = "project create must not compile authority"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(
+        project_setup,
+        "compile_spec_authority_for_version_with_engine",
+        compile_unexpected,
+    )
+    return compiler_calls
+
+
 def _error_code(result: dict[str, Any]) -> str:
     return result["errors"][0]["code"]
 
@@ -385,10 +476,13 @@ def _seed_expired_pending_create_after_spec_approval(
         product.spec_file_path = str(spec_file.resolve())
         product.spec_loaded_at = now
         session.add(product)
+        normalized_spec = normalize_spec_content_for_registry(
+            spec_file.read_text(encoding="utf-8")
+        )
         spec = SpecRegistry(
             product_id=project_id,
-            spec_hash="sha256:seeded-spec",
-            content=spec_file.read_text(encoding="utf-8"),
+            spec_hash=normalized_spec.spec_hash,
+            content=normalized_spec.content,
             content_ref=str(spec_file.resolve()),
             status="approved",
             approved_at=now,
@@ -416,6 +510,73 @@ def _seed_expired_pending_create_after_spec_approval(
         session.add(ledger)
         session.commit()
     return project_id, row.mutation_event_id
+
+
+def _seed_pending_create_after_spec_registry_write(
+    *,
+    engine: Engine,
+    spec_file: Path,
+    project_name: str = "Interrupted Draft Project",
+) -> tuple[int, int, int]:
+    now = datetime(2099, 1, 1, 12, 0, tzinfo=UTC)
+    repo = MutationLedgerRepository(engine=engine)
+    row = repo.create_or_load(
+        command="agileforge project create",
+        idempotency_key="create-draft-registry-001",
+        request_hash="sha256:create-draft-registry",
+        project_id=None,
+        correlation_id="corr-create-draft",
+        changed_by="agent",
+        lease_owner="create-owner",
+        now=now,
+        lease_seconds=300,
+    ).ledger
+    assert row.mutation_event_id is not None
+    with Session(engine) as session:
+        product = Product(name=project_name)
+        session.add(product)
+        session.flush()
+        project_id = product.product_id
+        assert project_id is not None
+        assert MutationLedgerRepository.set_project_id_in_session(
+            session,
+            mutation_event_id=row.mutation_event_id,
+            lease_owner="create-owner",
+            project_id=project_id,
+            now=now,
+        )
+        product.spec_file_path = str(spec_file.resolve())
+        product.spec_loaded_at = now
+        session.add(product)
+        normalized_spec = normalize_spec_content_for_registry(
+            spec_file.read_text(encoding="utf-8")
+        )
+        spec = SpecRegistry(
+            product_id=project_id,
+            spec_hash=normalized_spec.spec_hash,
+            content=normalized_spec.content,
+            content_ref=str(spec_file.resolve()),
+            status="draft",
+        )
+        session.add(spec)
+        session.flush()
+        spec_version_id = spec.spec_version_id
+        assert spec_version_id is not None
+        for step in (
+            "product_created",
+            "product_spec_linked",
+            "spec_registry_written",
+        ):
+            assert MutationLedgerRepository.mark_step_complete_in_session(
+                session,
+                mutation_event_id=row.mutation_event_id,
+                lease_owner="create-owner",
+                step=step,
+                next_step=step,
+                now=now,
+            )
+        session.commit()
+    return project_id, row.mutation_event_id, spec_version_id
 
 
 def test_project_create_dry_run_resolves_spec_from_caller_cwd_without_writes(
@@ -543,7 +704,7 @@ def test_project_create_request_validation_rules() -> None:
         )
 
 
-def test_project_create_success_creates_authority_without_acceptance(
+def test_project_create_success_registers_spec_without_compiling_authority(
     engine: Engine,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -567,32 +728,39 @@ def test_project_create_success_creates_authority_without_acceptance(
     data = result["data"]
     assert data["name"] == "CLI Project"
     assert data["resolved_spec_path"] == str(spec_file.resolve())
-    assert data["setup_status"] == "authority_pending_review"
+    assert data["setup_status"] == "authority_compile_required"
     assert data["fsm_state"] == "SETUP_REQUIRED"
-    assert data["authority_id"] is None
-    assert isinstance(data["pending_authority_id"], int)
-    assert data["pending_authority_id"] == data["compiled_authority_id"]
+    assert "pending_authority_id" not in data
+    assert "compiled_authority_id" not in data
+    assert isinstance(data["spec_version_id"], int)
     assert data["next_actions"] == [
-        {
-            "command": "agileforge authority status",
-            "args": {"project_id": data["project_id"]},
-            "reason": "Review pending compiled authority before acceptance.",
-        }
+        _expected_authority_compile_action(
+            project_id=data["project_id"],
+            spec_version_id=data["spec_version_id"],
+            spec_hash=data["spec_hash"],
+        )
     ]
 
     with Session(engine) as session:
         assert len(session.exec(select(Product)).all()) == 1
         assert len(session.exec(select(SpecRegistry)).all()) == 1
-        assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
         ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
         assert ledger.status == MutationStatus.SUCCEEDED.value
         assert ledger.project_id == data["project_id"]
+        assert "pending_authority_compiled" not in _row_payload(ledger)[
+            "completed_steps"
+        ]
 
     assert fake_workflow.created_sessions == [str(data["project_id"])]
-    assert fake_workflow.sessions[str(data["project_id"])]["setup_status"] == (
-        "authority_pending_review"
+    _assert_compile_required_workflow_state(
+        fake_workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
     )
 
 
@@ -605,18 +773,16 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     spec_file = _write_spec(tmp_path)
     workflow = FakeWorkflowPort()
     lease_seconds = 3
-    heartbeat_count = 6
     clock_now = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
     initial_lease_deadline = clock_now.replace(tzinfo=None) + timedelta(
         seconds=lease_seconds
     )
-    heartbeat_snapshots: list[tuple[datetime, datetime]] = []
-    guarded_after_initial_deadline = False
+    compiler_invocations = 0
 
     def controlled_now() -> datetime:
         return clock_now
 
-    def compile_with_many_heartbeats(
+    def compile_should_not_run(
         *,
         engine: Engine,
         spec_version_id: int,
@@ -625,54 +791,12 @@ def test_event_159_style_long_compile_survives_past_original_lease(
         lease_guard: Any | None = None,
         record_progress: Any | None = None,
     ) -> dict[str, Any]:
-        nonlocal clock_now, guarded_after_initial_deadline
-
-        del force_recompile, tool_context
-        assert lease_guard is not None
-        for index in range(heartbeat_count):
-            clock_now += timedelta(seconds=1)
-            current_db_now = clock_now.replace(tzinfo=None)
-            assert lease_guard(f"authority_compile_invocation_heartbeat_{index}")
-            heartbeat_snapshots.append(
-                _assert_create_lease_extended(
-                    engine=engine,
-                    idempotency_key="create-event-159-regression-001",
-                    expected_last_heartbeat_at=current_db_now,
-                    expected_lease_expires_at=current_db_now
-                    + timedelta(seconds=lease_seconds),
-                )
-            )
-            if current_db_now > initial_lease_deadline:
-                guarded_after_initial_deadline = True
-
-        assert guarded_after_initial_deadline
-
-        with Session(engine) as session:
-            authority = CompiledSpecAuthority(
-                spec_version_id=spec_version_id,
-                compiler_version="test-long-compiler",
-                prompt_hash="sha256:test-long",
-                compiled_artifact_json='{"ok":true}',
-                scope_themes="[]",
-                invariants="[]",
-                eligible_feature_ids="[]",
-                rejected_features="[]",
-                spec_gaps="[]",
-            )
-            session.add(authority)
-            session.commit()
-            session.refresh(authority)
-            authority_id = authority.authority_id
-        if record_progress is not None:
-            assert record_progress("compiled_authority_persisted")
-            assert record_progress("product_authority_cache_persisted")
-        return {
-            "success": True,
-            "authority_id": authority_id,
-            "spec_version_id": spec_version_id,
-            "compiler_version": "test-long-compiler",
-            "prompt_hash": "sha256:test-long",
-        }
+        nonlocal compiler_invocations
+        del engine, spec_version_id, force_recompile, tool_context
+        del lease_guard, record_progress
+        compiler_invocations += 1
+        message = "project create must not compile authority"
+        raise AssertionError(message)
 
     from services.agent_workbench import project_setup
 
@@ -680,7 +804,7 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     monkeypatch.setattr(
         project_setup,
         "compile_spec_authority_for_version_with_engine",
-        compile_with_many_heartbeats,
+        compile_should_not_run,
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     runner._lease_seconds = lease_seconds
@@ -695,15 +819,23 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     )
 
     assert result["ok"] is True
-    assert len(heartbeat_snapshots) == heartbeat_count
-    assert heartbeat_snapshots[-1][0] > initial_lease_deadline
-    assert heartbeat_snapshots[-1][1] > initial_lease_deadline
+    data = result["data"]
+    assert compiler_invocations == 0
+    assert clock_now.replace(tzinfo=None) < initial_lease_deadline
+    assert data["setup_status"] == "authority_compile_required"
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
-        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
         assert ledger.status == MutationStatus.SUCCEEDED.value
-        assert "pending_authority_compiled" in _row_payload(ledger)["completed_steps"]
-        assert session.exec(select(CompiledSpecAuthority)).first() is not None
+        assert "pending_authority_compiled" not in _row_payload(ledger)["completed_steps"]
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_project_create_compile_failure_records_failed_setup_not_recovery(
@@ -713,15 +845,11 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(
-        monkeypatch,
-        failure_artifact_id="spec-authority-failure-1",
-        blocking_gaps=["source_map excerpt does not mention required field 'selected squad'"],
-    )
+    compiler_calls = _install_unexpected_compiler(monkeypatch)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
 
-    failed = runner.create_project(
+    result = runner.create_project(
         ProjectCreateRequest(
             name="Compiler Failure Project",
             spec_file=str(spec_file),
@@ -730,26 +858,23 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
         )
     )
 
-    assert failed["ok"] is False
-    assert _error_code(failed) == "SPEC_COMPILE_FAILED"
-    data = failed["data"]
-    project_id = data["project_id"]
-    assert data["setup_status"] == "failed"
-    assert data["setup_failure_stage"] == "authority_compile"
-    assert data["setup_failure_summary"] == (
-        "SPEC_COMPILATION_FAILED: SOURCE_MAP_INVARIANT_MISMATCH"
-    )
-    assert data["setup_failure_artifact_id"] == "spec-authority-failure-1"
-    assert data["setup_failure_first_error"] == (
-        "source_map excerpt does not mention required field 'selected squad'"
-    )
-    assert data["has_full_artifact"] is True
-    assert data["next_actions"][0]["command"] == "agileforge project setup retry"
-    assert "recovery_mutation_event_id" not in data["next_actions"][0]["args"]
-    assert workflow.sessions[str(project_id)]["setup_status"] == "failed"
-    assert (
-        workflow.sessions[str(project_id)]["setup_failure_artifact_id"]
-        == "spec-authority-failure-1"
+    assert result["ok"] is True
+    data = result["data"]
+    assert compiler_calls == []
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["next_actions"] == [
+        _expected_authority_compile_action(
+            project_id=data["project_id"],
+            spec_version_id=data["spec_version_id"],
+            spec_hash=data["spec_hash"],
+        )
+    ]
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
     )
 
     replay = runner.create_project(
@@ -760,12 +885,12 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
             changed_by="agent",
         )
     )
-    assert replay == failed
+    assert replay == result
 
     with Session(engine) as session:
         ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
-        assert ledger.status == MutationStatus.VALIDATION_FAILED.value
+        assert ledger.status == MutationStatus.SUCCEEDED.value
         assert len(session.exec(select(Product)).all()) == 1
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
@@ -780,16 +905,11 @@ def test_project_create_compiler_timeout_is_failed_setup_not_recovery(
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(
-        monkeypatch,
-        error_code="SPEC_COMPILE_FAILED",
-        failure_artifact_id="spec-timeout-1",
-        blocking_gaps=["Spec authority compiler exceeded 1800 seconds."],
-    )
+    compiler_calls = _install_unexpected_compiler(monkeypatch)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
 
-    failed = runner.create_project(
+    result = runner.create_project(
         ProjectCreateRequest(
             name="Compiler Timeout Project",
             spec_file=str(spec_file),
@@ -798,32 +918,47 @@ def test_project_create_compiler_timeout_is_failed_setup_not_recovery(
         )
     )
 
-    assert failed["ok"] is False
-    assert _error_code(failed) == "SPEC_COMPILE_FAILED"
-    assert failed["data"]["setup_status"] == "failed"
-    assert failed["data"]["next_actions"][0]["command"] == "agileforge project setup retry"
-    assert "recovery_mutation_event_id" not in failed["data"]["next_actions"][0]["args"]
+    assert result["ok"] is True
+    data = result["data"]
+    assert compiler_calls == []
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["next_actions"][0]["command"] == "agileforge authority compile"
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
-        ledger = session.get(CliMutationLedger, failed["data"]["mutation_event_id"])
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
-        assert ledger.status == MutationStatus.VALIDATION_FAILED.value
+        assert ledger.status == MutationStatus.SUCCEEDED.value
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
-def test_create_recovery_mark_failure_does_not_claim_recovery_required(
+def test_create_recovery_mark_failure_not_needed_when_compile_deferred(
     engine: Engine,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(monkeypatch, error_code="MUTATION_IN_PROGRESS")
+    compiler_calls = _install_unexpected_compiler(monkeypatch)
+    recovery_mark_calls = 0
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+
+    def mark_recovery_required_unexpected(*args: Any, **kwargs: Any) -> bool:
+        nonlocal recovery_mark_calls
+        del args, kwargs
+        recovery_mark_calls += 1
+        return False
+
     monkeypatch.setattr(
         MutationLedgerRepository,
         "mark_recovery_required",
-        lambda *args, **kwargs: False,
+        mark_recovery_required_unexpected,
     )
 
     result = runner.create_project(
@@ -835,13 +970,23 @@ def test_create_recovery_mark_failure_does_not_claim_recovery_required(
         )
     )
 
-    assert result["ok"] is False
-    assert _error_code(result) == "MUTATION_IN_PROGRESS"
-    assert result["data"]["status"] == MutationStatus.PENDING.value
+    assert result["ok"] is True
+    data = result["data"]
+    assert compiler_calls == []
+    assert recovery_mark_calls == 0
+    assert data["setup_status"] == "authority_compile_required"
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
-        ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
+        ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
-        assert ledger.status == MutationStatus.PENDING.value
+        assert ledger.status == MutationStatus.SUCCEEDED.value
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_workflow_setup_recovery_mark_failure_does_not_claim_recovery_required(
@@ -886,7 +1031,7 @@ def test_failed_workflow_setup_recovery_mark_failure_does_not_claim_recovery_req
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(monkeypatch)
+    compiler_calls = _install_unexpected_compiler(monkeypatch)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     monkeypatch.setattr(
@@ -916,29 +1061,30 @@ def test_failed_workflow_setup_recovery_mark_failure_does_not_claim_recovery_req
         ledger = session.get(CliMutationLedger, result["data"]["mutation_event_id"])
         assert ledger is not None
         assert ledger.status == MutationStatus.PENDING.value
+    assert compiler_calls == []
 
 
-def test_project_setup_retry_without_recovery_link_recovers_failed_setup(
+def test_project_setup_retry_recovery_without_link_keeps_compile_required_state(
     engine: Engine,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_failing_compiler(monkeypatch)
+    compiler_calls = _install_unexpected_compiler(monkeypatch)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
-    failed = runner.create_project(
+    created = runner.create_project(
         ProjectCreateRequest(
-            name="Recover Failed Setup Project",
+            name="Retry Compile Required Project",
             spec_file=str(spec_file),
             idempotency_key="create-compile-fails-001",
             changed_by="agent",
         )
     )
-    project_id = failed["data"]["project_id"]
+    assert created["ok"] is True
+    project_id = created["data"]["project_id"]
 
-    _install_fast_compiler(monkeypatch)
     expected_fingerprint = _retry_fingerprint(
         project_id=project_id,
         spec_file=spec_file,
@@ -956,18 +1102,88 @@ def test_project_setup_retry_without_recovery_link_recovers_failed_setup(
     )
 
     assert retried["ok"] is True
-    assert retried["data"]["setup_status"] == "authority_pending_review"
-    assert retried["data"]["recovery_mutation_event_id"] is None
-    assert workflow.sessions[str(project_id)]["setup_status"] == "authority_pending_review"
+    data = retried["data"]
+    assert compiler_calls == []
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["recovery_mutation_event_id"] is None
+    assert data["next_actions"] == [
+        _expected_authority_compile_action(
+            project_id=project_id,
+            spec_version_id=data["spec_version_id"],
+            spec_hash=data["spec_hash"],
+        )
+    ]
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(project_id)],
+        project_id=project_id,
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
-        create_row = session.get(CliMutationLedger, failed["data"]["mutation_event_id"])
-        retry_row = session.get(CliMutationLedger, retried["data"]["mutation_event_id"])
+        create_row = session.get(CliMutationLedger, created["data"]["mutation_event_id"])
+        retry_row = session.get(CliMutationLedger, data["mutation_event_id"])
         assert create_row is not None
         assert retry_row is not None
-        assert create_row.status == MutationStatus.VALIDATION_FAILED.value
+        assert create_row.status == MutationStatus.SUCCEEDED.value
         assert retry_row.status == MutationStatus.SUCCEEDED.value
         assert len(session.exec(select(Product)).all()) == 1
-        assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_project_setup_retry_returns_workflow_unavailable_error(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery, spec_file, _ = _create_recovery_row(
+        engine=engine,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    project_id = recovery["data"]["project_id"]
+    runner = ProjectSetupMutationRunner(
+        engine=engine,
+        workflow=UnavailableWorkflowPort(),
+    )
+
+    result = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SETUP_REQUIRED",
+            expected_context_fingerprint="sha256:" + "0" * 64,
+            recovery_mutation_event_id=recovery["data"]["mutation_event_id"],
+            idempotency_key="retry-workflow-unavailable-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "WORKFLOW_SESSION_FAILED"
+    assert result["errors"][0]["details"]["project_id"] == project_id
+    assert result["errors"][0]["details"]["workflow_error"] == (
+        "workflow storage unavailable"
+    )
+    assert result["data"]["project_id"] == project_id
+    assert result["data"]["recovery_mutation_event_id"] == (
+        recovery["data"]["mutation_event_id"]
+    )
+    assert result["data"]["next_actions"] == [
+        {
+            "command": "agileforge project setup retry",
+            "args": {
+                "project_id": project_id,
+                "spec_file": str(spec_file),
+                "expected_state": "SETUP_REQUIRED",
+                "expected_context_fingerprint": "<refresh-context-fingerprint>",
+                "recovery_mutation_event_id": recovery["data"][
+                    "mutation_event_id"
+                ],
+            },
+            "reason": "Retry setup with a new idempotency key after fixing the reported error.",
+        }
+    ]
 
 
 def test_project_create_duplicate_replay_key_reuse_and_recovery_required(
@@ -1193,16 +1409,81 @@ def test_project_setup_retry_repairs_expired_pending_create_recovery_event(
     )
 
     assert retried["ok"] is True
-    assert retried["data"]["project_id"] == project_id
-    assert retried["data"]["recovery_mutation_event_id"] == original_event_id
+    data = retried["data"]
+    assert data["project_id"] == project_id
+    assert data["recovery_mutation_event_id"] == original_event_id
+    assert data["setup_status"] == "authority_compile_required"
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(project_id)],
+        project_id=project_id,
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
         original = session.get(CliMutationLedger, original_event_id)
-        retry = session.get(CliMutationLedger, retried["data"]["mutation_event_id"])
+        retry = session.get(CliMutationLedger, data["mutation_event_id"])
+        spec = session.get(SpecRegistry, data["spec_version_id"])
         assert original is not None
         assert retry is not None
+        assert spec is not None
         assert original.status == MutationStatus.SUPERSEDED.value
         assert retry.status == MutationStatus.SUCCEEDED.value
-        assert session.exec(select(CompiledSpecAuthority)).first() is not None
+        assert spec.status == "approved"
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_project_create_resume_after_registry_written_marks_spec_approved(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    project_id, mutation_event_id, spec_version_id = (
+        _seed_pending_create_after_spec_registry_write(
+            engine=engine,
+            spec_file=spec_file,
+        )
+    )
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+
+    result = runner._run_setup_steps(
+        request_name=None,
+        requested_spec_file=str(spec_file),
+        resolved_spec_path=spec_file.resolve(),
+        mutation_event_id=mutation_event_id,
+        lease_owner="create-owner",
+        create_product=False,
+        existing_project_id=project_id,
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["project_id"] == project_id
+    assert data["spec_version_id"] == spec_version_id
+    assert data["setup_status"] == "authority_compile_required"
+    _assert_compile_required_workflow_state(
+        workflow.sessions[str(project_id)],
+        project_id=project_id,
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=spec_version_id,
+    )
+    with Session(engine) as session:
+        spec = session.get(SpecRegistry, spec_version_id)
+        assert spec is not None
+        assert spec.status == "approved"
+        assert spec.approved_by == "cli-project-create"
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+        ledger = session.get(CliMutationLedger, mutation_event_id)
+        assert ledger is not None
+        assert ledger.status == MutationStatus.SUCCEEDED.value
+        completed_steps = _row_payload(ledger)["completed_steps"]
+        assert "spec_registry_written" in completed_steps
+        assert "spec_marked_approved" in completed_steps
 
 
 def test_project_setup_retry_dry_run_repairs_only_expired_pending_create(
@@ -1667,10 +1948,15 @@ def test_workflow_setup_reconciles_partial_or_existing_session_state(
     )
 
     assert result["ok"] is True
+    data = result["data"]
     assert fake_workflow.created_sessions == []
-    assert fake_workflow.sessions["1"]["setup_status"] == "authority_pending_review"
-    assert fake_workflow.sessions["1"]["setup_error"] is None
-    assert fake_workflow.sessions["1"]["setup_spec_file_path"] == str(spec_file.resolve())
+    _assert_compile_required_workflow_state(
+        fake_workflow.sessions["1"],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     assert fake_workflow.sessions["1"]["unrelated_state"] == "preserved"
 
 
@@ -1717,11 +2003,15 @@ def test_workflow_setup_retry_recovers_session_created_without_status(
     )
 
     assert retry["ok"] is True
+    data = retry["data"]
     assert fake_workflow.created_sessions == [str(project_id)]
-    assert fake_workflow.sessions[str(project_id)]["setup_status"] == (
-        "authority_pending_review"
+    _assert_compile_required_workflow_state(
+        fake_workflow.sessions[str(project_id)],
+        project_id=project_id,
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
     )
-    assert fake_workflow.sessions[str(project_id)]["setup_error"] is None
 
 
 def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
@@ -1750,7 +2040,13 @@ def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
     assert fake_workflow.created_sessions == [str(project_id)]
     assert len(fake_workflow.status_writes) == 1
     assert fake_workflow.sessions[str(project_id)]["setup_status"] == (
-        "authority_pending_review"
+        "authority_compile_required"
+    )
+    assert "setup_spec_hash" in fake_workflow.sessions[str(project_id)]
+    assert "setup_spec_version_id" in fake_workflow.sessions[str(project_id)]
+    assert (
+        fake_workflow.sessions[str(project_id)]["setup_next_actions"][0]["command"]
+        == "agileforge authority compile"
     )
 
     expected_fingerprint = _retry_fingerprint(
@@ -1770,8 +2066,16 @@ def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
     )
 
     assert retry["ok"] is True
+    data = retry["data"]
     assert fake_workflow.created_sessions == [str(project_id)]
     assert len(fake_workflow.status_writes) == 1
+    _assert_compile_required_workflow_state(
+        fake_workflow.sessions[str(project_id)],
+        project_id=project_id,
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
     with Session(engine) as session:
         retry_row = session.get(CliMutationLedger, retry["data"]["mutation_event_id"])
         assert retry_row is not None
