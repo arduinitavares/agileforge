@@ -1943,6 +1943,91 @@ def test_sprint_runtime_summary_blocks_next_sprint_for_story_triage_impact(  # n
     assert "reconcile" in disabled_reason
 
 
+def test_sprint_runtime_summary_blocks_create_next_when_sprint_generation_blocked(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, workflow = _build_client(monkeypatch)
+    project_id, completed_sprint_id = _seed_completed_sprint(
+        session,
+        repo,
+        created_title="Completed Sprint",
+    )
+    workflow.states[str(project_id)] = {
+        "fsm_state": "SPRINT_COMPLETE",
+        "latest_completed_sprint_id": completed_sprint_id,
+        "post_sprint_triage": build_triage_payload(
+            project_id=project_id,
+            sprint_id=completed_sprint_id,
+            impact="none",
+            affected_requirements=[],
+            affected_task_ids=[],
+            affected_story_ids=[],
+            affected_backlog_item_ids=[],
+            affected_roadmap_item_ids=[],
+            affected_layers=[],
+            learning_summary="Plan confirmed.",
+            decision_reason="No planning impact.",
+            idempotency_key="triage-api-zero-candidates",
+            replace_existing=False,
+            recorded_at="2026-06-10T00:00:00Z",
+            recorded_by="cli-agent",
+        ),
+    }
+
+    def fake_load_sprint_candidates(
+        product_id: int,  # noqa: ARG001
+        *,
+        story_completion_scope: object = None,  # noqa: ARG001
+    ) -> dict[str, object]:
+        return {
+            "success": True,
+            "count": 0,
+            "stories": [],
+            "excluded_counts": {"non_refined": 0, "superseded": 9},
+            "readiness": {"ready": False, "blocking_codes": []},
+            "message": "Found 0 sprint candidates.",
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "load_sprint_candidates",
+        fake_load_sprint_candidates,
+    )
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    runtime_summary = response.json()["data"]["runtime_summary"]
+    assert runtime_summary["can_create_next_sprint"] is False
+    assert (
+        runtime_summary["workflow_next_status"]
+        == "post_sprint_sprint_candidates_unavailable"
+    )
+    assert (
+        runtime_summary["create_next_sprint_blocked_reason"]
+        == "NO_REFINED_SPRINT_CANDIDATES"
+    )
+    assert runtime_summary["create_next_sprint_disabled_reason"] == (
+        "Sprint generation is blocked because no refined Story candidates are "
+        "available."
+    )
+    assert runtime_summary["create_next_sprint_valid_commands"] == [
+        f"agileforge story pending --project-id {project_id}",
+        f"agileforge sprint candidates --project-id {project_id}",
+    ]
+    assert runtime_summary["create_next_sprint_blocked_command"] == {
+        "command": "agileforge sprint generate",
+        "reason": "NO_REFINED_SPRINT_CANDIDATES",
+        "message": (
+            "Sprint generation is blocked because no refined Story candidates "
+            "are available."
+        ),
+        "candidate_count": 0,
+        "excluded_counts": {"non_refined": 0, "superseded": 9},
+    }
+
+
 def test_start_sprint_sets_started_at_once_and_logs_event(session, monkeypatch):  # noqa: ANN001, ANN201, D103
     client, repo, workflow = _build_client(monkeypatch)
     project_id, sprint_id = _seed_saved_sprint(

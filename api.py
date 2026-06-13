@@ -11,7 +11,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1043,10 +1043,86 @@ def _load_sprint_close_snapshot(sprint: Sprint) -> dict[str, Any] | None:
         return None
 
 
+def _sprint_generation_candidate_blocker(
+    candidate_summary: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the create-next blocker when no refined Sprint candidates exist."""
+    if candidate_summary.get("success") is False:
+        return None
+
+    raw_count = candidate_summary.get("count")
+    if isinstance(raw_count, int):
+        candidate_count = raw_count
+    elif isinstance(raw_count, str):
+        try:
+            candidate_count = int(raw_count)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if candidate_count != 0:
+        return None
+
+    message = (
+        "Sprint generation is blocked because no refined Story candidates are "
+        "available."
+    )
+    return {
+        "command": "agileforge sprint generate",
+        "reason": "NO_REFINED_SPRINT_CANDIDATES",
+        "message": message,
+        "candidate_count": candidate_count,
+        "excluded_counts": candidate_summary.get("excluded_counts", {}),
+    }
+
+
+def _load_sprint_generation_blocker(
+    *,
+    can_create_next_sprint: bool,
+    latest_completed_sprint_id: int | None,
+    current_triage: dict[str, Any] | None,
+    triage_impact: object,
+    load_candidate_summary: Callable[[], dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Load candidate availability only for post-sprint create-next decisions."""
+    if (
+        not can_create_next_sprint
+        or latest_completed_sprint_id is None
+        or current_triage is None
+        or triage_impact != "none"
+        or load_candidate_summary is None
+    ):
+        return None
+
+    try:
+        candidate_summary = load_candidate_summary()
+    except Exception:
+        logger.exception("Failed to load sprint candidates for runtime summary blocker")
+        return None
+    return _sprint_generation_candidate_blocker(candidate_summary)
+
+
+def _runtime_summary_project_id(
+    *,
+    project_id: int | None,
+    active: Sprint | None,
+    planned: Sprint | None,
+    completed: Sequence[Sprint],
+) -> int:
+    if project_id is not None:
+        return project_id
+
+    first_sprint = active or planned or completed[0]
+    return first_sprint.product_id
+
+
 def _build_sprint_runtime_summary(
     sprints: Sequence[Sprint],
     *,
+    project_id: int | None = None,
     workflow_state: dict[str, Any] | None = None,
+    load_candidate_summary: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     active = next(
         (sprint for sprint in sprints if sprint.status == SprintStatus.ACTIVE),
@@ -1086,6 +1162,16 @@ def _build_sprint_runtime_summary(
         and not triage_required
         and not triage_blocks_next_sprint
     )
+    sprint_generation_blocker = _load_sprint_generation_blocker(
+        can_create_next_sprint=can_create_next_sprint,
+        latest_completed_sprint_id=latest_completed_sprint_id,
+        current_triage=current_triage,
+        triage_impact=triage_impact,
+        load_candidate_summary=load_candidate_summary,
+    )
+    if sprint_generation_blocker is not None:
+        can_create_next_sprint = False
+
     disabled_reason = None
     if triage_required:
         disabled_reason = (
@@ -1107,6 +1193,8 @@ def _build_sprint_runtime_summary(
             "A planned sprint already exists. "
             "Modify it instead of creating another."
         )
+    elif sprint_generation_blocker is not None:
+        disabled_reason = sprint_generation_blocker["message"]
 
     summary = {
         "active_sprint_id": active.sprint_id if active else None,
@@ -1125,6 +1213,29 @@ def _build_sprint_runtime_summary(
                 "sprint_draft_artifact_fingerprint": draft_assessment.get(
                     "artifact_fingerprint"
                 ),
+            }
+        )
+    if sprint_generation_blocker is not None:
+        command_project_id = _runtime_summary_project_id(
+            project_id=project_id,
+            active=active,
+            planned=planned,
+            completed=completed,
+        )
+        summary.update(
+            {
+                "workflow_next_status": "post_sprint_sprint_candidates_unavailable",
+                "create_next_sprint_blocked_reason": (
+                    sprint_generation_blocker["reason"]
+                ),
+                "create_next_sprint_valid_commands": [
+                    f"agileforge story pending --project-id {command_project_id}",
+                    (
+                        "agileforge sprint candidates --project-id "
+                        f"{command_project_id}"
+                    ),
+                ],
+                "create_next_sprint_blocked_command": sprint_generation_blocker,
             }
         )
     return summary
@@ -3277,7 +3388,12 @@ async def list_project_sprints(project_id: int) -> dict[str, Any]:
             ).all(),
             build_runtime_summary=lambda sprints: _build_sprint_runtime_summary(
                 sprints,
+                project_id=project_id,
                 workflow_state=workflow_state,
+                load_candidate_summary=lambda: load_sprint_candidates(
+                    project_id,
+                    story_completion_scope=workflow_state.get("story_completion_scope"),
+                ),
             ),
             serialize_sprint_list_item=lambda sprint, runtime_summary: (
                 _serialize_sprint_list_item(

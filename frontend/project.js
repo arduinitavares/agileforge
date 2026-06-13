@@ -3874,8 +3874,7 @@ function hasReviewableSprintDraft(stateKey = activeFsmState) {
 }
 
 function shouldStartFreshSprintCycle() {
-    return Boolean(sprintRuntimeSummary?.can_create_next_sprint)
-        && !hasReviewableSprintDraft();
+    return getCreateNextSprintActionState().canCreate;
 }
 
 function renderOverviewPanel() {
@@ -3891,6 +3890,7 @@ function renderOverviewPanel() {
     const latestCompletedSprintId = sprintRuntimeSummary?.latest_completed_sprint_id || null;
     const postSprintTriageRequired = Boolean(sprintRuntimeSummary?.post_sprint_triage_required);
     const postSprintTriageImpact = sprintRuntimeSummary?.post_sprint_triage?.impact || null;
+    const createNextAction = getCreateNextSprintActionState();
     const savedSprintCount = savedSprints.length;
     const scopedSummary = storySelectionScopeSummary();
     const overviewTitle = scopedSummary
@@ -3960,10 +3960,18 @@ function renderOverviewPanel() {
                     <span class="material-symbols-outlined text-sm">schedule</span>
                     Open Planned Sprint
                </button>`
-            : `<button type="button" onclick="openSprintPlanner()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
-                    <span class="material-symbols-outlined text-sm">add_task</span>
-                    Create Next Sprint
-               </button>`;
+            : createNextAction.canOpen
+                ? `<button type="button" onclick="openSprintPlanner()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
+                        <span class="material-symbols-outlined text-sm">${createNextAction.icon}</span>
+                        ${createNextAction.label}
+                   </button>`
+                : `<div class="max-w-md rounded-lg border border-amber-200 bg-amber-50 p-3 text-left dark:border-amber-800 dark:bg-amber-900/20">
+                        <button type="button" disabled class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                            <span class="material-symbols-outlined text-sm">${createNextAction.icon}</span>
+                            ${createNextAction.label}
+                        </button>
+                        ${createNextAction.reasonHtml}
+                   </div>`;
 
     container.innerHTML = `
         <div class="space-y-6">
@@ -4024,6 +4032,80 @@ const escapeHtml = (str) => {
 };
 
 const escapeAttribute = (value) => escapeHtml(value);
+
+function getCreateNextSprintActionState() {
+    const hasDraftToReview = hasReviewableSprintDraft();
+    const normalizedState = typeof activeFsmState === 'string'
+        ? activeFsmState.trim().toUpperCase()
+        : '';
+    const canModifyPlanned = Boolean(sprintRuntimeSummary?.planned_sprint_id)
+        || normalizedState === 'SPRINT_PERSISTENCE';
+    const canCreate = Boolean(sprintRuntimeSummary?.can_create_next_sprint)
+        && !hasDraftToReview;
+
+    if (hasDraftToReview) {
+        return {
+            mode: 'draft',
+            canCreate: false,
+            canOpen: true,
+            label: 'Review Sprint Draft',
+            icon: 'fact_check',
+            reasonText: '',
+            reasonHtml: '',
+        };
+    }
+
+    if (canCreate) {
+        return {
+            mode: 'create',
+            canCreate: true,
+            canOpen: true,
+            label: 'Create Next Sprint',
+            icon: 'add_task',
+            reasonText: '',
+            reasonHtml: '',
+        };
+    }
+
+    if (canModifyPlanned) {
+        return {
+            mode: 'planned',
+            canCreate: false,
+            canOpen: true,
+            label: 'Modify Planned Sprint',
+            icon: 'edit_note',
+            reasonText: '',
+            reasonHtml: '',
+        };
+    }
+
+    const reasonCode = sprintRuntimeSummary?.create_next_sprint_blocked_reason || '';
+    const reasonText = sprintRuntimeSummary?.create_next_sprint_disabled_reason
+        || 'Sprint generation is not currently available.';
+    const validCommands = Array.isArray(sprintRuntimeSummary?.create_next_sprint_valid_commands)
+        ? sprintRuntimeSummary.create_next_sprint_valid_commands
+        : [];
+    const codeHtml = reasonCode
+        ? `<div class="text-[10px] font-black uppercase tracking-[0.16em] text-amber-600 dark:text-amber-300">${escapeHtml(reasonCode)}</div>`
+        : '';
+    const commandsHtml = validCommands.length
+        ? `<div class="mt-2 space-y-1 text-[11px] font-mono text-slate-600 dark:text-slate-300">${validCommands.map((command) => `<div>${escapeHtml(command)}</div>`).join('')}</div>`
+        : '';
+
+    return {
+        mode: 'blocked',
+        canCreate: false,
+        canOpen: false,
+        label: 'Sprint Generation Blocked',
+        icon: 'block',
+        reasonText,
+        reasonHtml: `
+            ${codeHtml}
+            <p class="mt-1 text-xs font-semibold text-slate-600 dark:text-slate-300">${escapeHtml(reasonText)}</p>
+            ${commandsHtml}
+        `,
+    };
+}
 
 function renderSprintSavedWorkspace() {
     const savedWorkspace = document.getElementById('sprint-saved-workspace');
@@ -4105,18 +4187,31 @@ function renderSprintSavedWorkspace() {
         closeButton.disabled = !canClose;
     }
     if (plannerButton) {
-        const hasDraftToReview = hasReviewableSprintDraft();
-        const canCreateNextSprint = Boolean(sprintRuntimeSummary?.can_create_next_sprint)
-            && !hasDraftToReview;
-        const plannerLabel = hasDraftToReview
-            ? 'Review Sprint Draft'
-            : canCreateNextSprint
-                ? 'Create Next Sprint'
-                : 'Modify Planned Sprint';
+        const createNextAction = getCreateNextSprintActionState();
+        plannerButton.disabled = !createNextAction.canOpen;
+        plannerButton.title = createNextAction.reasonText || '';
+        plannerButton.classList.toggle('cursor-not-allowed', !createNextAction.canOpen);
+        plannerButton.classList.toggle('opacity-60', !createNextAction.canOpen);
         plannerButton.innerHTML = `
-            <span class="material-symbols-outlined text-sm">${hasDraftToReview ? 'fact_check' : canCreateNextSprint ? 'add_task' : 'edit_note'}</span>
-            ${plannerLabel}
+            <span class="material-symbols-outlined text-sm">${createNextAction.icon}</span>
+            ${createNextAction.label}
         `;
+        let plannerHelp = document.getElementById('sprint-planner-action-help');
+        if (!plannerHelp && plannerButton.parentElement) {
+            plannerHelp = document.createElement('div');
+            plannerHelp.id = 'sprint-planner-action-help';
+            plannerHelp.className = 'basis-full text-left';
+            plannerButton.parentElement.appendChild(plannerHelp);
+        }
+        if (plannerHelp) {
+            plannerHelp.classList.toggle(
+                'hidden',
+                createNextAction.canOpen || !createNextAction.reasonHtml,
+            );
+            plannerHelp.innerHTML = createNextAction.canOpen
+                ? ''
+                : `<div class="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">${createNextAction.reasonHtml}</div>`;
+        }
     }
 
     if (isCompletedSprint || sprintMode !== 'active') {
@@ -4350,6 +4445,9 @@ async function resetSprintPlannerStateForCreateNext() {
 }
 
 async function openSprintPlanner() {
+    const createNextAction = getCreateNextSprintActionState();
+    if (!createNextAction.canOpen) return;
+
     resetSprintClosePanel();
     viewPhaseId = 'sprint';
     showSprintPlanner = true;

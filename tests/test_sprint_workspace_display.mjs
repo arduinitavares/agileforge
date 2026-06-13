@@ -74,6 +74,8 @@ test('openSprintPlanner resets planner working state for create-next mode', asyn
         'openSprintPlanner',
         [
             /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -139,6 +141,8 @@ test('openSprintPlanner preserves reviewable sprint draft even if summary is sta
         'openSprintPlanner',
         [
             /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -192,6 +196,8 @@ test('openSprintPlanner preserves planner working state for modify-planned mode'
         'openSprintPlanner',
         [
             /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -238,6 +244,90 @@ test('openSprintPlanner preserves planner working state for modify-planned mode'
     assert.equal(calls.resetCycle, 0);
     assert.equal(calls.historyRender, null);
     assert.equal(calls.attemptPanels, null);
+});
+
+test('create-next helpers expose backend blocker reason and commands', () => {
+    const getCreateNextSprintActionState = loadSprintFunction(
+        'getCreateNextSprintActionState',
+        [
+            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+        ],
+    );
+
+    globalThis.sprintRuntimeSummary = {
+        can_create_next_sprint: false,
+        create_next_sprint_disabled_reason: 'Sprint generation is blocked because no refined Story candidates are available.',
+        create_next_sprint_blocked_reason: 'NO_REFINED_SPRINT_CANDIDATES',
+        create_next_sprint_valid_commands: [
+            'agileforge story pending --project-id 3',
+            'agileforge sprint candidates --project-id 3',
+        ],
+    };
+    globalThis.activeFsmState = 'SPRINT_COMPLETE';
+
+    const state = getCreateNextSprintActionState();
+
+    assert.equal(state.canCreate, false);
+    assert.equal(state.canOpen, false);
+    assert.equal(state.label, 'Sprint Generation Blocked');
+    assert.match(state.reasonHtml, /NO_REFINED_SPRINT_CANDIDATES/);
+    assert.match(state.reasonHtml, /agileforge sprint candidates --project-id 3/);
+});
+
+test('openSprintPlanner does not enter planner when create-next is blocked', async () => {
+    const openSprintPlanner = loadSprintFunction(
+        'openSprintPlanner',
+        [
+            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+            /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
+            /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
+            /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
+        ],
+    );
+
+    const calls = {
+        resetClose: 0,
+        resetCycle: 0,
+        renderPhase: 0,
+        nextButton: 0,
+        loadCandidates: 0,
+        loadHistory: 0,
+    };
+
+    globalThis.sprintRuntimeSummary = {
+        can_create_next_sprint: false,
+        create_next_sprint_disabled_reason: 'No refined candidates.',
+        create_next_sprint_blocked_reason: 'NO_REFINED_SPRINT_CANDIDATES',
+    };
+    globalThis.activeFsmState = 'SPRINT_COMPLETE';
+    globalThis.viewPhaseId = 'overview';
+    globalThis.showSprintPlanner = false;
+    globalThis.selectedSprintStoryIds = new Set([12]);
+    globalThis.resetSprintClosePanel = () => { calls.resetClose += 1; };
+    globalThis.resetSprintPlannerStateForCreateNext = async () => { calls.resetCycle += 1; };
+    globalThis.renderPhaseSection = () => { calls.renderPhase += 1; };
+    globalThis.updateNextButton = () => { calls.nextButton += 1; };
+    globalThis.loadSprintCandidates = async () => { calls.loadCandidates += 1; };
+    globalThis.loadSprintHistory = async () => { calls.loadHistory += 1; };
+    globalThis.renderSprintHistory = () => {};
+    globalThis.renderSprintAttemptPanels = () => {};
+    globalThis.updateSprintSaveButton = () => {};
+
+    await openSprintPlanner();
+
+    assert.equal(globalThis.viewPhaseId, 'overview');
+    assert.equal(globalThis.showSprintPlanner, false);
+    assert.deepEqual(Array.from(globalThis.selectedSprintStoryIds), [12]);
+    assert.equal(calls.resetClose, 0);
+    assert.equal(calls.resetCycle, 0);
+    assert.equal(calls.renderPhase, 0);
+    assert.equal(calls.nextButton, 0);
+    assert.equal(calls.loadCandidates, 0);
+    assert.equal(calls.loadHistory, 0);
 });
 
 test('renderSprintValidationErrors lists actionable retry guidance', () => {
