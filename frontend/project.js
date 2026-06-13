@@ -792,14 +792,8 @@ function switchAuthorityReviewTab(tabName) {
 
 function createInvariantCard(invariant) {
     const card = document.createElement('div');
-    card.className = 'p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 shadow-sm space-y-2 hover:border-sky-200 dark:hover:border-sky-900 transition-all';
-    
-    const header = document.createElement('div');
-    header.className = 'flex items-center justify-between gap-2 flex-wrap';
-    
-    const leftBadges = document.createElement('div');
-    leftBadges.className = 'flex items-center gap-1.5';
-    
+    card.className = 'p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 shadow-sm space-y-3 hover:border-sky-200 dark:hover:border-sky-900 transition-all';
+
     const idStr = invariant.id || '';
     let idColorClass = 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200';
     if (idStr.startsWith('REQ.')) {
@@ -811,12 +805,71 @@ function createInvariantCard(invariant) {
     } else if (idStr.startsWith('INTERFACE.')) {
         idColorClass = 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200';
     }
-    
+
+    const humanSection = document.createElement('div');
+    humanSection.className = 'space-y-1';
+
+    const humanLabel = document.createElement('div');
+    humanLabel.className = 'text-[10px] font-black uppercase tracking-[0.18em] text-sky-600 dark:text-sky-300';
+    humanLabel.textContent = 'Human rule';
+
+    const textP = document.createElement('p');
+    textP.className = 'text-sm text-slate-800 dark:text-slate-100 whitespace-pre-wrap leading-relaxed font-semibold';
+    textP.textContent = invariant.text || 'No human-readable rule provided.';
+    humanSection.replaceChildren(humanLabel, textP);
+    card.appendChild(humanSection);
+
+    const sourceSection = document.createElement('div');
+    sourceSection.className = 'rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300';
+
+    const sourceLabel = document.createElement('div');
+    sourceLabel.className = 'font-black uppercase tracking-[0.16em] text-[10px] text-slate-500 dark:text-slate-400';
+    sourceLabel.textContent = 'Source evidence';
+    sourceSection.appendChild(sourceLabel);
+
+    const refs = safeArray(invariant.source_refs);
+    if (refs.length > 0) {
+        const refsWrap = document.createElement('div');
+        refsWrap.className = 'mt-2 flex flex-wrap gap-1';
+        refs.forEach(ref => {
+            const refSpan = document.createElement('span');
+            refSpan.className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-white text-slate-600 ring-1 ring-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:ring-slate-700';
+            refSpan.textContent = ref;
+            refsWrap.appendChild(refSpan);
+        });
+        sourceSection.appendChild(refsWrap);
+    }
+
+    const excerpt = invariant.source_excerpt || '';
+    const excerptP = document.createElement('p');
+    excerptP.className = 'mt-2 whitespace-pre-wrap leading-relaxed';
+    excerptP.textContent = excerpt || 'No source excerpt attached to this invariant.';
+    sourceSection.appendChild(excerptP);
+    card.appendChild(sourceSection);
+
+    const technicalSection = document.createElement('div');
+    technicalSection.className = 'rounded-lg border border-slate-200 bg-white/60 p-3 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-950/20 dark:text-slate-400';
+
+    const technicalLabel = document.createElement('div');
+    technicalLabel.className = 'font-black uppercase tracking-[0.16em] text-[10px] text-slate-500 dark:text-slate-500';
+    technicalLabel.textContent = 'Technical metadata';
+    technicalSection.appendChild(technicalLabel);
+
+    const leftBadges = document.createElement('div');
+    leftBadges.className = 'mt-2 flex flex-wrap items-center gap-1.5';
+
     const idBadge = document.createElement('span');
     idBadge.className = `px-2 py-0.5 rounded text-[10px] font-black uppercase ${idColorClass}`;
     idBadge.textContent = idStr;
     leftBadges.appendChild(idBadge);
-    
+
+    if (invariant.type) {
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
+        typeBadge.textContent = invariant.type;
+        leftBadges.appendChild(typeBadge);
+    }
+
     const supportBadge = document.createElement('span');
     const supportStr = invariant.support || 'inferred';
     let supportColorClass = 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-400';
@@ -826,28 +879,23 @@ function createInvariantCard(invariant) {
     supportBadge.className = `px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${supportColorClass}`;
     supportBadge.textContent = supportStr;
     leftBadges.appendChild(supportBadge);
-    
-    header.appendChild(leftBadges);
-    
-    const rightRefs = document.createElement('div');
-    rightRefs.className = 'flex flex-wrap gap-1';
-    
-    const refs = invariant.source_refs || [];
-    refs.forEach(ref => {
-        const refSpan = document.createElement('span');
-        refSpan.className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
-        refSpan.textContent = ref;
-        rightRefs.appendChild(refSpan);
-    });
-    
-    header.appendChild(rightRefs);
-    card.appendChild(header);
-    
-    const textP = document.createElement('p');
-    textP.className = 'text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed font-medium';
-    textP.textContent = invariant.text || '';
-    card.appendChild(textP);
-    
+
+    technicalSection.appendChild(leftBadges);
+
+    if (invariant.parameters && typeof invariant.parameters === 'object') {
+        const parameterText = Object.entries(invariant.parameters)
+            .map(([key, value]) => `${key}=${String(value)}`)
+            .join(', ');
+        if (parameterText) {
+            const parametersP = document.createElement('p');
+            parametersP.className = 'mt-2 font-mono text-[11px] break-words text-slate-500 dark:text-slate-400';
+            parametersP.textContent = parameterText;
+            technicalSection.appendChild(parametersP);
+        }
+    }
+
+    card.appendChild(technicalSection);
+
     return card;
 }
 

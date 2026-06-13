@@ -989,6 +989,51 @@ test('renderAuthorityInvariants uses createInvariantCard for visible invariants'
     assert.equal(invariantsList.innerHTML, '');
 });
 
+test('createInvariantCard renders human rule and source before technical metadata', () => {
+    const { documentStub } = createDocumentStub();
+    globalThis.document = documentStub;
+
+    const createInvariantCard = loadAuthorityConsoleFunction(
+        'createInvariantCard',
+        ['safeArray', 'createInvariantCard'],
+    );
+
+    const card = createInvariantCard({
+        id: 'INV-8c4a80c3d7d3cdd7',
+        type: 'FORBIDDEN_CAPABILITY',
+        support: 'direct',
+        text: 'Reviewed customer data must not be used for Orise model improvement unless the user granted Orise model training consent.',
+        parameters: {
+            capability: 'use_reviewed_customer_data_for_orise_model_improvement_without_orise_model_training_consent_true',
+        },
+        source_refs: ['CONSTRAINT.orise-training-data-gate'],
+        source_excerpt: 'Reviewed customer data must not be used for Orise model improvement unless training consent is granted.',
+    });
+
+    assert.ok(card.children.length >= 3);
+
+    const humanRuleText = card.children[0].textContent;
+    const sourceText = card.children[1].textContent;
+    const technicalText = card.children.slice(2).map((child) => child.textContent).join(' ');
+
+    assert.match(humanRuleText, /Human rule/);
+    assert.match(humanRuleText, /Reviewed customer data must not be used/);
+    assert.doesNotMatch(humanRuleText, /INV-8c4a80c3d7d3cdd7/);
+    assert.doesNotMatch(humanRuleText, /FORBIDDEN_CAPABILITY/);
+
+    assert.match(sourceText, /Source evidence/);
+    assert.match(sourceText, /CONSTRAINT\.orise-training-data-gate/);
+    assert.match(sourceText, /training consent is granted/);
+
+    assert.match(technicalText, /Technical metadata/);
+    assert.match(technicalText, /INV-8c4a80c3d7d3cdd7/);
+    assert.match(technicalText, /FORBIDDEN_CAPABILITY/);
+    assert.match(
+        technicalText,
+        /use_reviewed_customer_data_for_orise_model_improvement_without_orise_model_training_consent_true/,
+    );
+});
+
 test('authority artifact renderer does not assign user-controlled content through innerHTML', () => {
     const unsafePatterns = [
         /specViewer\.innerHTML\s*=/,
