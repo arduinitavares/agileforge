@@ -69,6 +69,37 @@ test('chooseLandingSprint prefers active, then planned, then latest completed', 
     assert.equal(chooseLandingSprint().id, 4);
 });
 
+test('active sprint execution overrides preserved non-sprint views', () => {
+    const shouldResolveSprintLandingInsteadOfPreservingView = loadSprintFunction(
+        'shouldResolveSprintLandingInsteadOfPreservingView',
+        [
+            /function normalizeStateKey\(value\) \{[\s\S]*?\n\}/,
+            /function shouldResolveSprintLandingInsteadOfPreservingView\(stateKey, preservedViewPhase\) \{[\s\S]*?\n\}/,
+        ],
+    );
+
+    assert.equal(
+        shouldResolveSprintLandingInsteadOfPreservingView('SPRINT_VIEW', 'story'),
+        true,
+    );
+    assert.equal(
+        shouldResolveSprintLandingInsteadOfPreservingView('SPRINT_UPDATE_STORY', 'roadmap'),
+        true,
+    );
+    assert.equal(
+        shouldResolveSprintLandingInsteadOfPreservingView('SPRINT_VIEW', 'sprint'),
+        false,
+    );
+    assert.equal(
+        shouldResolveSprintLandingInsteadOfPreservingView('STORY_INTERVIEW', 'story'),
+        false,
+    );
+    assert.match(
+        projectJsSource,
+        /preserveView && shouldResolveSprintLandingInsteadOfPreservingView\(stateKey, viewPhaseId\)/,
+    );
+});
+
 test('openSprintPlanner resets planner working state for create-next mode', async () => {
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',

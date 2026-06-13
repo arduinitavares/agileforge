@@ -118,6 +118,24 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   structured `TASK_CLOSE_EVIDENCE_REQUIRED` details when required close evidence
   is missing.
 
+#### Dashboard can preserve a Story panel after Sprint execution becomes active
+
+- Original feedback item: `Sprint-active dashboard still shows unrelated Story
+  draft context`, tracked as issue #138.
+- Product issue considered: real UI routing bug. The saved Sprint workspace
+  already knew how to render active Sprint execution, but a state refresh with
+  `preserveView=true` could accept backend `SPRINT_VIEW` while keeping
+  `viewPhaseId='story'`. That made the sidebar show Sprint execution while the
+  main panel stayed on Story planning artifacts.
+- Fix status: fixed in `dev/dashboard-active-sprint-default` for issue #138.
+- Why fixed: automatic state refresh should not strand operators on non-Sprint
+  planning panels once the backend has entered active Sprint execution. Active
+  Sprint states need to resolve the Sprint landing workspace by default.
+- Expected behavior after fix: when refreshed state is `SPRINT_VIEW`,
+  `SPRINT_LIST`, `SPRINT_UPDATE_STORY`, or `SPRINT_MODIFY`, a preserved
+  non-Sprint panel is overridden and the dashboard lands on the current Sprint
+  workspace. Manual navigation to Stories remains possible afterward.
+
 ### Considered but not fixed yet
 
 #### Sprint generation validation failure details
@@ -414,13 +432,16 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   makes it hard to audit what the CLI is doing against the visible roadmap.
 - Severity: non-blocking UX/traceability issue.
 
-### Dashboard shows Sprint active after backend has no active Sprint
+### Dashboard post-sprint no-candidate state needs clearer routing
 
 - Project: ASA `project_id=3`
 - Context: after Sprint `45` closed and all thirteen roadmap requirements had
   saved Story coverage.
-- Observed UI: the project sidebar still displayed `Sprint ACTIVE`, while the
-  main Story view remained visible with all requirements saved.
+- Initial observed UI: the main Story view remained visible with all
+  requirements saved while the user was validating Sprint state.
+- Correction after refreshed screenshot evidence: the sidebar displayed
+  `Sprint COMPLETED`, not `Sprint ACTIVE`. The earlier "active" wording should
+  not be treated as a proven active-badge bug.
 - Command: `agileforge workflow next --project-id 3`
 - Actual result: `status=post_sprint_sprint_candidates_unavailable`; valid
   commands were only `agileforge story pending --project-id 3` and
@@ -433,12 +454,11 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
 - Actual result: `count=0`, message
   `Found 0 refined sprint candidate(s) in backlog (excluded non-refined=0, superseded=9, open_sprint=0).`
 - Expected behavior: when the backend has no active/planned Sprint and no
-  refined candidates, the dashboard should not present Sprint as active. It
-  should show the same no-candidate/post-sprint state and explain the next
-  valid inspection or recovery action.
-- Why it matters: the UI suggests there is current Sprint work to execute, but
-  the CLI correctly refuses task execution. This makes live CLI validation,
-  including issue #137 task-close validation, look inconsistent even when the
-  backend is behaving correctly.
+  refined candidates, the dashboard should show the same no-candidate /
+  post-sprint state and explain the next valid inspection or recovery action.
+- Why it matters: the UI can still leave users looking at Story planning
+  artifacts when the CLI truth is a blocked post-sprint candidate state. This
+  makes live CLI validation look inconsistent even when the backend is behaving
+  correctly.
 - Severity: non-blocking UX/state-projection issue unless it causes users to
   plan or execute against stale Sprint assumptions.

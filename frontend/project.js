@@ -189,6 +189,16 @@ function getPhaseIdForState(stateKey) {
     return step ? step.id : 'setup';
 }
 
+function shouldResolveSprintLandingInsteadOfPreservingView(stateKey, preservedViewPhase) {
+    if (preservedViewPhase === 'sprint') return false;
+    return [
+        'SPRINT_VIEW',
+        'SPRINT_LIST',
+        'SPRINT_UPDATE_STORY',
+        'SPRINT_MODIFY',
+    ].includes(normalizeStateKey(stateKey));
+}
+
 function phaseIndex(phaseId) {
     return PHASE_ORDER.indexOf(phaseId);
 }
@@ -1679,6 +1689,8 @@ async function fetchProjectFSMState(projectId, options = {}) {
             showSprintPlanner = false;
             currentAuthorityReview = null;
             setPhaseState('SETUP_REQUIRED', 'setup');
+        } else if (preserveView && shouldResolveSprintLandingInsteadOfPreservingView(stateKey, viewPhaseId)) {
+            applyResolvedLanding(stateKey, landing);
         } else if (preserveView) {
             const selectedSprint = ensureCurrentSprintSelection();
             if (selectedSprint) {
