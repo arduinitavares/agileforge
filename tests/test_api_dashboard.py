@@ -284,6 +284,8 @@ class FakeAuthorityApplication:
         self.reject_requests: list[AuthorityRejectRequest] = []
         self.create_calls: list[dict[str, Any]] = []
         self.retry_calls: list[dict[str, Any]] = []
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.results: dict[str, dict[str, object]] = {}
 
     def project_create(
         self,
@@ -302,6 +304,8 @@ class FakeAuthorityApplication:
                 "changed_by": changed_by,
             }
         )
+        if "project_create" in self.results:
+            return self.results["project_create"]
         if not self.repo:
             return {"ok": False, "error": "Repo not initialized"}
         product = self.repo.create(name)
@@ -523,6 +527,46 @@ class FakeAuthorityApplication:
             },
         }
 
+    def authority_compile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str | None = None,
+        dry_run: bool = False,
+        dry_run_id: str | None = None,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, object]:
+        """Mock guarded authority compilation."""
+        del dry_run, dry_run_id, correlation_id
+        self.calls.append(
+            (
+                "authority_compile",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "expected_spec_hash": expected_spec_hash,
+                    "expected_state": expected_state,
+                    "expected_setup_status": expected_setup_status,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return self.results.get(
+            "authority_compile",
+            {
+                "ok": True,
+                "data": {"project_id": project_id},
+                "warnings": [],
+                "errors": [],
+            },
+        )
+
     def authority_review(
         self,
         *,
@@ -657,6 +701,61 @@ def test_create_project_success_advances_to_vision(
     assert payload["data"]["vision_auto_run"]["is_complete"] is False
 
     assert workflow.states["1"]["fsm_state"] == "VISION_INTERVIEW"
+
+
+def test_create_project_returns_compile_required_without_pending_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard create should return immediately before authority compilation."""
+    client, _repo, _workflow = _build_client(monkeypatch)
+    fake_app = FakeAuthorityApplication()
+    project_id = 10
+    spec_version_id = 3
+    spec_hash = "a" * 64
+    fake_app.results["project_create"] = {
+        "ok": True,
+        "data": {
+            "project_id": project_id,
+            "name": "API Project",
+            "setup_status": "authority_compile_required",
+            "fsm_state": "SETUP_REQUIRED",
+            "spec_hash": spec_hash,
+            "spec_version_id": spec_version_id,
+            "next_actions": [
+                {
+                    "command": "agileforge authority compile",
+                    "args": {
+                        "project_id": project_id,
+                        "spec_version_id": spec_version_id,
+                        "expected_spec_hash": spec_hash,
+                        "expected_state": "SETUP_REQUIRED",
+                        "expected_setup_status": "authority_compile_required",
+                    },
+                    "reason": "Compile pending authority before authority review.",
+                }
+            ],
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        "/api/projects",
+        json={"name": "API Project", "spec_file_path": "specs/spec.json"},
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["id"] == project_id
+    assert payload["data"]["setup_status"] == "authority_compile_required"
+    assert payload["data"]["fsm_state"] == "SETUP_REQUIRED"
+    assert payload["data"]["spec_hash"] == spec_hash
+    assert payload["data"]["spec_version_id"] == spec_version_id
+    assert payload["data"]["next_actions"][0]["command"] == (
+        "agileforge authority compile"
+    )
 
 
 def test_get_projects_uses_batch_session_lookup(
@@ -995,6 +1094,138 @@ def test_dashboard_reject_requires_explicit_idempotency_key(
     assert response.json()["detail"]["errors"][0]["details"]["missing"] == [
         "idempotency_key"
     ]
+
+
+def test_authority_compile_api_routes_guarded_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority compile API should mirror the CLI guarded mutation."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    repo.products.append(DummyProduct(product_id=10, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    fake_app.results["authority_compile"] = {
+        "ok": True,
+        "data": {
+            "project_id": 10,
+            "spec_version_id": 3,
+            "spec_hash": "a" * 64,
+            "pending_authority_id": 99,
+            "compiled_authority_id": 99,
+            "setup_status": "authority_pending_review",
+            "fsm_state": "SETUP_REQUIRED",
+            "mutation_event_id": 123,
+            "next_actions": [
+                {
+                    "command": "agileforge authority review",
+                    "args": {"project_id": 10},
+                    "reason": (
+                        "Review pending compiled authority before acceptance."
+                    ),
+                }
+            ],
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        "/api/projects/10/authority/compile",
+        json={
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "authority-compile-api-001",
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["setup_status"] == "authority_pending_review"
+    assert fake_app.calls[-1] == (
+        "authority_compile",
+        {
+            "project_id": 10,
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "authority-compile-api-001",
+            "changed_by": "dashboard-ui",
+        },
+    )
+
+
+def test_authority_compile_api_failure_uses_dashboard_error_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority compile failures should use the shared dashboard error envelope."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    result = {
+        "ok": False,
+        "data": {
+            "project_id": project_id,
+            "setup_status": "authority_compile_required",
+        },
+        "errors": [
+            {
+                "code": "AUTHORITY_COMPILE_GUARD_STALE",
+                "message": "Authority compile guard is stale.",
+            }
+        ],
+        "warnings": [
+            {
+                "code": "AUTHORITY_COMPILE_RETRY_READY",
+                "message": "Refresh compile metadata and retry.",
+            }
+        ],
+    }
+    fake_app.results["authority_compile"] = result
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/authority/compile",
+        json={
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "authority-compile-api-001",
+        },
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    detail = response.json()["detail"]
+    assert detail["status"] == "error"
+    assert detail["data"] == result["data"]
+    assert detail["errors"] == result["errors"]
+    assert detail["warnings"] == result["warnings"]
+
+
+def test_authority_compile_api_forbids_extra_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removed or unrelated fields should fail validation instead of being ignored."""
+    client, _repo, _workflow = _build_client(monkeypatch)
+
+    response = client.post(
+        "/api/projects/10/authority/compile",
+        json={
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "authority-compile-api-001",
+            "spec_file_path": "specs/spec.json",
+        },
+    )
+
+    assert response.status_code == HTTP_UNPROCESSABLE
 
 
 def test_dashboard_reject_empty_reason_returns_request_boundary_error(

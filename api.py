@@ -31,7 +31,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import desc
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import QueryableAttribute
@@ -333,6 +333,18 @@ class RetrySetupRequest(BaseModel):
     """Request body for retrying project setup after a failure."""
 
     spec_file_path: str = Field(min_length=1)
+
+
+class AuthorityCompileApiRequest(BaseModel):
+    """Request body for guarded authority compilation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec_version_id: int
+    expected_spec_hash: str = Field(min_length=1)
+    expected_state: str = Field(min_length=1)
+    expected_setup_status: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8, max_length=128)
 
 
 class IncompleteReviewOverrideApiRequest(BaseModel):
@@ -2301,7 +2313,7 @@ async def create_project(
         )
     data = result.get("data") or {}
     project_id = data.get("project_id")
-    setup_status = data.get("setup_status") or "authority_pending_review"
+    setup_status = data.get("setup_status") or "authority_compile_required"
     return {
         "status": "success",
         "data": {
@@ -2316,6 +2328,9 @@ async def create_project(
             "failure_summary": None,
             "raw_output_preview": None,
             "has_full_artifact": False,
+            "spec_hash": data.get("spec_hash"),
+            "spec_version_id": data.get("spec_version_id"),
+            "next_actions": data.get("next_actions") or [],
         },
     }
 
@@ -2562,6 +2577,29 @@ async def get_project_authority_review(
                             "data": rendered,
                             "warnings": [],
                         }
+
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/authority/compile")
+async def compile_project_authority(
+    project_id: int,
+    req: AuthorityCompileApiRequest,
+) -> dict[str, object]:
+    """Compile pending authority for a created project/spec shell."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().authority_compile(
+        project_id=project_id,
+        spec_version_id=req.spec_version_id,
+        expected_spec_hash=req.expected_spec_hash,
+        expected_state=req.expected_state,
+        expected_setup_status=req.expected_setup_status,
+        idempotency_key=req.idempotency_key,
+        changed_by="dashboard-ui",
+    )
 
     return _dashboard_authority_response(result)
 
