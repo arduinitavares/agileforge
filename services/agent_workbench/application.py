@@ -33,6 +33,7 @@ from services.agent_workbench.post_sprint_triage import (
     post_sprint_triage_required,
 )
 from services.agent_workbench.project_setup import (
+    AuthorityCompileRequest,
     ProjectCreateRequest,
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
@@ -108,6 +109,10 @@ class _ProjectSetupRunner(Protocol):
 
     def retry_setup(self, request: ProjectSetupRetryRequest) -> dict[str, Any]:
         """Retry setup from a validated request."""
+        ...
+
+    def compile_authority(self, request: AuthorityCompileRequest) -> dict[str, Any]:
+        """Compile pending authority from a validated request."""
         ...
 
 
@@ -1019,6 +1024,35 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
         return self._get_project_setup_runner().retry_setup(request)
+
+    def authority_compile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str | None = None,
+        dry_run: bool = False,
+        dry_run_id: str | None = None,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Compile pending authority through the guarded mutation runner."""
+        request = AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            expected_spec_hash=expected_spec_hash,
+            expected_state=expected_state,
+            expected_setup_status=expected_setup_status,
+            idempotency_key=idempotency_key,
+            dry_run=dry_run,
+            dry_run_id=dry_run_id,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+        return self._get_project_setup_runner().compile_authority(request)
 
     def authority_review(
         self,

@@ -216,6 +216,23 @@ class _Application(Protocol):
         """Retry interrupted project setup through the guarded mutation facade."""
         ...
 
+    def authority_compile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str | None = None,
+        dry_run: bool = False,
+        dry_run_id: str | None = None,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Compile pending authority through the guarded mutation facade."""
+        ...
+
     def workflow_state(self, *, project_id: int) -> JsonObject:
         """Return workflow state projection."""
         ...
@@ -1170,13 +1187,28 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
 
     authority = subparsers.add_parser(
         "authority",
-        help="Inspect accepted Spec Authority.",
+        help="Inspect and manage Spec Authority.",
     )
     authority_sub = authority.add_subparsers(
         dest="action",
         required=True,
         parser_class=_WorkbenchArgumentParser,
     )
+    authority_compile = authority_sub.add_parser(
+        "compile",
+        help="Compile pending Spec Authority for a created project.",
+    )
+    authority_compile.add_argument("--project-id", type=int, required=True)
+    authority_compile.add_argument("--spec-version-id", type=int, required=True)
+    authority_compile.add_argument("--expected-spec-hash", required=True)
+    authority_compile.add_argument("--expected-state", required=True)
+    authority_compile.add_argument("--expected-setup-status", required=True)
+    authority_compile.add_argument("--idempotency-key")
+    authority_compile.add_argument("--dry-run", action="store_true")
+    authority_compile.add_argument("--dry-run-id")
+    authority_compile.add_argument("--correlation-id")
+    authority_compile.add_argument("--changed-by", default="cli-agent")
+    authority_compile.set_defaults(command_handler=_authority_compile)
     authority_status = authority_sub.add_parser("status", help="Show authority status.")
     authority_status.add_argument("--project-id", type=int, required=True)
     authority_status.set_defaults(command_handler=_authority_status)
@@ -2090,6 +2122,29 @@ def _project_setup_retry(
         expected_state=args.expected_state,
         expected_context_fingerprint=args.expected_context_fingerprint,
         recovery_mutation_event_id=args.recovery_mutation_event_id,
+        idempotency_key=args.idempotency_key,
+        dry_run=args.dry_run,
+        dry_run_id=args.dry_run_id,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _authority_compile(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority compile to the application facade."""
+    command = "agileforge authority compile"
+    validation_error = _validate_mutation_idempotency_args(args)
+    if validation_error is not None:
+        return _mutation_arg_error(command, validation_error)
+    return command, application.authority_compile(
+        project_id=args.project_id,
+        spec_version_id=args.spec_version_id,
+        expected_spec_hash=args.expected_spec_hash,
+        expected_state=args.expected_state,
+        expected_setup_status=args.expected_setup_status,
         idempotency_key=args.idempotency_key,
         dry_run=args.dry_run,
         dry_run_id=args.dry_run_id,

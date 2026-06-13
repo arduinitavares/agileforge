@@ -117,6 +117,45 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def authority_compile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str | None = None,
+        dry_run: bool = False,
+        dry_run_id: str | None = None,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return an authority compile payload."""
+        self.calls.append(
+            (
+                "authority_compile",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "expected_spec_hash": expected_spec_hash,
+                    "expected_state": expected_state,
+                    "expected_setup_status": expected_setup_status,
+                    "idempotency_key": idempotency_key,
+                    "dry_run": dry_run,
+                    "dry_run_id": dry_run_id,
+                    "correlation_id": correlation_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id},
+            "warnings": [],
+            "errors": [],
+        }
+
     def workflow_state(self, *, project_id: int) -> JsonObject:
         """Return a workflow state payload."""
         self.calls.append(("workflow_state", {"project_id": project_id}))
@@ -2068,6 +2107,128 @@ def test_cli_rejects_project_setup_retry_dry_run_with_idempotency_key(
     payload = _stdout_payload(capsys)
     assert rc == INVALID_COMMAND_EXIT_CODE
     assert _mapping(payload["meta"])["command"] == "agileforge project setup retry"
+    assert _first_mapping(payload["errors"])["code"] == "INVALID_COMMAND"
+    assert app.calls == []
+
+
+def test_cli_routes_authority_compile_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority compile routes stale guards to the application facade."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "compile",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--expected-spec-hash",
+            "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--idempotency-key",
+            "authority-compile-cli-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge authority compile"
+    assert app.calls == [
+        (
+            "authority_compile",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": SPEC_VERSION_ID,
+                "expected_spec_hash": "a" * 64,
+                "expected_state": "SETUP_REQUIRED",
+                "expected_setup_status": "authority_compile_required",
+                "idempotency_key": "authority-compile-cli-001",
+                "dry_run": False,
+                "dry_run_id": None,
+                "correlation_id": None,
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+def test_cli_routes_authority_compile_dry_run_without_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority compile dry-run routes without consuming idempotency."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "compile",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--expected-spec-hash",
+            "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--dry-run",
+            "--dry-run-id",
+            "authority-compile-preview-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge authority compile"
+    assert app.calls[0][0] == "authority_compile"
+    assert app.calls[0][1]["dry_run"] is True
+    assert app.calls[0][1]["idempotency_key"] is None
+    assert app.calls[0][1]["dry_run_id"] == "authority-compile-preview-001"
+
+
+def test_cli_rejects_authority_compile_dry_run_with_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority compile dry-run rejects idempotency keys."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "compile",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--expected-spec-hash",
+            "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--dry-run",
+            "--dry-run-id",
+            "authority-compile-preview-001",
+            "--idempotency-key",
+            "authority-compile-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert _mapping(payload["meta"])["command"] == "agileforge authority compile"
     assert _first_mapping(payload["errors"])["code"] == "INVALID_COMMAND"
     assert app.calls == []
 

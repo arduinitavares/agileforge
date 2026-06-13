@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from services.agent_workbench.project_setup import (
+        AuthorityCompileRequest,
         ProjectCreateRequest,
         ProjectSetupRetryRequest,
     )
@@ -1182,6 +1183,16 @@ class _FakeProjectSetupRunner:
             "errors": [],
         }
 
+    def compile_authority(self, request: object) -> dict[str, Any]:
+        """Return an authority compile payload."""
+        self.calls.append(("compile_authority", request))
+        return {
+            "ok": True,
+            "data": {"project_id": PROJECT_ID},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 class _FakeAuthorityReview:
     """Fake authority review service used to verify facade delegation."""
@@ -2308,6 +2319,37 @@ def test_application_routes_project_setup_retry_to_setup_runner() -> None:
     assert request.idempotency_key == "retry-cli-project-001"
     assert request.dry_run is False
     assert request.dry_run_id is None
+    assert request.correlation_id == "corr-1"
+    assert request.changed_by == "test-agent"
+
+
+def test_application_routes_authority_compile_to_setup_runner() -> None:
+    """Verify authority compile facade builds the guarded request model."""
+    runner = _FakeProjectSetupRunner()
+    app = AgentWorkbenchApplication(project_setup_runner=runner)
+
+    result = app.authority_compile(
+        project_id=PROJECT_ID,
+        spec_version_id=SPEC_VERSION_ID,
+        expected_spec_hash="a" * 64,
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="authority-compile-cli-001",
+        dry_run=False,
+        dry_run_id=None,
+        correlation_id="corr-1",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "compile_authority"
+    request = cast("AuthorityCompileRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.spec_version_id == SPEC_VERSION_ID
+    assert request.expected_spec_hash == "a" * 64
+    assert request.expected_state == "SETUP_REQUIRED"
+    assert request.expected_setup_status == "authority_compile_required"
+    assert request.idempotency_key == "authority-compile-cli-001"
     assert request.correlation_id == "corr-1"
     assert request.changed_by == "test-agent"
 
