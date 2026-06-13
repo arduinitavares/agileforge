@@ -413,3 +413,32 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   AgileForge ritual execution. The backend state may be correct, but the UI
   makes it hard to audit what the CLI is doing against the visible roadmap.
 - Severity: non-blocking UX/traceability issue.
+
+### Dashboard shows Sprint active after backend has no active Sprint
+
+- Project: ASA `project_id=3`
+- Context: after Sprint `45` closed and all thirteen roadmap requirements had
+  saved Story coverage.
+- Observed UI: the project sidebar still displayed `Sprint ACTIVE`, while the
+  main Story view remained visible with all requirements saved.
+- Command: `agileforge workflow next --project-id 3`
+- Actual result: `status=post_sprint_sprint_candidates_unavailable`; valid
+  commands were only `agileforge story pending --project-id 3` and
+  `agileforge sprint candidates --project-id 3`; `agileforge sprint generate`
+  was blocked with `NO_REFINED_SPRINT_CANDIDATES`.
+- Command: `agileforge sprint task next --project-id 3`
+- Actual result: `ok=false`, error code `INVALID_COMMAND`, message
+  `No active or planned Sprint found.`
+- Command: `agileforge sprint candidates --project-id 3`
+- Actual result: `count=0`, message
+  `Found 0 refined sprint candidate(s) in backlog (excluded non-refined=0, superseded=9, open_sprint=0).`
+- Expected behavior: when the backend has no active/planned Sprint and no
+  refined candidates, the dashboard should not present Sprint as active. It
+  should show the same no-candidate/post-sprint state and explain the next
+  valid inspection or recovery action.
+- Why it matters: the UI suggests there is current Sprint work to execute, but
+  the CLI correctly refuses task execution. This makes live CLI validation,
+  including issue #137 task-close validation, look inconsistent even when the
+  backend is behaving correctly.
+- Severity: non-blocking UX/state-projection issue unless it causes users to
+  plan or execute against stale Sprint assumptions.
