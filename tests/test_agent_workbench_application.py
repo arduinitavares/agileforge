@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from shlex import quote
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from sqlalchemy import create_engine, text
@@ -26,6 +27,9 @@ from services.agent_workbench.mutation_ledger import (
     RecoveryAction,
 )
 from services.agent_workbench.post_sprint_triage import build_triage_payload
+from services.agent_workbench.project_setup_fingerprints import (
+    setup_retry_context_fingerprint,
+)
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 if TYPE_CHECKING:
@@ -51,6 +55,40 @@ CANDIDATES_FINGERPRINT = "sha256:" + "2" * 64
 AUTHORITY_FINGERPRINT = "sha256:" + "3" * 64
 PROJECT_FINGERPRINT = "sha256:" + "4" * 64
 REVIEW_TOKEN_FIXTURE = "review-token-123"  # noqa: S105  # nosec B105
+
+
+def _structured_spec_payload() -> dict[str, Any]:
+    """Build a minimal structured spec fixture."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.setup-retry",
+        "title": "Setup Retry App",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-06-13",
+        "updated_at": "2026-06-13",
+        "summary": "Create a project from a structured authority spec.",
+        "problem_statement": "Operators need runnable setup retry guidance.",
+        "items": [
+            {
+                "id": "REQ.setup.retry",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Setup retry guard",
+                "statement": "The system MUST publish runnable setup retry guards.",
+                "verification": "system-test",
+                "acceptance": ["Setup retry guards can be dry-run without refresh."],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
 
 CLI_MUTATION_LEDGER_CREATE_SQL_PHASE_2A = """
 CREATE TABLE IF NOT EXISTS cli_mutation_ledger (
@@ -990,13 +1028,19 @@ class _AuthorityRejectedReadProjection(_FakeReadProjection):
 class _SetupFailedReadProjection(_FakeReadProjection):
     """Fake read projection for failed setup."""
 
+    def __init__(self, *, spec_file_path: str | None = None) -> None:
+        self._spec_file_path = spec_file_path
+
     def workflow_state(self, *, project_id: int) -> dict[str, Any]:
         """Return failed setup workflow state."""
         result = super().workflow_state(project_id=project_id)
-        result["data"]["state"] = {
+        state = {
             "fsm_state": "SETUP_REQUIRED",
             "setup_status": "failed",
         }
+        if self._spec_file_path is not None:
+            state["setup_spec_file_path"] = self._spec_file_path
+        result["data"]["state"] = state
         return result
 
 
@@ -5016,13 +5060,56 @@ def test_workflow_next_routes_failed_setup_to_retry_action() -> None:
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["blocked_commands"] == [
+        {
+            "command": (
+                "agileforge project setup retry --project-id 7 "
+                "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+                "--expected-context-fingerprint <expected_context_fingerprint>"
+            ),
+            "installed": True,
+            "reason": (
+                "Setup retry requires setup_spec_file_path in workflow state "
+                "before a runnable guard can be computed."
+            ),
+        }
+    ]
+
+
+def test_workflow_next_failed_setup_publishes_runnable_retry_guards(
+    tmp_path: Path,
+) -> None:
+    """Publish concrete setup retry guards when failed setup has a spec path."""
+    spec_file = tmp_path / "spec file.json"
+    spec_file.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+    workflow_state = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "failed",
+        "setup_spec_file_path": str(spec_file),
+    }
+    expected_fingerprint = setup_retry_context_fingerprint(
+        project_id=PROJECT_ID,
+        resolved_spec_path=spec_file.resolve(),
+        workflow_state=workflow_state,
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SetupFailedReadProjection(spec_file_path=str(spec_file)),
+        authority_projection=_FakeAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
     assert result["data"]["next_valid_commands"] == [
         (
-            "agileforge project setup retry --project-id 7 "
-            "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
-            "--expected-context-fingerprint <expected_context_fingerprint>"
+            f"agileforge project setup retry --project-id {PROJECT_ID} "
+            f"--spec-file {quote(str(spec_file.resolve()))} "
+            "--expected-state SETUP_REQUIRED "
+            f"--expected-context-fingerprint {expected_fingerprint}"
         )
     ]
+    assert result["data"]["blocked_commands"] == []
 
 
 def test_workflow_next_failed_setup_does_not_require_authority_status(
@@ -5041,12 +5128,20 @@ def test_workflow_next_failed_setup_does_not_require_authority_status(
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == [
-        (
-            "agileforge project setup retry --project-id 7 "
-            "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
-            "--expected-context-fingerprint <expected_context_fingerprint>"
-        )
+    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["blocked_commands"] == [
+        {
+            "command": (
+                "agileforge project setup retry --project-id 7 "
+                "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+                "--expected-context-fingerprint <expected_context_fingerprint>"
+            ),
+            "installed": True,
+            "reason": (
+                "Setup retry requires setup_spec_file_path in workflow state "
+                "before a runnable guard can be computed."
+            ),
+        }
     ]
 
 

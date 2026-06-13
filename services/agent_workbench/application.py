@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from shlex import quote
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 if TYPE_CHECKING:
@@ -35,10 +37,14 @@ from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
     ProjectSetupRetryRequest,
 )
+from services.agent_workbench.project_setup_fingerprints import (
+    setup_retry_context_fingerprint,
+)
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
 )
+from services.specs.profile_content import SpecContentNormalizationError
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
@@ -2175,13 +2181,28 @@ def _setup_workflow_next(
                 "Inspect authority status for rejected_spec_version_id.",
             ]
     elif setup_status == "failed":
-        data["next_valid_commands"] = [
-            (
-                f"agileforge project setup retry --project-id {project_id} "
-                "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
-                "--expected-context-fingerprint <expected_context_fingerprint>"
-            )
-        ]
+        retry_command = _failed_setup_retry_command(
+            project_id=project_id,
+            workflow=workflow,
+        )
+        if retry_command.get("runnable"):
+            data["next_valid_commands"] = [str(retry_command["command"])]
+            data["next_actions"] = [
+                {
+                    "command": retry_command["command"],
+                    "installed": True,
+                    "requires_cli_installation": False,
+                    "reason": "Retry project setup after fixing the setup failure.",
+                }
+            ]
+        else:
+            data["blocked_commands"] = [
+                {
+                    "command": retry_command["command"],
+                    "installed": True,
+                    "reason": retry_command["reason"],
+                }
+            ]
 
     data["source_fingerprint"] = canonical_hash(
         {
@@ -2235,6 +2256,53 @@ def _setup_workflow_next(
             ),
         ],
         "errors": [],
+    }
+
+
+def _failed_setup_retry_command(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a failed-setup retry command only when guard inputs are available."""
+    state = _envelope_data(workflow).get("state")
+    workflow_state = state if isinstance(state, dict) else {}
+    placeholder_command = (
+        f"agileforge project setup retry --project-id {project_id} "
+        "--spec-file <spec-file> --expected-state SETUP_REQUIRED "
+        "--expected-context-fingerprint <expected_context_fingerprint>"
+    )
+    spec_file_path = workflow_state.get("setup_spec_file_path")
+    if not isinstance(spec_file_path, str) or not spec_file_path.strip():
+        return {
+            "command": placeholder_command,
+            "runnable": False,
+            "reason": (
+                "Setup retry requires setup_spec_file_path in workflow state "
+                "before a runnable guard can be computed."
+            ),
+        }
+    resolved_spec_path = Path(spec_file_path).expanduser().resolve()
+    try:
+        context_fingerprint = setup_retry_context_fingerprint(
+            project_id=project_id,
+            resolved_spec_path=resolved_spec_path,
+            workflow_state=workflow_state,
+        )
+    except (OSError, SpecContentNormalizationError, UnicodeError) as exc:
+        return {
+            "command": placeholder_command,
+            "runnable": False,
+            "reason": f"Setup retry guard could not be computed: {exc}",
+        }
+    return {
+        "command": (
+            f"agileforge project setup retry --project-id {project_id} "
+            f"--spec-file {quote(str(resolved_spec_path))} "
+            "--expected-state SETUP_REQUIRED "
+            f"--expected-context-fingerprint {context_fingerprint}"
+        ),
+        "runnable": True,
     }
 
 

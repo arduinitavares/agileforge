@@ -368,6 +368,14 @@ class ProjectSetupMutationRunner:
             workflow_state=workflow_state,
         )
         if current_fingerprint != request.expected_context_fingerprint:
+            stale_context_data = _stale_context_retry_data(
+                request=request,
+                actual_context_fingerprint=current_fingerprint,
+            )
+            remediation = [
+                "Retry setup with data.next_actions[0] after confirming the "
+                "actual context fingerprint."
+            ]
             if request.dry_run:
                 return _error(
                     ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
@@ -375,7 +383,8 @@ class ProjectSetupMutationRunner:
                         "expected_context_fingerprint": request.expected_context_fingerprint,
                         "actual_context_fingerprint": current_fingerprint,
                     },
-                    remediation=["Refresh setup retry stale guards before retrying."],
+                    remediation=remediation,
+                    data=stale_context_data,
                 )
             return self._guard_rejected_retry(
                 request=request,
@@ -384,6 +393,8 @@ class ProjectSetupMutationRunner:
                     "expected_context_fingerprint": request.expected_context_fingerprint,
                     "actual_context_fingerprint": current_fingerprint,
                 },
+                remediation=remediation,
+                data=stale_context_data,
             )
         if request.dry_run:
             if (
@@ -911,6 +922,8 @@ class ProjectSetupMutationRunner:
         request: ProjectSetupRetryRequest,
         code: str,
         details: dict[str, Any],
+        remediation: list[str] | None = None,
+        data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         loaded = self._ledger.create_or_load(
             command=PROJECT_SETUP_RETRY_COMMAND,
@@ -939,10 +952,16 @@ class ProjectSetupMutationRunner:
             response=_error(
                 code,
                 details=details,
-                remediation=["Refresh state before retrying setup."],
+                remediation=remediation or ["Refresh state before retrying setup."],
+                data=data,
             ),
         )
-        return _error(code, details=details, remediation=["Refresh state before retrying setup."])
+        return _error(
+            code,
+            details=details,
+            remediation=remediation or ["Refresh state before retrying setup."],
+            data=data,
+        )
 
     def _transfer_retry_recovery(
         self,
@@ -1502,6 +1521,24 @@ def _retry_pre_side_effect_failure_data(
         "side_effects_started": False,
         "original_status": MutationStatus.RECOVERY_REQUIRED.value,
         "next_actions": [_retry_action(request, original_mutation_event_id)],
+    }
+
+
+def _stale_context_retry_data(
+    *,
+    request: ProjectSetupRetryRequest,
+    actual_context_fingerprint: str,
+) -> dict[str, Any]:
+    """Return a corrected retry action for stale setup context guards."""
+    corrected_request = request.model_copy(
+        update={"expected_context_fingerprint": actual_context_fingerprint}
+    )
+    return {
+        "project_id": request.project_id,
+        "stale_guard_reason": "context_fingerprint_changed",
+        "next_actions": [
+            _retry_action(corrected_request, request.recovery_mutation_event_id)
+        ],
     }
 
 

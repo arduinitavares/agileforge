@@ -1115,6 +1115,31 @@ def test_setup_retry_rejects_stale_state_and_context(
     )
     assert _error_code(stale_state) == "STALE_STATE"
 
+    actual_context_fingerprint = _retry_fingerprint(
+        project_id=project_id,
+        spec_file=spec_file,
+        workflow_state=workflow.sessions[str(project_id)],
+    )
+    stale_context_preview = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            project_id=project_id,
+            spec_file=str(spec_file),
+            expected_state="SPRINT_PLANNING",
+            expected_context_fingerprint="sha256:" + "b" * 64,
+            recovery_mutation_event_id=recovery["data"]["mutation_event_id"],
+            dry_run=True,
+            dry_run_id="retry-stale-context-preview",
+        )
+    )
+    assert _error_code(stale_context_preview) == "STALE_CONTEXT_FINGERPRINT"
+    assert stale_context_preview["data"]["next_actions"][0]["args"] == {
+        "project_id": project_id,
+        "spec_file": str(spec_file),
+        "expected_state": "SPRINT_PLANNING",
+        "expected_context_fingerprint": actual_context_fingerprint,
+        "recovery_mutation_event_id": recovery["data"]["mutation_event_id"],
+    }
+
     stale_context = runner.retry_setup(
         ProjectSetupRetryRequest(
             project_id=project_id,
@@ -1126,6 +1151,13 @@ def test_setup_retry_rejects_stale_state_and_context(
         )
     )
     assert _error_code(stale_context) == "STALE_CONTEXT_FINGERPRINT"
+    assert stale_context["data"]["next_actions"][0]["args"] == {
+        "project_id": project_id,
+        "spec_file": str(spec_file),
+        "expected_state": "SPRINT_PLANNING",
+        "expected_context_fingerprint": actual_context_fingerprint,
+        "recovery_mutation_event_id": recovery["data"]["mutation_event_id"],
+    }
 
 
 def test_project_setup_retry_repairs_expired_pending_create_recovery_event(
