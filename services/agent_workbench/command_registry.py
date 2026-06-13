@@ -175,7 +175,6 @@ _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.SPEC_FILE_NOT_FOUND.value,
             ErrorCode.SPEC_FILE_INVALID.value,
             ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value,
-            ErrorCode.SPEC_COMPILE_FAILED.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
@@ -240,6 +239,48 @@ _AUTHORITY_DECISION_GUARDS: tuple[str, ...] = (
 )
 
 _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge authority compile",
+        mutates=True,
+        phase="phase_2c",
+        requires_idempotency_key=True,
+        accepts_expected_state=True,
+        guard_policy=(
+            "expected_state",
+            "expected_setup_status",
+            "expected_spec_hash",
+            "spec_version_id",
+        ),
+        idempotency_policy=_DRY_RUN_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "spec_version_id",
+            "expected_spec_hash",
+            "expected_state",
+            "expected_setup_status",
+        ),
+        input_optional=(
+            "idempotency_key",
+            "dry_run",
+            "dry_run_id",
+            "correlation_id",
+            "changed_by",
+        ),
+        errors=(
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_COMPILE_FAILED.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.STALE_SETUP_STATUS.value,
+            ErrorCode.STALE_SPEC_HASH.value,
+            ErrorCode.STALE_SPEC_VERSION.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+            ErrorCode.MUTATION_RESUME_CONFLICT.value,
+        ),
+    ),
     CommandMetadata(
         name="agileforge authority review",
         mutates=False,

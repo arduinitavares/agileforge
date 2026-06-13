@@ -43,6 +43,7 @@ EXPECTED_PHASE_2B_COMMAND_NAMES = {
 }
 
 EXPECTED_PHASE_2C_COMMAND_NAMES = {
+    "agileforge authority compile",
     "agileforge authority review",
     "agileforge authority accept",
     "agileforge authority reject",
@@ -285,6 +286,7 @@ def test_project_create_is_registered_as_mutating_idempotent_command() -> None:
         ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value
         in project_create_schema["errors"]
     )
+    assert ErrorCode.SPEC_COMPILE_FAILED.value not in project_create_schema["errors"]
     assert ErrorCode.MUTATION_FAILED.value in project_create_schema["errors"]
 
 
@@ -329,6 +331,35 @@ def test_authority_review_is_registered_as_read_only_command() -> None:
     assert capabilities["agileforge authority review"]["installed"] is True
     assert schema["input"]["required"] == ["project_id"]
     assert schema["input"]["optional"] == ["include_spec", "format", "open"]
+
+
+def test_authority_compile_is_registered_as_guarded_mutation() -> None:
+    """Publish the authority compile mutation contract for agents."""
+    schema = command_schema_payload("agileforge authority compile")
+
+    assert schema["mutates"] is True
+    assert schema["idempotency_required"] is True
+    assert schema["idempotency_policy"] == DRY_RUN_IDEMPOTENCY_POLICY
+    assert schema["guard_policy"] == [
+        "expected_state",
+        "expected_setup_status",
+        "expected_spec_hash",
+        "spec_version_id",
+    ]
+    assert schema["input"]["required"] == [
+        "project_id",
+        "spec_version_id",
+        "expected_spec_hash",
+        "expected_state",
+        "expected_setup_status",
+    ]
+    assert "idempotency_key" in schema["input"]["optional"]
+    assert "dry_run" in schema["input"]["optional"]
+    assert "dry_run_id" in schema["input"]["optional"]
+    assert ErrorCode.SPEC_COMPILE_FAILED.value in schema["errors"]
+    assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
+    assert ErrorCode.STALE_STATE.value in schema["errors"]
+    assert ErrorCode.MUTATION_IN_PROGRESS.value in schema["errors"]
 
 
 def test_authority_accept_is_registered_as_guarded_mutation() -> None:
