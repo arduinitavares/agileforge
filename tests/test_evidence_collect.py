@@ -167,6 +167,89 @@ def test_collect_repo_evidence_skips_database_lock_binary_and_oversized_files(
     assert any(warning.code == "EVIDENCE_FILE_SKIPPED" for warning in warnings)
 
 
+def test_collect_repo_evidence_default_ignores_generated_artifacts_without_warnings(
+    tmp_path: Path,
+) -> None:
+    """Verify generated AgileForge and binary artifacts do not pollute scans."""
+    repo_path = tmp_path
+    (repo_path / "src").mkdir()
+    (repo_path / "review_output" / "step1" / "images").mkdir(parents=True)
+    (repo_path / "ui" / "step1").mkdir(parents=True)
+    (repo_path / "model_bundle").mkdir()
+    (repo_path / "classification_model").mkdir()
+    (repo_path / "src" / "budget.py").write_text(
+        "# REQ.budget-validation\n",
+        encoding="utf-8",
+    )
+    generated_paths = [
+        repo_path / "authority-review-clean-v9.json",
+        repo_path / "project-create-clean-v9.json",
+        repo_path / "project-setup-retry-clean-v9.json",
+        repo_path / "evidence-collect-clean-v9.json",
+        repo_path / "review_output" / "step1" / "images" / "screen.png",
+        repo_path / "review_output" / "step1" / "data.xlsx",
+        repo_path / "ui" / "step1" / "screen.png",
+        repo_path / "model_bundle" / "weights.json",
+        repo_path / "classification_model" / "metadata.json",
+        repo_path / "review.pdf",
+        repo_path / "deck.pptx",
+        repo_path / "notes.docx",
+    ]
+    for generated_path in generated_paths:
+        generated_path.write_bytes(b"REQ.budget-validation")
+    target = evidence_collect_module.SpecEvidenceTarget(
+        spec_item_id="REQ.budget-validation",
+        item_type="REQ",
+        verification_method="unit-test",
+        matched_terms=["REQ.budget-validation"],
+    )
+
+    findings, warnings = evidence_collect_module.collect_repo_evidence(
+        repo_path,
+        [target],
+    )
+
+    assert warnings == []
+    assert len(findings) == 1
+    assert [evidence.path for evidence in findings[0].evidence_paths] == [
+        "src/budget.py"
+    ]
+
+
+def test_collect_repo_evidence_can_opt_into_generated_artifact_scanning(
+    tmp_path: Path,
+) -> None:
+    """Verify generated artifacts can still be scanned when explicitly requested."""
+    repo_path = tmp_path
+    (repo_path / "src").mkdir()
+    (repo_path / "src" / "budget.py").write_text(
+        "# implementation code\n",
+        encoding="utf-8",
+    )
+    (repo_path / "authority-review-clean-v9.json").write_text(
+        '{"evidence": "REQ.budget-validation"}\n',
+        encoding="utf-8",
+    )
+    target = evidence_collect_module.SpecEvidenceTarget(
+        spec_item_id="REQ.budget-validation",
+        item_type="REQ",
+        verification_method="inspection",
+        matched_terms=["REQ.budget-validation"],
+    )
+
+    findings, warnings = evidence_collect_module.collect_repo_evidence(
+        repo_path,
+        [target],
+        include_generated_artifacts=True,
+    )
+
+    assert warnings == []
+    assert len(findings) == 1
+    assert [evidence.path for evidence in findings[0].evidence_paths] == [
+        "authority-review-clean-v9.json"
+    ]
+
+
 def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
     """Verify runtime sockets do not abort evidence collection."""
     engine = create_engine("sqlite://")

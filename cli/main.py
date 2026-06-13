@@ -400,6 +400,7 @@ class _Application(Protocol):
         repo_path: str | None,
         from_file: str | None,
         idempotency_key: str,
+        include_generated_artifacts: bool = False,
     ) -> JsonObject:
         """Collect or import evidence and cache it in workflow state."""
         ...
@@ -933,12 +934,26 @@ def _source_fingerprint(result: JsonObject) -> str | None:
     return None
 
 
-def _wrap(command: str, result: JsonObject) -> JsonObject:
+def _wrap(
+    command: str,
+    result: JsonObject,
+    *,
+    compact_warnings: bool = False,
+) -> JsonObject:
     """Wrap a service result in a stable CLI envelope when needed."""
     if "meta" in result:
+        if compact_warnings:
+            envelope = dict(result)
+            envelope["warnings"] = [
+                warning.to_dict()
+                for warning in _compact_warning_list(_warnings_from_result(result))
+            ]
+            return envelope
         return result
 
     warnings = _warnings_from_result(result)
+    if compact_warnings:
+        warnings = _compact_warning_list(warnings)
     if result.get("ok") is True:
         return success_envelope(
             command=command,
@@ -970,6 +985,39 @@ def _wrap(command: str, result: JsonObject) -> JsonObject:
             retryable=False,
         ),
         warnings=warnings,
+    )
+
+
+def _compact_warning_list(warnings: list[WorkbenchWarning]) -> list[WorkbenchWarning]:
+    """Return a compact single-warning summary for noisy warning lists."""
+    if not warnings:
+        return []
+    warning_counts: dict[str, int] = {}
+    for warning in warnings:
+        warning_counts[warning.code] = warning_counts.get(warning.code, 0) + 1
+    return [
+        WorkbenchWarning(
+            code="EVIDENCE_WARNINGS_COMPACTED",
+            message=f"Evidence collection produced {len(warnings)} warnings.",
+            details={
+                "warning_count": len(warnings),
+                "warning_counts": dict(sorted(warning_counts.items())),
+                "sample_warnings": [warnings[0].to_dict()],
+                "verbose_flag": "--verbose",
+            },
+            remediation=[
+                "Rerun with --verbose to include full warning details.",
+            ],
+        )
+    ]
+
+
+def _compact_warnings_requested(args: argparse.Namespace) -> bool:
+    """Return whether this command should compact warning payloads."""
+    return (
+        getattr(args, "group", None) == "evidence"
+        and getattr(args, "action", None) == "collect"
+        and not bool(getattr(args, "verbose", False))
     )
 
 
@@ -1349,6 +1397,16 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     evidence_collect.add_argument("--repo-path")
     evidence_collect.add_argument("--from-file")
     evidence_collect.add_argument("--idempotency-key", required=True)
+    evidence_collect.add_argument(
+        "--include-generated-artifacts",
+        action="store_true",
+        help="Scan generated AgileForge artifacts and binary outputs.",
+    )
+    evidence_collect.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Include full evidence warning details in JSON output.",
+    )
     evidence_collect.set_defaults(command_handler=_evidence_collect)
 
     as_built = subparsers.add_parser(
@@ -2912,6 +2970,7 @@ def _evidence_collect(
         repo_path=args.repo_path,
         from_file=args.from_file,
         idempotency_key=args.idempotency_key,
+        include_generated_artifacts=args.include_generated_artifacts,
     )
 
 
@@ -3660,7 +3719,11 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
         if plain_text is not None:
             sys.stdout.write(f"{plain_text}\n")
             return 0
-        envelope = _wrap(command, result)
+        envelope = _wrap(
+            command,
+            result,
+            compact_warnings=_compact_warnings_requested(args),
+        )
     except Exception as exc:  # noqa: BLE001
         envelope = _exception_envelope(exc)
         _print_json(envelope)

@@ -173,6 +173,35 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def evidence_collect(
+        self,
+        *,
+        project_id: int,
+        repo_path: str | None,
+        from_file: str | None,
+        idempotency_key: str,
+        include_generated_artifacts: bool = False,
+    ) -> JsonObject:
+        """Return an evidence collect payload."""
+        self.calls.append(
+            (
+                "evidence_collect",
+                {
+                    "project_id": project_id,
+                    "repo_path": repo_path,
+                    "from_file": from_file,
+                    "idempotency_key": idempotency_key,
+                    "include_generated_artifacts": include_generated_artifacts,
+                },
+            )
+        )
+        return self.results.get("evidence_collect") or {
+            "ok": True,
+            "data": {"project_id": project_id, "report": {"findings": []}},
+            "warnings": [],
+            "errors": [],
+        }
+
     def vision_generate(
         self,
         *,
@@ -3684,6 +3713,30 @@ def test_cli_requires_roadmap_save_guards(
             "agileforge command schema",
         ),
         (
+            [
+                "evidence",
+                "collect",
+                "--project-id",
+                "7",
+                "--repo-path",
+                ".",
+                "--idempotency-key",
+                "evidence-1",
+                "--include-generated-artifacts",
+            ],
+            (
+                "evidence_collect",
+                {
+                    "project_id": 7,
+                    "repo_path": ".",
+                    "from_file": None,
+                    "idempotency_key": "evidence-1",
+                    "include_generated_artifacts": True,
+                },
+            ),
+            "agileforge evidence collect",
+        ),
+        (
             ["mutation", "show", "--mutation-event-id", "101"],
             ("mutation_show", {"mutation_event_id": 101}),
             "agileforge mutation show",
@@ -3732,6 +3785,107 @@ def test_cli_routes_phase_2a_operational_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+def test_evidence_collect_compacts_warnings_by_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify evidence collection warnings are summarized by default."""
+    app = _FakeApplication()
+    app.results["evidence_collect"] = {
+        "ok": True,
+        "data": {"project_id": PROJECT_ID, "report": {"findings": []}},
+        "warnings": [
+            {
+                "code": "EVIDENCE_FILE_SKIPPED",
+                "message": "Repository evidence file was skipped.",
+                "details": {"path": f"generated/{index}.png", "reason": "file_suffix"},
+                "remediation": ["Reference a smaller UTF-8 text file."],
+            }
+            for index in range(3)
+        ],
+        "errors": [],
+    }
+
+    rc = main(
+        [
+            "evidence",
+            "collect",
+            "--project-id",
+            str(PROJECT_ID),
+            "--repo-path",
+            ".",
+            "--idempotency-key",
+            "evidence-compact",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["warnings"] == [
+        {
+            "code": "EVIDENCE_WARNINGS_COMPACTED",
+            "message": "Evidence collection produced 3 warnings.",
+            "details": {
+                "warning_count": 3,
+                "warning_counts": {"EVIDENCE_FILE_SKIPPED": 3},
+                "sample_warnings": [
+                    {
+                        "code": "EVIDENCE_FILE_SKIPPED",
+                        "message": "Repository evidence file was skipped.",
+                        "details": {
+                            "path": "generated/0.png",
+                            "reason": "file_suffix",
+                        },
+                        "remediation": ["Reference a smaller UTF-8 text file."],
+                    }
+                ],
+                "verbose_flag": "--verbose",
+            },
+            "remediation": [
+                "Rerun with --verbose to include full warning details."
+            ],
+        }
+    ]
+
+
+def test_evidence_collect_verbose_preserves_full_warning_details(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify verbose evidence collection keeps full warning payloads."""
+    app = _FakeApplication()
+    warning = {
+        "code": "EVIDENCE_FILE_SKIPPED",
+        "message": "Repository evidence file was skipped.",
+        "details": {"path": "generated/0.png", "reason": "file_suffix"},
+        "remediation": ["Reference a smaller UTF-8 text file."],
+    }
+    app.results["evidence_collect"] = {
+        "ok": True,
+        "data": {"project_id": PROJECT_ID, "report": {"findings": []}},
+        "warnings": [warning],
+        "errors": [],
+    }
+
+    rc = main(
+        [
+            "evidence",
+            "collect",
+            "--project-id",
+            str(PROJECT_ID),
+            "--repo-path",
+            ".",
+            "--idempotency-key",
+            "evidence-verbose",
+            "--verbose",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["warnings"] == [warning]
 
 
 def test_cli_uses_error_exit_code_and_preserves_warnings(

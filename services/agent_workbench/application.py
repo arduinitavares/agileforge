@@ -617,6 +617,7 @@ class _EvidenceCollectionRunner(Protocol):
         repo_path: str | None,
         from_file: str | None,
         idempotency_key: str,
+        include_generated_artifacts: bool = False,
     ) -> dict[str, Any]:
         """Collect or import evidence and cache it in workflow state."""
         ...
@@ -1262,6 +1263,7 @@ class AgentWorkbenchApplication:
         repo_path: str | None,
         from_file: str | None,
         idempotency_key: str,
+        include_generated_artifacts: bool = False,
     ) -> dict[str, Any]:
         """Collect or import implementation evidence for backlog generation."""
         return self._get_evidence_runner().collect(
@@ -1269,6 +1271,7 @@ class AgentWorkbenchApplication:
             repo_path=repo_path,
             from_file=from_file,
             idempotency_key=idempotency_key,
+            include_generated_artifacts=include_generated_artifacts,
         )
 
     def as_built_assess(  # noqa: PLR0913

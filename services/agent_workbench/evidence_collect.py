@@ -100,6 +100,13 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset(
         "venv",
     }
 )
+DEFAULT_IGNORE_DIR_NAMES: frozenset[str] = frozenset(
+    {
+        "classification_model",
+        "model_bundle",
+        "review_output",
+    }
+)
 SKIP_FILE_NAMES: frozenset[str] = frozenset(
     {
         "uv.lock",
@@ -116,14 +123,21 @@ SKIP_FILE_SUFFIXES: frozenset[str] = frozenset(
         ".lock",
         ".pyc",
         ".pyo",
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".webp",
-        ".pdf",
         ".zip",
         ".gz",
+    }
+)
+DEFAULT_IGNORE_FILE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".docx",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".pdf",
+        ".png",
+        ".pptx",
+        ".webp",
+        ".xlsx",
     }
 )
 CONFIG_FILE_NAMES: frozenset[str] = frozenset(
@@ -530,6 +544,7 @@ class EvidenceCollectionRunner:
         repo_path: str | None,
         from_file: str | None,
         idempotency_key: str,
+        include_generated_artifacts: bool = False,
     ) -> dict[str, Any]:
         """Collect evidence from a repo or import a report file."""
         validation_error = self._validate_request(
@@ -569,6 +584,7 @@ class EvidenceCollectionRunner:
                 "source_fingerprint": source_fingerprint,
                 "collector_strategy": COLLECTOR_STRATEGY,
                 "collector_version": COLLECTOR_VERSION,
+                "include_generated_artifacts": include_generated_artifacts,
             }
         )
         replay = self._idempotent_replay(
@@ -587,6 +603,7 @@ class EvidenceCollectionRunner:
                 compiled=compiled,
                 repo_path=repo_path,
                 from_file=from_file,
+                include_generated_artifacts=include_generated_artifacts,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return error_envelope(
@@ -751,6 +768,7 @@ class EvidenceCollectionRunner:
         compiled: dict[str, Any],
         repo_path: str | None,
         from_file: str | None,
+        include_generated_artifacts: bool = False,
     ) -> tuple[ReconciliationReport, list[WorkbenchWarning]]:
         if from_file:
             return import_report_json(
@@ -765,7 +783,11 @@ class EvidenceCollectionRunner:
             raise ValueError(msg)
         targets, target_warnings = targets_from_compiled_authority(compiled)
         if targets:
-            findings, scan_warnings = collect_repo_evidence(repo, targets)
+            findings, scan_warnings = collect_repo_evidence(
+                repo,
+                targets,
+                include_generated_artifacts=include_generated_artifacts,
+            )
         else:
             findings = []
             scan_warnings = []
@@ -1115,14 +1137,24 @@ def file_kind_for_path(path: Path) -> EvidenceKind:
 def collect_repo_evidence(
     repo_path: Path,
     targets: list[SpecEvidenceTarget],
+    *,
+    include_generated_artifacts: bool = False,
 ) -> tuple[list[ReconciliationFinding], list[WorkbenchWarning]]:
     """Scan a repository for exact target evidence references."""
     evidence_by_target: list[list[EvidencePath]] = [[] for _ in targets]
     warnings: list[WorkbenchWarning] = []
 
-    files, traversal_warnings = _iter_scannable_files(repo_path)
+    files, traversal_warnings = _iter_scannable_files(
+        repo_path,
+        include_generated_artifacts=include_generated_artifacts,
+    )
     warnings.extend(traversal_warnings)
     for file_path, relative_path in files:
+        if (
+            not include_generated_artifacts
+            and _is_default_ignored_path(relative_path)
+        ):
+            continue
         skip_reason = _skip_file_reason(file_path, relative_path)
         if skip_reason is not None:
             warnings.append(_skipped_file_warning(relative_path, skip_reason))
@@ -1195,6 +1227,8 @@ def _is_test_file_name(lower_name: str) -> bool:
 
 def _iter_scannable_files(
     repo_path: Path,
+    *,
+    include_generated_artifacts: bool = False,
 ) -> tuple[Sequence[tuple[Path, Path]], list[WorkbenchWarning]]:
     """Yield repository files in deterministic order while pruning skip dirs."""
     repo_root = repo_path.resolve()
@@ -1210,8 +1244,16 @@ def _iter_scannable_files(
         warnings.append(_unreadable_file_warning(relative_path, str(error)))
 
     for root, dirnames, filenames in os.walk(repo_root, onerror=onerror):
+        ignored_dir_names = (
+            frozenset()
+            if include_generated_artifacts
+            else DEFAULT_IGNORE_DIR_NAMES
+        )
         dirnames[:] = sorted(
-            dirname for dirname in dirnames if dirname not in SKIP_DIR_NAMES
+            dirname
+            for dirname in dirnames
+            if dirname not in SKIP_DIR_NAMES
+            and dirname.lower() not in ignored_dir_names
         )
         root_path = Path(root)
         for filename in sorted(filenames):
@@ -1219,6 +1261,32 @@ def _iter_scannable_files(
             relative_path = file_path.relative_to(repo_root)
             scannable_files.append((file_path, relative_path))
     return scannable_files, warnings
+
+
+def _is_default_ignored_path(relative_path: Path) -> bool:
+    """Return whether generated or binary artifacts are ignored by default."""
+    parts = {part.lower() for part in relative_path.parts}
+    if parts & DEFAULT_IGNORE_DIR_NAMES:
+        return True
+    lower_name = relative_path.name.lower()
+    lower_suffix = relative_path.suffix.lower()
+    if _is_agileforge_generated_json(lower_name):
+        return True
+    return lower_suffix in DEFAULT_IGNORE_FILE_SUFFIXES
+
+
+def _is_agileforge_generated_json(lower_name: str) -> bool:
+    """Return whether a JSON filename is an AgileForge generated artifact."""
+    if not lower_name.endswith(".json"):
+        return False
+    return lower_name.startswith(
+        (
+            "authority-",
+            "evidence-collect",
+            "project-create",
+            "project-setup-retry",
+        )
+    )
 
 
 def _skip_file_reason(file_path: Path, relative_path: Path) -> str | None:
