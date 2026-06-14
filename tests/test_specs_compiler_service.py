@@ -45,6 +45,7 @@ _SCHEMA_RETRY_ATTEMPTS = 1
 _TOTAL_BLOCKED_MUST_ITEMS = 2
 _EXPECTED_FOCUSED_RETRY_CALLS = 2
 _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT = 2
+_EXPECTED_REPAIR_CALLS = 2
 
 
 def _compiled_success_json() -> str:
@@ -383,6 +384,82 @@ def _behavioral_payload_json(
             )
         ],
         compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    return SpecAuthorityCompilerOutput(root=success).model_dump_json()
+
+
+def _focused_repair_spec_profile_payload() -> dict[str, object]:
+    payload = _agileforge_spec_profile_payload()
+    payload["items"] = [
+        {
+            "id": "REQ.payments.email",
+            "type": "REQ",
+            "status": "accepted",
+            "level": "MUST",
+            "title": "Collect customer email",
+            "statement": "The system must collect customer email.",
+            "verification": "system-test",
+            "acceptance": ["The system must collect customer email."],
+        }
+    ]
+    return payload
+
+
+def _source_metadata_failure_json(
+    *,
+    source_item_id: str,
+    invariant_id: str,
+) -> str:
+    failure = SpecAuthorityCompilationFailure(
+        error="SPEC_COMPILATION_FAILED",
+        reason="SOURCE_METADATA_MISMATCH",
+        blocking_gaps=[
+            f"{invariant_id} source_item_id {source_item_id} "
+            "lacks supporting real source_map evidence."
+        ],
+        source_metadata_issues=[
+            {
+                "subcode": "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED",
+                "message": (
+                    f"{invariant_id} source_item_id {source_item_id} "
+                    "lacks supporting real source_map evidence."
+                ),
+                "invariant_id": invariant_id,
+                "source_item_id": source_item_id,
+                "expected_source_level": "MUST",
+                "repairable": True,
+            }
+        ],
+    )
+    return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
+
+
+def _compiled_success_json_for_source_item(source_item_id: str) -> str:
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Payments"],
+        domain=None,
+        invariants=[
+            Invariant(
+                id="INV-1111111111111111",
+                type=InvariantType.REQUIRED_FIELD,
+                source_item_id=source_item_id,
+                source_level="MUST",
+                parameters=RequiredFieldParams(field_name="email"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[
+            SourceMapEntry(
+                invariant_id="INV-1111111111111111",
+                excerpt="The system must collect customer email.",
+                location=f"{source_item_id}.acceptance[0]",
+            )
+        ],
+        compiler_version="2.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -1991,6 +2068,304 @@ def test_merge_compilation_successes_reports_cross_success_duplicate_merges() ->
         merged.authority_quality.merged_items[0].source_evidence_count
         == _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT
     )
+
+
+def test_compile_spec_authority_repairs_one_behavioral_source_item(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repairable source metadata failure should retry only the failing item."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=json.dumps(_focused_repair_spec_profile_payload()),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    calls: list[dict[str, str | None]] = []
+
+    def fake_invoke(  # noqa: PLR0913
+        *,
+        spec_content: str,
+        content_ref: str | None,
+        product_id: int | None,
+        spec_version_id: int | None,
+        domain_hint: str | None = None,
+        compiler_model: str | None = None,
+    ) -> str:
+        del content_ref, product_id, spec_version_id
+        calls.append(
+            {
+                "spec_content": spec_content,
+                "domain_hint": domain_hint,
+                "compiler_model": compiler_model,
+            }
+        )
+        if domain_hint is None:
+            return _source_metadata_failure_json(
+                source_item_id="REQ.payments.email",
+                invariant_id="INV-badbadbadbadbad1",
+            )
+        return _compiled_success_json_for_source_item("REQ.payments.email")
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=session.get_bind(),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+        compiler_model="openrouter/openai/gpt-5.2",
+    )
+
+    assert result["success"] is True
+    assert len(calls) == _EXPECTED_REPAIR_CALLS
+    assert "REQ.payments.email" in calls[1]["spec_content"]
+    assert "source_item_id: REQ.payments.email" in str(calls[1]["domain_hint"])
+    assert calls[1]["compiler_model"] == "openrouter/openai/gpt-5.2"
+
+
+def test_compile_spec_authority_does_not_repair_mixed_source_metadata_issues(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed source metadata failures must fail closed without focused repair."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=json.dumps(_focused_repair_spec_profile_payload()),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    calls = 0
+
+    def fake_invoke(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if kwargs.get("domain_hint") is not None:
+            return _compiled_success_json_for_source_item("REQ.payments.email")
+        failure = SpecAuthorityCompilationFailure(
+            error="SPEC_COMPILATION_FAILED",
+            reason="SOURCE_METADATA_MISMATCH",
+            blocking_gaps=[
+                "INV-badbadbadbadbad1 source_item_id REQ.payments.email "
+                "lacks supporting real source_map evidence.",
+                "INV-hard FORBIDDEN_CAPABILITY over-promotes "
+                "REQ.payments.email source level MUST.",
+            ],
+            source_metadata_issues=[
+                {
+                    "subcode": "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED",
+                    "message": (
+                        "INV-badbadbadbadbad1 source_item_id "
+                        "REQ.payments.email lacks supporting real "
+                        "source_map evidence."
+                    ),
+                    "invariant_id": "INV-badbadbadbadbad1",
+                    "source_item_id": "REQ.payments.email",
+                    "expected_source_level": "MUST",
+                    "repairable": True,
+                },
+                {
+                    "subcode": "LEGACY_MODALITY_PROMOTION",
+                    "message": (
+                        "INV-hard FORBIDDEN_CAPABILITY over-promotes "
+                        "REQ.payments.email source level MUST."
+                    ),
+                    "invariant_id": "INV-hard",
+                    "source_item_id": "REQ.payments.email",
+                    "expected_source_level": "MUST",
+                    "repairable": False,
+                },
+            ],
+        )
+        return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=session.get_bind(),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    assert calls == 1
+    assert result["details"]["repair_attempted"] is False
+    with Session(session.get_bind()) as verify_session:
+        rows = verify_session.exec(select(CompiledSpecAuthority)).all()
+    assert rows == []
+
+
+def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair success must still cover every accepted MUST/MUST_NOT item."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=_accepted_multi_item_spec_profile_json(),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    calls: list[str | None] = []
+
+    def fake_invoke(**kwargs: object) -> str:
+        domain_hint = kwargs.get("domain_hint")
+        calls.append(cast("str | None", domain_hint))
+        if domain_hint is None:
+            return _source_metadata_failure_json(
+                source_item_id="REQ.todo-create",
+                invariant_id="INV-badbadbadbadbad1",
+            )
+        return _behavioral_payload_json("REQ.todo-create", "MUST")
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=session.get_bind(),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    assert len(calls) == _EXPECTED_REPAIR_CALLS
+    assert calls[0] is None
+    assert "source_item_id: REQ.todo-create" in str(calls[1])
+    assert result["error"] == "STRUCTURED_COVERAGE_INCOMPLETE"
+    assert result["reason"] == "MISSING_ACCEPTED_MUST_AUTHORITY"
+    assert result["blocking_gaps"] == ["REQ.todo-toggle"]
+    assert result["details"]["repair_attempted"] is True
+    assert result["details"]["repair_item_ids"] == ["REQ.todo-create"]
+    assert result["details"]["repair_result"] == "coverage_incomplete"
+    with Session(session.get_bind()) as verify_session:
+        rows = verify_session.exec(select(CompiledSpecAuthority)).all()
+    assert rows == []
+
+
+def test_compile_spec_authority_does_not_repair_over_promotion(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-repairable source metadata failures should not trigger focused retry."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=json.dumps(_focused_repair_spec_profile_payload()),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    calls = 0
+
+    def fake_invoke(**kwargs: object) -> str:
+        nonlocal calls
+        del kwargs
+        calls += 1
+        failure = SpecAuthorityCompilationFailure(
+            error="SPEC_COMPILATION_FAILED",
+            reason="SOURCE_METADATA_MISMATCH",
+            blocking_gaps=[
+                "INV-hard FORBIDDEN_CAPABILITY over-promotes "
+                "DECISION.choice source level None."
+            ],
+            source_metadata_issues=[
+                {
+                    "subcode": "LEGACY_MODALITY_PROMOTION",
+                    "message": (
+                        "INV-hard FORBIDDEN_CAPABILITY over-promotes "
+                        "DECISION.choice source level None."
+                    ),
+                    "invariant_id": "INV-hard",
+                    "source_item_id": "DECISION.choice",
+                    "repairable": False,
+                }
+            ],
+        )
+        return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=session.get_bind(),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    assert calls == 1
+    assert result["details"]["repair_attempted"] is False
+
+
+def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed source metadata repair must not persist partial authority."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=json.dumps(_focused_repair_spec_profile_payload()),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+
+    def fake_invoke(**kwargs: object) -> str:
+        domain_hint = kwargs.get("domain_hint")
+        if domain_hint is None:
+            return _source_metadata_failure_json(
+                source_item_id="REQ.payments.email",
+                invariant_id="INV-badbadbadbadbad1",
+            )
+        return _source_metadata_failure_json(
+            source_item_id="REQ.payments.email",
+            invariant_id="INV-stillbadstillbd",
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=session.get_bind(),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    assert result["details"]["repair_attempted"] is True
+    assert result["details"]["repair_item_ids"] == ["REQ.payments.email"]
+    assert result["details"]["repair_result"] == "failed"
+    with Session(session.get_bind()) as verify_session:
+        rows = verify_session.exec(select(CompiledSpecAuthority)).all()
+    assert rows == []
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(

@@ -98,6 +98,8 @@ _SCHEMA_RETRY_FEEDBACK = (
     "invariant.source_level.\n"
     'schema_version must be "agileforge.compiled_authority.v2".'
 )
+_SOURCE_METADATA_MISMATCH: str = "SOURCE_METADATA_MISMATCH"
+_REPAIRABLE_SOURCE_METADATA_SUBCODE: str = "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
@@ -326,6 +328,18 @@ class _FocusedItemCompilationFailure:
     item_id: str
     failure: SpecAuthorityCompilationFailure
     schema_retry_failure_details: tuple[_SchemaRetryFailureDetail, ...] = ()
+
+
+@dataclass(frozen=True)
+class _FocusedRepairCandidate:
+    """One structured source item eligible for focused compiler repair."""
+
+    item_id: str
+    invariant_id: str
+    expected_source_level: str | None
+    observed_source_level: str | None
+    reason: str
+    source_excerpt: str | None = None
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -1150,6 +1164,113 @@ def _focused_structured_spec_content(
     return canonical_spec_json(focused)
 
 
+def _repairable_source_metadata_candidates(
+    failure: SpecAuthorityCompilationFailure,
+    artifact: TechnicalSpecArtifact,
+) -> list[_FocusedRepairCandidate]:
+    """Return candidates only when every source metadata issue is repairable."""
+    item_ids = {item.id for item in artifact.items}
+    raw_issues = failure.source_metadata_issues or []
+    if not raw_issues:
+        return []
+
+    seen_item_ids: set[str] = set()
+    candidates: list[_FocusedRepairCandidate] = []
+    for issue in raw_issues:
+        if issue.get("subcode") != _REPAIRABLE_SOURCE_METADATA_SUBCODE:
+            return []
+        if issue.get("repairable") is not True:
+            return []
+        source_item_id = issue.get("source_item_id")
+        invariant_id = issue.get("invariant_id")
+        if not isinstance(source_item_id, str) or source_item_id not in item_ids:
+            return []
+        if source_item_id in seen_item_ids:
+            continue
+        if not isinstance(invariant_id, str):
+            return []
+        seen_item_ids.add(source_item_id)
+        candidates.append(
+            _FocusedRepairCandidate(
+                item_id=source_item_id,
+                invariant_id=invariant_id,
+                expected_source_level=(
+                    str(issue["expected_source_level"])
+                    if issue.get("expected_source_level") is not None
+                    else None
+                ),
+                observed_source_level=(
+                    str(issue["observed_source_level"])
+                    if issue.get("observed_source_level") is not None
+                    else None
+                ),
+                reason=str(issue.get("message") or failure.reason),
+                source_excerpt=(
+                    str(issue["source_excerpt"])
+                    if issue.get("source_excerpt") is not None
+                    else None
+                ),
+            )
+        )
+    return candidates
+
+
+def _focused_repair_domain_hint(candidate: _FocusedRepairCandidate) -> str:
+    """Build validator feedback for one focused authority repair attempt."""
+    lines = [
+        "Your previous authority output failed source metadata validation.",
+        "",
+        "Repair target:",
+        f"- source_item_id: {candidate.item_id}",
+        f"- source_level: {candidate.expected_source_level or 'unknown'}",
+        f"- failing invariant_id: {candidate.invariant_id}",
+        f"- failure reason: {candidate.reason}",
+    ]
+    if candidate.observed_source_level:
+        lines.append(f"- observed_source_level: {candidate.observed_source_level}")
+    if candidate.source_excerpt:
+        lines.append(f"- invalid source excerpt: {candidate.source_excerpt}")
+    lines.extend(
+        [
+            "",
+            "Retry only this source item.",
+            (
+                "Use only source_map excerpts that appear verbatim in the "
+                "source item text."
+            ),
+            "Do not invent source references or source levels.",
+            (
+                "If the source item cannot support an invariant, omit that "
+                "invariant or return a blocking gap."
+            ),
+            "Return only valid compiled authority JSON.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _with_repair_diagnostics(
+    result: dict[str, Any],
+    *,
+    repair_attempted: bool,
+    repair_item_ids: list[str],
+    repair_result: str,
+) -> dict[str, Any]:
+    """Copy a failure result and attach focused-repair diagnostics."""
+    enriched = dict(result)
+    details = enriched.get("details")
+    details = {} if not isinstance(details, dict) else dict(details)
+    details.update(
+        {
+            "repair_attempted": repair_attempted,
+            "repair_item_ids": repair_item_ids,
+            "repair_result": repair_result,
+        }
+    )
+    enriched["details"] = details
+    return enriched
+
+
 def _dedupe_strings(values: list[str]) -> list[str]:
     """Return unique strings in first-seen order."""
     deduped: list[str] = []
@@ -1616,9 +1737,14 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
     spec_version_id: int | None,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
+    focused_structured_item_passes: bool = True,
 ) -> _NormalizedCompilerInvocation:
     """Compile authority, adding focused item passes for structured specs."""
-    artifact = _structured_spec_artifact_or_none(spec_content)
+    artifact = (
+        _structured_spec_artifact_or_none(spec_content)
+        if focused_structured_item_passes
+        else None
+    )
     full_invocation = _invoke_and_normalize_spec_authority(
         spec_content=spec_content,
         content_ref=content_ref,
@@ -1951,6 +2077,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
     timeout_seconds: float,
     domain_hint: str | None = None,
     compiler_model: str | None = None,
+    focused_structured_item_passes: bool = True,
 ) -> _NormalizedCompilerInvocation | dict[str, Any]:
     """Run one guarded compiler attempt and return raw normalized output."""
     try:
@@ -1962,6 +2089,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
                 spec_version_id=spec_version.spec_version_id,
                 domain_hint=domain_hint,
                 compiler_model=compiler_model,
+                focused_structured_item_passes=focused_structured_item_passes,
             ),
             lease_guard=lease_guard,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -2001,6 +2129,75 @@ def _run_compiler_attempt(  # noqa: PLR0913
             reason=str(exc),
             exception=exc,
         )
+
+
+def _focused_repair_successes(  # noqa: PLR0913
+    artifact: TechnicalSpecArtifact,
+    *,
+    candidates: list[_FocusedRepairCandidate],
+    spec_version: SpecRegistry,
+    compiler_model: str | None,
+    lease_guard: Callable[[str], bool] | None,
+    heartbeat_interval_seconds: float,
+    timeout_seconds: float,
+) -> list[SpecAuthorityCompilationSuccess] | _CompilerInvocationResult:
+    """Run focused repair attempts and return successes or a failure result."""
+    successes: list[SpecAuthorityCompilationSuccess] = []
+    attempted_item_ids: list[str] = []
+    for candidate in candidates:
+        attempted_item_ids.append(candidate.item_id)
+        focused_content = _focused_structured_spec_content(
+            artifact,
+            item_id=candidate.item_id,
+        )
+        invocation = _run_compiler_attempt(
+            spec_version,
+            spec_content=focused_content,
+            lease_guard=lease_guard,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            domain_hint=_focused_repair_domain_hint(candidate),
+            compiler_model=compiler_model,
+            focused_structured_item_passes=False,
+        )
+        if isinstance(invocation, dict):
+            return _CompilerInvocationResult(
+                failure=_attach_schema_retry_metadata(
+                    _with_repair_diagnostics(
+                        invocation,
+                        repair_attempted=True,
+                        repair_item_ids=attempted_item_ids,
+                        repair_result="failed",
+                    ),
+                    attempted=False,
+                    reason=None,
+                    attempts=0,
+                )
+            )
+
+        if isinstance(invocation.output.root, SpecAuthorityCompilationFailure):
+            failure = _normalized_failure_result(
+                spec_version,
+                raw_json=invocation.raw_json,
+                failure=invocation.output.root,
+            )
+            return _CompilerInvocationResult(
+                failure=_attach_schema_retry_metadata(
+                    _with_repair_diagnostics(
+                        failure,
+                        repair_attempted=True,
+                        repair_item_ids=attempted_item_ids,
+                        repair_result="failed",
+                    ),
+                    attempted=False,
+                    reason=None,
+                    attempts=0,
+                )
+            )
+        successes.append(
+            cast("SpecAuthorityCompilationSuccess", invocation.output.root)
+        )
+    return successes
 
 
 def _compiler_invocation_returned_no_success_artifact_error() -> RuntimeError:
@@ -2476,7 +2673,7 @@ def _load_spec_content_for_compile(
         }
 
 
-def _invoke_compiler_for_version(  # noqa: PLR0913
+def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
     spec_version: SpecRegistry,
     *,
     spec_content: str,
@@ -2510,14 +2707,119 @@ def _invoke_compiler_for_version(  # noqa: PLR0913
     if not isinstance(normalized.root, SpecAuthorityCompilationFailure):
         return _CompilerInvocationResult(success=normalized.root)
 
-    retry_reason = normalized.root.reason
+    initial_failure = normalized.root
+    retry_reason = initial_failure.reason
+    if retry_reason == _SOURCE_METADATA_MISMATCH:
+        artifact = _structured_spec_artifact_or_none(spec_content)
+        if artifact is not None:
+            candidates = _repairable_source_metadata_candidates(
+                initial_failure,
+                artifact,
+            )
+            if candidates:
+                repaired = _focused_repair_successes(
+                    artifact,
+                    candidates=candidates,
+                    spec_version=spec_version,
+                    compiler_model=compiler_model,
+                    lease_guard=lease_guard,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    timeout_seconds=timeout_seconds,
+                )
+                if isinstance(repaired, _CompilerInvocationResult):
+                    return repaired
+                merged_success = _merge_compilation_successes(repaired)
+                merged_raw_json = SpecAuthorityCompilerOutput(
+                    root=merged_success
+                ).model_dump_json()
+                merged_output = normalize_compiler_output(
+                    merged_raw_json,
+                    source_text=spec_content,
+                    source_format=_detect_spec_source_format(spec_content),
+                )
+                if isinstance(merged_output.root, SpecAuthorityCompilationFailure):
+                    failure = _normalized_failure_result(
+                        spec_version,
+                        raw_json=merged_raw_json,
+                        failure=merged_output.root,
+                    )
+                    return _CompilerInvocationResult(
+                        failure=_attach_schema_retry_metadata(
+                            _with_repair_diagnostics(
+                                failure,
+                                repair_attempted=True,
+                                repair_item_ids=[
+                                    candidate.item_id for candidate in candidates
+                                ],
+                                repair_result="failed",
+                            ),
+                            attempted=False,
+                            reason=None,
+                            attempts=0,
+                        )
+                    )
+                item_ids = _iterative_authority_item_ids(artifact)
+                missing_item_ids = _missing_iterative_authority_item_ids(
+                    merged_output.root,
+                    item_ids=item_ids,
+                )
+                if missing_item_ids:
+                    coverage_output = _structured_missing_authority_failure(
+                        missing_item_ids=missing_item_ids,
+                        focused_failures=[],
+                        total_item_count=len(item_ids),
+                    )
+                    coverage_failure = cast(
+                        "SpecAuthorityCompilationFailure",
+                        coverage_output.root,
+                    )
+                    failure = _normalized_failure_result(
+                        spec_version,
+                        raw_json=coverage_output.model_dump_json(),
+                        failure=coverage_failure,
+                    )
+                    return _CompilerInvocationResult(
+                        failure=_attach_schema_retry_metadata(
+                            _with_repair_diagnostics(
+                                failure,
+                                repair_attempted=True,
+                                repair_item_ids=[
+                                    candidate.item_id for candidate in candidates
+                                ],
+                                repair_result="coverage_incomplete",
+                            ),
+                            attempted=False,
+                            reason=None,
+                            attempts=0,
+                        )
+                    )
+                return _CompilerInvocationResult(success=merged_output.root)
+
+            return _CompilerInvocationResult(
+                failure=_attach_schema_retry_metadata(
+                    _with_repair_diagnostics(
+                        _normalized_failure_result(
+                            spec_version,
+                            raw_json=raw_json,
+                            failure=initial_failure,
+                        ),
+                        repair_attempted=False,
+                        repair_item_ids=[],
+                        repair_result="not_applicable",
+                    ),
+                    attempted=False,
+                    reason=None,
+                    attempts=0,
+                ),
+            )
+
     if retry_reason not in _SCHEMA_RETRY_FAILURES:
         return _CompilerInvocationResult(
             failure=_attach_schema_retry_metadata(
                 _normalized_failure_result(
                     spec_version,
                     raw_json=raw_json,
-                    failure=normalized.root,
+                    failure=initial_failure,
                 ),
                 attempted=False,
                 reason=None,
