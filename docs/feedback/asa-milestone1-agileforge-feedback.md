@@ -39,6 +39,25 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   - #130 authority compiler source-map/model repair.
   - Product Goal / scope-extension workflow.
 
+#### Authority compiler source-map repair
+
+- Source: issue #130 and ASA authority compile feedback.
+- Decision: accepted and implemented for focused source-map repair.
+- Fix status: implemented in `dev/authority-compiler-focused-repair`.
+- What changed:
+  - `agileforge authority compile` and `agileforge authority regenerate` accept
+    a per-run `--compiler-model` override.
+  - Source-metadata failures now expose structured subcodes and bounded
+    diagnostics for the failing source item, invariant, source level, repair
+    attempt, repair item ids, repair result, and retry commands.
+  - The compiler retries only structured behavioral source-evidence failures
+    where every source metadata issue is marked repairable.
+- Remains fail-closed:
+  - Invented or unsupported authority evidence is not accepted.
+  - Legacy modality promotion and example-only evidence are not auto-repaired.
+  - Mixed repairable and non-repairable source metadata failures still block
+    authority compilation.
+
 #### Post-sprint story reconciliation can strand a saveable draft
 
 - Original feedback item: `Post-sprint story reconciliation leaves saveable

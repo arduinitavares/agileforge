@@ -100,6 +100,8 @@ _SCHEMA_RETRY_FEEDBACK = (
 )
 _SOURCE_METADATA_MISMATCH: str = "SOURCE_METADATA_MISMATCH"
 _REPAIRABLE_SOURCE_METADATA_SUBCODE: str = "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
+_SOURCE_METADATA_EXCERPT_LIMIT: int = 500
+_SOURCE_METADATA_RETRY_COMPILER_MODEL: str = "openrouter/openai/gpt-5.2"
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
 COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
@@ -1249,6 +1251,80 @@ def _focused_repair_domain_hint(candidate: _FocusedRepairCandidate) -> str:
     return "\n".join(lines)
 
 
+def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
+    """Return operator commands for retrying a source-metadata compiler failure."""
+    project_id = spec_version.product_id
+    spec_version_id = spec_version.spec_version_id
+    spec_hash = spec_version.spec_hash
+    compiler_model = _SOURCE_METADATA_RETRY_COMPILER_MODEL
+    return [
+        (
+            "agileforge authority compile "
+            f"--project-id {project_id} "
+            f"--spec-version-id {spec_version_id} "
+            f"--expected-spec-hash {spec_hash} "
+            "--expected-state SETUP_REQUIRED "
+            "--expected-setup-status authority_compile_failed "
+            f"--compiler-model {compiler_model} "
+            "--idempotency-key <new-idempotency-key>"
+        ),
+        (
+            "agileforge authority regenerate "
+            f"--project-id {project_id} "
+            f"--spec-version-id {spec_version_id} "
+            f"--compiler-model {compiler_model} "
+            "--idempotency-key <new-idempotency-key>"
+        ),
+    ]
+
+
+def _source_metadata_failure_detail_fields(
+    failure: SpecAuthorityCompilationFailure,
+    *,
+    spec_version: SpecRegistry,
+) -> dict[str, object]:
+    """Return bounded actionable diagnostics for source metadata failures."""
+    issue = next(
+        (raw for raw in failure.source_metadata_issues or [] if isinstance(raw, dict)),
+        None,
+    )
+    details: dict[str, object] = {
+        "suggested_commands": _source_metadata_retry_commands(spec_version)
+    }
+    if issue is None:
+        return details
+    if issue.get("subcode") is not None:
+        details["source_metadata_subcode"] = str(issue["subcode"])
+    if issue.get("source_item_id") is not None:
+        details["source_item_id"] = str(issue["source_item_id"])
+    if issue.get("invariant_id") is not None:
+        details["invalid_invariant_id"] = str(issue["invariant_id"])
+    if issue.get("expected_source_level") is not None:
+        details["source_level"] = str(issue["expected_source_level"])
+    if issue.get("source_excerpt") is not None:
+        details["source_excerpt"] = str(issue["source_excerpt"])[
+            :_SOURCE_METADATA_EXCERPT_LIMIT
+        ]
+    return details
+
+
+def _with_source_metadata_failure_details(
+    result: dict[str, Any],
+    *,
+    failure: SpecAuthorityCompilationFailure,
+    spec_version: SpecRegistry,
+) -> dict[str, Any]:
+    """Copy a failure result and attach bounded source-metadata diagnostics."""
+    enriched = dict(result)
+    details = enriched.get("details")
+    details = {} if not isinstance(details, dict) else dict(details)
+    details.update(
+        _source_metadata_failure_detail_fields(failure, spec_version=spec_version)
+    )
+    enriched["details"] = details
+    return enriched
+
+
 def _with_repair_diagnostics(
     result: dict[str, Any],
     *,
@@ -2056,7 +2132,7 @@ def _normalized_failure_result(
     failure_stage = (
         "invalid_json" if failure.reason == "INVALID_JSON" else "output_validation"
     )
-    return _compiler_failure_result(
+    result = _compiler_failure_result(
         product_id=spec_version.product_id,
         spec_version_id=spec_version.spec_version_id,
         content_ref=spec_version.content_ref,
@@ -2066,6 +2142,13 @@ def _normalized_failure_result(
         raw_output=raw_json,
         blocking_gaps=failure.blocking_gaps,
     )
+    if failure.reason == _SOURCE_METADATA_MISMATCH:
+        return _with_source_metadata_failure_details(
+            result,
+            failure=failure,
+            spec_version=spec_version,
+        )
+    return result
 
 
 def _run_compiler_attempt(  # noqa: PLR0913
@@ -2161,10 +2244,11 @@ def _focused_repair_successes(  # noqa: PLR0913
             focused_structured_item_passes=False,
         )
         if isinstance(invocation, dict):
+            failure_result = cast("dict[str, Any]", invocation)
             return _CompilerInvocationResult(
                 failure=_attach_schema_retry_metadata(
                     _with_repair_diagnostics(
-                        invocation,
+                        failure_result,
                         repair_attempted=True,
                         repair_item_ids=attempted_item_ids,
                         repair_result="failed",

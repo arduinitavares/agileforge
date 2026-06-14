@@ -410,7 +410,21 @@ def _source_metadata_failure_json(
     *,
     source_item_id: str,
     invariant_id: str,
+    source_excerpt: str | None = None,
 ) -> str:
+    issue: dict[str, object] = {
+        "subcode": "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED",
+        "message": (
+            f"{invariant_id} source_item_id {source_item_id} "
+            "lacks supporting real source_map evidence."
+        ),
+        "invariant_id": invariant_id,
+        "source_item_id": source_item_id,
+        "expected_source_level": "MUST",
+        "repairable": True,
+    }
+    if source_excerpt is not None:
+        issue["source_excerpt"] = source_excerpt
     failure = SpecAuthorityCompilationFailure(
         error="SPEC_COMPILATION_FAILED",
         reason="SOURCE_METADATA_MISMATCH",
@@ -418,19 +432,7 @@ def _source_metadata_failure_json(
             f"{invariant_id} source_item_id {source_item_id} "
             "lacks supporting real source_map evidence."
         ],
-        source_metadata_issues=[
-            {
-                "subcode": "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED",
-                "message": (
-                    f"{invariant_id} source_item_id {source_item_id} "
-                    "lacks supporting real source_map evidence."
-                ),
-                "invariant_id": invariant_id,
-                "source_item_id": source_item_id,
-                "expected_source_level": "MUST",
-                "repairable": True,
-            }
-        ],
+        source_metadata_issues=[issue],
     )
     return SpecAuthorityCompilerOutput(root=failure).model_dump_json()
 
@@ -2117,7 +2119,7 @@ def test_compile_spec_authority_repairs_one_behavioral_source_item(
     )
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=session.get_bind(),
+        engine=cast("Engine", session.get_bind()),
         spec_version_id=spec_version_id,
         force_recompile=True,
         compiler_model="openrouter/openai/gpt-5.2",
@@ -2125,7 +2127,9 @@ def test_compile_spec_authority_repairs_one_behavioral_source_item(
 
     assert result["success"] is True
     assert len(calls) == _EXPECTED_REPAIR_CALLS
-    assert "REQ.payments.email" in calls[1]["spec_content"]
+    focused_spec_content = calls[1]["spec_content"]
+    assert focused_spec_content is not None
+    assert "REQ.payments.email" in focused_spec_content
     assert "source_item_id: REQ.payments.email" in str(calls[1]["domain_hint"])
     assert calls[1]["compiler_model"] == "openrouter/openai/gpt-5.2"
 
@@ -2195,7 +2199,7 @@ def test_compile_spec_authority_does_not_repair_mixed_source_metadata_issues(
     )
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=session.get_bind(),
+        engine=cast("Engine", session.get_bind()),
         spec_version_id=spec_version_id,
         force_recompile=True,
     )
@@ -2241,7 +2245,7 @@ def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
     )
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=session.get_bind(),
+        engine=cast("Engine", session.get_bind()),
         spec_version_id=spec_version_id,
         force_recompile=True,
     )
@@ -2310,7 +2314,7 @@ def test_compile_spec_authority_does_not_repair_over_promotion(
     )
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=session.get_bind(),
+        engine=cast("Engine", session.get_bind()),
         spec_version_id=spec_version_id,
         force_recompile=True,
     )
@@ -2354,7 +2358,7 @@ def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
     )
 
     result = compiler_service.compile_spec_authority_for_version_with_engine(
-        engine=session.get_bind(),
+        engine=cast("Engine", session.get_bind()),
         spec_version_id=spec_version_id,
         force_recompile=True,
     )
@@ -2366,6 +2370,79 @@ def test_compile_spec_authority_failed_repair_leaves_no_compiled_authority_rows(
     with Session(session.get_bind()) as verify_session:
         rows = verify_session.exec(select(CompiledSpecAuthority)).all()
     assert rows == []
+
+
+def test_source_metadata_failure_details_include_repair_guidance(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrepaired source metadata failures should include actionable guidance."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=json.dumps(_focused_repair_spec_profile_payload()),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    long_excerpt = "unsupported evidence " * 40
+
+    def fake_invoke(**kwargs: object) -> str:
+        del kwargs
+        return _source_metadata_failure_json(
+            source_item_id="REQ.payments.email",
+            invariant_id="INV-badbadbadbadbad1",
+            source_excerpt=long_excerpt,
+        )
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=cast("Engine", session.get_bind()),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    details = result["details"]
+    assert (
+        details["source_metadata_subcode"] == "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
+    )
+    assert details["source_item_id"] == "REQ.payments.email"
+    assert details["invalid_invariant_id"] == "INV-badbadbadbadbad1"
+    assert details["source_level"] == "MUST"
+    assert details["source_excerpt"] == long_excerpt[:500]
+    assert details["repair_attempted"] is True
+    assert details["repair_item_ids"] == ["REQ.payments.email"]
+    assert details["repair_result"] == "failed"
+    assert any(
+        "--compiler-model" in command for command in details["suggested_commands"]
+    )
+    assert any(
+        command.startswith("agileforge authority compile ")
+        for command in details["suggested_commands"]
+    )
+    assert any(
+        command.startswith("agileforge authority regenerate ")
+        for command in details["suggested_commands"]
+    )
+    assert all(
+        "authority-compile-retry-20260614" not in command
+        for command in details["suggested_commands"]
+    )
+    assert all(
+        "authority-regenerate-retry-20260614" not in command
+        for command in details["suggested_commands"]
+    )
+    assert all(
+        "--idempotency-key <new-idempotency-key>" in command
+        for command in details["suggested_commands"]
+    )
 
 
 def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
@@ -3581,8 +3658,13 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
     acceptance_calls: dict[str, object] = {}
 
     def fake_compile(
-        *, spec_version_id: int, force_recompile: bool, tool_context: object
+        *,
+        spec_version_id: int,
+        force_recompile: bool,
+        tool_context: object,
+        compiler_model: str | None = None,
     ) -> object:
+        del compiler_model
         compile_calls["spec_version_id"] = spec_version_id
         compile_calls["force_recompile"] = force_recompile
         compile_calls["tool_context"] = tool_context
@@ -3769,9 +3851,13 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
     )
 
     def fake_compile(
-        *, spec_version_id: int, force_recompile: bool, tool_context: object
+        *,
+        spec_version_id: int,
+        force_recompile: bool,
+        tool_context: object,
+        compiler_model: str | None = None,
     ) -> object:
-        del force_recompile, tool_context
+        del force_recompile, tool_context, compiler_model
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
             compiler_version="1.2.3",
@@ -3863,9 +3949,13 @@ def test_update_spec_and_compile_authority_loads_content_ref(
     spec_path.write_text(spec_content, encoding="utf-8")
 
     def fake_compile(
-        *, spec_version_id: int, force_recompile: bool, tool_context: object
+        *,
+        spec_version_id: int,
+        force_recompile: bool,
+        tool_context: object,
+        compiler_model: str | None = None,
     ) -> object:
-        del force_recompile, tool_context
+        del force_recompile, tool_context, compiler_model
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
             compiler_version="1.2.3",
@@ -3937,9 +4027,13 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
     authority_counter = {"value": 0}
 
     def fake_compile(
-        *, spec_version_id: int, force_recompile: bool, tool_context: object
+        *,
+        spec_version_id: int,
+        force_recompile: bool,
+        tool_context: object,
+        compiler_model: str | None = None,
     ) -> object:
-        del tool_context
+        del tool_context, compiler_model
         compile_calls.append(
             {
                 "spec_version_id": spec_version_id,
@@ -4044,9 +4138,13 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
     compile_calls: dict[str, object] = {}
 
     def fake_compile(
-        *, spec_version_id: int, force_recompile: bool, tool_context: object
+        *,
+        spec_version_id: int,
+        force_recompile: bool,
+        tool_context: object,
+        compiler_model: str | None = None,
     ) -> object:
-        del tool_context
+        del tool_context, compiler_model
         compile_calls["force_recompile"] = force_recompile
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
