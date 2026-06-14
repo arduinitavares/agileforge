@@ -113,9 +113,7 @@ _STRUCTURED_ITEM_ID_RE = re.compile(
 )
 _STRUCTURED_ELLIPSIS_RE = re.compile(r"(?:\.{3,}|…)")
 _STRUCTURED_EVIDENCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STRUCTURED_EVIDENCE_GLUE_CHARS = frozenset(
-    " \t\n\r\f\v.,;:!?()[]{}<>\"'`-"
-)
+_STRUCTURED_EVIDENCE_GLUE_CHARS = frozenset(" \t\n\r\f\v.,;:!?()[]{}<>\"'`-")
 _STRICT_INVARIANT_ID_RE = re.compile(r"^INV-[0-9a-f]{16}$")
 _PROMPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUCCESS_REQUIRED_KEYS_EXCEPT_SOURCE_MAP = frozenset(
@@ -151,6 +149,12 @@ _BEHAVIORAL_INVARIANT_TYPES = frozenset(
         InvariantType.VISIBILITY_RULE,
     }
 )
+BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED = "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
+LEGACY_MODALITY_PROMOTION = "LEGACY_MODALITY_PROMOTION"
+EXAMPLE_ONLY_SOURCE_EVIDENCE = "EXAMPLE_ONLY_SOURCE_EVIDENCE"
+UNKNOWN_SOURCE_ITEM = "UNKNOWN_SOURCE_ITEM"
+MISSING_SOURCE_ITEM_ID = "MISSING_SOURCE_ITEM_ID"
+SOURCE_LEVEL_MISMATCH = "SOURCE_LEVEL_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -162,12 +166,18 @@ class _SourceEvidenceCandidate:
     priority: int = 0
 
 
-def _failure(reason: str, blocking_gaps: list[str]) -> SpecAuthorityCompilerOutput:
+def _failure(
+    reason: str,
+    blocking_gaps: list[str],
+    *,
+    source_metadata_issues: list[dict[str, object]] | None = None,
+) -> SpecAuthorityCompilerOutput:
     return SpecAuthorityCompilerOutput(
         root=SpecAuthorityCompilationFailure(
             error="SPEC_COMPILATION_FAILED",
             reason=reason,
             blocking_gaps=blocking_gaps,
+            source_metadata_issues=source_metadata_issues,
         )
     )
 
@@ -569,9 +579,7 @@ def _record_duplicate_invariant_quality_report(
         summary=AuthorityQualitySummary(
             original_invariant_count=original_count,
             final_invariant_count=len(success.invariants),
-            merged_invariant_count=sum(
-                len(item.removed_ids) for item in merged_items
-            ),
+            merged_invariant_count=sum(len(item.removed_ids) for item in merged_items),
             merged_assumption_count=0,
             review_group_count=0,
             near_duplicate_group_count=0,
@@ -615,11 +623,7 @@ def _rewrite_quality_report_invariant_ids(
 
 def _tokenize_support_text(text: str) -> list[str]:
     """Return normalized support tokens for source/invariant comparisons."""
-    return [
-        token
-        for token in re.split(r"[^a-zA-Z0-9]+", text.casefold())
-        if token
-    ]
+    return [token for token in re.split(r"[^a-zA-Z0-9]+", text.casefold()) if token]
 
 
 def _support_overlap_ratio(expected: list[str], excerpt: str) -> float:
@@ -695,9 +699,7 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
         tokens = _tokenize_support_text(capability)
         if _support_overlap_ratio(tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
             safety_tokens = _forbidden_capability_support_tokens(capability)
-            if _FORBIDDEN_SAFETY_CUE_RE.search(
-                excerpt
-            ) and (
+            if _FORBIDDEN_SAFETY_CUE_RE.search(excerpt) and (
                 _support_overlap_ratio(safety_tokens, excerpt)
                 >= _FORBIDDEN_SAFETY_SUPPORT_THRESHOLD
             ):
@@ -714,7 +716,10 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
         max_value = "" if raw_max_value is None else str(raw_max_value)
         field_tokens = _tokenize_support_text(field_name)
         excerpt_tokens = set(_tokenize_support_text(excerpt))
-        if _support_overlap_ratio(field_tokens, excerpt) < _FIELD_SUPPORT_RATIO_THRESHOLD:
+        if (
+            _support_overlap_ratio(field_tokens, excerpt)
+            < _FIELD_SUPPORT_RATIO_THRESHOLD
+        ):
             return (
                 f"source_map excerpt does not mention max-value field "
                 f"'{field_name}' for invariant {inv.id}"
@@ -734,9 +739,7 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
     if inv.type == InvariantType.RELATION_CONSTRAINT:
         expression = str(getattr(parameters, "expression", "") or "")
         expression_tokens = [
-            token
-            for token in _tokenize_support_text(expression)
-            if not token.isdigit()
+            token for token in _tokenize_support_text(expression) if not token.isdigit()
         ]
         if not _relation_operator_supported(expression, excerpt):
             return (
@@ -756,10 +759,7 @@ def _source_map_support_error(inv: Invariant, excerpt: str) -> str | None:
     if _is_behavioral_invariant(inv):
         support_tokens = _behavioral_support_tokens(parameters)
         if _support_overlap_ratio(support_tokens, excerpt) < _SUPPORT_RATIO_THRESHOLD:
-            return (
-                "source_map excerpt does not support behavioral invariant "
-                f"{inv.id}"
-            )
+            return f"source_map excerpt does not support behavioral invariant {inv.id}"
         return None
 
     return None
@@ -783,9 +783,7 @@ def _source_map_support_score(inv: Invariant, excerpt: str) -> float:
     if inv.type == InvariantType.RELATION_CONSTRAINT:
         expression = str(getattr(parameters, "expression", "") or "")
         expression_tokens = [
-            token
-            for token in _tokenize_support_text(expression)
-            if not token.isdigit()
+            token for token in _tokenize_support_text(expression) if not token.isdigit()
         ]
         base = _support_overlap_ratio(expression_tokens, excerpt)
         if _relation_operator_supported(expression, excerpt):
@@ -961,9 +959,7 @@ def _normalize_structured_evidence_text(text: str) -> str:
 
 def _is_structured_evidence_glue(text: str) -> bool:
     """Return whether text is only separator glue between real source segments."""
-    return bool(text) and all(
-        char in _STRUCTURED_EVIDENCE_GLUE_CHARS for char in text
-    )
+    return bool(text) and all(char in _STRUCTURED_EVIDENCE_GLUE_CHARS for char in text)
 
 
 def _has_structured_segment_conflict(
@@ -1305,50 +1301,91 @@ def _is_non_normative_source_item(source_item: Mapping[str, Any]) -> bool:
     )
 
 
-def _structured_authority_metadata_errors(
+def _source_metadata_issue(  # noqa: PLR0913
+    *,
+    subcode: str,
+    message: str,
+    invariant_id: str,
+    source_item_id: str | None = None,
+    expected_source_level: str | None = None,
+    observed_source_level: str | None = None,
+    repairable: bool = False,
+) -> dict[str, object]:
+    """Build a structured source metadata issue for compiler failure details."""
+    issue: dict[str, object] = {
+        "subcode": subcode,
+        "message": message,
+        "invariant_id": invariant_id,
+        "repairable": repairable,
+    }
+    if source_item_id:
+        issue["source_item_id"] = source_item_id
+    if expected_source_level:
+        issue["expected_source_level"] = expected_source_level
+    if observed_source_level:
+        issue["observed_source_level"] = observed_source_level
+    return issue
+
+
+def _structured_authority_metadata_issues(
     success: SpecAuthorityCompilationSuccess,
     *,
     source_text: str,
-) -> list[str]:
+) -> list[dict[str, object]]:
     """Validate model-emitted authority metadata against structured source."""
     source_items = _structured_profile_items_by_id(source_text)
     if not source_items:
         return []
 
-    errors: list[str] = []
+    issues: list[dict[str, object]] = []
     source_map_ids = _source_map_item_ids_by_invariant(success)
     source_map_entries = _source_map_entries_by_invariant(success.source_map)
     for invariant in success.invariants:
-        errors.extend(
-            _behavioral_source_metadata_errors(
+        issues.extend(
+            _behavioral_source_metadata_issues(
                 invariant,
                 source_items=source_items,
                 source_entries=source_map_entries.get(invariant.id, []),
             )
         )
-        errors.extend(
-            _legacy_modality_promotion_errors(
+        issues.extend(
+            _legacy_modality_promotion_issues(
                 invariant,
                 source_items=source_items,
                 source_item_ids=source_map_ids.get(invariant.id, set()),
             )
         )
-        errors.extend(
-            _example_only_source_errors(
+        issues.extend(
+            _example_only_source_issues(
                 invariant,
                 source_items=source_items,
                 source_item_ids=source_map_ids.get(invariant.id, set()),
             )
         )
-    return errors
+    return issues
 
 
-def _behavioral_source_metadata_errors(
+def _structured_authority_metadata_errors(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> list[str]:
+    """Return legacy string source metadata errors."""
+    return [
+        str(issue["message"])
+        for issue in _structured_authority_metadata_issues(
+            success,
+            source_text=source_text,
+        )
+    ]
+
+
+def _behavioral_source_metadata_issues(
     invariant: Invariant,
     *,
     source_items: Mapping[str, Mapping[str, Any]],
     source_entries: list[SourceMapEntry],
-) -> list[str]:
+) -> list[dict[str, object]]:
     """Return behavioral source metadata mismatch errors for an invariant."""
     if not _is_behavioral_invariant(invariant):
         return []
@@ -1356,25 +1393,58 @@ def _behavioral_source_metadata_errors(
     source_item_id = invariant.source_item_id
     source_level = invariant.source_level
     if not source_item_id:
-        return [f"{invariant.id} is missing source_item_id."]
+        message = f"{invariant.id} is missing source_item_id."
+        return [
+            _source_metadata_issue(
+                subcode=MISSING_SOURCE_ITEM_ID,
+                message=message,
+                invariant_id=invariant.id,
+                repairable=False,
+            )
+        ]
     if not source_level:
-        return [f"{invariant.id} is missing source_level."]
+        message = f"{invariant.id} is missing source_level."
+        return [
+            _source_metadata_issue(
+                subcode=SOURCE_LEVEL_MISMATCH,
+                message=message,
+                invariant_id=invariant.id,
+                source_item_id=source_item_id,
+                repairable=False,
+            )
+        ]
 
     source_item = source_items.get(source_item_id)
     if source_item is None:
+        message = f"{invariant.id} references unknown source_item_id {source_item_id}."
         return [
-            (
-                f"{invariant.id} references unknown source_item_id "
-                f"{source_item_id}."
+            _source_metadata_issue(
+                subcode=UNKNOWN_SOURCE_ITEM,
+                message=message,
+                invariant_id=invariant.id,
+                source_item_id=source_item_id,
+                expected_source_level=source_level,
+                repairable=False,
             )
         ]
 
     actual_level = source_item.get("level")
     if actual_level != source_level:
+        message = (
+            f"{invariant.id} source_item_id {source_item_id} "
+            f"source_level {source_level} does not match {actual_level}."
+        )
         return [
-            (
-                f"{invariant.id} source_item_id {source_item_id} "
-                f"source_level {source_level} does not match {actual_level}."
+            _source_metadata_issue(
+                subcode=SOURCE_LEVEL_MISMATCH,
+                message=message,
+                invariant_id=invariant.id,
+                source_item_id=source_item_id,
+                expected_source_level=source_level,
+                observed_source_level=(
+                    str(actual_level) if actual_level is not None else None
+                ),
+                repairable=False,
             )
         ]
 
@@ -1390,25 +1460,33 @@ def _behavioral_source_metadata_errors(
     ):
         return []
 
+    message = (
+        f"{invariant.id} source_item_id {source_item_id} lacks supporting "
+        "real source_map evidence."
+    )
     return [
-        (
-            f"{invariant.id} source_item_id {source_item_id} lacks supporting "
-            "real source_map evidence."
+        _source_metadata_issue(
+            subcode=BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED,
+            message=message,
+            invariant_id=invariant.id,
+            source_item_id=source_item_id,
+            expected_source_level=source_level,
+            repairable=True,
         )
     ]
 
 
-def _legacy_modality_promotion_errors(
+def _legacy_modality_promotion_issues(
     invariant: Invariant,
     *,
     source_items: Mapping[str, Mapping[str, Any]],
     source_item_ids: set[str],
-) -> list[str]:
+) -> list[dict[str, object]]:
     """Return errors for legacy hard bans sourced from non-hard guidance."""
     if invariant.type != InvariantType.FORBIDDEN_CAPABILITY:
         return []
 
-    errors: list[str] = []
+    issues: list[dict[str, object]] = []
     for source_item_id in sorted(source_item_ids):
         source_item = source_items.get(source_item_id)
         if source_item is None:
@@ -1418,19 +1496,31 @@ def _legacy_modality_promotion_errors(
         source_level = source_item.get("level")
         if source_level in {"MUST", "MUST_NOT"}:
             continue
-        errors.append(
+        message = (
             f"{invariant.id} FORBIDDEN_CAPABILITY over-promotes "
             f"{source_item_id} source level {source_level}."
         )
-    return errors
+        issues.append(
+            _source_metadata_issue(
+                subcode=LEGACY_MODALITY_PROMOTION,
+                message=message,
+                invariant_id=invariant.id,
+                source_item_id=source_item_id,
+                observed_source_level=(
+                    str(source_level) if source_level is not None else None
+                ),
+                repairable=False,
+            )
+        )
+    return issues
 
 
-def _example_only_source_errors(
+def _example_only_source_issues(
     invariant: Invariant,
     *,
     source_items: Mapping[str, Mapping[str, Any]],
     source_item_ids: set[str],
-) -> list[str]:
+) -> list[dict[str, object]]:
     """Return errors when illustrative examples are sole invariant evidence."""
     if not source_item_ids:
         return []
@@ -1446,10 +1536,72 @@ def _example_only_source_errors(
     if any(source_item.get("type") != "EXAMPLE" for source_item in known_source_items):
         return []
 
+    sorted_source_item_ids = sorted(source_item_ids)
+    message = (
+        f"{invariant.id} {invariant.type.value} uses only EXAMPLE source "
+        f"evidence: {', '.join(sorted_source_item_ids)}."
+    )
+    issue = _source_metadata_issue(
+        subcode=EXAMPLE_ONLY_SOURCE_EVIDENCE,
+        message=message,
+        invariant_id=invariant.id,
+        source_item_id=(
+            sorted_source_item_ids[0] if len(sorted_source_item_ids) == 1 else None
+        ),
+        repairable=False,
+    )
+    if len(sorted_source_item_ids) > 1:
+        issue["source_item_ids"] = sorted_source_item_ids
+    return [issue]
+
+
+def _behavioral_source_metadata_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+    source_entries: list[SourceMapEntry],
+) -> list[str]:
+    """Return legacy behavioral source metadata mismatch errors."""
     return [
-        (
-            f"{invariant.id} {invariant.type.value} uses only EXAMPLE source "
-            f"evidence: {', '.join(sorted(source_item_ids))}."
+        str(issue["message"])
+        for issue in _behavioral_source_metadata_issues(
+            invariant,
+            source_items=source_items,
+            source_entries=source_entries,
+        )
+    ]
+
+
+def _legacy_modality_promotion_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+    source_item_ids: set[str],
+) -> list[str]:
+    """Return legacy hard-ban promotion mismatch errors."""
+    return [
+        str(issue["message"])
+        for issue in _legacy_modality_promotion_issues(
+            invariant,
+            source_items=source_items,
+            source_item_ids=source_item_ids,
+        )
+    ]
+
+
+def _example_only_source_errors(
+    invariant: Invariant,
+    *,
+    source_items: Mapping[str, Mapping[str, Any]],
+    source_item_ids: set[str],
+) -> list[str]:
+    """Return legacy example-only source mismatch errors."""
+    return [
+        str(issue["message"])
+        for issue in _example_only_source_issues(
+            invariant,
+            source_items=source_items,
+            source_item_ids=source_item_ids,
         )
     ]
 
@@ -1543,9 +1695,7 @@ def _support_matched_source_map_invariant(
         return None
 
     best_score = max(score for _, score in scored)
-    best_matches = [
-        invariant for invariant, score in scored if score == best_score
-    ]
+    best_matches = [invariant for invariant, score in scored if score == best_score]
     if len(best_matches) != 1:
         return None
     return best_matches[0]
@@ -1749,8 +1899,7 @@ def _repair_structured_behavior_source_map_entries(
             continue
 
         existing_keys = {
-            (_compact_whitespace(entry.excerpt), entry.location)
-            for entry in entries
+            (_compact_whitespace(entry.excerpt), entry.location) for entry in entries
         }
         appended_entries: list[SourceMapEntry] = []
         draft_excerpts = list(grounded_excerpts)
@@ -1810,13 +1959,10 @@ def _repair_structured_source_map_from_source_text(
         ):
             repaired.append(entry)
             continue
-        if (
-            invariant is not None
-            and _structured_source_map_entry_has_grounded_item_ref(
-                entry,
-                invariant,
-                source_text=source_text,
-            )
+        if invariant is not None and _structured_source_map_entry_has_grounded_item_ref(
+            entry,
+            invariant,
+            source_text=source_text,
         ):
             repaired.append(entry)
             continue
@@ -1918,7 +2064,9 @@ def _repair_source_map_from_source_text(
     dropped_invariants: list[Invariant] = []
     used_entry_indexes: set[int] = set()
 
-    def primary_entry_index_for_invariant(invariant: Invariant, index: int) -> int | None:
+    def primary_entry_index_for_invariant(
+        invariant: Invariant, index: int
+    ) -> int | None:
         for entry_index, entry in enumerate(original_source_map):
             if entry_index in used_entry_indexes:
                 continue
@@ -2058,9 +2206,7 @@ def _rewrite_source_map_invariant_ids(
             return None
 
         best_score = max(score for _, score in scored)
-        best_matches = [
-            invariant for invariant, score in scored if score == best_score
-        ]
+        best_matches = [invariant for invariant, score in scored if score == best_score]
         if positional_score is not None and positional_score >= best_score:
             return None
         if len(best_matches) != 1:
@@ -2237,14 +2383,15 @@ def normalize_compiler_output(
             original_invariants=original_invariants,
             original_source_map=original_source_map,
         )
-        metadata_errors = _structured_authority_metadata_errors(
+        metadata_issues = _structured_authority_metadata_issues(
             success,
             source_text=source_text,
         )
-        if metadata_errors:
+        if metadata_issues:
             return _failure(
                 reason="SOURCE_METADATA_MISMATCH",
-                blocking_gaps=metadata_errors,
+                blocking_gaps=[str(issue["message"]) for issue in metadata_issues],
+                source_metadata_issues=metadata_issues,
             )
 
     _clear_compact_ir(success)

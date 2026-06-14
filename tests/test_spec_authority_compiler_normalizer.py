@@ -60,9 +60,7 @@ def _structured_spec_source() -> str:
                     "statement": "The system MUST record audit evidence.",
                     "level": "MUST",
                     "verification": "system-test",
-                    "acceptance": [
-                        "Audit evidence is stored for each operation."
-                    ],
+                    "acceptance": ["Audit evidence is stored for each operation."],
                 },
                 {
                     "id": "REQ.review-token",
@@ -72,9 +70,7 @@ def _structured_spec_source() -> str:
                     "statement": "The system MUST include review token evidence.",
                     "level": "MUST",
                     "verification": "inspection",
-                    "acceptance": [
-                        "Review packets include review token evidence."
-                    ],
+                    "acceptance": ["Review packets include review token evidence."],
                 },
             ],
         }
@@ -501,9 +497,7 @@ def test_normalizer_invariant_ids_include_source_provenance() -> None:
     ids = [invariant.id for invariant in normalized.root.invariants]
     assert len(ids) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
     assert len(set(ids)) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
-    assert {
-        entry.invariant_id for entry in normalized.root.source_map
-    } == set(ids)
+    assert {entry.invariant_id for entry in normalized.root.source_map} == set(ids)
 
 
 def test_normalizer_merges_only_same_provenance_exact_duplicates() -> None:
@@ -537,12 +531,11 @@ def test_normalizer_merges_only_same_provenance_exact_duplicates() -> None:
     normalized = normalize_compiler_output(json.dumps(payload))
 
     assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
-    assert (
-        len(normalized.root.invariants) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
-    )
-    assert {
-        invariant.source_item_id for invariant in normalized.root.invariants
-    } == {"REQ.alpha", "REQ.beta"}
+    assert len(normalized.root.invariants) == EXPECTED_SOURCE_DISTINCT_INVARIANT_COUNT
+    assert {invariant.source_item_id for invariant in normalized.root.invariants} == {
+        "REQ.alpha",
+        "REQ.beta",
+    }
 
 
 def test_normalizer_exact_duplicate_cleanup_preserves_source_map_entries() -> None:
@@ -587,9 +580,7 @@ def test_normalizer_exact_duplicate_cleanup_preserves_source_map_entries() -> No
         kept_id,
     ]
     assert normalized.root.authority_quality is not None
-    assert (
-        normalized.root.authority_quality.summary.merged_invariant_count == 1
-    )
+    assert normalized.root.authority_quality.summary.merged_invariant_count == 1
     assert normalized.root.authority_quality.merged_items[0].kept_id == kept_id
     assert normalized.root.authority_quality.merged_items[0].removed_ids == [
         "INV-0000000000000001"
@@ -1004,6 +995,45 @@ def test_normalizer_rejects_forbidden_capability_from_should_source() -> None:
     assert "CONSTRAINT.html-css-js-style" in normalized.root.blocking_gaps[0]
 
 
+def test_structured_profile_over_promotion_subcode_is_not_repairable() -> None:
+    """Hard-ban over-promotion should remain fail-closed without focused repair."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "FORBIDDEN_CAPABILITY",
+            "parameters": {"capability": "Sass"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "The implementation avoids Sass, CoffeeScript, or other "
+                "preprocessors unless a reviewer records a framework-specific "
+                "reason."
+            ),
+            "location": "CONSTRAINT.html-css-js-style.acceptance[0]",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    details = normalized.root.source_metadata_issues
+    assert details is not None
+    assert details[0]["subcode"] == "LEGACY_MODALITY_PROMOTION"
+    assert details[0]["repairable"] is False
+
+
 def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
     """DECISION rationale must not become a hard forbidden authority invariant."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
@@ -1045,9 +1075,7 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
                         "statement": "The system MUST include review token evidence.",
                         "level": "MUST",
                         "verification": "inspection",
-                        "acceptance": [
-                            "Review packets include review token evidence."
-                        ],
+                        "acceptance": ["Review packets include review token evidence."],
                     },
                 ],
             }
@@ -1106,9 +1134,12 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
         "DECISION.research-before-algorithm" not in (entry.location or "")
         for entry in normalized.root.source_map
     )
-    assert normalized.root.assumptions.count(
-        "Excluded non-normative source item from hard forbidden authority."
-    ) == 1
+    assert (
+        normalized.root.assumptions.count(
+            "Excluded non-normative source item from hard forbidden authority."
+        )
+        == 1
+    )
 
 
 def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
@@ -1215,9 +1246,12 @@ def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
         "OPEN_QUESTION.production-action-boundary" not in (entry.location or "")
         for entry in normalized.root.source_map
     )
-    assert normalized.root.assumptions.count(
-        "Excluded non-normative source item from hard forbidden authority."
-    ) == 1
+    assert (
+        normalized.root.assumptions.count(
+            "Excluded non-normative source item from hard forbidden authority."
+        )
+        == 1
+    )
 
 
 def test_normalizer_keeps_decision_hard_ban_with_unknown_source_ref() -> None:
@@ -1436,6 +1470,44 @@ def test_normalizer_rejects_invariant_sourced_only_from_example() -> None:
     assert "EXAMPLE.package-json" in normalized.root.blocking_gaps[0]
 
 
+def test_structured_profile_example_only_subcode_is_not_repairable() -> None:
+    """Example-only source evidence should expose a non-repairable subcode."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    payload = _legacy_success_payload()
+    payload["invariants"] = [
+        {
+            "id": "INV-aaaaaaaaaaaaaaaa",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "package.json"},
+        }
+    ]
+    payload["source_map"] = [
+        {
+            "invariant_id": "INV-aaaaaaaaaaaaaaaa",
+            "excerpt": (
+                "A package.json may include framework dependencies alongside "
+                "todomvc-app-css and todomvc-common."
+            ),
+            "location": "EXAMPLE.package-json.statement",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_behavior_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    details = normalized.root.source_metadata_issues
+    assert details is not None
+    assert details[0]["subcode"] == "EXAMPLE_ONLY_SOURCE_EVIDENCE"
+    assert details[0]["repairable"] is False
+
+
 def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> None:
     """Duplicate model placeholder IDs do not smear source-map metadata."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
@@ -1488,8 +1560,7 @@ def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> 
         invariant.type: [
             entry.location
             for entry in normalized.root.source_map
-            if entry.invariant_id == invariant.id
-            and isinstance(entry.location, str)
+            if entry.invariant_id == invariant.id and isinstance(entry.location, str)
         ]
         for invariant in normalized.root.invariants
     }
@@ -1497,9 +1568,7 @@ def test_normalizer_validates_source_metadata_after_placeholder_id_rewrite() -> 
         invariant_type: [".".join(location.split(".")[:2]) for location in locations]
         for invariant_type, locations in source_refs_by_type.items()
     }
-    assert source_item_ids_by_type[InvariantType.DATA_CONTRACT] == [
-        "DATA.todo-record"
-    ]
+    assert source_item_ids_by_type[InvariantType.DATA_CONTRACT] == ["DATA.todo-record"]
     assert source_item_ids_by_type[InvariantType.FORBIDDEN_CAPABILITY] == [
         "DATA.editing-state"
     ]
@@ -2049,8 +2118,7 @@ def test_source_text_repair_preserves_extra_source_map_review_evidence() -> None
     invariant_ids = {invariant.id for invariant in normalized.root.invariants}
     assert len(normalized.root.source_map) == 2  # noqa: PLR2004
     assert (
-        normalized.root.source_map[0].excerpt
-        == "- The payload must include user_id."
+        normalized.root.source_map[0].excerpt == "- The payload must include user_id."
     )
     assert all(
         entry.invariant_id in invariant_ids for entry in normalized.root.source_map
@@ -2672,6 +2740,49 @@ def test_structured_profile_rejects_fake_excerpt_with_real_text_prefix() -> None
     assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
 
 
+def test_structured_profile_source_metadata_repairable_subcode() -> None:
+    """Unsupported behavioral source evidence should expose a repairable subcode."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-3333333333333333",
+            "type": "USER_INTERACTION",
+            "source_item_id": "CONSTRAINT.uv-managed",
+            "source_level": "MUST",
+            "parameters": {
+                "trigger": "running documented setup commands",
+                "target": "project environment",
+                "expected_response": "auto-approve all recommendations without review",
+            },
+        }
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-3333333333333333",
+            "excerpt": "uv-managed Python project.",
+            "location": "CONSTRAINT.uv-managed.title",
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_asa_like_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+    details = normalized.root.source_metadata_issues
+    assert details is not None
+    assert details[0]["subcode"] == "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
+    assert details[0]["repairable"] is True
+    assert details[0]["source_item_id"] == "CONSTRAINT.uv-managed"
+
+
 def test_structured_profile_rejects_concatenation_with_invented_middle() -> None:
     """Concatenation cannot hide non-source text between real source segments."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
@@ -2792,8 +2903,9 @@ def test_structured_profile_backfills_missing_behavior_source_map_entry() -> Non
     assert entry.excerpt.startswith("The repository contains uv.lock")
 
 
-def test_structured_profile_source_notes_do_not_satisfy_hard_behavioral_evidence(
-) -> None:
+def test_structured_profile_source_notes_do_not_satisfy_hard_behavioral_evidence() -> (
+    None
+):
     """source_notes are hints, not normative evidence for hard invariants."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
@@ -2928,8 +3040,7 @@ def test_structured_profile_repairs_malformed_acceptance_location() -> None:
         {
             "invariant_id": "INV-1111111111111111",
             "excerpt": (
-                "Unsafe candidate actions are rejected before operator "
-                "recommendation."
+                "Unsafe candidate actions are rejected before operator recommendation."
             ),
             "location": "CONSTRAINT.safe-action-envelope: acceptance[1]",
         }
@@ -3078,9 +3189,7 @@ def test_structured_profile_duplicate_placeholder_source_map_rewrites_by_positio
     assert len(set(source_map_ids)) == 2  # noqa: PLR2004
 
 
-def test_structured_profile_duplicate_placeholder_source_map_prefers_evidence() -> (
-    None
-):
+def test_structured_profile_duplicate_placeholder_source_map_prefers_evidence() -> None:
     """Structured duplicate placeholders map by evidence before position."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
@@ -3126,9 +3235,7 @@ def test_structured_profile_duplicate_placeholder_source_map_prefers_evidence() 
         for invariant in success.invariants
         if isinstance(invariant.parameters, RequiredFieldParams)
     }
-    source_map_by_location = {
-        entry.location: entry for entry in success.source_map
-    }
+    source_map_by_location = {entry.location: entry for entry in success.source_map}
 
     assert len(success.source_map) == 2  # noqa: PLR2004
     assert set(source_map_by_location) == {
@@ -3191,11 +3298,13 @@ def test_duplicate_placeholder_source_map_prefers_excerpt_support_over_position(
     source_map_ids_by_location = {
         entry.location: entry.invariant_id for entry in normalized.root.source_map
     }
-    assert source_map_ids_by_location["REQ.review-token.statement"] == (
-        normalized_ids_by_field["review_token"]
+    assert (
+        source_map_ids_by_location["REQ.review-token.statement"]
+        == (normalized_ids_by_field["review_token"])
     )
-    assert source_map_ids_by_location["REQ.audit-evidence.statement"] == (
-        normalized_ids_by_field["audit_evidence"]
+    assert (
+        source_map_ids_by_location["REQ.audit-evidence.statement"]
+        == (normalized_ids_by_field["audit_evidence"])
     )
     assert len(set(source_map_ids_by_location.values())) == 2  # noqa: PLR2004
 
@@ -3569,14 +3678,13 @@ def test_swapped_legacy_authority_id_discarded_with_model_quote_mapping() -> Non
         for invariant in success.invariants
         if isinstance(invariant.parameters, RequiredFieldParams)
     }
-    source_map_by_excerpt = {
-        entry.excerpt: entry for entry in success.source_map
-    }
-    assert source_map_by_excerpt[user_quote].invariant_id == (
-        user_id_by_field["user_id"]
+    source_map_by_excerpt = {entry.excerpt: entry for entry in success.source_map}
+    assert (
+        source_map_by_excerpt[user_quote].invariant_id == (user_id_by_field["user_id"])
     )
-    assert source_map_by_excerpt[account_quote].invariant_id == (
-        user_id_by_field["account_id"]
+    assert (
+        source_map_by_excerpt[account_quote].invariant_id
+        == (user_id_by_field["account_id"])
     )
 
 
@@ -3771,9 +3879,7 @@ def test_swapped_legacy_source_refs_repair_review_evidence() -> None:
     success = normalized.root
     _assert_compact_ir_cleared(success)
     _assert_semantic_invariant_ids(success)
-    source_map_by_excerpt = {
-        entry.excerpt: entry for entry in success.source_map
-    }
+    source_map_by_excerpt = {entry.excerpt: entry for entry in success.source_map}
     ids_by_field = {
         invariant.parameters.field_name: invariant.id
         for invariant in success.invariants
@@ -3782,12 +3888,14 @@ def test_swapped_legacy_source_refs_repair_review_evidence() -> None:
     assert source_map_by_excerpt["- The payload must include user_id."].location == (
         "line 2"
     )
-    assert source_map_by_excerpt[
-        "- The payload must include user_id."
-    ].invariant_id == ids_by_field["user_id"]
-    assert source_map_by_excerpt[
-        "- The payload must include account_id."
-    ].invariant_id == ids_by_field["account_id"]
+    assert (
+        source_map_by_excerpt["- The payload must include user_id."].invariant_id
+        == ids_by_field["user_id"]
+    )
+    assert (
+        source_map_by_excerpt["- The payload must include account_id."].invariant_id
+        == ids_by_field["account_id"]
+    )
 
 
 def test_normalizer_allows_missing_source_map_with_semantic_ids() -> None:

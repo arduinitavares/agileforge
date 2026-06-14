@@ -218,11 +218,7 @@ class SpecAuthorityCompilerInput(BaseModel):
     ]
     spec_source_format: Annotated[
         Literal["agileforge.spec.v1"],
-        Field(
-            description=(
-                "Input format: canonical agileforge.spec.v1 JSON."
-            )
-        ),
+        Field(description=("Input format: canonical agileforge.spec.v1 JSON.")),
     ] = "agileforge.spec.v1"
 
     @model_validator(mode="after")
@@ -834,8 +830,7 @@ class SpecAuthorityCompilationSuccess(BaseModel):
 
         source_unit_ids = {unit.unit_id for unit in self.source_units}
         allow_model_candidate_hints_without_units = (
-            self.ir_provenance == IrProvenance.MODEL_EMITTED
-            and not self.source_units
+            self.ir_provenance == IrProvenance.MODEL_EMITTED and not self.source_units
         )
         if not allow_model_candidate_hints_without_units:
             for candidate in self.requirement_candidates:
@@ -993,6 +988,13 @@ class SpecAuthorityCompilationFailure(BaseModel):
         list[str],
         Field(description="Blocking gaps that prevented compilation."),
     ]
+    source_metadata_issues: Annotated[
+        list[dict[str, object]] | None,
+        Field(
+            default=None,
+            description="Structured source metadata validation issues.",
+        ),
+    ] = None
 
 
 class SpecAuthorityCompilerOutput(
