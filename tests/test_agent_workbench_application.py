@@ -8,11 +8,14 @@ from shlex import quote
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from sqlalchemy import create_engine, text
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel, select
 
 import services.agent_workbench.application as application_mod
+import services.workflow as workflow_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
+from models.core import Product
+from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.authority_decision import (
@@ -32,6 +35,7 @@ from services.agent_workbench.project_setup_fingerprints import (
 )
 from services.agent_workbench.scope_extension import ScopeExtensionPreconditions
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
+from services.specs.profile_content import normalize_spec_content_for_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -95,6 +99,24 @@ def _structured_spec_payload() -> dict[str, Any]:
             "rendered_markdown_sha256": None,
         },
     }
+
+
+def _structured_spec_payload_with_scope_extension() -> dict[str, Any]:
+    """Build a structured spec fixture with one additive requirement."""
+    payload = json.loads(json.dumps(_structured_spec_payload()))
+    payload["items"].append(
+        {
+            "id": "REQ.scope-extension",
+            "type": "REQ",
+            "status": "proposed",
+            "level": "MUST",
+            "title": "Scope extension guard",
+            "statement": "The system MUST guard project scope extension starts.",
+            "verification": "system-test",
+            "acceptance": ["Scope extension start is blocked with open work."],
+        }
+    )
+    return payload
 
 
 CLI_MUTATION_LEDGER_CREATE_SQL_PHASE_2A = """
@@ -2558,6 +2580,100 @@ def test_application_default_scope_extension_runner_evaluates_preconditions(
     assert result.available is True
 
 
+def test_application_default_scope_extension_start_blocks_sprint_candidates(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify default application wiring blocks start when candidates remain."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    base_payload = _structured_spec_payload()
+    normalized = normalize_spec_content_for_registry(json.dumps(base_payload))
+
+    with Session(engine) as session:
+        product = Product(
+            product_id=PROJECT_ID,
+            name="Scope Extension Candidate Guard",
+        )
+        session.add(product)
+        session.commit()
+        base_spec = SpecRegistry(
+            product_id=PROJECT_ID,
+            spec_hash=normalized.spec_hash,
+            content=normalized.content,
+            content_ref="accepted-base.json",
+            status="approved",
+            approved_by="test",
+            approval_notes="accepted for tests",
+        )
+        session.add(base_spec)
+        session.commit()
+        session.refresh(base_spec)
+        base_spec_version_id = base_spec.spec_version_id or 0
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=PROJECT_ID,
+                spec_version_id=base_spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="test",
+                compiler_version="test",
+                prompt_hash="prompt",
+                spec_hash=base_spec.spec_hash,
+            )
+        )
+        session.commit()
+
+    class WorkflowServiceDouble:
+        def __init__(self) -> None:
+            self.state = {"fsm_state": "SPRINT_COMPLETE"}
+            self.updates: list[dict[str, Any]] = []
+
+        def get_session_status(self, _session_id: str) -> dict[str, Any]:
+            return dict(self.state)
+
+        def update_session_status(
+            self,
+            _session_id: str,
+            partial_update: dict[str, Any],
+        ) -> None:
+            self.updates.append(dict(partial_update))
+            self.state.update(partial_update)
+
+    workflow = WorkflowServiceDouble()
+    monkeypatch.setattr(workflow_mod, "WorkflowService", lambda: workflow)
+    amended_file = tmp_path / "amended.json"
+    amended_file.write_text(
+        json.dumps(_structured_spec_payload_with_scope_extension()),
+        encoding="utf-8",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteWithCurrentTriageReadProjection(impact="none")
+    )
+
+    result = app.scope_extension_start(
+        project_id=PROJECT_ID,
+        spec_file=str(amended_file),
+        base_spec_version_id=base_spec_version_id,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="scope-extension-default-candidate-guard",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SCOPE_EXTENSION_UNRESOLVED_WORK"
+    assert (
+        result["errors"][0]["details"]["blocking_reason"]
+        == "SPRINT_CANDIDATES_EXIST"
+    )
+    assert workflow.updates == []
+    with Session(engine) as session:
+        spec_rows = session.exec(
+            select(SpecRegistry).where(SpecRegistry.product_id == PROJECT_ID)
+        ).all()
+    assert [spec.spec_version_id for spec in spec_rows] == [base_spec_version_id]
+
+
 def test_authority_regenerate_is_registered_command() -> None:
     """Verify authority regenerate is discoverable with mutation metadata."""
     contracts = {command.name: command for command in command_contracts()}
@@ -4474,10 +4590,11 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_extension(
     )
     assert data["status"] == "project_scope_extension_available"
     assert data["next_valid_commands"] == [
+        validate_command,
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert validate_command in data["blocked_future_commands"]
+    assert validate_command not in data["blocked_future_commands"]
     assert (
         "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
     )
@@ -4490,9 +4607,9 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_extension(
                 "The current execution scope is exhausted; validate an amended spec "
                 "before generating new work."
             ),
-            "runnable": False,
-            "installed": False,
-            "requires_cli_installation": True,
+            "runnable": True,
+            "installed": True,
+            "requires_cli_installation": False,
         }
     ]
 
@@ -4526,11 +4643,11 @@ def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
     )
     assert data["status"] == "project_scope_extension_available"
     assert data["next_valid_commands"] == [
+        validate_command,
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert validate_command not in data["next_valid_commands"]
-    assert validate_command in data["blocked_future_commands"]
+    assert validate_command not in data["blocked_future_commands"]
     assert (
         "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
     )
@@ -4541,9 +4658,9 @@ def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
             "The current execution scope is exhausted; validate an amended spec "
             "before generating new work."
         ),
-        "runnable": False,
-        "installed": False,
-        "requires_cli_installation": True,
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
     }
 
 

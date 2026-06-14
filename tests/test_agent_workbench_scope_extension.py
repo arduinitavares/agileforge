@@ -16,6 +16,8 @@ from services.agent_workbench.scope_extension import (
     ERR_SCOPE_EXTENSION_BASE_SPEC_MISMATCH,
     ERR_SCOPE_EXTENSION_NO_ADDED_ITEMS,
     ERR_SCOPE_EXTENSION_NOT_ADDITIVE,
+    ERR_SCOPE_EXTENSION_NOT_AVAILABLE,
+    ERR_SCOPE_EXTENSION_UNRESOLVED_WORK,
     SCOPE_EXTENSION_AVAILABLE,
     SCOPE_EXTENSION_BLOCKED,
     SCOPE_EXTENSION_STARTED,
@@ -673,6 +675,120 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
         ),
         "spec_file": str(amended_file.resolve()),
     }
+
+
+def test_runner_start_blocks_active_sprint_without_pending_spec_registration(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Reject start while an active Sprint means execution scope is not exhausted."""
+    product = _product(session)
+    base_spec = _accepted_base_spec(session, product.product_id)
+    _sprint(session, product.product_id, status=SprintStatus.ACTIVE)
+    amended_file = _write_spec_file(
+        tmp_path,
+        "amended.json",
+        _with_new_item(_artifact()),
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+
+    result = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=product.product_id,
+            spec_file=str(amended_file),
+            base_spec_version_id=base_spec.spec_version_id or 0,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-active-sprint",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_NOT_AVAILABLE
+    assert result["errors"][0]["details"]["blocking_reason"] == "ACTIVE_SPRINT_EXISTS"
+    assert workflow.updates == []
+    spec_version_ids = [
+        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+    ]
+    assert spec_version_ids == [base_spec.spec_version_id]
+
+
+def test_runner_start_blocks_open_story_without_pending_spec_registration(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Reject start while unresolved story work still exists."""
+    product = _product(session)
+    base_spec = _accepted_base_spec(session, product.product_id)
+    _story(session, product.product_id, status=StoryStatus.IN_PROGRESS)
+    amended_file = _write_spec_file(
+        tmp_path,
+        "amended.json",
+        _with_new_item(_artifact()),
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+
+    result = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=product.product_id,
+            spec_file=str(amended_file),
+            base_spec_version_id=base_spec.spec_version_id or 0,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-open-story",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_UNRESOLVED_WORK
+    assert result["errors"][0]["details"]["blocking_reason"] == "OPEN_STORY_EXISTS"
+    assert workflow.updates == []
+    spec_version_ids = [
+        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+    ]
+    assert spec_version_ids == [base_spec.spec_version_id]
+
+
+def test_runner_start_blocks_remaining_candidates_without_pending_spec_registration(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Reject start when injected planning candidate count says scope remains."""
+    product = _product(session)
+    base_spec = _accepted_base_spec(session, product.product_id)
+    amended_file = _write_spec_file(
+        tmp_path,
+        "amended.json",
+        _with_new_item(_artifact()),
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(
+        session=session,
+        workflow_service=workflow,
+        sprint_candidate_count_resolver=lambda _project_id: 1,
+    )
+
+    result = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=product.product_id,
+            spec_file=str(amended_file),
+            base_spec_version_id=base_spec.spec_version_id or 0,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-candidates",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_UNRESOLVED_WORK
+    assert (
+        result["errors"][0]["details"]["blocking_reason"]
+        == "SPRINT_CANDIDATES_EXIST"
+    )
+    assert workflow.updates == []
+    spec_version_ids = [
+        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+    ]
+    assert spec_version_ids == [base_spec.spec_version_id]
 
 
 def test_runner_start_replays_same_idempotency_key_without_mutation(

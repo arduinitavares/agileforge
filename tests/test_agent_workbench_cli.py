@@ -117,6 +117,62 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def scope_extension_validate(
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int | None = None,
+    ) -> JsonObject:
+        """Return a scope extension validation payload."""
+        self.calls.append(
+            (
+                "scope_extension_validate",
+                {
+                    "project_id": project_id,
+                    "spec_file": spec_file,
+                    "base_spec_version_id": base_spec_version_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "valid": True},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def scope_extension_start(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int,
+        expected_state: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope extension start payload."""
+        self.calls.append(
+            (
+                "scope_extension_start",
+                {
+                    "project_id": project_id,
+                    "spec_file": spec_file,
+                    "base_spec_version_id": base_spec_version_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_INTERVIEW"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -1977,6 +2033,126 @@ def test_cli_generates_auto_idempotency_key_when_omitted() -> None:
     key = call_args["idempotency_key"]
     assert isinstance(key, str)
     assert key.startswith("auto-")
+
+
+def test_scope_extension_validate_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope extension validate routes project, spec, and base version."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "scope",
+            "extension",
+            "validate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-file",
+            "specs/amended.json",
+            "--base-spec-version-id",
+            str(SPEC_VERSION_ID),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge scope extension validate"
+    )
+    assert app.calls == [
+        (
+            "scope_extension_validate",
+            {
+                "project_id": PROJECT_ID,
+                "spec_file": "specs/amended.json",
+                "base_spec_version_id": SPEC_VERSION_ID,
+            },
+        )
+    ]
+
+
+def test_scope_extension_start_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope extension start routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "scope",
+            "extension",
+            "start",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-file",
+            "specs/amended.json",
+            "--base-spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--expected-state",
+            "SPRINT_COMPLETE",
+            "--idempotency-key",
+            "scope-extension-start-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge scope extension start"
+    )
+    assert app.calls == [
+        (
+            "scope_extension_start",
+            {
+                "project_id": PROJECT_ID,
+                "spec_file": "specs/amended.json",
+                "base_spec_version_id": SPEC_VERSION_ID,
+                "expected_state": "SPRINT_COMPLETE",
+                "idempotency_key": "scope-extension-start-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_scope_extension_start_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope extension start requires a non-blank idempotency key."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "scope",
+            "extension",
+            "start",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-file",
+            "specs/amended.json",
+            "--base-spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--expected-state",
+            "SPRINT_COMPLETE",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == "agileforge scope extension start"
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
 
 
 def test_cli_routes_project_setup_retry_to_application(

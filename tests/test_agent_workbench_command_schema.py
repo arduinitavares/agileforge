@@ -92,6 +92,11 @@ EXPECTED_PHASE_2E_COMMAND_NAMES = {
     "agileforge spec profile validate",
 }
 
+EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
+    "agileforge scope extension validate",
+    "agileforge scope extension start",
+}
+
 EXPECTED_PHASE_1_INPUTS = {
     "agileforge status": (["project_id"], []),
     "agileforge project list": ([], []),
@@ -170,6 +175,7 @@ def test_command_schema_payloads_are_available() -> None:
         | EXPECTED_PHASE_2C_COMMAND_NAMES
         | EXPECTED_PHASE_2D_COMMAND_NAMES
         | EXPECTED_PHASE_2E_COMMAND_NAMES
+        | EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES
     )
 
     payload_names = {
@@ -1092,3 +1098,70 @@ def test_spec_profile_commands_are_registered_with_expected_inputs() -> None:
     assert ErrorCode.SPEC_FILE_NOT_FOUND.value in validate["errors"]
     assert ErrorCode.SPEC_FILE_INVALID.value in validate["errors"]
     assert ErrorCode.INVALID_COMMAND.value in validate["errors"]
+
+
+def test_scope_extension_commands_publish_expected_cli_schema() -> None:
+    """Publish scope-extension validation and start command contracts."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES.issubset(names)
+    for command_name in EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES:
+        assert command_is_available(command_name) is True
+        assert command_name in capabilities
+        assert capabilities[command_name]["installed"] is True
+
+    validate = command_schema_payload("agileforge scope extension validate")
+    start = command_schema_payload("agileforge scope extension start")
+
+    assert validate["mutates"] is False
+    assert (
+        capabilities["agileforge scope extension validate"]["phase"]
+        == "scope_extension"
+    )
+    assert validate["idempotency_required"] is False
+    assert validate["input"]["required"] == ["project_id", "spec_file"]
+    assert validate["input"]["optional"] == ["base_spec_version_id"]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+        ErrorCode.SPEC_FILE_NOT_FOUND.value,
+        ErrorCode.SPEC_FILE_INVALID.value,
+        ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+        ErrorCode.WORKFLOW_SESSION_FAILED.value,
+    }.issubset(set(validate["errors"]))
+    assert ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value not in validate["errors"]
+    assert ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value not in validate["errors"]
+
+    assert start["mutates"] is True
+    assert capabilities["agileforge scope extension start"]["phase"] == (
+        "scope_extension"
+    )
+    assert start["idempotency_required"] is True
+    assert start["idempotency_policy"]["non_dry_run"] == "required"
+    assert "expected_state" in start["guard_policy"]
+    assert start["input"]["required"] == [
+        "project_id",
+        "spec_file",
+        "base_spec_version_id",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert start["input"]["optional"] == ["changed_by"]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+        ErrorCode.SPEC_FILE_NOT_FOUND.value,
+        ErrorCode.SPEC_FILE_INVALID.value,
+        ErrorCode.STALE_STATE.value,
+        ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE.value,
+        ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+        ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
+        ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
+        ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
+        ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ErrorCode.MUTATION_FAILED.value,
+        ErrorCode.MUTATION_IN_PROGRESS.value,
+        ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ErrorCode.WORKFLOW_SESSION_FAILED.value,
+    }.issubset(set(start["errors"]))

@@ -73,7 +73,9 @@ class ErrorCode(StrEnum):
     TRIAGE_REQUIRED_FIELD_MISSING = "TRIAGE_REQUIRED_FIELD_MISSING"
     TRIAGE_FIELD_INVALID = "TRIAGE_FIELD_INVALID"
     BACKLOG_SOURCE_UNAVAILABLE = "BACKLOG_SOURCE_UNAVAILABLE"
+    SCOPE_EXTENSION_NOT_AVAILABLE = "SCOPE_EXTENSION_NOT_AVAILABLE"
     SCOPE_EXTENSION_BASE_SPEC_MISMATCH = "SCOPE_EXTENSION_BASE_SPEC_MISMATCH"
+    SCOPE_EXTENSION_UNRESOLVED_WORK = "SCOPE_EXTENSION_UNRESOLVED_WORK"
     SCOPE_EXTENSION_NOT_ADDITIVE = "SCOPE_EXTENSION_NOT_ADDITIVE"
     SCOPE_EXTENSION_NO_ADDED_ITEMS = "SCOPE_EXTENSION_NO_ADDED_ITEMS"
 
@@ -385,11 +387,23 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         retryable=False,
         description="Backlog source data is unavailable.",
     ),
+    ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE: ErrorMetadata(
+        code=ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Project scope extension is not available.",
+    ),
     ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH: ErrorMetadata(
         code=ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
         default_exit_code=3,
         retryable=True,
         description="Scope extension base spec guard did not match.",
+    ),
+    ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK: ErrorMetadata(
+        code=ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Project scope extension is blocked by unresolved work.",
     ),
     ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: ErrorMetadata(
         code=ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,

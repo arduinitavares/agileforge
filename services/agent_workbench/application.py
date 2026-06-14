@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 from sqlmodel import Session
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.engine import Engine
 
     from services.agent_workbench.authority_decision import (
@@ -181,8 +183,24 @@ class _ScopeExtensionRunner(Protocol):
         ...
 
 
+def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
+    """Return the direct-runner default when no read projection is available."""
+    return 0
+
+
 class _DefaultScopeExtensionRunner:
     """Session-scoped adapter for scope-extension operations."""
+
+    def __init__(
+        self,
+        *,
+        sprint_candidate_count_resolver: Callable[[int], int] | None = None,
+    ) -> None:
+        """Initialize default runner dependencies."""
+        self._sprint_candidate_count_resolver = (
+            sprint_candidate_count_resolver
+            or _zero_scope_extension_sprint_candidate_count
+        )
 
     def preconditions(
         self,
@@ -221,6 +239,9 @@ class _DefaultScopeExtensionRunner:
             runner = ScopeExtensionRunner(
                 session=session,
                 workflow_service=WorkflowService(),
+                sprint_candidate_count_resolver=(
+                    self._sprint_candidate_count_resolver
+                ),
             )
             return runner.start(request)
 
@@ -2017,8 +2038,18 @@ class AgentWorkbenchApplication:
     def _get_scope_extension_runner(self) -> _ScopeExtensionRunner:
         """Return the scope-extension runner, constructing the default lazily."""
         if self._scope_extension_runner is None:
-            self._scope_extension_runner = _DefaultScopeExtensionRunner()
+            self._scope_extension_runner = _DefaultScopeExtensionRunner(
+                sprint_candidate_count_resolver=(
+                    self._scope_extension_sprint_candidate_count
+                )
+            )
         return self._scope_extension_runner
+
+    def _scope_extension_sprint_candidate_count(self, project_id: int) -> int:
+        """Resolve candidate count from the same read projection as workflow-next."""
+        return _sprint_candidate_count(
+            self.sprint_candidates(project_id=project_id)
+        ) or 0
 
     def _get_vision_runner(self) -> _VisionPhaseRunner:
         """Return the Vision runner, constructing the default lazily."""

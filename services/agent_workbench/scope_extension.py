@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -49,6 +49,11 @@ _PENDING_APPROVAL_NOTES: str = (
     "Required compiler precondition for pending authority generation"
 )
 _RECOVERY_MARKER_PREFIX: str = "scope_extension_start_recovery="
+_UNRESOLVED_WORK_BLOCKERS: frozenset[str] = frozenset(
+    {"OPEN_STORY_EXISTS", "SPRINT_CANDIDATES_EXIST"}
+)
+
+SprintCandidateCountResolver = Callable[[int], int]
 
 
 class ScopeExtensionValidateRequest(BaseModel):
@@ -129,6 +134,11 @@ class ScopeExtensionWorkflowPort(Protocol):
         raise NotImplementedError
 
 
+def _zero_sprint_candidate_count(_project_id: int) -> int:
+    """Return no remaining Sprint candidates for direct runner use."""
+    return 0
+
+
 class ScopeExtensionRunner:
     """Validate and start additive project scope extensions."""
 
@@ -137,10 +147,14 @@ class ScopeExtensionRunner:
         *,
         session: Session,
         workflow_service: ScopeExtensionWorkflowPort,
+        sprint_candidate_count_resolver: SprintCandidateCountResolver | None = None,
     ) -> None:
         """Initialize the runner with storage and workflow ports."""
         self._session = session
         self._workflow_service = workflow_service
+        self._sprint_candidate_count_resolver = (
+            sprint_candidate_count_resolver or _zero_sprint_candidate_count
+        )
 
     def validate(self, request: ScopeExtensionValidateRequest) -> dict[str, Any]:
         """Validate an amended spec against the latest accepted base spec."""
@@ -216,17 +230,28 @@ class ScopeExtensionRunner:
                 remediation=["Refresh scope extension stale guards before retrying."],
             )
 
+        preconditions = evaluate_scope_extension_preconditions(
+            session=self._session,
+            product_id=request.project_id,
+            workflow_state=workflow_state,
+            sprint_candidate_count=self._sprint_candidate_count_resolver(
+                request.project_id
+            ),
+        )
+        start_error = _start_precondition_error(preconditions, request)
+
         resolved_spec_path = Path(request.spec_file).expanduser().resolve()
         request_fingerprint = _start_request_fingerprint(
             request,
             amended_spec_hash=str(validation_data["amended_spec_hash"]),
         )
-        recovery_error = self._recovery_marker_conflict(
-            request=request,
-            request_fingerprint=request_fingerprint,
-        )
-        if recovery_error is not None:
-            return recovery_error
+        if start_error is None:
+            start_error = self._recovery_marker_conflict(
+                request=request,
+                request_fingerprint=request_fingerprint,
+            )
+        if start_error is not None:
+            return start_error
 
         pending = ensure_pending_spec_version_for_project(
             session=self._session,
@@ -844,6 +869,39 @@ def _invalid_start_error(validation_data: Mapping[str, Any]) -> dict[str, Any]:
             "blocking_issues": list(issues) if isinstance(issues, list) else [],
         },
         remediation=["Provide an amended spec that only adds accepted scope items."],
+    )
+
+
+def _start_precondition_error(
+    preconditions: ScopeExtensionPreconditions,
+    request: ScopeExtensionStartRequest,
+) -> dict[str, Any] | None:
+    if preconditions.available:
+        return None
+    blocking_reason = preconditions.blocking_reason or "UNKNOWN"
+    unresolved_work = blocking_reason in _UNRESOLVED_WORK_BLOCKERS
+    return _error(
+        (
+            ERR_SCOPE_EXTENSION_UNRESOLVED_WORK
+            if unresolved_work
+            else ERR_SCOPE_EXTENSION_NOT_AVAILABLE
+        ),
+        details={
+            "project_id": request.project_id,
+            "status": preconditions.status,
+            "blocking_reason": blocking_reason,
+        },
+        remediation=(
+            [
+                "Complete, archive, or refine unresolved work before starting a "
+                "scope extension."
+            ]
+            if unresolved_work
+            else [
+                "Refresh workflow state and retry after current Sprint activity "
+                "is complete."
+            ]
+        ),
     )
 
 
