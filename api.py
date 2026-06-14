@@ -348,6 +348,36 @@ class AuthorityCompileApiRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128)
 
 
+class ScopeExtensionValidateApiRequest(BaseModel):
+    """Request body for validating an amended project-scope spec."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec_file: str = Field(min_length=1)
+    base_spec_version_id: int | None = None
+
+
+class ScopeExtensionStartApiRequest(BaseModel):
+    """Request body for guarded project-scope extension start."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec_file: str = Field(min_length=1)
+    base_spec_version_id: int
+    expected_state: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = Field(default="dashboard-agent", min_length=1)
+
+    @field_validator("spec_file", "expected_state", "idempotency_key", "changed_by")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            message = "must not be blank"
+            raise ValueError(message)
+        return normalized
+
+
 class IncompleteReviewOverrideApiRequest(BaseModel):
     """Candidate-scoped incomplete review override payload."""
 
@@ -1112,18 +1142,67 @@ def _load_sprint_generation_blocker(
     return _sprint_generation_candidate_blocker(candidate_summary)
 
 
-def _runtime_summary_project_id(
+def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | None:
+    """Return scope-extension workflow projection fields when available."""
+    try:
+        result = _workbench_application().workflow_next(project_id=project_id)
+    except Exception:
+        logger.exception("Failed to load workflow-next scope-extension projection")
+        return None
+
+    if not result.get("ok"):
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    if status != "project_scope_extension_available":
+        return None
+
+    raw_actions = data.get("next_actions", [])
+    actions = raw_actions if isinstance(raw_actions, list) else []
+    primary_action = actions[0] if actions else None
+    return {
+        "workflow_next_status": status,
+        "scope_extension_status": status,
+        "scope_extension_available": True,
+        "scope_extension_actions": actions,
+        "scope_extension_primary_action": primary_action,
+    }
+
+
+def _apply_sprint_generation_runtime_blocker(
+    summary: dict[str, Any],
     *,
     project_id: int | None,
-    active: Sprint | None,
-    planned: Sprint | None,
     completed: Sequence[Sprint],
-) -> int:
-    if project_id is not None:
-        return project_id
+    sprint_generation_blocker: dict[str, Any] | None,
+) -> None:
+    """Add create-next blocker and scope-extension projection fields."""
+    if sprint_generation_blocker is None:
+        return
 
-    first_sprint = active or planned or completed[0]
-    return first_sprint.product_id
+    if project_id is None and not completed:
+        return
+    command_project_id = (
+        project_id if project_id is not None else completed[0].product_id
+    )
+    scope_extension_projection = _scope_extension_runtime_projection(
+        command_project_id
+    )
+    summary.update(
+        {
+            "workflow_next_status": "post_sprint_sprint_candidates_unavailable",
+            "create_next_sprint_blocked_reason": sprint_generation_blocker["reason"],
+            "create_next_sprint_valid_commands": [
+                f"agileforge story pending --project-id {command_project_id}",
+                f"agileforge sprint candidates --project-id {command_project_id}",
+            ],
+            "create_next_sprint_blocked_command": sprint_generation_blocker,
+        }
+    )
+    if scope_extension_projection is not None:
+        summary.update(scope_extension_projection)
 
 
 def _build_sprint_runtime_summary(
@@ -1224,26 +1303,12 @@ def _build_sprint_runtime_summary(
                 ),
             }
         )
-    if sprint_generation_blocker is not None:
-        command_project_id = _runtime_summary_project_id(
-            project_id=project_id,
-            active=active,
-            planned=planned,
-            completed=completed,
-        )
-        summary.update(
-            {
-                "workflow_next_status": "post_sprint_sprint_candidates_unavailable",
-                "create_next_sprint_blocked_reason": (
-                    sprint_generation_blocker["reason"]
-                ),
-                "create_next_sprint_valid_commands": [
-                    f"agileforge story pending --project-id {command_project_id}",
-                    (f"agileforge sprint candidates --project-id {command_project_id}"),
-                ],
-                "create_next_sprint_blocked_command": sprint_generation_blocker,
-            }
-        )
+    _apply_sprint_generation_runtime_blocker(
+        summary,
+        project_id=project_id,
+        completed=completed,
+        sprint_generation_blocker=sprint_generation_blocker,
+    )
     return summary
 
 
@@ -2597,6 +2662,45 @@ async def compile_project_authority(
     return _dashboard_authority_response(result)
 
 
+@app.post("/api/projects/{project_id}/scope-extension/validate")
+async def validate_project_scope_extension(
+    project_id: int,
+    req: ScopeExtensionValidateApiRequest,
+) -> dict[str, Any]:
+    """Validate an amended project-scope spec through the application facade."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().scope_extension_validate(
+        project_id=project_id,
+        spec_file=req.spec_file,
+        base_spec_version_id=req.base_spec_version_id,
+    )
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/scope-extension/start")
+async def start_project_scope_extension(
+    project_id: int,
+    req: ScopeExtensionStartApiRequest,
+) -> dict[str, Any]:
+    """Start guarded project-scope extension through the application facade."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().scope_extension_start(
+        project_id=project_id,
+        spec_file=req.spec_file,
+        base_spec_version_id=req.base_spec_version_id,
+        expected_state=req.expected_state,
+        idempotency_key=req.idempotency_key,
+        changed_by=req.changed_by,
+    )
+    return _dashboard_authority_response(result)
+
+
 @app.post("/api/projects/{project_id}/authority/accept")
 async def accept_project_authority(
     project_id: int,
@@ -3458,7 +3562,14 @@ async def get_project_sprint(project_id: int, sprint_id: int) -> dict[str, Any]:
                 ).all(),
                 build_runtime_summary=lambda sprints: _build_sprint_runtime_summary(
                     sprints,
+                    project_id=project_id,
                     workflow_state=workflow_state,
+                    load_candidate_summary=lambda: load_sprint_candidates(
+                        project_id,
+                        story_completion_scope=workflow_state.get(
+                            "story_completion_scope"
+                        ),
+                    ),
                 ),
                 serialize_sprint_detail=lambda sprint, runtime_summary: (
                     _serialize_sprint_detail(
