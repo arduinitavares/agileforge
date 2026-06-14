@@ -125,6 +125,7 @@ class _FakeApplication:
         expected_spec_hash: str,
         expected_state: str,
         expected_setup_status: str,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -141,6 +142,7 @@ class _FakeApplication:
                     "expected_spec_hash": expected_spec_hash,
                     "expected_state": expected_state,
                     "expected_setup_status": expected_setup_status,
+                    "compiler_model": compiler_model,
                     "idempotency_key": idempotency_key,
                     "dry_run": dry_run,
                     "dry_run_id": dry_run_id,
@@ -2156,9 +2158,59 @@ def test_cli_routes_authority_compile_to_application(
                 "dry_run_id": None,
                 "correlation_id": None,
                 "changed_by": "test-agent",
+                "compiler_model": None,
             },
         )
     ]
+
+
+def test_cli_routes_authority_compile_compiler_model_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority compile routes the per-request compiler model."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "compile",
+            "--project-id",
+            "7",
+            "--spec-version-id",
+            "3",
+            "--expected-spec-hash",
+            "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--compiler-model",
+            "openrouter/openai/gpt-5.2",
+            "--idempotency-key",
+            "compile-model-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge authority compile"
+    assert app.calls[-1] == (
+        "authority_compile",
+        {
+            "project_id": 7,
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "compile-model-cli-001",
+            "dry_run": False,
+            "dry_run_id": None,
+            "correlation_id": None,
+            "changed_by": "cli-agent",
+            "compiler_model": "openrouter/openai/gpt-5.2",
+        },
+    )
 
 
 def test_cli_routes_authority_compile_dry_run_without_idempotency_key(
@@ -4037,9 +4089,7 @@ def test_evidence_collect_compacts_warnings_by_default(
                 ],
                 "verbose_flag": "--verbose",
             },
-            "remediation": [
-                "Rerun with --verbose to include full warning details."
-            ],
+            "remediation": ["Rerun with --verbose to include full warning details."],
         }
     ]
 

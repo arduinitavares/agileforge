@@ -202,7 +202,11 @@ class FakeWorkflowPort:
                 return {"ok": False, "error_code": "WORKFLOW_SESSION_FAILED"}
         if not record_progress("workflow_session_status_written"):
             return {"ok": False, "error_code": "MUTATION_RECOVERY_REQUIRED"}
-        return {"ok": True, "session_id": session_id, "state": self.get_session_status(session_id)}
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "state": self.get_session_status(session_id),
+        }
 
 
 class UnavailableWorkflowPort(FakeWorkflowPort):
@@ -673,9 +677,7 @@ def test_project_create_dry_run_missing_spec_returns_structured_error_without_wr
 
     assert result["ok"] is False
     assert _error_code(result) == "SPEC_FILE_NOT_FOUND"
-    assert result["errors"][0]["details"] == {
-        "spec_file": str(missing_spec.resolve())
-    }
+    assert result["errors"][0]["details"] == {"spec_file": str(missing_spec.resolve())}
 
     with Session(engine) as session:
         assert session.exec(select(Product)).all() == []
@@ -701,9 +703,7 @@ def test_project_create_missing_spec_returns_structured_error_before_ledger(
 
     assert result["ok"] is False
     assert _error_code(result) == "SPEC_FILE_NOT_FOUND"
-    assert result["errors"][0]["details"] == {
-        "spec_file": str(missing_spec.resolve())
-    }
+    assert result["errors"][0]["details"] == {"spec_file": str(missing_spec.resolve())}
 
     with Session(engine) as session:
         assert session.exec(select(Product)).all() == []
@@ -714,7 +714,9 @@ def test_project_create_request_validation_rules() -> None:
     with pytest.raises(ValidationError, match="idempotency_key is required"):
         ProjectCreateRequest(name="CLI Project", spec_file="specs/app.md")
 
-    with pytest.raises(ValidationError, match="idempotency_key is not allowed with dry_run"):
+    with pytest.raises(
+        ValidationError, match="idempotency_key is not allowed with dry_run"
+    ):
         ProjectCreateRequest(
             name="CLI Project",
             spec_file="specs/app.md",
@@ -762,7 +764,9 @@ def test_authority_compile_request_validation_rules() -> None:
     assert request.spec_version_id == spec_version_id
     assert request.normalized_request_hash()
 
-    with pytest.raises(ValidationError, match="idempotency_key is not allowed with dry_run"):
+    with pytest.raises(
+        ValidationError, match="idempotency_key is not allowed with dry_run"
+    ):
         AuthorityCompileRequest(
             project_id=project_id,
             spec_version_id=spec_version_id,
@@ -785,6 +789,22 @@ def test_authority_compile_request_validation_rules() -> None:
     )
     assert preview.dry_run is True
     assert preview.dry_run_id == "compile-preview-001"
+
+
+def test_authority_compile_request_hash_includes_compiler_model() -> None:
+    """Compiler model changes must produce a different mutation request hash."""
+    base = AuthorityCompileRequest(
+        project_id=7,
+        spec_version_id=3,
+        expected_spec_hash="a" * 64,
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="compile-hash-001",
+        compiler_model="openrouter/openai/gpt-5.2",
+    )
+    changed = base.model_copy(update={"compiler_model": "openrouter/openai/gpt-5.3"})
+
+    assert base.normalized_request_hash() != changed.normalized_request_hash()
 
 
 def test_project_create_success_registers_spec_without_compiling_authority(
@@ -833,9 +853,9 @@ def test_project_create_success_registers_spec_without_compiling_authority(
         assert ledger is not None
         assert ledger.status == MutationStatus.SUCCEEDED.value
         assert ledger.project_id == data["project_id"]
-        assert "pending_authority_compiled" not in _row_payload(ledger)[
-            "completed_steps"
-        ]
+        assert (
+            "pending_authority_compiled" not in _row_payload(ledger)["completed_steps"]
+        )
 
     assert fake_workflow.created_sessions == [str(data["project_id"])]
     _assert_compile_required_workflow_state(
@@ -888,7 +908,9 @@ def test_authority_compile_succeeds_from_compile_required(
     assert data["setup_status"] == "authority_pending_review"
     assert data["fsm_state"] == "SETUP_REQUIRED"
     assert data["mutation_event_id"] != created["data"]["mutation_event_id"]
-    assert data["next_actions"] == [_expected_authority_review_action(data["project_id"])]
+    assert data["next_actions"] == [
+        _expected_authority_review_action(data["project_id"])
+    ]
 
     with Session(engine) as session:
         authorities = session.exec(select(CompiledSpecAuthority)).all()
@@ -900,12 +922,16 @@ def test_authority_compile_succeeds_from_compile_required(
         assert ledger.status == MutationStatus.SUCCEEDED.value
         payload = _row_payload(ledger)
         assert "pending_authority_compiled" in payload["completed_steps"]
-        assert payload["after"]["compiled_authority_id"] == data["compiled_authority_id"]
+        assert (
+            payload["after"]["compiled_authority_id"] == data["compiled_authority_id"]
+        )
 
     workflow_state = workflow.sessions[str(data["project_id"])]
     assert workflow_state["setup_status"] == "authority_pending_review"
     assert workflow_state["fsm_state"] == "SETUP_REQUIRED"
-    assert workflow_state["setup_compile_mutation_event_id"] == data["mutation_event_id"]
+    assert (
+        workflow_state["setup_compile_mutation_event_id"] == data["mutation_event_id"]
+    )
 
 
 def test_authority_compile_pins_guarded_spec_version(
@@ -1098,8 +1124,13 @@ def test_authority_compile_marks_compiling_before_invocation(
 
     assert compiled["ok"] is True
     assert captured_state["setup_status"] == "authority_compiling"
-    assert captured_state["setup_compile_mutation_event_id"] == compiled["data"]["mutation_event_id"]
-    assert captured_state["setup_next_actions"][0]["command"] == "agileforge mutation show"
+    assert (
+        captured_state["setup_compile_mutation_event_id"]
+        == compiled["data"]["mutation_event_id"]
+    )
+    assert (
+        captured_state["setup_next_actions"][0]["command"] == "agileforge mutation show"
+    )
 
 
 def test_authority_compile_failure_records_retryable_compile_failed(
@@ -1148,7 +1179,10 @@ def test_authority_compile_failure_records_retryable_compile_failed(
     assert data["failure_artifact_stage"] == "output_validation"
     assert data["setup_failure_first_error"] == "First compiler validation gap."
     assert data["next_actions"][0]["command"] == "agileforge authority compile"
-    assert data["next_actions"][0]["args"]["expected_setup_status"] == "authority_compile_failed"
+    assert (
+        data["next_actions"][0]["args"]["expected_setup_status"]
+        == "authority_compile_failed"
+    )
 
     workflow_state = workflow.sessions[str(created["data"]["project_id"])]
     assert workflow_state["setup_status"] == "authority_compile_failed"
@@ -1300,7 +1334,10 @@ def test_authority_compile_final_workflow_failure_marks_recovery_required(
         payload = _row_payload(ledger)
         assert payload["last_error"]["code"] == "WORKFLOW_SESSION_FAILED"
         assert payload["last_error"]["project_id"] == created["data"]["project_id"]
-        assert payload["last_error"]["spec_version_id"] == created["data"]["spec_version_id"]
+        assert (
+            payload["last_error"]["spec_version_id"]
+            == created["data"]["spec_version_id"]
+        )
         assert payload["last_error"]["spec_hash"] == created["data"]["spec_hash"]
         assert payload["last_error"]["mutation_event_id"] == mutation_event_id
         assert payload["last_error"]["workflow_error"] == workflow_error
@@ -1359,7 +1396,11 @@ def test_authority_compile_initial_workflow_failure_marks_recovery_required(
     ) -> dict[str, Any]:
         del engine, force_recompile, tool_context, lease_guard, record_progress
         compiler_calls.append(spec_version_id)
-        return {"success": True, "authority_id": 999, "spec_version_id": spec_version_id}
+        return {
+            "success": True,
+            "authority_id": 999,
+            "spec_version_id": spec_version_id,
+        }
 
     monkeypatch.setattr(
         project_setup,
@@ -1696,7 +1737,9 @@ def test_event_159_style_long_compile_survives_past_original_lease(
         ledger = session.get(CliMutationLedger, data["mutation_event_id"])
         assert ledger is not None
         assert ledger.status == MutationStatus.SUCCEEDED.value
-        assert "pending_authority_compiled" not in _row_payload(ledger)["completed_steps"]
+        assert (
+            "pending_authority_compiled" not in _row_payload(ledger)["completed_steps"]
+        )
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
@@ -1756,7 +1799,9 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
         assert len(session.exec(select(Product)).all()) == 1
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
-    listed = MutationLedgerRepository(engine=engine).list_events(status="recovery_required")
+    listed = MutationLedgerRepository(engine=engine).list_events(
+        status="recovery_required"
+    )
     assert listed["data"]["items"] == []
 
 
@@ -1983,7 +2028,9 @@ def test_project_setup_retry_recovery_without_link_keeps_compile_required_state(
         spec_version_id=data["spec_version_id"],
     )
     with Session(engine) as session:
-        create_row = session.get(CliMutationLedger, created["data"]["mutation_event_id"])
+        create_row = session.get(
+            CliMutationLedger, created["data"]["mutation_event_id"]
+        )
         retry_row = session.get(CliMutationLedger, data["mutation_event_id"])
         assert create_row is not None
         assert retry_row is not None
@@ -2028,8 +2075,9 @@ def test_project_setup_retry_returns_workflow_unavailable_error(
         "workflow storage unavailable"
     )
     assert result["data"]["project_id"] == project_id
-    assert result["data"]["recovery_mutation_event_id"] == (
-        recovery["data"]["mutation_event_id"]
+    assert (
+        result["data"]["recovery_mutation_event_id"]
+        == (recovery["data"]["mutation_event_id"])
     )
     assert result["data"]["next_actions"] == [
         {
@@ -2039,9 +2087,7 @@ def test_project_setup_retry_returns_workflow_unavailable_error(
                 "spec_file": str(spec_file),
                 "expected_state": "SETUP_REQUIRED",
                 "expected_context_fingerprint": "<refresh-context-fingerprint>",
-                "recovery_mutation_event_id": recovery["data"][
-                    "mutation_event_id"
-                ],
+                "recovery_mutation_event_id": recovery["data"]["mutation_event_id"],
             },
             "reason": "Retry setup with a new idempotency key after fixing the reported error.",
         }
@@ -2458,7 +2504,9 @@ def test_linked_setup_retry_success_supersedes_original_and_replays(
     monkeypatch.setattr(
         MutationLedgerRepository,
         "supersede_recovered_event",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy helper called")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy helper called")
+        ),
     )
     expected_fingerprint = _retry_fingerprint(
         project_id=project_id,
@@ -2668,7 +2716,9 @@ def test_linked_retry_post_side_effect_failure_transfers_recovery(
     monkeypatch.setattr(
         MutationLedgerRepository,
         "supersede_recovered_event",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy helper called")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy helper called")
+        ),
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     runner.fail_retry_after_side_effects_for_test = True
@@ -2700,10 +2750,16 @@ def test_linked_retry_post_side_effect_failure_transfers_recovery(
         assert original.status == MutationStatus.SUPERSEDED.value
         assert original.superseded_by_mutation_event_id == retry_event_id
         assert retry.status == MutationStatus.RECOVERY_REQUIRED.value
-    listed = MutationLedgerRepository(engine=engine).list_events(status="recovery_required")
-    assert [item["mutation_event_id"] for item in listed["data"]["items"]] == [retry_event_id]
+    listed = MutationLedgerRepository(engine=engine).list_events(
+        status="recovery_required"
+    )
+    assert [item["mutation_event_id"] for item in listed["data"]["items"]] == [
+        retry_event_id
+    ]
 
-    original_replay = ProjectSetupMutationRunner(engine=engine, workflow=workflow).create_project(
+    original_replay = ProjectSetupMutationRunner(
+        engine=engine, workflow=workflow
+    ).create_project(
         ProjectCreateRequest(
             name="CLI Project",
             spec_file=str(spec_file),
@@ -2853,7 +2909,9 @@ def test_workflow_setup_retry_recovers_session_created_without_status(
         spec_file=spec_file,
         workflow_state=fake_workflow.sessions[str(project_id)],
     )
-    retry = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow).retry_setup(
+    retry = ProjectSetupMutationRunner(
+        engine=engine, workflow=fake_workflow
+    ).retry_setup(
         ProjectSetupRetryRequest(
             project_id=project_id,
             spec_file=str(spec_file),
@@ -2916,7 +2974,9 @@ def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
         spec_file=spec_file,
         workflow_state=fake_workflow.sessions[str(project_id)],
     )
-    retry = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow).retry_setup(
+    retry = ProjectSetupMutationRunner(
+        engine=engine, workflow=fake_workflow
+    ).retry_setup(
         ProjectSetupRetryRequest(
             project_id=project_id,
             spec_file=str(spec_file),
@@ -2942,7 +3002,10 @@ def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
         retry_row = session.get(CliMutationLedger, retry["data"]["mutation_event_id"])
         assert retry_row is not None
         assert "workflow_session_created" in _row_payload(retry_row)["completed_steps"]
-        assert "workflow_session_status_written" in _row_payload(retry_row)["completed_steps"]
+        assert (
+            "workflow_session_status_written"
+            in _row_payload(retry_row)["completed_steps"]
+        )
 
 
 def test_linked_retry_repository_helpers_roll_back_and_report_conflict(

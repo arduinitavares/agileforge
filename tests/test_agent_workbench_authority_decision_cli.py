@@ -87,11 +87,12 @@ class _AuthorityDecisionCliApplication:
         self.calls.append(("authority_reject", _request_payload(request)))
         return {"ok": True, "data": {"rejected": True}, "warnings": [], "errors": []}
 
-    def authority_regenerate(
+    def authority_regenerate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         spec_version_id: int,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         changed_by: str = "cli-agent",
         dry_run: bool = False,
@@ -103,6 +104,7 @@ class _AuthorityDecisionCliApplication:
                 {
                     "project_id": project_id,
                     "spec_version_id": spec_version_id,
+                    "compiler_model": compiler_model,
                     "idempotency_key": idempotency_key,
                     "changed_by": changed_by,
                     "dry_run": dry_run,
@@ -300,9 +302,50 @@ def test_authority_regenerate_cli_invokes_application(
             {
                 "project_id": PROJECT_ID,
                 "spec_version_id": 3,
+                "compiler_model": None,
                 "idempotency_key": "regen-cli-001",
                 "changed_by": "test-agent",
                 "dry_run": True,
+            },
+        )
+    ]
+
+
+def test_authority_regenerate_cli_routes_compiler_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority regenerate routes the per-request compiler model."""
+    app = _AuthorityDecisionCliApplication()
+
+    rc = main(
+        [
+            "authority",
+            "regenerate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            "3",
+            "--compiler-model",
+            "openrouter/openai/gpt-5.2",
+            "--idempotency-key",
+            "regen-model-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert app.calls == [
+        (
+            "authority_regenerate",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": 3,
+                "idempotency_key": "regen-model-cli-001",
+                "changed_by": "cli-agent",
+                "dry_run": False,
+                "compiler_model": "openrouter/openai/gpt-5.2",
             },
         )
     ]
@@ -337,6 +380,7 @@ def test_authority_regenerate_cli_defaults_changed_by(
             {
                 "project_id": PROJECT_ID,
                 "spec_version_id": 3,
+                "compiler_model": None,
                 "idempotency_key": "regen-cli-002",
                 "changed_by": "cli-agent",
                 "dry_run": False,
@@ -742,7 +786,7 @@ def test_authority_help_shows_review_accept_reject_examples(
     assert "agileforge authority review --project-id 1" in captured.out
     assert "agileforge authority accept --project-id 1" in captured.out
     assert (
-        'agileforge authority reject --project-id 1 --review-token <review_token> '
+        "agileforge authority reject --project-id 1 --review-token <review_token> "
         '--reason "..." --idempotency-key reject-001'
     ) in captured.out
 

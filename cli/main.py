@@ -224,6 +224,7 @@ class _Application(Protocol):
         expected_spec_hash: str,
         expected_state: str,
         expected_setup_status: str,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -272,11 +273,12 @@ class _Application(Protocol):
         """Reject pending authority from a guarded request."""
         ...
 
-    def authority_regenerate(
+    def authority_regenerate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         spec_version_id: int,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         changed_by: str = "cli-agent",
         dry_run: bool = False,
@@ -1203,6 +1205,7 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_compile.add_argument("--expected-spec-hash", required=True)
     authority_compile.add_argument("--expected-state", required=True)
     authority_compile.add_argument("--expected-setup-status", required=True)
+    authority_compile.add_argument("--compiler-model")
     authority_compile.add_argument("--idempotency-key")
     authority_compile.add_argument("--dry-run", action="store_true")
     authority_compile.add_argument("--dry-run-id")
@@ -1271,6 +1274,7 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     authority_regenerate.add_argument("--project-id", type=int, required=True)
     authority_regenerate.add_argument("--spec-version-id", type=int, required=True)
+    authority_regenerate.add_argument("--compiler-model")
     authority_regenerate.add_argument("--idempotency-key")
     authority_regenerate.add_argument("--changed-by", default="cli-agent")
     authority_regenerate.add_argument("--dry-run", action="store_true")
@@ -2145,6 +2149,7 @@ def _authority_compile(
         expected_spec_hash=args.expected_spec_hash,
         expected_state=args.expected_state,
         expected_setup_status=args.expected_setup_status,
+        compiler_model=args.compiler_model,
         idempotency_key=args.idempotency_key,
         dry_run=args.dry_run,
         dry_run_id=args.dry_run_id,
@@ -2214,6 +2219,7 @@ def _authority_regenerate(
     return "agileforge authority regenerate", application.authority_regenerate(
         project_id=args.project_id,
         spec_version_id=args.spec_version_id,
+        compiler_model=args.compiler_model,
         idempotency_key=args.idempotency_key,
         changed_by=args.changed_by,
         dry_run=args.dry_run,

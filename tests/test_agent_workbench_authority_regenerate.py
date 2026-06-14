@@ -174,6 +174,7 @@ def test_regenerate_persists_pending_v2_authority_and_does_not_accept(
     approved_spec_version_id: int,
 ) -> None:
     """Real regenerate should persist pending authority and stop before accept."""
+
     def fake_compile(  # noqa: PLR0913
         *,
         engine: Engine,
@@ -376,6 +377,59 @@ def test_regenerate_idempotency_replays_completed_mutation(
     assert compile_calls == [(approved_spec_version_id, True)]
 
 
+def test_authority_regenerate_ledger_hash_includes_compiler_model(
+    authority_regenerate_runner: AuthorityRegenerateRunner,
+    product_id: int,
+    approved_spec_version_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reusing a key with a different compiler model must conflict."""
+
+    def fake_compile(  # noqa: PLR0913
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: object | None = None,
+        record_progress: object | None = None,
+    ) -> dict[str, object]:
+        del force_recompile, tool_context, lease_guard, record_progress
+        return _persist_compiled_authority(
+            engine=engine,
+            product_id=product_id,
+            prompt_hash="a" * 64,
+            spec_version_id=spec_version_id,
+        )
+
+    monkeypatch.setattr(
+        authority_regenerate_mod,
+        "compile_spec_authority_for_version_with_engine",
+        fake_compile,
+    )
+
+    first = authority_regenerate_runner.regenerate(
+        AuthorityRegenerateRequest(
+            project_id=product_id,
+            spec_version_id=approved_spec_version_id,
+            idempotency_key="regen-model-hash-001",
+            compiler_model="openrouter/openai/gpt-5.2",
+        )
+    )
+    second = authority_regenerate_runner.regenerate(
+        AuthorityRegenerateRequest(
+            project_id=product_id,
+            spec_version_id=approved_spec_version_id,
+            idempotency_key="regen-model-hash-001",
+            compiler_model="openrouter/openai/gpt-5.3",
+        )
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
 def test_regenerate_passes_lease_callbacks_to_compile(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     monkeypatch: pytest.MonkeyPatch,
@@ -450,6 +504,7 @@ def test_regenerate_compile_failure_does_not_claim_terminal_error_if_finalize_fa
     approved_spec_version_id: int,
 ) -> None:
     """Compile failure should surface mutation conflict when terminal fencing fails."""
+
     def fake_compile(  # noqa: PLR0913
         *,
         engine: Engine,

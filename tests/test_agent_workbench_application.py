@@ -91,6 +91,7 @@ def _structured_spec_payload() -> dict[str, Any]:
         },
     }
 
+
 CLI_MUTATION_LEDGER_CREATE_SQL_PHASE_2A = """
 CREATE TABLE IF NOT EXISTS cli_mutation_ledger (
     mutation_event_id INTEGER PRIMARY KEY,
@@ -2339,6 +2340,7 @@ def test_application_routes_authority_compile_to_setup_runner() -> None:
         dry_run_id=None,
         correlation_id="corr-1",
         changed_by="test-agent",
+        compiler_model="openrouter/openai/gpt-5.2",
     )
 
     assert result["ok"] is True
@@ -2349,6 +2351,7 @@ def test_application_routes_authority_compile_to_setup_runner() -> None:
     assert request.expected_spec_hash == "a" * 64
     assert request.expected_state == "SETUP_REQUIRED"
     assert request.expected_setup_status == "authority_compile_required"
+    assert request.compiler_model == "openrouter/openai/gpt-5.2"
     assert request.idempotency_key == "authority-compile-cli-001"
     assert request.correlation_id == "corr-1"
     assert request.changed_by == "test-agent"
@@ -2419,6 +2422,7 @@ def test_application_authority_regenerate_delegates_to_runner() -> None:
         idempotency_key="regen-app-001",
         changed_by="test",
         dry_run=True,
+        compiler_model="openrouter/openai/gpt-5.2",
     )
 
     assert result["ok"] is True
@@ -2429,6 +2433,7 @@ def test_application_authority_regenerate_delegates_to_runner() -> None:
             idempotency_key="regen-app-001",
             changed_by="test",
             dry_run=True,
+            compiler_model="openrouter/openai/gpt-5.2",
         )
     ]
 
@@ -2450,6 +2455,7 @@ def test_authority_regenerate_is_registered_command() -> None:
     assert metadata.input_required == ("project_id", "spec_version_id")
     assert metadata.input_optional == (
         "idempotency_key",
+        "compiler_model",
         "changed_by",
         "dry_run",
     )
@@ -2461,6 +2467,51 @@ def test_authority_regenerate_is_registered_command() -> None:
         "AUTHORITY_REVIEW_REQUIRED",
         "SPEC_COMPILE_FAILED",
         "MUTATION_FAILED",
+        "IDEMPOTENCY_KEY_REUSED",
+        "MUTATION_IN_PROGRESS",
+        "MUTATION_RECOVERY_REQUIRED",
+        "MUTATION_RESUME_CONFLICT",
+    }
+
+
+def test_authority_compile_is_registered_command() -> None:
+    """Verify authority compile is discoverable with mutation metadata."""
+    contracts = {command.name: command for command in command_contracts()}
+
+    metadata = contracts["agileforge authority compile"]
+
+    assert metadata.mutates is True
+    assert metadata.phase == "phase_2c"
+    assert metadata.requires_idempotency_key is True
+    assert metadata.idempotency_policy == {
+        "non_dry_run": "required",
+        "dry_run": "forbidden",
+        "dry_run_trace_field": "dry_run_id",
+    }
+    assert metadata.input_required == (
+        "project_id",
+        "spec_version_id",
+        "expected_spec_hash",
+        "expected_state",
+        "expected_setup_status",
+    )
+    assert metadata.input_optional == (
+        "idempotency_key",
+        "compiler_model",
+        "dry_run",
+        "dry_run_id",
+        "correlation_id",
+        "changed_by",
+    )
+    assert set(metadata.errors) == {
+        "SCHEMA_NOT_READY",
+        "PROJECT_NOT_FOUND",
+        "SPEC_COMPILE_FAILED",
+        "WORKFLOW_SESSION_FAILED",
+        "STALE_STATE",
+        "STALE_SETUP_STATUS",
+        "STALE_SPEC_HASH",
+        "STALE_SPEC_VERSION",
         "IDEMPOTENCY_KEY_REUSED",
         "MUTATION_IN_PROGRESS",
         "MUTATION_RECOVERY_REQUIRED",
@@ -3713,7 +3764,9 @@ def test_application_workflow_next_routes_story_persistence_to_next_pending_stor
     assert result["data"]["blocked_future_commands"] == []
 
 
-def test_workflow_next_routes_story_persistence_to_selection_complete_when_partially_saved() -> None:  # noqa: E501
+def test_workflow_next_routes_story_persistence_to_selection_complete_when_partially_saved() -> (  # noqa: E501
+    None
+):
     """Story persistence should advertise installed selection completion."""
     app = AgentWorkbenchApplication(
         read_projection=_WorkflowStateReader(
@@ -3812,7 +3865,9 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
     assert result["data"]["blocked_future_commands"] == []
 
 
-def test_workflow_next_routes_story_persistence_to_scoped_complete_when_milestone_ready() -> None:  # noqa: E501
+def test_workflow_next_routes_story_persistence_to_scoped_complete_when_milestone_ready() -> (  # noqa: E501
+    None
+):
     """Expose scoped Story completion when one milestone is planning-ready."""
     app = AgentWorkbenchApplication(
         read_projection=_StoryMilestoneReadyReadProjection(),
@@ -3911,9 +3966,9 @@ def test_workflow_next_blocks_generate_for_stale_story_scope() -> None:
     assert result["ok"] is True
     data = result["data"]
     assert data["status"] == "sprint_setup_story_scope_repair_required"
-    assert "agileforge sprint generate --project-id 7" not in data[
-        "next_valid_commands"
-    ]
+    assert (
+        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    )
     assert (
         "agileforge story repair-readiness --project-id 7 "
         "--expected-state SPRINT_SETUP "
@@ -4298,9 +4353,9 @@ def test_workflow_next_blocks_sprint_generate_when_saved_stories_not_refined(
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert "agileforge sprint generate --project-id 7" not in data[
-        "next_valid_commands"
-    ]
+    assert (
+        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    )
     assert data["blocked_commands"] == [
         {
             "command": "agileforge sprint generate",
@@ -4352,8 +4407,7 @@ def test_workflow_next_routes_impact_story_to_story_reconciliation(
     assert data["status"] == "post_sprint_story_impact_needs_reconciliation"
     assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
     assert (
-        'agileforge story generate --project-id 7 '
-        '--parent-requirement "Quality Gate"'
+        'agileforge story generate --project-id 7 --parent-requirement "Quality Gate"'
     ) in data["next_valid_commands"]
     assert not any(
         command.startswith("agileforge sprint generate")
@@ -4658,13 +4712,10 @@ def test_refined_backlog_stale_guard_blocks_placeholder_backlog_commands() -> No
     assert result["ok"] is True
     data = result["data"]
     assert data["status"] == "post_sprint_blocked_by_stale_backlog"
-    assert data["next_valid_commands"] == [
-        "agileforge backlog history --project-id 7"
-    ]
+    assert data["next_valid_commands"] == ["agileforge backlog history --project-id 7"]
     assert not any("<attempt_id>" in command for command in data["next_valid_commands"])
     assert not any(
-        "<artifact_fingerprint>" in command
-        for command in data["next_valid_commands"]
+        "<artifact_fingerprint>" in command for command in data["next_valid_commands"]
     )
     assert {
         "command": "agileforge backlog save",
@@ -4690,6 +4741,7 @@ def test_workflow_next_post_sprint_triage_required_action_reflects_unavailable_t
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reflect unavailable triage commands in the required next action."""
+
     def unavailable_triage_command(command_name: str) -> bool:
         return command_name != "agileforge sprint triage"
 
@@ -4939,9 +4991,7 @@ def test_workflow_next_marks_accept_blocked_when_review_has_blocking_findings() 
     assert "AUTHORITY_REVIEW_PACKET_TRUNCATED" in accept_action["reason"]
 
 
-def test_workflow_next_routes_rejected_authority_to_installed_regenerate() -> (
-    None
-):
+def test_workflow_next_routes_rejected_authority_to_installed_regenerate() -> None:
     """Rejected authority must expose the installed regenerate repair path."""
     app = AgentWorkbenchApplication(
         read_projection=_AuthorityRejectedReadProjection(),

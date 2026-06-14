@@ -1036,6 +1036,7 @@ class AgentWorkbenchApplication:
         expected_spec_hash: str,
         expected_state: str,
         expected_setup_status: str,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -1049,6 +1050,7 @@ class AgentWorkbenchApplication:
             expected_spec_hash=expected_spec_hash,
             expected_state=expected_state,
             expected_setup_status=expected_setup_status,
+            compiler_model=compiler_model,
             idempotency_key=idempotency_key,
             dry_run=dry_run,
             dry_run_id=dry_run_id,
@@ -1079,11 +1081,12 @@ class AgentWorkbenchApplication:
         """Reject pending authority through the decision runner."""
         return self._get_authority_decision_runner().reject(request)
 
-    def authority_regenerate(
+    def authority_regenerate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         spec_version_id: int,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         changed_by: str = "cli-agent",
         dry_run: bool = False,
@@ -1097,6 +1100,7 @@ class AgentWorkbenchApplication:
             AuthorityRegenerateRequest(
                 project_id=project_id,
                 spec_version_id=spec_version_id,
+                compiler_model=compiler_model,
                 idempotency_key=idempotency_key,
                 changed_by=changed_by,
                 dry_run=dry_run,
@@ -2430,8 +2434,7 @@ def _apply_authority_compiling_routing(
     data["blocked_commands"] = [
         {
             "command": (
-                "agileforge mutation show "
-                "--mutation-event-id <mutation_event_id>"
+                "agileforge mutation show --mutation-event-id <mutation_event_id>"
             ),
             "installed": True,
             "reason": (
@@ -3119,9 +3122,7 @@ def _story_review_commands_for_candidate(
     review_candidate: dict[str, str],
 ) -> list[tuple[str, str]]:
     """Return guarded Story review commands for one saveable draft."""
-    parent_flag = _story_parent_requirement_flag(
-        review_candidate["parent_requirement"]
-    )
+    parent_flag = _story_parent_requirement_flag(review_candidate["parent_requirement"])
     return [
         (
             "agileforge story history",
@@ -3281,8 +3282,7 @@ def _story_selection_complete_command(
 ) -> tuple[str, str]:
     """Return a Story selection completion command."""
     parent_requirement_flags = " ".join(
-        _story_parent_requirement_flag(requirement)
-        for requirement in requirements
+        _story_parent_requirement_flag(requirement) for requirement in requirements
     )
     return (
         "agileforge story complete",

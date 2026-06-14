@@ -32,7 +32,7 @@ HTTP_CONFLICT = 409
 HTTP_TEMP_REDIRECT = 307
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
-REVIEW_FIELD = "review_" "token"
+REVIEW_FIELD = "review_token"
 AUTHORITY_REVIEW_FIXTURE = "agileforge.authority_review.v1:sha256:test"
 LEGACY_COMPILED_AUTHORITY_JSON = '{"invariants":[]}'
 
@@ -337,9 +337,7 @@ class FakeAuthorityApplication:
                 "fsm_state": "SETUP_REQUIRED",
                 "setup_failure_artifact_id": "setup-artifact-1",
                 "setup_failure_stage": "output_validation",
-                "setup_failure_summary": (
-                    "SPEC_COMPILATION_FAILED: invalid spec path"
-                ),
+                "setup_failure_summary": ("SPEC_COMPILATION_FAILED: invalid spec path"),
                 "raw_output_preview": '{"invalid": true}',
                 "has_full_artifact": True,
             }
@@ -477,9 +475,7 @@ class FakeAuthorityApplication:
                 "fsm_state": "SETUP_REQUIRED",
                 "setup_failure_artifact_id": "setup-artifact-1",
                 "setup_failure_stage": "output_validation",
-                "setup_failure_summary": (
-                    "SPEC_COMPILATION_FAILED: invalid spec path"
-                ),
+                "setup_failure_summary": ("SPEC_COMPILATION_FAILED: invalid spec path"),
                 "raw_output_preview": '{"invalid": true}',
                 "has_full_artifact": True,
             }
@@ -535,6 +531,7 @@ class FakeAuthorityApplication:
         expected_spec_hash: str,
         expected_state: str,
         expected_setup_status: str,
+        compiler_model: str | None = None,
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -552,6 +549,7 @@ class FakeAuthorityApplication:
                     "expected_spec_hash": expected_spec_hash,
                     "expected_state": expected_state,
                     "expected_setup_status": expected_setup_status,
+                    "compiler_model": compiler_model,
                     "idempotency_key": idempotency_key,
                     "changed_by": changed_by,
                 },
@@ -950,8 +948,7 @@ def test_dashboard_accept_requires_review_token_or_full_guard_set(
     assert response.status_code == HTTP_BAD_REQUEST
     assert fake_app.accept_requests == []
     assert (
-        response.json()["detail"]["errors"][0]["code"]
-        == "AUTHORITY_GUARD_INCOMPLETE"
+        response.json()["detail"]["errors"][0]["code"] == "AUTHORITY_GUARD_INCOMPLETE"
     )
 
 
@@ -972,8 +969,7 @@ def test_dashboard_accept_rejects_fingerprint_only_guard(
     assert response.status_code == HTTP_BAD_REQUEST
     assert fake_app.accept_requests == []
     assert (
-        response.json()["detail"]["errors"][0]["code"]
-        == "AUTHORITY_GUARD_INCOMPLETE"
+        response.json()["detail"]["errors"][0]["code"] == "AUTHORITY_GUARD_INCOMPLETE"
     )
 
 
@@ -1062,8 +1058,7 @@ def test_dashboard_reject_records_reason_and_keeps_vision_locked(
     assert request.actor_mode == "dashboard-human"
     assert workflow.states[str(product.product_id)]["fsm_state"] == "SETUP_REQUIRED"
     assert (
-        workflow.states[str(product.product_id)]["setup_status"]
-        == "authority_rejected"
+        workflow.states[str(product.product_id)]["setup_status"] == "authority_rejected"
     )
     assert workflow.states[str(product.product_id)]["setup_error"] == reason
 
@@ -1088,8 +1083,7 @@ def test_dashboard_reject_requires_explicit_idempotency_key(
     assert response.status_code == HTTP_BAD_REQUEST
     assert fake_app.reject_requests == []
     assert (
-        response.json()["detail"]["errors"][0]["code"]
-        == "AUTHORITY_GUARD_INCOMPLETE"
+        response.json()["detail"]["errors"][0]["code"] == "AUTHORITY_GUARD_INCOMPLETE"
     )
     assert response.json()["detail"]["errors"][0]["details"]["missing"] == [
         "idempotency_key"
@@ -1118,9 +1112,7 @@ def test_authority_compile_api_routes_guarded_request(
                 {
                     "command": "agileforge authority review",
                     "args": {"project_id": 10},
-                    "reason": (
-                        "Review pending compiled authority before acceptance."
-                    ),
+                    "reason": ("Review pending compiled authority before acceptance."),
                 }
             ],
         },
@@ -1136,6 +1128,7 @@ def test_authority_compile_api_routes_guarded_request(
             "expected_spec_hash": "a" * 64,
             "expected_state": "SETUP_REQUIRED",
             "expected_setup_status": "authority_compile_required",
+            "compiler_model": "openrouter/openai/gpt-5.2",
             "idempotency_key": "authority-compile-api-001",
         },
     )
@@ -1152,6 +1145,7 @@ def test_authority_compile_api_routes_guarded_request(
             "expected_spec_hash": "a" * 64,
             "expected_state": "SETUP_REQUIRED",
             "expected_setup_status": "authority_compile_required",
+            "compiler_model": "openrouter/openai/gpt-5.2",
             "idempotency_key": "authority-compile-api-001",
             "changed_by": "dashboard-ui",
         },
@@ -1222,6 +1216,28 @@ def test_authority_compile_api_forbids_extra_fields(
             "expected_setup_status": "authority_compile_required",
             "idempotency_key": "authority-compile-api-001",
             "spec_file_path": "specs/spec.json",
+        },
+    )
+
+    assert response.status_code == HTTP_UNPROCESSABLE
+
+
+def test_authority_compile_api_rejects_misspelled_compiler_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler model must use the exact public field name."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    repo.products.append(DummyProduct(product_id=10, name="API Project"))
+
+    response = client.post(
+        "/api/projects/10/authority/compile",
+        json={
+            "spec_version_id": 3,
+            "expected_spec_hash": "a" * 64,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+            "idempotency_key": "authority-compile-api-001",
+            "compilerModel": "openrouter/openai/gpt-5.2",
         },
     )
 
@@ -1454,9 +1470,7 @@ def test_get_project_authority_review_post_accept_fallback(
     )
 
     monkeypatch.setattr(
-        api_module,
-        "_load_authority_selection",
-        lambda *_args, **_kwargs: selection
+        api_module, "_load_authority_selection", lambda *_args, **_kwargs: selection
     )
 
     snapshot = AuthorityReviewSnapshot(
@@ -1510,7 +1524,7 @@ def test_get_project_authority_review_post_accept_fallback(
     monkeypatch.setattr(
         api_module,
         "build_authority_review_snapshot",
-        lambda *_args, **_kwargs: snapshot
+        lambda *_args, **_kwargs: snapshot,
     )
 
     response = client.get(f"/api/projects/{product.product_id}/authority/review")
@@ -1569,9 +1583,7 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
     )
 
     monkeypatch.setattr(
-        api_module,
-        "_load_authority_selection",
-        lambda *_args, **_kwargs: selection
+        api_module, "_load_authority_selection", lambda *_args, **_kwargs: selection
     )
     monkeypatch.setattr(
         api_module,

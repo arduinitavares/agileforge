@@ -261,6 +261,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
         input_optional=(
             "idempotency_key",
+            "compiler_model",
             "dry_run",
             "dry_run_id",
             "correlation_id",
@@ -377,6 +378,7 @@ _PHASE_2C_COMMANDS: tuple[CommandMetadata, ...] = (
         input_required=("project_id", "spec_version_id"),
         input_optional=(
             "idempotency_key",
+            "compiler_model",
             "changed_by",
             "dry_run",
         ),

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import update
 from sqlmodel import Session, select
 
@@ -56,6 +56,7 @@ class AuthorityRegenerateRequest(BaseModel):
 
     project_id: int
     spec_version_id: int
+    compiler_model: str | None = Field(default=None, min_length=1)
     idempotency_key: str | None = None
     changed_by: str = "cli-agent"
     dry_run: bool = False
@@ -141,9 +142,7 @@ class AuthorityRegenerateRunner:
                 command=AUTHORITY_REGENERATE_COMMAND,
                 error=workbench_error(
                     ErrorCode.INVALID_COMMAND,
-                    message=(
-                        "idempotency_key is required for authority regeneration."
-                    ),
+                    message=("idempotency_key is required for authority regeneration."),
                     details={
                         "project_id": request.project_id,
                         "spec_version_id": request.spec_version_id,
@@ -153,8 +152,7 @@ class AuthorityRegenerateRunner:
 
         now = datetime.now(UTC)
         lease_owner = (
-            "agileforge-cli:authority-regenerate:"
-            f"{request.idempotency_key}:{uuid4()}"
+            f"agileforge-cli:authority-regenerate:{request.idempotency_key}:{uuid4()}"
         )
         ledger = MutationLedgerRepository(engine=self.engine)
         loaded = ledger.create_or_load(
@@ -165,6 +163,7 @@ class AuthorityRegenerateRunner:
                     "command": AUTHORITY_REGENERATE_COMMAND,
                     "project_id": request.project_id,
                     "spec_version_id": request.spec_version_id,
+                    "compiler_model": request.compiler_model,
                 }
             ),
             project_id=request.project_id,
@@ -367,10 +366,7 @@ class AuthorityRegenerateRunner:
         """Validate project/spec ownership and approval guards."""
         with Session(self.engine) as session:
             spec_version = session.get(SpecRegistry, request.spec_version_id)
-            if (
-                spec_version is None
-                or spec_version.product_id != request.project_id
-            ):
+            if spec_version is None or spec_version.product_id != request.project_id:
                 return error_envelope(
                     command=AUTHORITY_REGENERATE_COMMAND,
                     error=workbench_error(
@@ -466,10 +462,7 @@ def _has_terminal_decision_for_authority(
         session.exec(
             select(SpecAuthorityAcceptance)
             .where(SpecAuthorityAcceptance.product_id == request.project_id)
-            .where(
-                SpecAuthorityAcceptance.spec_version_id
-                == request.spec_version_id
-            )
+            .where(SpecAuthorityAcceptance.spec_version_id == request.spec_version_id)
             .where(SpecAuthorityAcceptance.pending_authority_id == authority_id)
             .where(_ACCEPTANCE_STATUS.in_(("accepted", "rejected")))
         ).first()

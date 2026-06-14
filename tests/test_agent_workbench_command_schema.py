@@ -281,6 +281,7 @@ def test_project_create_is_registered_as_mutating_idempotent_command() -> None:
     assert "idempotency_key" in project_create_schema["input"]["optional"]
     assert "dry_run" in project_create_schema["input"]["optional"]
     assert "dry_run_id" in project_create_schema["input"]["optional"]
+    assert "compiler_model" not in project_create_schema["input"]["optional"]
     assert ErrorCode.PROJECT_ALREADY_EXISTS.value in project_create_schema["errors"]
     assert (
         ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value
@@ -354,6 +355,7 @@ def test_authority_compile_is_registered_as_guarded_mutation() -> None:
         "expected_setup_status",
     ]
     assert "idempotency_key" in schema["input"]["optional"]
+    assert "compiler_model" in schema["input"]["optional"]
     assert "dry_run" in schema["input"]["optional"]
     assert "dry_run_id" in schema["input"]["optional"]
     assert ErrorCode.SPEC_COMPILE_FAILED.value in schema["errors"]
@@ -1058,9 +1060,9 @@ def test_sprint_commands_are_registered() -> None:  # noqa: PLR0915
         assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in generate["errors"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
-    assert ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID.value in generate[
-        "errors"
-    ]
+    assert (
+        ErrorCode.SPRINT_GENERATION_MODEL_RESPONSE_INVALID.value in generate["errors"]
+    )
     assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in save["errors"]
     assert ErrorCode.MUTATION_FAILED.value in start["errors"]

@@ -344,6 +344,7 @@ class AuthorityCompileApiRequest(BaseModel):
     expected_spec_hash: str = Field(min_length=1)
     expected_state: str = Field(min_length=1)
     expected_setup_status: str = Field(min_length=1)
+    compiler_model: str | None = Field(default=None, min_length=1)
     idempotency_key: str = Field(min_length=8, max_length=128)
 
 
@@ -716,9 +717,7 @@ def _raise_compiled_authority_schema_unsupported(
             "errors": [
                 {
                     "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
-                    "message": (
-                        "Compiled authority artifact schema is unsupported."
-                    ),
+                    "message": ("Compiled authority artifact schema is unsupported."),
                     "details": compiled_authority_schema_unsupported_details(
                         project_id=project_id,
                         spec_version_id=spec_version_id,
@@ -993,9 +992,7 @@ def _build_sprint_close_readiness(
         story_id = int(story.story_id) if story.story_id is not None else 0
         story_done = story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
         tasks_done = total_tasks == 0 or all_actionable_done
-        completion_state = (
-            "completed" if story_done and tasks_done else "unfinished"
-        )
+        completion_state = "completed" if story_done and tasks_done else "unfinished"
         if completion_state == "completed":
             completed_story_count += 1
         elif story.story_id is not None:
@@ -1155,9 +1152,10 @@ def _build_sprint_runtime_summary(
     draft_assessment = state.get("sprint_plan_assessment")
     if not isinstance(draft_assessment, dict):
         draft_assessment = {}
-    has_reviewable_draft = (
-        state.get("fsm_state") == OrchestratorState.SPRINT_DRAFT.value
-        and bool(draft_assessment.get("is_complete"))
+    has_reviewable_draft = state.get(
+        "fsm_state"
+    ) == OrchestratorState.SPRINT_DRAFT.value and bool(
+        draft_assessment.get("is_complete")
     )
     latest_completed_sprint_id = completed[0].sprint_id if completed else None
     triage_state = dict(state)
@@ -1202,8 +1200,7 @@ def _build_sprint_runtime_summary(
         )
     elif planned is not None:
         disabled_reason = (
-            "A planned sprint already exists. "
-            "Modify it instead of creating another."
+            "A planned sprint already exists. Modify it instead of creating another."
         )
     elif sprint_generation_blocker is not None:
         disabled_reason = sprint_generation_blocker["message"]
@@ -1242,10 +1239,7 @@ def _build_sprint_runtime_summary(
                 ),
                 "create_next_sprint_valid_commands": [
                     f"agileforge story pending --project-id {command_project_id}",
-                    (
-                        "agileforge sprint candidates --project-id "
-                        f"{command_project_id}"
-                    ),
+                    (f"agileforge sprint candidates --project-id {command_project_id}"),
                 ],
                 "create_next_sprint_blocked_command": sprint_generation_blocker,
             }
@@ -1381,9 +1375,7 @@ def _serialize_sprint_metrics_row(
         if story.status in (StoryStatus.DONE, StoryStatus.ACCEPTED)
     ]
     duration_values = [
-        event.duration_seconds
-        for event in events
-        if event.duration_seconds is not None
+        event.duration_seconds for event in events if event.duration_seconds is not None
     ]
     turn_count_values = [
         event.turn_count for event in events if event.turn_count is not None
@@ -2597,6 +2589,7 @@ async def compile_project_authority(
         expected_spec_hash=req.expected_spec_hash,
         expected_state=req.expected_state,
         expected_setup_status=req.expected_setup_status,
+        compiler_model=req.compiler_model,
         idempotency_key=req.idempotency_key,
         changed_by="dashboard-ui",
     )

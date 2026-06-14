@@ -150,6 +150,7 @@ class AuthorityCompileRequest(BaseModel):
     expected_spec_hash: str = Field(min_length=1)
     expected_state: str = Field(min_length=1)
     expected_setup_status: str = Field(min_length=1)
+    compiler_model: str | None = Field(default=None, min_length=1)
     idempotency_key: str | None = None
     dry_run: bool = False
     dry_run_id: str | None = None
@@ -175,6 +176,7 @@ class AuthorityCompileRequest(BaseModel):
                 "expected_spec_hash": self.expected_spec_hash,
                 "expected_state": self.expected_state,
                 "expected_setup_status": self.expected_setup_status,
+                "compiler_model": self.compiler_model,
                 "changed_by": self.changed_by,
             }
         )
@@ -224,9 +226,7 @@ class SyncProjectSetupWorkflowAdapter:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
-                self._workflow.initialize_session(session_id=session_id)
-            )
+            return asyncio.run(self._workflow.initialize_session(session_id=session_id))
         raise RuntimeError(
             "Project setup runner cannot initialize workflow sessions inside "
             "an active event loop"
@@ -433,7 +433,10 @@ class ProjectSetupMutationRunner:
             return self._guard_rejected_retry(
                 request=request,
                 code=ErrorCode.STALE_STATE.value,
-                details={"expected_state": request.expected_state, "actual_state": current_state},
+                details={
+                    "expected_state": request.expected_state,
+                    "actual_state": current_state,
+                },
             )
 
         current_fingerprint = _retry_context_fingerprint(
@@ -471,9 +474,8 @@ class ProjectSetupMutationRunner:
                 data=stale_context_data,
             )
         if request.dry_run:
-            if (
-                original is not None
-                and _active_recovery_lease_blocks_retry(original, now=_now())
+            if original is not None and _active_recovery_lease_blocks_retry(
+                original, now=_now()
             ):
                 return _mutation_resume_conflict(
                     retry_mutation_event_id=None,
@@ -485,7 +487,9 @@ class ProjectSetupMutationRunner:
                     "project_id": request.project_id,
                     "resolved_spec_path": str(resolved_spec_path),
                     "recovery_mutation_event_id": request.recovery_mutation_event_id,
-                    "recovery_status": original.status if original is not None else None,
+                    "recovery_status": original.status
+                    if original is not None
+                    else None,
                     "next_actions": [
                         _retry_action(request, request.recovery_mutation_event_id)
                     ],
@@ -626,7 +630,9 @@ class ProjectSetupMutationRunner:
             )
         return retry_response
 
-    def _run_authority_compile(self, request: AuthorityCompileRequest) -> dict[str, Any]:
+    def _run_authority_compile(
+        self, request: AuthorityCompileRequest
+    ) -> dict[str, Any]:
         if not self._project_exists(request.project_id):
             return _error(
                 ErrorCode.PROJECT_NOT_FOUND.value,
@@ -648,7 +654,9 @@ class ProjectSetupMutationRunner:
                 return _error(
                     code,
                     details=details,
-                    remediation=["Refresh authority compile stale guards before retrying."],
+                    remediation=[
+                        "Refresh authority compile stale guards before retrying."
+                    ],
                 )
             return self._guard_rejected_authority_compile(
                 request=request,
@@ -656,7 +664,9 @@ class ProjectSetupMutationRunner:
                 details=details,
             )
 
-        resolved_spec_path = Path(str(workflow_state["setup_spec_file_path"])).expanduser().resolve()
+        resolved_spec_path = (
+            Path(str(workflow_state["setup_spec_file_path"])).expanduser().resolve()
+        )
         spec_hash = str(workflow_state["setup_spec_hash"])
         spec_version_id = int(str(workflow_state["setup_spec_version_id"]))
         live_spec_hash_result = _spec_hash_or_error(resolved_spec_path)
@@ -675,7 +685,9 @@ class ProjectSetupMutationRunner:
                 return _error(
                     ErrorCode.STALE_SPEC_HASH.value,
                     details=details,
-                    remediation=["Refresh authority compile stale guards before retrying."],
+                    remediation=[
+                        "Refresh authority compile stale guards before retrying."
+                    ],
                 )
             return self._guard_rejected_authority_compile(
                 request=request,
@@ -819,7 +831,9 @@ class ProjectSetupMutationRunner:
             return _error(
                 ErrorCode.MUTATION_RESUME_CONFLICT.value,
                 details={"mutation_event_id": mutation_event_id},
-                remediation=["Re-read mutation state before retrying authority compile."],
+                remediation=[
+                    "Re-read mutation state before retrying authority compile."
+                ],
             )
         return response
 
@@ -908,7 +922,9 @@ class ProjectSetupMutationRunner:
         state: dict[str, Any] = {
             "fsm_state": "SETUP_REQUIRED",
             "setup_status": status,
-            "setup_error": None if failure_data is None else failure_data.get("setup_error"),
+            "setup_error": None
+            if failure_data is None
+            else failure_data.get("setup_error"),
             "setup_spec_file_path": str(resolved_spec_path),
             "setup_spec_hash": spec_hash,
             "setup_spec_version_id": spec_version_id,
@@ -1081,8 +1097,12 @@ class ProjectSetupMutationRunner:
             ),
             "failure_artifact_stage": artifact_failure_stage,
             "setup_failure_first_error": setup_failure_first_error,
-            "raw_output_preview": _optional_str(authority_result.get("raw_output_preview")),
-            "has_full_artifact": _optional_bool(authority_result.get("has_full_artifact")),
+            "raw_output_preview": _optional_str(
+                authority_result.get("raw_output_preview")
+            ),
+            "has_full_artifact": _optional_bool(
+                authority_result.get("has_full_artifact")
+            ),
         }
         if isinstance(blocking_gaps, list):
             failure_data["setup_failure_blocking_gaps"] = [
@@ -1144,7 +1164,9 @@ class ProjectSetupMutationRunner:
             return _error(
                 ErrorCode.MUTATION_RESUME_CONFLICT.value,
                 details={"mutation_event_id": mutation_event_id},
-                remediation=["Re-read mutation state before retrying authority compile."],
+                remediation=[
+                    "Re-read mutation state before retrying authority compile."
+                ],
             )
         return response
 
@@ -1162,7 +1184,9 @@ class ProjectSetupMutationRunner:
         finalize_domain_failures: bool = True,
     ) -> dict[str, Any]:
         completed_steps = self._completed_steps(mutation_event_id)
-        project_id = existing_project_id or self._project_id_for_event(mutation_event_id)
+        project_id = existing_project_id or self._project_id_for_event(
+            mutation_event_id
+        )
 
         if create_product and "product_created" not in completed_steps:
             if request_name is None:
@@ -1181,7 +1205,9 @@ class ProjectSetupMutationRunner:
                     spec_file=requested_spec_file,
                     safe_to_auto_resume=True,
                 )
-                raise RuntimeError("Injected project setup failure after product_created")
+                raise RuntimeError(
+                    "Injected project setup failure after product_created"
+                )
         if project_id is None:
             return _error(
                 ErrorCode.MUTATION_RESUME_CONFLICT.value,
@@ -1554,7 +1580,8 @@ class ProjectSetupMutationRunner:
                     select(CliMutationLedger).where(
                         CliMutationLedger.command == PROJECT_CREATE_COMMAND,
                         CliMutationLedger.project_id == request.project_id,
-                        CliMutationLedger.status == MutationStatus.RECOVERY_REQUIRED.value,
+                        CliMutationLedger.status
+                        == MutationStatus.RECOVERY_REQUIRED.value,
                     )
                 ).first()
             if unresolved is not None:
@@ -1815,7 +1842,9 @@ class ProjectSetupMutationRunner:
             "raw_output_preview": _optional_str(raw_output_preview),
             "has_full_artifact": _optional_bool(has_full_artifact),
             "mutation_event_id": mutation_event_id,
-            "next_actions": [_failed_setup_retry_action(project_id, requested_spec_file)],
+            "next_actions": [
+                _failed_setup_retry_action(project_id, requested_spec_file)
+            ],
         }
         if isinstance(blocking_gaps, list):
             data["setup_failure_blocking_gaps"] = [str(item) for item in blocking_gaps]
@@ -1883,7 +1912,11 @@ class ProjectSetupMutationRunner:
                 "state": self._workflow.get_session_status(session_id),
             }
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error_code": WORKFLOW_SESSION_FAILED, "error": str(exc)}
+            return {
+                "ok": False,
+                "error_code": WORKFLOW_SESSION_FAILED,
+                "error": str(exc),
+            }
 
     def _mark_retry_domain_failed(
         self,
@@ -1970,7 +2003,10 @@ class ProjectSetupMutationRunner:
 
     def _product_name_exists(self, name: str) -> bool:
         with Session(self._engine) as session:
-            return session.exec(select(Product).where(Product.name == name)).first() is not None
+            return (
+                session.exec(select(Product).where(Product.name == name)).first()
+                is not None
+            )
 
     def _project_name(self, project_id: int) -> str:
         with Session(self._engine) as session:
@@ -2408,7 +2444,9 @@ def _mutation_resume_conflict(
     )
 
 
-def _active_recovery_lease_blocks_retry(row: CliMutationLedger, *, now: datetime) -> bool:
+def _active_recovery_lease_blocks_retry(
+    row: CliMutationLedger, *, now: datetime
+) -> bool:
     """Return whether another worker currently owns the recovery row."""
     return (
         row.status == MutationStatus.RECOVERY_REQUIRED.value
@@ -2434,7 +2472,9 @@ def _error_for_ledger(code: str, row: CliMutationLedger) -> dict[str, Any]:
     return _error(
         code,
         details={"mutation_event_id": row.mutation_event_id},
-        remediation=[f"agileforge mutation show --mutation-event-id {row.mutation_event_id}"],
+        remediation=[
+            f"agileforge mutation show --mutation-event-id {row.mutation_event_id}"
+        ],
         data=data,
     )
 
@@ -2451,7 +2491,9 @@ def _error(
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        error = workbench_error(code, details=details, remediation=remediation).to_dict()
+        error = workbench_error(
+            code, details=details, remediation=remediation
+        ).to_dict()
     except (KeyError, ValueError):
         error = {
             "code": code,
