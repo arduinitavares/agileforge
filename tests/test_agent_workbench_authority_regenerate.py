@@ -390,11 +390,12 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
         engine: Engine,
         spec_version_id: int,
         force_recompile: bool | None = None,
+        compiler_model: str | None = None,
         tool_context: object | None = None,
         lease_guard: object | None = None,
         record_progress: object | None = None,
     ) -> dict[str, object]:
-        del force_recompile, tool_context, lease_guard, record_progress
+        del force_recompile, compiler_model, tool_context, lease_guard, record_progress
         return _persist_compiled_authority(
             engine=engine,
             product_id=product_id,
@@ -428,6 +429,45 @@ def test_authority_regenerate_ledger_hash_includes_compiler_model(
     assert first["ok"] is True
     assert second["ok"] is False
     assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_authority_regenerate_passes_compiler_model_to_compile_service(
+    authority_regenerate_runner: AuthorityRegenerateRunner,
+    product_id: int,
+    approved_spec_version_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regenerate should pass the selected compiler model into compiler service."""
+    captured: list[str | None] = []
+
+    def fake_compile(
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.append(cast("str | None", kwargs.get("compiler_model")))
+        return _persist_compiled_authority(
+            engine=authority_regenerate_runner.engine,
+            product_id=product_id,
+            prompt_hash="b" * 64,
+            spec_version_id=approved_spec_version_id,
+        )
+
+    monkeypatch.setattr(
+        authority_regenerate_mod,
+        "compile_spec_authority_for_version_with_engine",
+        fake_compile,
+    )
+
+    result = authority_regenerate_runner.regenerate(
+        AuthorityRegenerateRequest(
+            project_id=product_id,
+            spec_version_id=approved_spec_version_id,
+            idempotency_key="regen-model-pass-001",
+            compiler_model="openrouter/openai/gpt-5.2",
+        )
+    )
+
+    assert result["ok"] is True
+    assert captured == ["openrouter/openai/gpt-5.2"]
 
 
 def test_regenerate_passes_lease_callbacks_to_compile(

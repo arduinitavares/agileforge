@@ -213,13 +213,16 @@ class AuthorityRegenerateRunner:
                 now=datetime.now(UTC),
             )
 
-        return compile_spec_authority_for_version_with_engine(
-            engine=self.engine,
-            spec_version_id=request.spec_version_id,
-            force_recompile=True,
-            lease_guard=lease_guard,
-            record_progress=record_progress,
-        )
+        compile_kwargs: dict[str, Any] = {
+            "engine": self.engine,
+            "spec_version_id": request.spec_version_id,
+            "force_recompile": True,
+            "lease_guard": lease_guard,
+            "record_progress": record_progress,
+        }
+        if request.compiler_model is not None:
+            compile_kwargs["compiler_model"] = request.compiler_model
+        return compile_spec_authority_for_version_with_engine(**compile_kwargs)
 
     def _compile_failure_response(
         self,

@@ -296,7 +296,11 @@ def _assert_create_lease_extended(
         return ledger.last_heartbeat_at, ledger.lease_expires_at
 
 
-def _install_fast_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_fast_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    expected_compiler_model: str | None = None,
+) -> None:
     from services.agent_workbench import project_setup
 
     def compile_fast(
@@ -304,11 +308,13 @@ def _install_fast_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
         engine: Engine,
         spec_version_id: int,
         force_recompile: bool | None = None,
+        compiler_model: str | None = None,
         tool_context: object | None = None,
         lease_guard: Any | None = None,
         record_progress: Any | None = None,
     ) -> dict[str, Any]:
         del force_recompile, tool_context
+        assert compiler_model == expected_compiler_model
         if lease_guard is not None and not lease_guard("compiled_authority_persisted"):
             return {
                 "success": False,
@@ -874,7 +880,10 @@ def test_authority_compile_succeeds_from_compile_required(
 ) -> None:
     ensure_schema_current(engine)
     spec_file = _write_spec(tmp_path)
-    _install_fast_compiler(monkeypatch)
+    _install_fast_compiler(
+        monkeypatch,
+        expected_compiler_model="openrouter/openai/gpt-5.2",
+    )
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
@@ -895,6 +904,7 @@ def test_authority_compile_succeeds_from_compile_required(
             expected_state="SETUP_REQUIRED",
             expected_setup_status="authority_compile_required",
             idempotency_key="compile-success-001",
+            compiler_model="openrouter/openai/gpt-5.2",
             changed_by="agent",
         )
     )

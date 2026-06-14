@@ -334,6 +334,7 @@ class _CompilerFailureOptions(TypedDict, total=False):
     product_id: int | None
     spec_version_id: int | None
     content_ref: str | None
+    compiler_model: str | None
     failure_stage: str
     error: str
     reason: str
@@ -423,12 +424,18 @@ class CompiledArtifactLoadResult:
         return self.status == "schema_unsupported"
 
 
-def _spec_authority_compiler_agent() -> object:
-    """Load the ADK compiler agent only for compile-time execution paths."""
+def _spec_authority_compiler_agent(
+    *,
+    compiler_model: str | None = None,
+) -> object:
+    """Load or build the ADK compiler agent only for compile-time execution paths."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.agent import (  # noqa: PLC0415
+        build_spec_authority_compiler_agent,
         root_agent,
     )
 
+    if compiler_model:
+        return build_spec_authority_compiler_agent(compiler_model=compiler_model)
     return root_agent
 
 
@@ -1011,22 +1018,25 @@ def _extract_compiler_response_text(events: list[Any]) -> str:
 
 async def _invoke_spec_authority_compiler_async(
     input_payload: SpecAuthorityCompilerInput,
+    *,
+    compiler_model: str | None = None,
 ) -> str:
     """Invoke the spec authority compiler agent and return raw JSON text."""
     return await invoke_agent_to_text(
-        agent=_spec_authority_compiler_agent(),
+        agent=_spec_authority_compiler_agent(compiler_model=compiler_model),
         runner_identity=SPEC_AUTHORITY_COMPILER_IDENTITY,
         payload_json=input_payload.model_dump_json(),
         no_text_error="Compiler agent returned no text response",
     )
 
 
-def _default_invoke_spec_authority_compiler(
+def _default_invoke_spec_authority_compiler(  # noqa: PLR0913
     spec_content: str,
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
+    compiler_model: str | None = None,
 ) -> str:
     """Invoke the compiler agent from sync code and return raw JSON text."""
     del content_ref
@@ -1042,7 +1052,14 @@ def _default_invoke_spec_authority_compiler(
             STRUCTURED_SPEC_FORMAT,
         ),
     )
-    return _run_async_task(_invoke_spec_authority_compiler_async(input_payload))
+    if compiler_model is None:
+        return _run_async_task(_invoke_spec_authority_compiler_async(input_payload))
+    return _run_async_task(
+        _invoke_spec_authority_compiler_async(
+            input_payload,
+            compiler_model=compiler_model,
+        )
+    )
 
 
 def _detect_spec_source_format(
@@ -1068,22 +1085,26 @@ def _resolve_compiler_invoker() -> Callable[..., str]:
     return cast("Callable[..., str]", tool_invoke)
 
 
-def _invoke_spec_authority_compiler(
+def _invoke_spec_authority_compiler(  # noqa: PLR0913
     spec_content: str,
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
+    compiler_model: str | None = None,
 ) -> str:
     """Invoke the effective compiler seam, honoring legacy monkeypatch overrides."""
     compiler_invoke = _resolve_compiler_invoker()
-    return compiler_invoke(
-        spec_content=spec_content,
-        content_ref=content_ref,
-        product_id=product_id,
-        spec_version_id=spec_version_id,
-        domain_hint=domain_hint,
-    )
+    kwargs: dict[str, Any] = {
+        "spec_content": spec_content,
+        "content_ref": content_ref,
+        "product_id": product_id,
+        "spec_version_id": spec_version_id,
+        "domain_hint": domain_hint,
+    }
+    if compiler_model is not None:
+        kwargs["compiler_model"] = compiler_model
+    return compiler_invoke(**kwargs)
 
 
 def _structured_spec_artifact_or_none(
@@ -1319,6 +1340,7 @@ def _invoke_focused_structured_item_authority(
     item_id: str,
     product_id: int | None,
     spec_version_id: int | None,
+    compiler_model: str | None = None,
 ) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
     """Compile one structured item with a bounded retry for transient failures."""
     focused_content = _focused_structured_spec_content(artifact, item_id=item_id)
@@ -1327,6 +1349,7 @@ def _invoke_focused_structured_item_authority(
         content_ref=None,
         product_id=product_id,
         spec_version_id=spec_version_id,
+        compiler_model=compiler_model,
     )
     if not isinstance(initial_invocation.output.root, SpecAuthorityCompilationFailure):
         return cast("SpecAuthorityCompilationSuccess", initial_invocation.output.root)
@@ -1349,6 +1372,7 @@ def _invoke_focused_structured_item_authority(
         product_id=product_id,
         spec_version_id=spec_version_id,
         domain_hint=_SCHEMA_RETRY_FEEDBACK,
+        compiler_model=compiler_model,
     )
     if not isinstance(retry_invocation.output.root, SpecAuthorityCompilationFailure):
         return cast("SpecAuthorityCompilationSuccess", retry_invocation.output.root)
@@ -1443,8 +1467,7 @@ def _merge_compilation_successes(
                 None,
             ),
             "invariants": [
-                invariant.model_dump(mode="json")
-                for invariant in merged_invariants
+                invariant.model_dump(mode="json") for invariant in merged_invariants
             ],
             "eligible_feature_rules": [
                 rule.model_dump(mode="json")
@@ -1468,8 +1491,7 @@ def _merge_compilation_successes(
                 ]
             ),
             "source_map": [
-                entry.model_dump(mode="json")
-                for entry in merged_source_map
+                entry.model_dump(mode="json") for entry in merged_source_map
             ],
             "authority_quality": _merge_authority_quality_reports(
                 successes,
@@ -1497,11 +1519,7 @@ def _merge_authority_quality_reports(
     if not reports and not cross_success_merges:
         return None
 
-    merged_items = [
-        item
-        for report in reports
-        for item in report.merged_items
-    ]
+    merged_items = [item for report in reports for item in report.merged_items]
     source_counts: dict[str, int] = {}
     for entry in merged_source_map:
         source_counts[entry.invariant_id] = source_counts.get(entry.invariant_id, 0) + 1
@@ -1516,20 +1534,12 @@ def _merge_authority_quality_reports(
         )
         for kept_id, removed_ids in cross_success_merges.items()
     )
-    review_groups = [
-        group
-        for report in reports
-        for group in report.review_groups
-    ]
+    review_groups = [group for report in reports for group in report.review_groups]
     merged_invariant_removed_count = sum(
-        len(item.removed_ids)
-        for item in merged_items
-        if item.item_kind == "invariant"
+        len(item.removed_ids) for item in merged_items if item.item_kind == "invariant"
     )
     merged_assumption_count = sum(
-        len(item.removed_ids)
-        for item in merged_items
-        if item.item_kind == "assumption"
+        len(item.removed_ids) for item in merged_items if item.item_kind == "assumption"
     )
     report = AuthorityQualityReport(
         summary=AuthorityQualitySummary(
@@ -1551,9 +1561,7 @@ def _merge_authority_quality_reports(
                 if group.group_type == "over_split_invariants"
             ),
             noisy_assumption_group_count=sum(
-                1
-                for group in review_groups
-                if group.group_type == "noisy_assumptions"
+                1 for group in review_groups if group.group_type == "noisy_assumptions"
             ),
         ),
         merged_items=[
@@ -1568,22 +1576,26 @@ def _merge_authority_quality_reports(
     return report.model_dump(mode="json")
 
 
-def _invoke_and_normalize_spec_authority(
+def _invoke_and_normalize_spec_authority(  # noqa: PLR0913
     *,
     spec_content: str,
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
+    compiler_model: str | None = None,
 ) -> _NormalizedCompilerInvocation:
     """Invoke the compiler once and normalize the result."""
-    raw_json = _invoke_spec_authority_compiler(
-        spec_content=spec_content,
-        content_ref=content_ref,
-        product_id=product_id,
-        spec_version_id=spec_version_id,
-        domain_hint=domain_hint,
-    )
+    kwargs: dict[str, Any] = {
+        "spec_content": spec_content,
+        "content_ref": content_ref,
+        "product_id": product_id,
+        "spec_version_id": spec_version_id,
+        "domain_hint": domain_hint,
+    }
+    if compiler_model is not None:
+        kwargs["compiler_model"] = compiler_model
+    raw_json = _invoke_spec_authority_compiler(**kwargs)
     normalized = normalize_compiler_output(
         raw_json,
         source_text=spec_content,
@@ -1596,13 +1608,14 @@ def _invoke_and_normalize_spec_authority(
     return _NormalizedCompilerInvocation(raw_json=raw_json, output=normalized)
 
 
-def _compile_spec_authority_output(  # noqa: C901, PLR0911
+def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
     *,
     spec_content: str,
     content_ref: str | None,
     product_id: int | None,
     spec_version_id: int | None,
     domain_hint: str | None = None,
+    compiler_model: str | None = None,
 ) -> _NormalizedCompilerInvocation:
     """Compile authority, adding focused item passes for structured specs."""
     artifact = _structured_spec_artifact_or_none(spec_content)
@@ -1612,6 +1625,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911
         product_id=product_id,
         spec_version_id=spec_version_id,
         domain_hint=domain_hint,
+        compiler_model=compiler_model,
     )
     if artifact is None:
         return full_invocation
@@ -1638,6 +1652,7 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911
             item_id=item_id,
             product_id=product_id,
             spec_version_id=spec_version_id,
+            compiler_model=compiler_model,
         )
         if isinstance(item_result, _FocusedItemCompilationFailure):
             focused_failures.append(item_result)
@@ -1751,6 +1766,7 @@ def preview_spec_authority(
 def _compiler_failure_result(
     **kwargs: Unpack[_CompilerFailureOptions],
 ) -> dict[str, Any]:
+    compiler_model = kwargs.get("compiler_model")
     details = _CompilerFailureDetails(
         product_id=kwargs.get("product_id"),
         spec_version_id=kwargs.get("spec_version_id"),
@@ -1764,7 +1780,7 @@ def _compiler_failure_result(
         exception=kwargs.get("exception"),
     )
     summary = f"{details.error}: {details.reason}" if details.reason else details.error
-    agent = _spec_authority_compiler_agent()
+    agent = _spec_authority_compiler_agent(compiler_model=compiler_model)
     artifact_result = write_failure_artifact(
         phase="spec_authority",
         project_id=details.product_id,
@@ -1860,10 +1876,7 @@ def _schema_retry_failure_detail_message(
     preview = compact_output[:_SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS]
     if len(compact_output) > _SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS:
         preview += "..."
-    return (
-        f"attempt_{detail.attempt} reason={detail.reason} "
-        f"raw_output={preview!r}"
-    )
+    return f"attempt_{detail.attempt} reason={detail.reason} raw_output={preview!r}"
 
 
 def _schema_retry_metadata_dict(
@@ -1937,6 +1950,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
     heartbeat_interval_seconds: float,
     timeout_seconds: float,
     domain_hint: str | None = None,
+    compiler_model: str | None = None,
 ) -> _NormalizedCompilerInvocation | dict[str, Any]:
     """Run one guarded compiler attempt and return raw normalized output."""
     try:
@@ -1947,6 +1961,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
                 product_id=spec_version.product_id,
                 spec_version_id=spec_version.spec_version_id,
                 domain_hint=domain_hint,
+                compiler_model=compiler_model,
             ),
             lease_guard=lease_guard,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -1955,11 +1970,11 @@ def _run_compiler_attempt(  # noqa: PLR0913
                 product_id=spec_version.product_id,
                 spec_version_id=spec_version.spec_version_id,
                 content_ref=spec_version.content_ref,
+                compiler_model=compiler_model,
                 failure_stage="invocation_timeout",
                 error="SPEC_COMPILER_INVOCATION_TIMEOUT",
                 reason=(
-                    "Spec authority compiler exceeded "
-                    f"{timeout_seconds:.0f} seconds."
+                    f"Spec authority compiler exceeded {timeout_seconds:.0f} seconds."
                 ),
             ),
         )
@@ -1968,6 +1983,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
             product_id=spec_version.product_id,
             spec_version_id=spec_version.spec_version_id,
             content_ref=spec_version.content_ref,
+            compiler_model=compiler_model,
             failure_stage="invocation_exception",
             error="SPEC_COMPILER_INVOCATION_FAILED",
             reason=str(exc),
@@ -1979,6 +1995,7 @@ def _run_compiler_attempt(  # noqa: PLR0913
             product_id=spec_version.product_id,
             spec_version_id=spec_version.spec_version_id,
             content_ref=spec_version.content_ref,
+            compiler_model=compiler_model,
             failure_stage="invocation_exception",
             error="SPEC_COMPILER_INVOCATION_FAILED",
             reason=str(exc),
@@ -2026,20 +2043,22 @@ def _compile_spec_authority_for_version(
     spec_version_id: int,
     force_recompile: bool,
     tool_context: ToolContext | None,
+    compiler_model: str | None = None,
 ) -> dict[str, Any]:
     tool_compile = _resolve_compile_spec_authority_for_version()
     if tool_compile is not None:
-        return tool_compile(
-            {
-                "spec_version_id": spec_version_id,
-                "force_recompile": force_recompile,
-            },
-            tool_context=tool_context,
-        )
+        payload: dict[str, Any] = {
+            "spec_version_id": spec_version_id,
+            "force_recompile": force_recompile,
+        }
+        if compiler_model is not None:
+            payload["compiler_model"] = compiler_model
+        return tool_compile(payload, tool_context=tool_context)
     return compile_spec_authority_for_version(
         spec_version_id=spec_version_id,
         force_recompile=force_recompile,
         tool_context=tool_context,
+        compiler_model=compiler_model,
     )
 
 
@@ -2457,10 +2476,11 @@ def _load_spec_content_for_compile(
         }
 
 
-def _invoke_compiler_for_version(
+def _invoke_compiler_for_version(  # noqa: PLR0913
     spec_version: SpecRegistry,
     *,
     spec_content: str,
+    compiler_model: str | None = None,
     lease_guard: Callable[[str], bool] | None = None,
     heartbeat_interval_seconds: float = DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS,
     timeout_seconds: float = DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS,
@@ -2472,6 +2492,7 @@ def _invoke_compiler_for_version(
         lease_guard=lease_guard,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         timeout_seconds=timeout_seconds,
+        compiler_model=compiler_model,
     )
 
     if isinstance(compiled, dict):
@@ -2519,6 +2540,7 @@ def _invoke_compiler_for_version(
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         timeout_seconds=timeout_seconds,
         domain_hint=_SCHEMA_RETRY_FEEDBACK,
+        compiler_model=compiler_model,
     )
     if isinstance(retried, dict):
         retried_failure = cast("dict[str, Any]", retried)
@@ -2663,6 +2685,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
     parsed: CompileSpecAuthorityForVersionInput,
     should_recompile: bool,
     tool_context: ToolContext | None,
+    compiler_model: str | None = None,
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
@@ -2693,6 +2716,7 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
     invocation = _invoke_compiler_for_version(
         context.spec_version,
         spec_content=spec_content,
+        compiler_model=compiler_model,
         lease_guard=lease_guard,
     )
     if invocation.failure is not None:
@@ -2748,6 +2772,7 @@ def compile_spec_authority_for_version(
     spec_version_id: int | None = None,
     force_recompile: bool | None = None,
     tool_context: ToolContext | None = None,
+    compiler_model: str | None = None,
 ) -> dict[str, Any]:
     """Compile an approved spec version into cached authority (idempotent)."""
     parsed = _normalize_compile_version_input(
@@ -2763,6 +2788,7 @@ def compile_spec_authority_for_version(
             parsed=parsed,
             should_recompile=should_recompile,
             tool_context=tool_context,
+            compiler_model=compiler_model,
         )
 
 
@@ -2772,6 +2798,7 @@ def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
     spec_version_id: int,
     force_recompile: bool | None = None,
     tool_context: ToolContext | None = None,
+    compiler_model: str | None = None,
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
@@ -2788,6 +2815,7 @@ def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
             parsed=parsed,
             should_recompile=bool(parsed.force_recompile),
             tool_context=tool_context,
+            compiler_model=compiler_model,
             lease_guard=lease_guard,
             record_progress=record_progress,
         )

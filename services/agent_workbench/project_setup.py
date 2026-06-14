@@ -770,6 +770,7 @@ class ProjectSetupMutationRunner:
             resolved_spec_path=resolved_spec_path,
             expected_spec_hash=spec_hash,
             expected_spec_version_id=spec_version_id,
+            compiler_model=request.compiler_model,
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
         )
@@ -1422,6 +1423,7 @@ class ProjectSetupMutationRunner:
         resolved_spec_path: Path,
         expected_spec_hash: str,
         expected_spec_version_id: int,
+        compiler_model: str | None,
         mutation_event_id: int,
         lease_owner: str,
     ) -> dict[str, Any]:
@@ -1449,6 +1451,8 @@ class ProjectSetupMutationRunner:
             )
 
         def engine_bound_compiler(**kwargs: Any) -> dict[str, Any]:
+            if compiler_model is not None:
+                kwargs["compiler_model"] = compiler_model
             return compile_spec_authority_for_version_with_engine(
                 engine=self._engine,
                 **kwargs,

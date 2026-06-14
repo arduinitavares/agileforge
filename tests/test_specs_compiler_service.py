@@ -611,8 +611,9 @@ def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
     assert result.validation_error is None
 
 
-def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload(
-) -> None:
+def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload() -> (
+    None
+):
     """Verify invalid v2 payloads expose schema-invalid result details."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
@@ -650,8 +651,9 @@ def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
     assert result.validation_error is None
 
 
-def test_compiled_authority_schema_unsupported_helpers_include_regenerate_details(
-) -> None:
+def test_compiled_authority_schema_unsupported_helpers_include_regenerate_details() -> (
+    None
+):
     """Unsupported-artifact helpers should point operators at regeneration."""
     from services.specs.compiler_service import (  # noqa: PLC0415
         COMPILED_AUTHORITY_SCHEMA_VERSION,
@@ -1478,8 +1480,7 @@ def test_preview_spec_authority_preserves_focused_schema_retry_details(
     blocking_gaps = result["details"]["blocking_gaps"]
     assert any("attempt_1" in gap and "INVALID_JSON" in gap for gap in blocking_gaps)
     assert any(
-        "attempt_2" in gap and "JSON_VALIDATION_FAILED" in gap
-        for gap in blocking_gaps
+        "attempt_2" in gap and "JSON_VALIDATION_FAILED" in gap for gap in blocking_gaps
     )
 
 
@@ -1612,7 +1613,12 @@ def test_default_compiler_invocation_rejects_unstructured_spec_source(
 
     captured: list[SpecAuthorityCompilerInput] = []
 
-    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+    async def fake_invoke(
+        payload: SpecAuthorityCompilerInput,
+        *,
+        compiler_model: str | None = None,
+    ) -> str:
+        del compiler_model
         captured.append(payload)
         return _success_payload_json()
 
@@ -1641,7 +1647,12 @@ def test_default_compiler_invocation_marks_structured_spec_source_format(
 
     captured: list[SpecAuthorityCompilerInput] = []
 
-    async def fake_invoke(payload: SpecAuthorityCompilerInput) -> str:
+    async def fake_invoke(
+        payload: SpecAuthorityCompilerInput,
+        *,
+        compiler_model: str | None = None,
+    ) -> str:
+        del compiler_model
         captured.append(payload)
         return _success_payload_json()
 
@@ -1659,6 +1670,56 @@ def test_default_compiler_invocation_marks_structured_spec_source_format(
 
     assert len(captured) == 1
     assert captured[0].spec_source_format == "agileforge.spec.v1"
+
+
+def test_default_compiler_invocation_passes_compiler_model_to_async_invoker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler model override should reach the async agent invocation seam."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    captured: list[str | None] = []
+
+    async def fake_invoke(
+        payload: SpecAuthorityCompilerInput,
+        *,
+        compiler_model: str | None = None,
+    ) -> str:
+        del payload
+        captured.append(compiler_model)
+        return _success_payload_json()
+
+    monkeypatch.setattr(
+        "services.specs.compiler_service._invoke_spec_authority_compiler_async",
+        fake_invoke,
+    )
+
+    compiler_service._default_invoke_spec_authority_compiler(
+        spec_content=json.dumps(_agileforge_spec_profile_payload()),
+        content_ref=None,
+        product_id=4,
+        spec_version_id=9,
+        compiler_model="openrouter/openai/gpt-5.2",
+    )
+
+    assert captured == ["openrouter/openai/gpt-5.2"]
+
+
+def test_compiler_agent_override_rechecks_schema_disable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Override agent construction should observe the current schema-disable flag."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (  # noqa: PLC0415
+        agent,
+    )
+
+    monkeypatch.setattr(agent, "is_spec_compiler_schema_disabled", lambda: True)
+
+    built = agent.build_spec_authority_compiler_agent(
+        compiler_model="openrouter/openai/gpt-5.2"
+    )
+
+    assert getattr(built, "output_schema", None) is None
 
 
 def test_compile_spec_authority_for_version_persists_authority(
@@ -1863,13 +1924,9 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
     )
     assert isinstance(second_output.root, SpecAuthorityCompilationSuccess)
     assert second_output.root.authority_quality is not None
-    assert (
-        second_output.root.authority_quality.summary.merged_invariant_count == 1
-    )
+    assert second_output.root.authority_quality.summary.merged_invariant_count == 1
 
-    merged = compiler_service._merge_compilation_successes(
-        [first, second_output.root]
-    )
+    merged = compiler_service._merge_compilation_successes([first, second_output.root])
 
     assert merged.authority_quality is not None
     assert merged.authority_quality.summary.merged_invariant_count == 1
@@ -1926,10 +1983,7 @@ def test_merge_compilation_successes_reports_cross_success_duplicate_merges() ->
     assert merged.authority_quality is not None
     assert merged.authority_quality.summary.merged_invariant_count == 1
     assert len(merged.authority_quality.merged_items) == 1
-    assert (
-        merged.authority_quality.merged_items[0].kept_id
-        == "INV-1111111111111111"
-    )
+    assert merged.authority_quality.merged_items[0].kept_id == "INV-1111111111111111"
     assert merged.authority_quality.merged_items[0].removed_ids == [
         "INV-1111111111111111"
     ]
@@ -3163,7 +3217,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
             compiler_version="1.2.3",
             prompt_hash="b" * 64,
             compiled_at=datetime.now(UTC),
-        compiled_artifact_json=_stored_compiled_success_json(),
+            compiled_artifact_json=_stored_compiled_success_json(),
             scope_themes='["Payments"]',
             invariants='["REQUIRED_FIELD:email"]',
             eligible_feature_ids="[]",
