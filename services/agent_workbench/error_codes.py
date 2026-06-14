@@ -73,6 +73,9 @@ class ErrorCode(StrEnum):
     TRIAGE_REQUIRED_FIELD_MISSING = "TRIAGE_REQUIRED_FIELD_MISSING"
     TRIAGE_FIELD_INVALID = "TRIAGE_FIELD_INVALID"
     BACKLOG_SOURCE_UNAVAILABLE = "BACKLOG_SOURCE_UNAVAILABLE"
+    SCOPE_EXTENSION_BASE_SPEC_MISMATCH = "SCOPE_EXTENSION_BASE_SPEC_MISMATCH"
+    SCOPE_EXTENSION_NOT_ADDITIVE = "SCOPE_EXTENSION_NOT_ADDITIVE"
+    SCOPE_EXTENSION_NO_ADDED_ITEMS = "SCOPE_EXTENSION_NO_ADDED_ITEMS"
 
 
 _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
@@ -381,6 +384,24 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="Backlog source data is unavailable.",
+    ),
+    ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH: ErrorMetadata(
+        code=ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+        default_exit_code=3,
+        retryable=True,
+        description="Scope extension base spec guard did not match.",
+    ),
+    ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: ErrorMetadata(
+        code=ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Scope extension amendment is not additive.",
+    ),
+    ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS: ErrorMetadata(
+        code=ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Scope extension amendment adds no source items.",
     ),
 }
 
