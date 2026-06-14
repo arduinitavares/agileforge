@@ -30,6 +30,7 @@ from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
+from services.agent_workbench.scope_extension import ScopeExtensionPreconditions
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 if TYPE_CHECKING:
@@ -42,6 +43,10 @@ if TYPE_CHECKING:
         AuthorityCompileRequest,
         ProjectCreateRequest,
         ProjectSetupRetryRequest,
+    )
+    from services.agent_workbench.scope_extension import (
+        ScopeExtensionStartRequest,
+        ScopeExtensionValidateRequest,
     )
 
 PROJECT_ID = 7
@@ -1273,6 +1278,66 @@ class _FakeAuthorityRegenerateRunner:
         }
 
 
+class _FakeScopeExtensionRunner:
+    """Fake scope-extension runner used to verify facade delegation and routing."""
+
+    def __init__(self, *, available: bool = True, enabled: bool = True) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self._available = available
+        self._enabled = enabled
+
+    def preconditions(
+        self,
+        *,
+        project_id: int,
+        workflow: dict[str, Any],
+        sprint_candidate_count: int,
+    ) -> ScopeExtensionPreconditions | None:
+        """Return a deterministic scope-extension availability result."""
+        self.calls.append(
+            (
+                "preconditions",
+                {
+                    "project_id": project_id,
+                    "workflow": workflow,
+                    "sprint_candidate_count": sprint_candidate_count,
+                },
+            )
+        )
+        if not self._enabled:
+            return None
+        if self._available:
+            return ScopeExtensionPreconditions(
+                status="project_scope_extension_available",
+                available=True,
+            )
+        return ScopeExtensionPreconditions(
+            status="project_scope_extension_blocked",
+            available=False,
+            blocking_reason="OPEN_STORY_EXISTS",
+        )
+
+    def validate(self, request: ScopeExtensionValidateRequest) -> dict[str, Any]:
+        """Record validation requests."""
+        self.calls.append(("validate", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "valid"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
+        """Record start requests."""
+        self.calls.append(("start", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "started"},
+            "warnings": [],
+            "errors": [],
+        }
+
+
 class _FakeVisionRunner:
     """Fake Vision runner used to verify facade delegation."""
 
@@ -2436,6 +2501,61 @@ def test_application_authority_regenerate_delegates_to_runner() -> None:
             compiler_model="openrouter/openai/gpt-5.2",
         )
     ]
+
+
+def test_application_scope_extension_facades_pass_request_data_to_runner() -> None:
+    """Verify scope extension facades build runner request models."""
+    runner = _FakeScopeExtensionRunner()
+    app = AgentWorkbenchApplication(scope_extension_runner=runner)
+
+    validate_result = app.scope_extension_validate(
+        project_id=PROJECT_ID,
+        spec_file="specs/amended.md",
+        base_spec_version_id=SPEC_VERSION_ID,
+    )
+    start_result = app.scope_extension_start(
+        project_id=PROJECT_ID,
+        spec_file="specs/amended.md",
+        base_spec_version_id=SPEC_VERSION_ID,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="scope-extension-start-001",
+        changed_by="test-agent",
+    )
+
+    assert validate_result["ok"] is True
+    assert start_result["ok"] is True
+    validate_request = cast("ScopeExtensionValidateRequest", runner.calls[0][1])
+    start_request = cast("ScopeExtensionStartRequest", runner.calls[1][1])
+    assert validate_request.project_id == PROJECT_ID
+    assert validate_request.spec_file == "specs/amended.md"
+    assert validate_request.base_spec_version_id == SPEC_VERSION_ID
+    assert start_request.project_id == PROJECT_ID
+    assert start_request.spec_file == "specs/amended.md"
+    assert start_request.base_spec_version_id == SPEC_VERSION_ID
+    assert start_request.expected_state == "SPRINT_COMPLETE"
+    assert start_request.idempotency_key == "scope-extension-start-001"
+    assert start_request.changed_by == "test-agent"
+
+
+def test_application_default_scope_extension_runner_evaluates_preconditions(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify default application construction can evaluate scope preconditions."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    app = AgentWorkbenchApplication()
+
+    runner = app._get_scope_extension_runner()
+    result = runner.preconditions(
+        project_id=PROJECT_ID,
+        workflow={"state": {"fsm_state": "SPRINT_COMPLETE"}},
+        sprint_candidate_count=0,
+    )
+
+    assert result is not None
+    assert result.status == "project_scope_extension_available"
+    assert result.available is True
 
 
 def test_authority_regenerate_is_registered_command() -> None:
@@ -4328,10 +4448,10 @@ def test_workflow_next_routes_impact_none_with_no_candidates_to_story_generation
     ]
 
 
-def test_workflow_next_blocks_sprint_generate_when_saved_stories_not_refined(
+def test_workflow_next_routes_exhausted_default_app_to_scope_extension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Do not advertise Sprint generation when no refined candidates exist."""
+    """Default app routes exhausted saved stories to scope extension."""
     monkeypatch.setattr(
         post_sprint_triage_module,
         "canonical_hash",
@@ -4348,14 +4468,150 @@ def test_workflow_next_blocks_sprint_generate_when_saved_stories_not_refined(
 
     assert result["ok"] is True
     data = result["data"]
-    assert data["status"] == "post_sprint_sprint_candidates_unavailable"
+    validate_command = (
+        "agileforge scope extension validate --project-id 7 "
+        "--spec-file <amended_spec_file>"
+    )
+    assert data["status"] == "project_scope_extension_available"
     assert data["next_valid_commands"] == [
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
+    assert validate_command in data["blocked_future_commands"]
     assert (
         "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
     )
+    assert data["blocked_commands"] == []
+    assert data["next_actions"] == [
+        {
+            "command": validate_command,
+            "status": "project_scope_extension_available",
+            "reason": (
+                "The current execution scope is exhausted; validate an amended spec "
+                "before generating new work."
+            ),
+            "runnable": False,
+            "installed": False,
+            "requires_cli_installation": True,
+        }
+    ]
+
+
+def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route exhausted completed projects through the default scope runner."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    validate_command = (
+        "agileforge scope extension validate --project-id 7 "
+        "--spec-file <amended_spec_file>"
+    )
+    assert data["status"] == "project_scope_extension_available"
+    assert data["next_valid_commands"] == [
+        "agileforge story pending --project-id 7",
+        "agileforge sprint candidates --project-id 7",
+    ]
+    assert validate_command not in data["next_valid_commands"]
+    assert validate_command in data["blocked_future_commands"]
+    assert (
+        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    )
+    assert data["next_actions"][0] == {
+        "command": validate_command,
+        "status": "project_scope_extension_available",
+        "reason": (
+            "The current execution scope is exhausted; validate an amended spec "
+            "before generating new work."
+        ),
+        "runnable": False,
+        "installed": False,
+        "requires_cli_installation": True,
+    }
+
+
+def test_workflow_next_scope_extension_blocked_preserves_blocker_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return scope-extension blockers without advertising Sprint generation."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+        scope_extension_runner=_FakeScopeExtensionRunner(available=False),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "project_scope_extension_blocked"
+    assert (
+        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    )
+    assert not any(
+        action["command"].startswith("agileforge sprint generate")
+        and action["runnable"]
+        for action in data["next_actions"]
+    )
+    assert {
+        "command": "agileforge scope extension validate",
+        "reason": "OPEN_STORY_EXISTS",
+        "message": (
+            "Scope extension is blocked until current project work is exhausted."
+        ),
+    } in data["blocked_commands"]
+    assert not any(
+        command["command"] == "agileforge scope extension start"
+        for command in data["blocked_commands"]
+    )
+
+
+def test_workflow_next_no_refined_candidates_unchanged_without_scope_extension_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep zero-candidate routing when scope extension is explicitly disabled."""
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+        scope_extension_runner=_FakeScopeExtensionRunner(enabled=False),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "post_sprint_sprint_candidates_unavailable"
     assert data["blocked_commands"] == [
         {
             "command": "agileforge sprint generate",
@@ -4366,19 +4622,6 @@ def test_workflow_next_blocks_sprint_generate_when_saved_stories_not_refined(
             ),
             "candidate_count": 0,
             "excluded_counts": {"non_refined": 2},
-        }
-    ]
-    assert data["next_actions"] == [
-        {
-            "command": "agileforge sprint candidates --project-id 7",
-            "status": "post_sprint_sprint_candidates_unavailable",
-            "reason": (
-                "Post-sprint triage recorded no follow-up impact, but Sprint "
-                "generation has no refined candidates to plan."
-            ),
-            "runnable": True,
-            "installed": True,
-            "requires_cli_installation": False,
         }
     ]
 
