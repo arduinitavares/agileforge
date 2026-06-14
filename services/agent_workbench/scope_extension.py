@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+from sqlmodel import Session, select
 
+from models.core import Sprint, UserStory
+from models.enums import SprintStatus, StoryStatus
 from services.agent_workbench.fingerprints import canonical_hash
 from services.specs.profile_content import normalize_spec_content_for_registry
 from utils.agileforge_spec_profile import TechnicalSpecArtifact
@@ -82,6 +85,89 @@ class ScopeExtensionValidation:
     removed_source_item_ids: list[str]
     modified_source_item_ids: list[str]
     blocking_issues: list[ScopeExtensionIssue]
+
+
+@dataclass(frozen=True)
+class ScopeExtensionPreconditions:
+    """Read-only scope-extension availability decision."""
+
+    status: str
+    available: bool
+    blocking_reason: str | None = None
+
+
+def _available_scope_extension_preconditions() -> ScopeExtensionPreconditions:
+    return ScopeExtensionPreconditions(
+        status=SCOPE_EXTENSION_AVAILABLE,
+        available=True,
+    )
+
+
+def _blocked_scope_extension_preconditions(
+    reason: str,
+) -> ScopeExtensionPreconditions:
+    return ScopeExtensionPreconditions(
+        status=SCOPE_EXTENSION_BLOCKED,
+        available=False,
+        blocking_reason=reason,
+    )
+
+
+def _sprint_exists(
+    session: Session,
+    product_id: int,
+    status: SprintStatus,
+) -> bool:
+    return (
+        session.exec(
+            select(Sprint).where(
+                Sprint.product_id == product_id,
+                Sprint.status == status,
+            )
+        ).first()
+        is not None
+    )
+
+
+def _story_is_terminal(story: UserStory) -> bool:
+    return (
+        story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}
+        or story.is_superseded
+        or story.archived_reason is not None
+    )
+
+
+def _open_story_exists(session: Session, product_id: int) -> bool:
+    stories = session.exec(
+        select(UserStory).where(UserStory.product_id == product_id)
+    ).all()
+    return any(not _story_is_terminal(story) for story in stories)
+
+
+def evaluate_scope_extension_preconditions(
+    *,
+    session: Session,
+    product_id: int,
+    workflow_state: Mapping[str, Any],
+    sprint_candidate_count: int,
+) -> ScopeExtensionPreconditions:
+    """Return whether project scope extension is available from current state."""
+    if workflow_state.get("fsm_state") != "SPRINT_COMPLETE":
+        return _blocked_scope_extension_preconditions("FSM_STATE_NOT_SPRINT_COMPLETE")
+
+    if _sprint_exists(session, product_id, SprintStatus.ACTIVE):
+        return _blocked_scope_extension_preconditions("ACTIVE_SPRINT_EXISTS")
+
+    if _sprint_exists(session, product_id, SprintStatus.PLANNED):
+        return _blocked_scope_extension_preconditions("PLANNED_SPRINT_EXISTS")
+
+    if _open_story_exists(session, product_id):
+        return _blocked_scope_extension_preconditions("OPEN_STORY_EXISTS")
+
+    if sprint_candidate_count != 0:
+        return _blocked_scope_extension_preconditions("SPRINT_CANDIDATES_EXIST")
+
+    return _available_scope_extension_preconditions()
 
 
 def _fingerprint_value(value: object) -> object:

@@ -6,8 +6,13 @@ import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from models.core import Product, Sprint, Team, UserStory
+from models.enums import SprintStatus, StoryStatus
 from services.agent_workbench.scope_extension import (
+    SCOPE_EXTENSION_AVAILABLE,
+    SCOPE_EXTENSION_BLOCKED,
     ScopeExtensionIssue,
+    evaluate_scope_extension_preconditions,
     load_structured_spec_file,
     validate_additive_scope_extension,
 )
@@ -15,6 +20,8 @@ from utils.agileforge_spec_profile import TechnicalSpecArtifact
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sqlmodel import Session
 
 
 def _artifact() -> dict[str, Any]:
@@ -80,6 +87,194 @@ def _with_new_item(base: dict[str, Any]) -> dict[str, Any]:
 
 def _issue_codes(issues: list[ScopeExtensionIssue]) -> set[str]:
     return {issue.code for issue in issues}
+
+
+def _workflow_state(fsm_state: str = "SPRINT_COMPLETE") -> dict[str, str]:
+    return {"fsm_state": fsm_state}
+
+
+def _product(session: Session) -> Product:
+    product = Product(name="Scope Extension Product")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    return product
+
+
+def _team(session: Session) -> Team:
+    team = Team(name="Scope Extension Team")
+    session.add(team)
+    session.commit()
+    session.refresh(team)
+    return team
+
+
+def _story(
+    session: Session,
+    product_id: int,
+    *,
+    status: StoryStatus = StoryStatus.TO_DO,
+    is_superseded: bool = False,
+    archived_reason: str | None = None,
+) -> UserStory:
+    story = UserStory(
+        product_id=product_id,
+        title=f"Story {status.value}",
+        status=status,
+        is_superseded=is_superseded,
+        archived_reason=archived_reason,
+    )
+    session.add(story)
+    session.commit()
+    session.refresh(story)
+    return story
+
+
+def _sprint(
+    session: Session,
+    product_id: int,
+    *,
+    status: SprintStatus,
+) -> Sprint:
+    team = _team(session)
+    sprint = Sprint(product_id=product_id, team_id=team.team_id, status=status)
+    session.add(sprint)
+    session.commit()
+    session.refresh(sprint)
+    return sprint
+
+
+def test_scope_extension_preconditions_available_when_sprint_complete_and_no_open_work(
+    session: Session,
+) -> None:
+    """Allow extension only after completed workflow state with exhausted scope."""
+    product = _product(session)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_AVAILABLE
+    assert result.available is True
+    assert result.blocking_reason is None
+
+
+def test_scope_extension_preconditions_block_active_sprint(
+    session: Session,
+) -> None:
+    """Block extension while an active sprint exists."""
+    product = _product(session)
+    _sprint(session, product.product_id, status=SprintStatus.ACTIVE)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_BLOCKED
+    assert result.available is False
+    assert result.blocking_reason == "ACTIVE_SPRINT_EXISTS"
+
+
+def test_scope_extension_preconditions_block_planned_sprint(
+    session: Session,
+) -> None:
+    """Block extension while a planned sprint exists."""
+    product = _product(session)
+    _sprint(session, product.product_id, status=SprintStatus.PLANNED)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_BLOCKED
+    assert result.available is False
+    assert result.blocking_reason == "PLANNED_SPRINT_EXISTS"
+
+
+def test_scope_extension_preconditions_block_open_story(
+    session: Session,
+) -> None:
+    """Block extension while any non-terminal story remains."""
+    product = _product(session)
+    _story(session, product.product_id, status=StoryStatus.IN_PROGRESS)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_BLOCKED
+    assert result.available is False
+    assert result.blocking_reason == "OPEN_STORY_EXISTS"
+
+
+def test_scope_extension_preconditions_block_remaining_sprint_candidates(
+    session: Session,
+) -> None:
+    """Block extension while sprint planning still has candidate stories."""
+    product = _product(session)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=1,
+    )
+
+    assert result.status == SCOPE_EXTENSION_BLOCKED
+    assert result.available is False
+    assert result.blocking_reason == "SPRINT_CANDIDATES_EXIST"
+
+
+def test_scope_extension_preconditions_block_non_sprint_complete_state(
+    session: Session,
+) -> None:
+    """Block extension unless the workflow FSM is SPRINT_COMPLETE."""
+    product = _product(session)
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state("SPRINT_PLANNING"),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_BLOCKED
+    assert result.available is False
+    assert result.blocking_reason == "FSM_STATE_NOT_SPRINT_COMPLETE"
+
+
+def test_scope_extension_preconditions_allow_terminal_stories(
+    session: Session,
+) -> None:
+    """Treat accepted, done, superseded, and archived stories as terminal."""
+    product = _product(session)
+    _story(session, product.product_id, status=StoryStatus.DONE)
+    _story(session, product.product_id, status=StoryStatus.ACCEPTED)
+    _story(session, product.product_id, is_superseded=True)
+    _story(session, product.product_id, archived_reason="scope_reset")
+
+    result = evaluate_scope_extension_preconditions(
+        session=session,
+        product_id=product.product_id,
+        workflow_state=_workflow_state(),
+        sprint_candidate_count=0,
+    )
+
+    assert result.status == SCOPE_EXTENSION_AVAILABLE
+    assert result.available is True
+    assert result.blocking_reason is None
 
 
 def test_additive_scope_extension_accepts_new_source_item() -> None:
