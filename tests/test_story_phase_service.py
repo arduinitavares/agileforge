@@ -74,8 +74,9 @@ def _merge_recommended_artifact(parent_requirement: str) -> JsonDict:
     return artifact
 
 
-def _state_with_complete_story_draft() -> JsonDict:
-    parent_requirement = "Requirement A"
+def _state_with_complete_story_draft(
+    parent_requirement: str = "Requirement A",
+) -> JsonDict:
     artifact = _story_artifact(parent_requirement, "Saved draft")
     artifact_fingerprint = _story_artifact_fingerprint(parent_requirement, artifact)
     artifact["artifact_fingerprint"] = artifact_fingerprint
@@ -353,6 +354,117 @@ async def test_get_story_pending_groups_requirements_by_status() -> None:
                     "status": "Attempted",
                     "attempt_count": 1,
                 },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_scope_extension_filters_appended_requirements() -> (
+    None
+):
+    """Scope extension pending only exposes appended extension Roadmap items."""
+    state: JsonDict = {
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 7,
+            "amended_spec_version_id": 12,
+            "added_source_item_ids": ["SRC-NEW"],
+        },
+        "roadmap_releases": [
+            {
+                "theme": "Original milestone",
+                "reasoning": "Already delivered.",
+                "items": ["Original requirement"],
+            },
+            {
+                "theme": "Extension milestone",
+                "reasoning": "New amended scope.",
+                "items": ["Extension requirement"],
+                "extension_of_spec_version_id": 7,
+                "accepted_spec_version_id": 12,
+                "source_item_ids": ["SRC-NEW"],
+            },
+        ],
+        "story_saved": {"Original requirement": True},
+    }
+
+    payload = await get_story_pending(load_state=lambda: _async_value(state))
+
+    assert payload["total_count"] == 1
+    assert payload["saved_count"] == 0
+    assert payload["grouped_items"] == [
+        {
+            "group_id": "milestone_1",
+            "theme": "Extension milestone",
+            "reasoning": "New amended scope.",
+            "extension_scope": True,
+            "accepted_spec_version_id": 12,
+            "source_item_ids": ["SRC-NEW"],
+            "requirements": [
+                {
+                    "requirement": "Extension requirement",
+                    "status": "Pending",
+                    "attempt_count": 0,
+                    "extension_scope": True,
+                    "accepted_spec_version_id": 12,
+                    "source_item_ids": ["SRC-NEW"],
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_scope_extension_does_not_use_legacy_same_name_saved_flag() -> (  # noqa: E501
+    None
+):
+    """Extension pending status is based on extension provenance, not legacy names."""
+    state: JsonDict = {
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 7,
+            "amended_spec_version_id": 12,
+            "added_source_item_ids": ["SRC-NEW"],
+        },
+        "roadmap_releases": [
+            {
+                "theme": "Original milestone",
+                "reasoning": "Old scope.",
+                "items": ["Shared requirement"],
+            },
+            {
+                "theme": "Extension milestone",
+                "reasoning": "New amended scope.",
+                "items": ["Shared requirement"],
+                "extension_of_spec_version_id": 7,
+                "accepted_spec_version_id": 12,
+                "source_item_ids": ["SRC-NEW"],
+            },
+        ],
+        "story_saved": {"Shared requirement": True},
+    }
+
+    payload = await get_story_pending(load_state=lambda: _async_value(state))
+
+    assert payload["saved_count"] == 0
+    assert payload["grouped_items"] == [
+        {
+            "group_id": "milestone_1",
+            "theme": "Extension milestone",
+            "reasoning": "New amended scope.",
+            "extension_scope": True,
+            "accepted_spec_version_id": 12,
+            "source_item_ids": ["SRC-NEW"],
+            "requirements": [
+                {
+                    "requirement": "Shared requirement",
+                    "status": "Pending",
+                    "attempt_count": 0,
+                    "extension_scope": True,
+                    "accepted_spec_version_id": 12,
+                    "source_item_ids": ["SRC-NEW"],
+                }
             ],
         }
     ]
@@ -1585,6 +1697,57 @@ async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_save_story_draft_scope_extension_uses_amended_spec_metadata() -> None:
+    """Extension story save preserves amended spec provenance on persistence input."""
+    state = _state_with_complete_story_draft()
+    state["scope_extension_context"] = {
+        "schema": "agileforge.scope_extension.v1",
+        "base_spec_version_id": 7,
+        "amended_spec_version_id": 12,
+        "added_source_item_ids": ["SRC-NEW"],
+    }
+    state["roadmap_releases"] = [
+        {"items": ["Original requirement"]},
+        {
+            "items": ["Requirement A"],
+            "extension_of_spec_version_id": 7,
+            "accepted_spec_version_id": 12,
+            "source_item_ids": ["SRC-NEW"],
+        },
+    ]
+    artifact_fingerprint = state["interview_runtime"]["story"]["Requirement A"][
+        "draft_projection"
+    ]["artifact_fingerprint"]
+    hydrated = SimpleNamespace(state=state, session_id="7")
+    captured: JsonDict = {}
+
+    def fake_save_stories_tool(save_input: object, _context: object) -> JsonDict:
+        save_payload = cast("Any", save_input)
+        captured["story_origin"] = save_payload.story_origin
+        captured["accepted_spec_version_id"] = save_payload.accepted_spec_version_id
+        return {"success": True, "saved_count": 1}
+
+    await save_story_draft(
+        project_id=7,
+        parent_requirement="Requirement A",
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        hydrate_context=lambda _session_id, _project_id: _async_value(hydrated),
+        build_tool_context=lambda context: context,
+        save_stories_tool=fake_save_stories_tool,
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-save-7-extension",
+    )
+
+    assert captured == {
+        "story_origin": "scope_extension",
+        "accepted_spec_version_id": 12,
+    }
+
+
+@pytest.mark.asyncio
 async def test_save_story_draft_requires_attempt_guards() -> None:
     """Verify save story draft requires all attempt guard fields."""
     state = _state_with_complete_story_draft()
@@ -2199,6 +2362,159 @@ async def test_complete_story_phase_allows_saved_milestone_scope_with_pending_la
 
     assert replay_payload == payload
     assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_scope_extension_milestone_keeps_extension_metadata() -> (  # noqa: E501
+    None
+):
+    """Extension milestone completion does not require old original milestones."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 7,
+            "amended_spec_version_id": 12,
+            "added_source_item_ids": ["SRC-NEW"],
+        },
+        "roadmap_releases": [
+            {
+                "theme": "Original milestone",
+                "items": ["Original requirement"],
+            },
+            {
+                "theme": "Extension milestone",
+                "items": ["Extension requirement"],
+                "extension_of_spec_version_id": 7,
+                "accepted_spec_version_id": 12,
+                "source_item_ids": ["SRC-NEW"],
+            },
+        ],
+        "story_saved": {"Extension requirement": True},
+        "story_saved_metadata": {
+            "Extension requirement": {
+                "extension_scope": True,
+                "accepted_spec_version_id": 12,
+                "source_item_ids": ["SRC-NEW"],
+            }
+        },
+    }
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-extension-milestone",
+        scope="milestone",
+        scope_id="milestone_1",
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-14T12:00:00Z",
+    )
+
+    assert payload["coverage"] == {"saved": 1, "merged": 0, "total": 1}
+    assert payload["story_completion_scope"] == {
+        "schema_version": "agileforge.story_completion_scope.v1",
+        "scope": "milestone",
+        "scope_id": "milestone_1",
+        "requirements": ["Extension requirement"],
+        "extension_scope": True,
+        "accepted_spec_version_id": 12,
+        "source_item_ids": ["SRC-NEW"],
+        "completed_at": "2026-06-14T12:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_scope_extension_requires_same_name_extension_save() -> (  # noqa: E501
+    None
+):
+    """Same-name legacy saves do not cover appended extension milestones."""
+    parent_requirement = "Shared requirement"
+    state = _state_with_complete_story_draft(parent_requirement)
+    state.update(
+        {
+            "fsm_state": "STORY_PERSISTENCE",
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": 7,
+                "amended_spec_version_id": 12,
+                "added_source_item_ids": ["SRC-NEW"],
+            },
+            "roadmap_releases": [
+                {
+                    "theme": "Original milestone",
+                    "items": [parent_requirement],
+                },
+                {
+                    "theme": "Extension milestone",
+                    "items": [parent_requirement],
+                    "extension_of_spec_version_id": 7,
+                    "accepted_spec_version_id": 12,
+                    "source_item_ids": ["SRC-NEW"],
+                },
+            ],
+            "story_saved": {parent_requirement: True},
+        }
+    )
+
+    with pytest.raises(StoryPhaseError, match="0 of 1"):
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-extension-milestone-legacy-only",
+            scope="milestone",
+            scope_id="milestone_1",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            now_iso=lambda: "2026-06-14T12:00:00Z",
+        )
+
+    state["fsm_state"] = "STORY_REVIEW"
+    artifact_fingerprint = state["interview_runtime"]["story"][parent_requirement][
+        "draft_projection"
+    ]["artifact_fingerprint"]
+    hydrated = SimpleNamespace(state=state, session_id="7")
+
+    def fake_save_stories_tool(save_input: object, _context: object) -> JsonDict:
+        save_payload = cast("Any", save_input)
+        assert save_payload.story_origin == "scope_extension"
+        assert save_payload.accepted_spec_version_id == 12  # noqa: PLR2004
+        return {"success": True, "saved_count": 1}
+
+    await save_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        hydrate_context=lambda _session_id, _project_id: _async_value(hydrated),
+        build_tool_context=lambda context: context,
+        save_stories_tool=fake_save_stories_tool,
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-save-7-extension-shared",
+    )
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-extension-milestone-after-extension-save",
+        scope="milestone",
+        scope_id="milestone_1",
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-14T12:01:00Z",
+    )
+
+    assert payload["coverage"] == {"saved": 1, "merged": 0, "total": 1}
+    assert payload["story_completion_scope"] == {
+        "schema_version": "agileforge.story_completion_scope.v1",
+        "scope": "milestone",
+        "scope_id": "milestone_1",
+        "requirements": [parent_requirement],
+        "extension_scope": True,
+        "accepted_spec_version_id": 12,
+        "source_item_ids": ["SRC-NEW"],
+        "completed_at": "2026-06-14T12:01:00Z",
+    }
+    assert state["story_completion_scope"]["extension_scope"] is True
 
 
 @pytest.mark.asyncio

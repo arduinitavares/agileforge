@@ -32,6 +32,7 @@ from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.phases import sprint_service
+from services.sprint_input import load_sprint_candidates
 from utils.task_metadata import TaskMetadata, serialize_task_metadata
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ JsonDict = dict[str, Any]
 MIDDLE_STORY_EXECUTION_ORDER = 2
 DEPENDENT_STORY_EXECUTION_ORDER = 3
 TASK_FINGERPRINT_PREFIX = "sha256:"
+AMENDED_SPEC_VERSION_ID = 12
 
 
 class _FakeProductRepository:
@@ -116,6 +118,75 @@ def test_sprint_runner_generate_wraps_keyword_only_failure_meta(
     assert result["ok"] is True
     assert result["data"]["fsm_state"] == "SPRINT_DRAFT"
     assert result["data"]["attempt_id"] == "sprint-attempt-1"
+
+
+def test_scope_extension_sprint_candidates_keep_only_extension_stories() -> None:
+    """Extension Story completion excludes legacy candidates from Sprint planning."""
+
+    def fake_fetch_candidates(*, product_id: int) -> JsonDict:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "stories": [
+                {
+                    "story_id": 1,
+                    "story_title": "Legacy shared requirement",
+                    "source_requirement": "Shared requirement",
+                    "story_origin": "refined",
+                    "accepted_spec_version_id": 7,
+                    "story_points": 2,
+                    "priority": 101,
+                },
+                {
+                    "story_id": 2,
+                    "story_title": "Amended spec requirement",
+                    "source_requirement": "Shared requirement",
+                    "story_origin": "refined",
+                    "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+                    "story_points": 3,
+                    "priority": 201,
+                },
+                {
+                    "story_id": 3,
+                    "story_title": "Missing spec extension requirement",
+                    "source_requirement": "Shared requirement",
+                    "story_origin": "scope_extension",
+                    "accepted_spec_version_id": None,
+                    "story_points": 5,
+                    "priority": 202,
+                },
+                {
+                    "story_id": 4,
+                    "story_title": "Wrong spec extension requirement",
+                    "source_requirement": "Shared requirement",
+                    "story_origin": "scope_extension",
+                    "accepted_spec_version_id": 9,
+                    "story_points": 5,
+                    "priority": 203,
+                },
+            ],
+        }
+
+    result = load_sprint_candidates(
+        7,
+        fetch_candidates=fake_fetch_candidates,
+        story_completion_scope={
+            "scope": "milestone",
+            "scope_id": "milestone_1",
+            "requirements": ["Shared requirement"],
+            "extension_scope": True,
+            "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+        },
+    )
+
+    assert result["count"] == 1
+    assert [story["story_id"] for story in result["stories"]] == [2]
+    assert result["excluded_counts"]["story_completion_scope"] == 3  # noqa: PLR2004
+    assert result["story_completion_scope"]["extension_scope"] is True
+    assert (
+        result["story_completion_scope"]["accepted_spec_version_id"]
+        == AMENDED_SPEC_VERSION_ID
+    )
 
 
 def test_sprint_runner_generate_normalizes_invalid_model_response(

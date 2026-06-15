@@ -289,6 +289,7 @@ def fetch_sprint_candidates_from_session(
             "persona": story.persona,
             "source_requirement": story.source_requirement,
             "story_origin": story.story_origin,
+            "accepted_spec_version_id": story.accepted_spec_version_id,
             "story_description": story.story_description,
             "acceptance_criteria": story.acceptance_criteria,
             "evaluated_invariant_ids": _story_evaluated_invariant_ids(story),

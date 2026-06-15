@@ -53,6 +53,20 @@ class SaveStoriesInput(BaseModel):
             ),
         ),
     ] = None
+    story_origin: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional persistence origin override for extension scope.",
+        ),
+    ] = None
+    accepted_spec_version_id: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="Accepted amended spec version that produced these stories.",
+        ),
+    ] = None
     stories: Annotated[
         list[dict[str, Any]],
         Field(
@@ -182,11 +196,17 @@ def _story_save_request_identity(
     normalized_req: str,
     parent_rank: int | None,
     validated: list[UserStoryItem],
+    story_origin: str | None = None,
+    accepted_spec_version_id: int | None = None,
 ) -> dict[str, str]:
     return {
         "normalized_requirement": normalized_req,
         "parent_rank": "" if parent_rank is None else str(parent_rank),
         "story_payload_hash": _story_request_payload_hash(validated),
+        "story_origin": story_origin or "",
+        "accepted_spec_version_id": (
+            "" if accepted_spec_version_id is None else str(accepted_spec_version_id)
+        ),
     }
 
 
@@ -216,6 +236,9 @@ def _story_save_event_matches_request(
         == request_identity["normalized_requirement"]
         and str(metadata.get("parent_rank", "")) == request_identity["parent_rank"]
         and metadata.get("story_payload_hash") == request_identity["story_payload_hash"]
+        and str(metadata.get("story_origin", "")) == request_identity["story_origin"]
+        and str(metadata.get("accepted_spec_version_id", ""))
+        == request_identity["accepted_spec_version_id"]
     )
 
 
@@ -270,14 +293,24 @@ def _active_stories_for_requirement(
     *,
     product_id: int,
     normalized_req: str,
+    story_origin: str | None = None,
+    accepted_spec_version_id: int | None = None,
 ) -> list[UserStory]:
+    statement = (
+        select(UserStory)
+        .where(UserStory.product_id == product_id)
+        .where(UserStory.source_requirement == normalized_req)
+        .where(UserStory.is_superseded == False)  # noqa: E712
+    )
+    if story_origin is not None:
+        statement = statement.where(UserStory.story_origin == story_origin)
+    if accepted_spec_version_id is not None:
+        statement = statement.where(
+            UserStory.accepted_spec_version_id == accepted_spec_version_id
+        )
     return list(
         session.exec(
-            select(UserStory)
-            .where(UserStory.product_id == product_id)
-            .where(UserStory.source_requirement == normalized_req)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-            .order_by(
+            statement.order_by(
                 cast("Any", UserStory.refinement_slot),
                 cast("Any", UserStory.story_id),
             )
@@ -349,6 +382,8 @@ def _upsert_refined_story(  # noqa: PLR0913
     item: UserStoryItem,
     existing: UserStory | None,
     rank: str,
+    story_origin: str,
+    accepted_spec_version_id: int | None,
 ) -> tuple[int, str]:
     """Upsert a refined story by deterministic linkage key."""
     product_id, normalized_req = linkage
@@ -375,11 +410,13 @@ def _upsert_refined_story(  # noqa: PLR0913
         existing.story_description = item.statement
         existing.acceptance_criteria = ac_text
         existing.persona = persona
-        existing.story_origin = "refined"
+        existing.story_origin = story_origin
         existing.is_refined = True
         existing.is_superseded = False
         existing.story_points = _story_points_from_effort(item.estimated_effort)
         existing.rank = rank
+        if accepted_spec_version_id is not None:
+            existing.accepted_spec_version_id = accepted_spec_version_id
         existing.ac_updated_at = datetime.now(UTC)
         existing.ac_update_reason = "user_story_refinement"
         session.add(existing)
@@ -397,12 +434,13 @@ def _upsert_refined_story(  # noqa: PLR0913
         persona=persona,
         source_requirement=normalized_req,
         refinement_slot=slot,
-        story_origin="refined",
+        story_origin=story_origin,
         is_refined=True,
         is_superseded=False,
         story_points=_story_points_from_effort(item.estimated_effort),
         rank=rank,
         ac_update_reason="user_story_refinement",
+        accepted_spec_version_id=accepted_spec_version_id,
     )
     session.add(story)
     session.flush()
@@ -482,6 +520,7 @@ def _persist_validated_stories(
         for story in existing_active
         if story.refinement_slot is not None
     }
+    story_origin = input_data.story_origin or "refined"
 
     for idx, item in enumerate(validated, start=1):
         rank = _refined_story_rank(
@@ -496,6 +535,8 @@ def _persist_validated_stories(
             item=item,
             existing=existing_by_slot.get(idx),
             rank=rank,
+            story_origin=story_origin,
+            accepted_spec_version_id=input_data.accepted_spec_version_id,
         )
         target = created_ids if action == "created" else updated_ids
         target.append(story_id)
@@ -526,6 +567,8 @@ def _persist_validated_stories(
             normalized_req=normalized_req,
             parent_rank=input_data.parent_rank,
             validated=validated,
+            story_origin=input_data.story_origin,
+            accepted_spec_version_id=input_data.accepted_spec_version_id,
         ),
         updated_ids=updated_ids,
         created_ids=created_ids,
@@ -706,9 +749,10 @@ def _post_save_dependency_reference_stories(
             ),
             source_requirement=normalized_req,
             refinement_slot=slot,
-            story_origin="refined",
+            story_origin=input_data.story_origin or "refined",
             is_refined=True,
             is_superseded=False,
+            accepted_spec_version_id=input_data.accepted_spec_version_id,
         )
         synthetic.story_id = int(story_id)
         reference_stories.append(synthetic)
@@ -1121,6 +1165,8 @@ def save_stories_tool(  # noqa: PLR0911
             normalized_req=normalized_req,
             parent_rank=input_data.parent_rank,
             validated=validated,
+            story_origin=input_data.story_origin,
+            accepted_spec_version_id=input_data.accepted_spec_version_id,
         )
         previous_event = _find_story_save_event(
             session,
@@ -1139,6 +1185,12 @@ def save_stories_tool(  # noqa: PLR0911
             session,
             product_id=input_data.product_id,
             normalized_req=normalized_req,
+            story_origin=input_data.story_origin
+            if input_data.story_origin == "scope_extension"
+            else None,
+            accepted_spec_version_id=input_data.accepted_spec_version_id
+            if input_data.story_origin == "scope_extension"
+            else None,
         )
         blockers = _story_replacement_blockers(existing_active)
         if blockers:

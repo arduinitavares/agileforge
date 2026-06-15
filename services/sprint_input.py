@@ -237,11 +237,26 @@ def _story_completion_scope_payload(value: object) -> dict[str, Any] | None:
     ]
     if not requirements:
         return None
-    return {
+    payload: dict[str, Any] = {
         "scope": str(scope_data.get("scope") or "").strip() or None,
         "scope_id": str(scope_data.get("scope_id") or "").strip() or None,
         "requirements": requirements,
     }
+    if scope_data.get("extension_scope") is True:
+        payload["extension_scope"] = True
+    accepted_spec_version_id = normalize_positive_int(
+        scope_data.get("accepted_spec_version_id")
+    )
+    if accepted_spec_version_id is not None:
+        payload["accepted_spec_version_id"] = accepted_spec_version_id
+    source_item_ids = [
+        str(item).strip()
+        for item in (scope_data.get("source_item_ids") or [])
+        if str(item).strip()
+    ]
+    if source_item_ids:
+        payload["source_item_ids"] = source_item_ids
+    return payload
 
 
 def _scope_requirement_keys(scope_payload: dict[str, Any]) -> set[str]:
@@ -250,6 +265,41 @@ def _scope_requirement_keys(scope_payload: dict[str, Any]) -> set[str]:
         for requirement in scope_payload["requirements"]
         if normalize_requirement_key(requirement)
     }
+
+
+def _matches_extension_scope(
+    story: dict[str, Any],
+    scope_payload: dict[str, Any],
+) -> bool:
+    """Return whether a requirement-matched story belongs to extension scope."""
+    if scope_payload.get("extension_scope") is not True:
+        return True
+    accepted_spec_version_id = normalize_positive_int(
+        scope_payload.get("accepted_spec_version_id")
+    )
+    if accepted_spec_version_id is not None:
+        return (
+            normalize_positive_int(story.get("accepted_spec_version_id"))
+            == accepted_spec_version_id
+        )
+    return as_text(story.get("story_origin")).strip() == "scope_extension"
+
+
+def _copy_story_scope_metadata(
+    normalized_story: dict[str, Any],
+    row: dict[str, Any],
+) -> None:
+    source_req = as_text(row.get("source_requirement")).strip() or None
+    if source_req:
+        normalized_story["source_requirement"] = source_req
+    story_origin = as_text(row.get("story_origin")).strip() or None
+    if story_origin:
+        normalized_story["story_origin"] = story_origin
+    accepted_spec_version_id = normalize_positive_int(
+        row.get("accepted_spec_version_id")
+    )
+    if accepted_spec_version_id is not None:
+        normalized_story["accepted_spec_version_id"] = accepted_spec_version_id
 
 
 def _story_completion_scope_candidate_message(
@@ -302,7 +352,10 @@ def apply_story_completion_scope_to_candidate_result(
         if not isinstance(story, dict):
             continue
         source_requirement = as_text(story.get("source_requirement")).strip()
-        if normalize_requirement_key(source_requirement) in requirement_keys:
+        if (
+            normalize_requirement_key(source_requirement) in requirement_keys
+            and _matches_extension_scope(story, scope_payload)
+        ):
             filtered.append(story)
         else:
             excluded_count += 1
@@ -430,9 +483,7 @@ def load_sprint_candidates(
         if persona:
             normalized_story["persona"] = persona
 
-        source_req = as_text(row.get("source_requirement")).strip() or None
-        if source_req:
-            normalized_story["source_requirement"] = source_req
+        _copy_story_scope_metadata(normalized_story, row)
 
         stories.append(normalized_story)
 
