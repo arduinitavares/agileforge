@@ -250,6 +250,10 @@ def _hydrate_active_backlog_from_db(
     project_id: int,
 ) -> None:
     """Backfill canonical active backlog items from persisted seed stories."""
+    if _scope_extension_backlog_saved(state):
+        _hydrate_scope_extension_backlog_from_db(state, project_id=project_id)
+        return
+
     backlog_items = state.get("backlog_items")
     force_db_reload = bool(state.get("active_backlog_reset_attempt_id"))
     if not force_db_reload and isinstance(backlog_items, list) and backlog_items:
@@ -274,6 +278,66 @@ def _hydrate_active_backlog_from_db(
             "value_driver": "Strategic",
             "justification": story.story_description or story.title,
             "estimated_effort": _effort_from_points(story.story_points),
+        }
+        for index, story in enumerate(stories, start=1)
+    ]
+
+
+def _scope_extension_backlog_saved(state: dict[str, Any]) -> bool:
+    context = state.get("scope_extension_context")
+    return (
+        isinstance(context, dict)
+        and bool(context.get("backlog_extension_saved_at"))
+        and not bool(context.get("roadmap_extension_saved_at"))
+    )
+
+
+def _scope_extension_amended_spec_version_id(state: dict[str, Any]) -> int | None:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        return None
+    value = context.get("amended_spec_version_id")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _hydrate_scope_extension_backlog_from_db(
+    state: dict[str, Any],
+    *,
+    project_id: int,
+) -> None:
+    amended_spec_version_id = _scope_extension_amended_spec_version_id(state)
+    with Session(get_engine()) as session:
+        statement = (
+            select(UserStory)
+            .where(UserStory.product_id == project_id)
+            .where(UserStory.story_origin == "scope_extension")
+            .where(UserStory.is_superseded == False)  # noqa: E712
+            .order_by(cast("Any", UserStory.rank), cast("Any", UserStory.story_id))
+        )
+        if amended_spec_version_id is not None:
+            statement = statement.where(
+                UserStory.accepted_spec_version_id == amended_spec_version_id
+            )
+        stories = session.exec(statement).all()
+
+    if not stories:
+        return
+
+    state["backlog_items"] = [
+        {
+            "priority": _priority_from_story(story, fallback=index),
+            "requirement": story.title,
+            "value_driver": "Strategic",
+            "justification": story.story_description or story.title,
+            "estimated_effort": _effort_from_points(story.story_points),
+            "story_origin": "scope_extension",
+            "accepted_spec_version_id": story.accepted_spec_version_id,
         }
         for index, story in enumerate(stories, start=1)
     ]

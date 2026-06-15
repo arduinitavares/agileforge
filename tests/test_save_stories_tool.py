@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from agile_sqlmodel import (
     Product,
+    SpecRegistry,
     Sprint,
     SprintStory,
     StoryStatus,
@@ -960,6 +961,85 @@ class TestSaveStoriesTool:
 
         session.refresh(story)
         assert story.is_refined is False
+
+    def test_save_stories_tool_scope_extension_ignores_progressed_legacy_match(
+        self, session: Session
+    ) -> None:
+        """Extension save creates separate rows when legacy requirement names match."""
+        base_spec_version_id = 7
+        amended_spec_version_id = 12
+        _seed_product(session)
+        session.add_all(
+            [
+                SpecRegistry(
+                    spec_version_id=base_spec_version_id,
+                    product_id=1,
+                    spec_hash="sha256:base",
+                    content="BASE SPEC",
+                    status="approved",
+                ),
+                SpecRegistry(
+                    spec_version_id=amended_spec_version_id,
+                    product_id=1,
+                    spec_hash="sha256:amended",
+                    content="AMENDED SPEC",
+                    status="approved",
+                ),
+            ]
+        )
+        session.commit()
+        legacy = UserStory(
+            product_id=1,
+            title="Legacy attestation gate",
+            story_description="Already completed legacy work.",
+            acceptance_criteria="- Legacy behavior remains visible.",
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+            status=StoryStatus.DONE,
+            accepted_spec_version_id=base_spec_version_id,
+        )
+        session.add(legacy)
+        session.commit()
+        session.refresh(legacy)
+        legacy_story_id = legacy.story_id
+        assert legacy_story_id is not None
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-scope-extension-same-requirement",
+            story_origin="scope_extension",
+            accepted_spec_version_id=amended_spec_version_id,
+            stories=[_valid_story()],
+        )
+        result = save_stories_tool(input_data=payload, tool_context=None)
+
+        assert result["success"], result.get("error")
+        assert result["created_count"] == 1
+        assert result["updated_count"] == 0
+        assert result["superseded_count"] == 0
+        assert result["created_story_ids"] != [legacy_story_id]
+
+        session.expire_all()
+        preserved_legacy = session.get(UserStory, legacy_story_id)
+        assert preserved_legacy is not None
+        assert preserved_legacy.title == "Legacy attestation gate"
+        assert preserved_legacy.status == StoryStatus.DONE
+        assert preserved_legacy.story_origin == "refined"
+        assert preserved_legacy.accepted_spec_version_id == base_spec_version_id
+        assert preserved_legacy.is_superseded is False
+
+        extension_story = session.get(UserStory, result["created_story_ids"][0])
+        assert extension_story is not None
+        assert extension_story.source_requirement == normalize_requirement_key(
+            "Attestation Gate"
+        )
+        assert extension_story.story_origin == "scope_extension"
+        assert extension_story.accepted_spec_version_id == amended_spec_version_id
+        assert extension_story.status == StoryStatus.TO_DO
 
     def test_save_stories_tool_supersedes_overflow_active_slots(
         self, session: Session

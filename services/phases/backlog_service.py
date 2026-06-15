@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -15,7 +15,11 @@ from orchestrator_agent.agent_tools.backlog_primer.schemes import (
     BacklogItem,
     OutputSchema,
 )
-from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from orchestrator_agent.agent_tools.backlog_primer.tools import (
+    INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
+    INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
+    SaveBacklogInput,
+)
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetRequest,
@@ -87,6 +91,7 @@ COMPILED_AUTHORITY_REF_KEYS = (
     "source_item_id",
     "target_id",
 )
+_MISSING_INTERNAL_SAVE_OPTIONS = object()
 
 
 class BacklogPhaseError(Exception):
@@ -157,6 +162,29 @@ def _backlog_runtime_diagnostics(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _has_scope_extension_delta_context(state: dict[str, Any]) -> bool:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        return False
+    if context.get("backlog_extension_saved_at"):
+        return False
+    added_source_item_ids = context.get("added_source_item_ids")
+    return isinstance(added_source_item_ids, list) and any(
+        isinstance(item, str) and item.strip() for item in added_source_item_ids
+    )
+
+
+def _should_preserve_setup_required_for_backlog_failure(
+    *,
+    fsm_state: str,
+    backlog_result: dict[str, Any],
+) -> bool:
+    return (
+        fsm_state == OrchestratorState.SETUP_REQUIRED.value
+        and backlog_result.get("failure_stage") == "authority_review_required"
+    )
+
+
 def set_backlog_fsm_state(
     state: dict[str, Any],
     *,
@@ -183,10 +211,20 @@ async def generate_backlog_draft(
 ) -> dict[str, Any]:
     state = await load_state()
     fsm_state = _normalize_fsm_state(state.get("fsm_state"))
-    if fsm_state == OrchestratorState.SETUP_REQUIRED.value:
+    has_scope_extension_delta_context = _has_scope_extension_delta_context(state)
+    if (
+        fsm_state == OrchestratorState.SETUP_REQUIRED.value
+        and not has_scope_extension_delta_context
+    ):
         raise BacklogPhaseError("Setup required before backlog")
 
-    if fsm_state not in VALID_BACKLOG_GENERATION_STATES:
+    if (
+        fsm_state not in VALID_BACKLOG_GENERATION_STATES
+        and not (
+            fsm_state == OrchestratorState.SETUP_REQUIRED.value
+            and has_scope_extension_delta_context
+        )
+    ):
         raise BacklogPhaseError(f"Invalid FSM State for backlog: {fsm_state}")
 
     assessment = state.get("product_backlog_assessment")
@@ -195,7 +233,11 @@ async def generate_backlog_draft(
         and isinstance(assessment.get("backlog_items"), list)
     )
     normalized_user_input = (user_input or "").strip()
-    if has_refinable_draft and not normalized_user_input:
+    if (
+        has_refinable_draft
+        and not normalized_user_input
+        and not has_scope_extension_delta_context
+    ):
         raise BacklogPhaseError(
             "Feedback is required for Backlog refinement attempts",
         )
@@ -225,11 +267,18 @@ async def generate_backlog_draft(
         attempt_id=attempt_id,
         artifact_fingerprint=artifact_fingerprint,
     )
-    next_state = set_backlog_fsm_state(
-        state,
-        is_complete=is_complete,
-        now_iso=now_iso,
-    )
+    if _should_preserve_setup_required_for_backlog_failure(
+        fsm_state=fsm_state,
+        backlog_result=backlog_result,
+    ):
+        next_state = fsm_state
+        state["fsm_state"] = next_state
+    else:
+        next_state = set_backlog_fsm_state(
+            state,
+            is_complete=is_complete,
+            now_iso=now_iso,
+        )
     save_state(state)
 
     return {
@@ -606,17 +655,32 @@ async def save_backlog_draft(
     if len(items) == 0:
         raise BacklogPhaseError("Backlog items are empty")
 
-    result = save_backlog_tool(
-        SaveBacklogInput(
-            product_id=project_id,
-            backlog_items=items,
-            idempotency_key=idempotency_key,
-        ),
-        build_tool_context(context),
+    internal_save_options = _scope_extension_internal_save_options(
+        context.state,
+        attempt_id=attempt_id,
     )
-    if inspect.isawaitable(result):
-        result = await result
-    result = cast("dict[str, Any]", result)
+    tool_context = build_tool_context(context)
+    previous_internal_save_options = _install_internal_backlog_save_options(
+        tool_context,
+        internal_save_options,
+    )
+    try:
+        result = save_backlog_tool(
+            SaveBacklogInput(
+                product_id=project_id,
+                backlog_items=items,
+                idempotency_key=idempotency_key,
+            ),
+            tool_context,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        result = cast("dict[str, Any]", result)
+    finally:
+        _restore_internal_backlog_save_options(
+            tool_context,
+            previous_internal_save_options,
+        )
 
     if not result.get("success"):
         raise BacklogPhaseError(
@@ -624,9 +688,18 @@ async def save_backlog_draft(
             status_code=500,
         )
 
+    context.state.pop(INTERNAL_BACKLOG_SAVE_OPTIONS_KEY, None)
     context.state["fsm_state"] = OrchestratorState.BACKLOG_PERSISTENCE.value
     context.state["fsm_state_entered_at"] = now_iso()
-    context.state["backlog_saved_at"] = now_iso()
+    saved_at = now_iso()
+    context.state["backlog_saved_at"] = saved_at
+    if internal_save_options:
+        _mark_scope_extension_backlog_saved(
+            context.state,
+            saved_at=saved_at,
+            attempt_id=attempt_id,
+            artifact_fingerprint=expected_artifact_fingerprint,
+        )
 
     payload = {
         "fsm_state": OrchestratorState.BACKLOG_PERSISTENCE.value,
@@ -1534,6 +1607,112 @@ def _record_backlog_save_replay(
         saves = {}
     saves[idempotency_key] = dict(payload)
     state["backlog_save_idempotency_keys"] = saves
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _save_input_context_for_attempt(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+) -> dict[str, Any]:
+    selected_attempt = _find_backlog_attempt(state, attempt_id)
+    if isinstance(selected_attempt, dict):
+        input_context = selected_attempt.get("input_context")
+        if isinstance(input_context, dict):
+            return input_context
+    last_input_context = state.get("backlog_last_input_context")
+    return last_input_context if isinstance(last_input_context, dict) else {}
+
+
+def _scope_extension_internal_save_options(
+    state: dict[str, Any],
+    *,
+    attempt_id: str,
+) -> dict[str, Any]:
+    input_context = _save_input_context_for_attempt(state, attempt_id=attempt_id)
+    if input_context.get("generation_mode") != "scope_extension":
+        return {}
+    scope_extension = input_context.get("scope_extension")
+    if not isinstance(scope_extension, dict):
+        raise BacklogPhaseError(
+            "Scope extension Backlog save is missing scope_extension metadata.",
+        )
+    accepted_spec_version_id = _coerce_int(
+        scope_extension.get("amended_spec_version_id")
+    )
+    if accepted_spec_version_id is None:
+        raise BacklogPhaseError(
+            "Scope extension Backlog save is missing amended_spec_version_id.",
+        )
+    return {
+        "authorized_by": INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
+        "append_only": True,
+        "story_origin": "scope_extension",
+        "accepted_spec_version_id": accepted_spec_version_id,
+    }
+
+
+def _tool_context_state(tool_context: object) -> MutableMapping[str, Any]:
+    state = getattr(tool_context, "state", None)
+    if state is None or not hasattr(state, "get") or not hasattr(state, "__setitem__"):
+        raise BacklogPhaseError("Backlog save tool context is missing mutable state.")
+    return cast("MutableMapping[str, Any]", state)
+
+
+def _install_internal_backlog_save_options(
+    tool_context: object,
+    options: dict[str, Any],
+) -> object:
+    state = _tool_context_state(tool_context)
+    previous = state.get(
+        INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
+        _MISSING_INTERNAL_SAVE_OPTIONS,
+    )
+    if options:
+        state[INTERNAL_BACKLOG_SAVE_OPTIONS_KEY] = dict(options)
+    else:
+        state.pop(INTERNAL_BACKLOG_SAVE_OPTIONS_KEY, None)
+    return previous
+
+
+def _restore_internal_backlog_save_options(
+    tool_context: object,
+    previous: object,
+) -> None:
+    state = _tool_context_state(tool_context)
+    if previous is _MISSING_INTERNAL_SAVE_OPTIONS:
+        state.pop(INTERNAL_BACKLOG_SAVE_OPTIONS_KEY, None)
+    else:
+        state[INTERNAL_BACKLOG_SAVE_OPTIONS_KEY] = previous
+
+
+def _mark_scope_extension_backlog_saved(
+    state: dict[str, Any],
+    *,
+    saved_at: str,
+    attempt_id: str,
+    artifact_fingerprint: str,
+) -> None:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        input_context = _save_input_context_for_attempt(state, attempt_id=attempt_id)
+        scope_extension = input_context.get("scope_extension")
+        if not isinstance(scope_extension, dict):
+            return
+        context = dict(scope_extension)
+        state["scope_extension_context"] = context
+    context["backlog_extension_saved_at"] = saved_at
+    context["backlog_extension_attempt_id"] = attempt_id
+    context["backlog_extension_artifact_fingerprint"] = artifact_fingerprint
 
 
 def _record_backlog_refine_record_replay(

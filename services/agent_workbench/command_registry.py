@@ -154,6 +154,12 @@ _AUTHORITY_REGENERATE_IDEMPOTENCY_POLICY: dict[str, str] = {
     "dry_run_trace_field": "none",
 }
 
+_REQUIRED_IDEMPOTENCY_POLICY: dict[str, str] = {
+    "non_dry_run": "required",
+    "dry_run": "not_supported",
+    "dry_run_trace_field": "none",
+}
+
 _PHASE_2B_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge project create",
@@ -446,6 +452,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.AUTHORITY_REVIEW_REQUIRED.value,
             ErrorCode.INVALID_COMMAND.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
@@ -1145,6 +1152,58 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge scope extension validate",
+        mutates=False,
+        phase="scope_extension",
+        input_required=("project_id", "spec_file"),
+        input_optional=("base_spec_version_id",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge scope extension start",
+        mutates=True,
+        phase="scope_extension",
+        requires_idempotency_key=True,
+        accepts_expected_state=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "spec_file",
+            "base_spec_version_id",
+            "expected_state",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE.value,
+            ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+            ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
+            ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
+            ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
+)
+
+
 _PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge spec profile schema",
@@ -1174,6 +1233,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
         *_PHASE_2D_COMMANDS,
+        *_SCOPE_EXTENSION_COMMANDS,
         *_PHASE_2E_COMMANDS,
     )
 

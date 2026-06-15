@@ -2,10 +2,11 @@
 
 import json
 import time
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlmodel import Session, select
 
 from models.core import SprintStory, UserStory
@@ -16,9 +17,23 @@ from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_k
 
 from .schemes import BacklogItem
 
+INTERNAL_BACKLOG_SAVE_OPTIONS_KEY = "_agileforge_internal_backlog_save_options"
+INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY = "services.phases.backlog_service"
+
+
+@dataclass(frozen=True)
+class _BacklogSaveOptions:
+    """Host-authorized save options that are not public tool input."""
+
+    append_only: bool = False
+    story_origin: str = "backlog_seed"
+    accepted_spec_version_id: int | None = None
+
 
 class SaveBacklogInput(BaseModel):
     """Input schema for save_backlog_tool."""
+
+    model_config = ConfigDict(extra="forbid")
 
     product_id: Annotated[int, Field(description="The product ID.")]
     idempotency_key: Annotated[
@@ -61,6 +76,34 @@ def _resolve_backlog_items_from_state(
     return []
 
 
+def _internal_backlog_save_options(tool_context: ToolContext) -> _BacklogSaveOptions:
+    state = tool_context.state or {}
+    raw_options = state.get(INTERNAL_BACKLOG_SAVE_OPTIONS_KEY)
+    if not isinstance(raw_options, dict):
+        return _BacklogSaveOptions()
+    if raw_options.get("authorized_by") != INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY:
+        return _BacklogSaveOptions()
+
+    story_origin_raw = raw_options.get("story_origin")
+    story_origin = (
+        story_origin_raw.strip()
+        if isinstance(story_origin_raw, str) and story_origin_raw.strip()
+        else "backlog_seed"
+    )
+    accepted_spec_version_raw = raw_options.get("accepted_spec_version_id")
+    accepted_spec_version_id = (
+        accepted_spec_version_raw
+        if isinstance(accepted_spec_version_raw, int)
+        and not isinstance(accepted_spec_version_raw, bool)
+        else None
+    )
+    return _BacklogSaveOptions(
+        append_only=raw_options.get("append_only") is True,
+        story_origin=story_origin,
+        accepted_spec_version_id=accepted_spec_version_id,
+    )
+
+
 async def save_backlog_tool(
     save_input: SaveBacklogInput,
     tool_context: ToolContext | None = None,
@@ -87,6 +130,7 @@ async def save_backlog_tool(
             idempotency_key=normalized_input.idempotency_key,
             backlog_items=_resolve_backlog_items_from_state(tool_context),
         )
+    save_options = _internal_backlog_save_options(tool_context)
 
     # Validate backlog items using BacklogItem schema
     validated_items: list[BacklogItem] = []
@@ -130,35 +174,38 @@ async def save_backlog_tool(
         if replay is not None:
             return replay
 
-        active_stories = session.exec(
-            select(UserStory)
-            .where(UserStory.product_id == normalized_input.product_id)
-            .where(UserStory.is_superseded == False)  # noqa: E712
-        ).all()
-        blocked = [
-            story
-            for story in active_stories
-            if _blocks_backlog_replacement(session, story)
-        ]
-        if blocked:
-            return {
-                "success": False,
-                "error": "BACKLOG_REPLACEMENT_BLOCKED",
-                "blocked_count": len(blocked),
-                "blocked_story_ids": [
-                    story.story_id for story in blocked if story.story_id is not None
-                ],
-                "message": (
-                    "Existing backlog stories have progressed downstream; "
-                    "refine or reconcile them before replacing the backlog."
-                ),
-            }
+        if not save_options.append_only:
+            active_stories = session.exec(
+                select(UserStory)
+                .where(UserStory.product_id == normalized_input.product_id)
+                .where(UserStory.is_superseded == False)  # noqa: E712
+            ).all()
+            blocked = [
+                story
+                for story in active_stories
+                if _blocks_backlog_replacement(session, story)
+            ]
+            if blocked:
+                return {
+                    "success": False,
+                    "error": "BACKLOG_REPLACEMENT_BLOCKED",
+                    "blocked_count": len(blocked),
+                    "blocked_story_ids": [
+                        story.story_id
+                        for story in blocked
+                        if story.story_id is not None
+                    ],
+                    "message": (
+                        "Existing backlog stories have progressed downstream; "
+                        "refine or reconcile them before replacing the backlog."
+                    ),
+                }
 
-        for story in active_stories:
-            if story.story_origin == "backlog_seed":
-                story.is_superseded = True
-                session.add(story)
-                superseded_count += 1
+            for story in active_stories:
+                if story.story_origin == "backlog_seed":
+                    story.is_superseded = True
+                    session.add(story)
+                    superseded_count += 1
 
         for item in validated_items:
             normalized_requirement = normalize_requirement_key(item.requirement)
@@ -203,9 +250,10 @@ async def save_backlog_tool(
                 acceptance_criteria=None,  # To be filled by UserStory Writer later
                 source_requirement=normalized_requirement,
                 refinement_slot=slot,
-                story_origin="backlog_seed",
+                story_origin=save_options.story_origin,
                 is_refined=False,
                 is_superseded=False,
+                accepted_spec_version_id=save_options.accepted_spec_version_id,
             )
             session.add(new_story)
             created_count += 1
@@ -219,6 +267,9 @@ async def save_backlog_tool(
             {
                 "action": "backlog_saved",
                 "idempotency_key": normalized_input.idempotency_key,
+                "append_only": save_options.append_only,
+                "story_origin": save_options.story_origin,
+                "accepted_spec_version_id": save_options.accepted_spec_version_id,
                 "processed_count": len(validated_items),
                 "created_count": created_count,
                 "superseded_count": superseded_count,
@@ -312,4 +363,9 @@ def _blocks_backlog_replacement(session: Session, story: UserStory) -> bool:
     return sprint_link is not None
 
 
-__all__ = ["SaveBacklogInput", "save_backlog_tool"]
+__all__ = [
+    "INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY",
+    "INTERNAL_BACKLOG_SAVE_OPTIONS_KEY",
+    "SaveBacklogInput",
+    "save_backlog_tool",
+]

@@ -1,6 +1,6 @@
 """Input and output schemas for the Roadmap Builder agent."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -120,12 +120,40 @@ class RoadmapBuilderInput(BaseModel):
             description="User's specific requests, feedback, or constraints.",
         ),
     ]
+    generation_mode: Annotated[
+        Literal["scope_extension"] | None,
+        Field(
+            default=None,
+            description="Optional host mode for append-only scope extension planning.",
+        ),
+    ]
+    existing_roadmap_context: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            default=None,
+            description="Read-only existing roadmap releases for append-only planning.",
+        ),
+    ]
+    scope_extension: Annotated[
+        dict[str, Any] | None,
+        Field(
+            default=None,
+            description="Scope extension spec/version/source metadata.",
+        ),
+    ]
+    extension_backlog_items: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            default=None,
+            description="Extension backlog item references to schedule without duplicates.",
+        ),
+    ]
 
 
 class RoadmapRelease(BaseModel):
     """A single release/milestone in the roadmap."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     release_name: Annotated[
         str,

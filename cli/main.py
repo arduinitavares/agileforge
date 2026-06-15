@@ -112,6 +112,10 @@ Examples:
     """<task_fingerprint> --idempotency-key update-task-001 """
     """--outcome-summary "..." --checklist-result fully_met """
     """--artifact-ref path/to/file --validation-summary "pytest ..."
+  agileforge scope extension validate --project-id 1 --spec-file amended-spec.json
+  agileforge scope extension start --project-id 1 --spec-file amended-spec.json """
+    """--base-spec-version-id 3 --expected-state SPRINT_COMPLETE """
+    """--idempotency-key scope-extension-001
   agileforge context pack --project-id 1 --phase sprint-planning
 """
 )
@@ -214,6 +218,29 @@ class _Application(Protocol):
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Retry interrupted project setup through the guarded mutation facade."""
+        ...
+
+    def scope_extension_validate(
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int | None = None,
+    ) -> JsonObject:
+        """Validate an amended spec through the scope-extension runner."""
+        ...
+
+    def scope_extension_start(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int,
+        expected_state: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Start guarded scope extension through the runner."""
         ...
 
     def authority_compile(  # noqa: PLR0913
@@ -1187,6 +1214,48 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     workflow_next.add_argument("--project-id", type=int, required=True)
     workflow_next.set_defaults(command_handler=_workflow_next)
 
+    scope = subparsers.add_parser(
+        "scope",
+        help="Validate and start project scope extensions.",
+    )
+    scope_sub = scope.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    scope_extension = scope_sub.add_parser(
+        "extension",
+        help="Run the project scope extension ritual.",
+    )
+    scope_extension_sub = scope_extension.add_subparsers(
+        dest="extension_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    scope_extension_validate = scope_extension_sub.add_parser(
+        "validate",
+        help="Validate an amended additive project spec.",
+    )
+    scope_extension_validate.add_argument("--project-id", type=int, required=True)
+    scope_extension_validate.add_argument("--spec-file", required=True)
+    scope_extension_validate.add_argument("--base-spec-version-id", type=int)
+    scope_extension_validate.set_defaults(command_handler=_scope_extension_validate)
+    scope_extension_start = scope_extension_sub.add_parser(
+        "start",
+        help="Start a guarded additive project scope extension.",
+    )
+    scope_extension_start.add_argument("--project-id", type=int, required=True)
+    scope_extension_start.add_argument("--spec-file", required=True)
+    scope_extension_start.add_argument(
+        "--base-spec-version-id",
+        type=int,
+        required=True,
+    )
+    scope_extension_start.add_argument("--expected-state", required=True)
+    scope_extension_start.add_argument("--idempotency-key", required=True)
+    scope_extension_start.add_argument("--changed-by", default="cli-agent")
+    scope_extension_start.set_defaults(command_handler=_scope_extension_start)
+
     authority = subparsers.add_parser(
         "authority",
         help="Inspect and manage Spec Authority.",
@@ -2130,6 +2199,41 @@ def _project_setup_retry(
         dry_run=args.dry_run,
         dry_run_id=args.dry_run_id,
         correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _scope_extension_validate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route scope extension validation to the application facade."""
+    return "agileforge scope extension validate", application.scope_extension_validate(
+        project_id=args.project_id,
+        spec_file=args.spec_file,
+        base_spec_version_id=args.base_spec_version_id,
+    )
+
+
+def _scope_extension_start(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route guarded scope extension start to the application facade."""
+    command = "agileforge scope extension start"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Scope extension start requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.scope_extension_start(
+        project_id=args.project_id,
+        spec_file=args.spec_file,
+        base_spec_version_id=args.base_spec_version_id,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,
     )
 

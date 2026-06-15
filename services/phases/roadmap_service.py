@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
@@ -55,6 +56,58 @@ def _non_empty_string(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _has_scope_extension_delta_context(state: dict[str, Any]) -> bool:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return False
+    return bool(_string_list(context.get("added_source_item_ids")))
+
+
+def _saved_scope_extension_context(
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return None
+    if not context.get("backlog_extension_saved_at"):
+        return None
+    if context.get("roadmap_extension_saved_at"):
+        return None
+    if not _string_list(context.get("added_source_item_ids")):
+        return None
+    return {str(key): value for key, value in context.items()}
+
+
+def _assert_scope_extension_backlog_saved(state: dict[str, Any]) -> None:
+    context = state.get("scope_extension_context")
+    if isinstance(context, Mapping) and context.get("roadmap_extension_saved_at"):
+        return
+    if (
+        _has_scope_extension_delta_context(state)
+        and _saved_scope_extension_context(state) is None
+    ):
+        raise RoadmapPhaseError(
+            "Scope extension Roadmap requires saved extension Backlog before "
+            "generation or save.",
+        )
 
 
 def _active_reset_stale_attempt_id(state: dict[str, Any]) -> str | None:
@@ -169,13 +222,18 @@ async def generate_roadmap_draft(
     except workflow_state.DownstreamBacklogStaleError as exc:
         raise RoadmapPhaseError(str(exc)) from exc
 
+    _assert_scope_extension_backlog_saved(state)
+    is_scope_extension = _saved_scope_extension_context(state) is not None
     has_refinable_draft = _has_refinable_roadmap_draft(state)
     normalized_user_input = (user_input or "").strip()
-    if has_refinable_draft and not normalized_user_input:
+    if has_refinable_draft and not is_scope_extension and not normalized_user_input:
         raise RoadmapPhaseError(
             "User input is required to refine an existing roadmap.",
             status_code=400,
         )
+
+    if is_scope_extension:
+        _capture_scope_extension_roadmap_baseline(state)
 
     roadmap_result = await run_roadmap_agent(
         state,
@@ -258,21 +316,15 @@ async def save_roadmap_draft(
     save_roadmap_tool: Callable[[SaveRoadmapToolInput, Any], dict[str, Any]],
 ) -> dict[str, Any]:
     context = await hydrate_context()
-    replay = _roadmap_save_replay(context.state, idempotency_key)
+    replay = _handle_roadmap_save_replay(
+        context.state,
+        idempotency_key=idempotency_key,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        now_iso=now_iso,
+        save_state=save_state,
+    )
     if replay is not None:
-        if _replay_matches_request(
-            replay,
-            attempt_id=attempt_id,
-            expected_artifact_fingerprint=expected_artifact_fingerprint,
-        ):
-            selected_attempt = _find_roadmap_attempt(context.state, attempt_id)
-            if selected_attempt is not None and _maybe_clear_active_reset_stale_marker(
-                context.state,
-                selected_attempt=selected_attempt,
-                now=now_iso(),
-                clear_source="roadmap_save_replay",
-            ):
-                save_state(context.state)
         return replay
 
     _assert_save_expected_state(context.state, expected_state)
@@ -304,12 +356,16 @@ async def save_roadmap_draft(
             status_code=500,
         ) from exc
 
-    _assert_exact_backlog_coverage(context.state, roadmap_data)
+    roadmap_data_to_save, extension_context = _roadmap_data_for_save(
+        context.state,
+        roadmap_data=roadmap_data,
+        selected_attempt=selected_attempt,
+    )
 
     result = save_roadmap_tool(
         SaveRoadmapToolInput(
             product_id=project_id,
-            roadmap_data=roadmap_data,
+            roadmap_data=roadmap_data_to_save,
             idempotency_key=idempotency_key,
         ),
         build_tool_context(context),
@@ -325,9 +381,25 @@ async def save_roadmap_draft(
         )
 
     saved_at = now_iso()
-    context.state["fsm_state"] = OrchestratorState.ROADMAP_PERSISTENCE.value
+    next_state = (
+        OrchestratorState.STORY_INTERVIEW.value
+        if extension_context is not None
+        else OrchestratorState.ROADMAP_PERSISTENCE.value
+    )
+    context.state["fsm_state"] = next_state
     context.state["fsm_state_entered_at"] = saved_at
     context.state["roadmap_saved_at"] = saved_at
+    if extension_context is not None:
+        context.state["roadmap_releases"] = roadmap_data_to_save.model_dump(
+            mode="json"
+        )["roadmap_releases"]
+        scope_context = context.state.get("scope_extension_context")
+        if isinstance(scope_context, dict):
+            scope_context["roadmap_extension_saved_at"] = saved_at
+            scope_context["roadmap_extension_attempt_id"] = attempt_id
+            scope_context["roadmap_extension_artifact_fingerprint"] = (
+                expected_artifact_fingerprint
+            )
     _maybe_clear_active_reset_stale_marker(
         context.state,
         selected_attempt=selected_attempt,
@@ -336,7 +408,7 @@ async def save_roadmap_draft(
     )
 
     payload = {
-        "fsm_state": OrchestratorState.ROADMAP_PERSISTENCE.value,
+        "fsm_state": next_state,
         "save_result": result,
         "attempt_id": attempt_id,
         "artifact_fingerprint": expected_artifact_fingerprint,
@@ -410,6 +482,36 @@ def _roadmap_save_replay(
         return None
     payload = saves.get(idempotency_key)
     return dict(payload) if isinstance(payload, dict) else None
+
+
+def _handle_roadmap_save_replay(
+    state: dict[str, Any],
+    *,
+    idempotency_key: str,
+    attempt_id: str,
+    expected_artifact_fingerprint: str,
+    now_iso: Callable[[], str],
+    save_state: Callable[[dict[str, Any]], None],
+) -> dict[str, Any] | None:
+    replay = _roadmap_save_replay(state, idempotency_key)
+    if replay is None:
+        return None
+    if not _replay_matches_request(
+        replay,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    ):
+        return replay
+
+    selected_attempt = _find_roadmap_attempt(state, attempt_id)
+    if selected_attempt is not None and _maybe_clear_active_reset_stale_marker(
+        state,
+        selected_attempt=selected_attempt,
+        now=now_iso(),
+        clear_source="roadmap_save_replay",
+    ):
+        save_state(state)
+    return replay
 
 
 def _replay_matches_request(
@@ -542,11 +644,167 @@ def _legacy_roadmap_attempt_is_after_active_reset(
     return attempt_created_at >= reset_at and roadmap_saved_at >= reset_at
 
 
+def _attempt_input_context(selected_attempt: dict[str, Any]) -> dict[str, Any]:
+    input_context = selected_attempt.get("input_context")
+    return input_context if isinstance(input_context, dict) else {}
+
+
+def _scope_extension_save_context(
+    state: dict[str, Any],
+    *,
+    selected_attempt: dict[str, Any],
+) -> dict[str, Any] | None:
+    input_context = _attempt_input_context(selected_attempt)
+    saved_context = _saved_scope_extension_context(state)
+    if input_context.get("generation_mode") != "scope_extension":
+        if saved_context is not None:
+            raise RoadmapPhaseError(
+                "Scope extension Roadmap save is missing scope extension "
+                "generation metadata.",
+            )
+        return None
+    if saved_context is None:
+        raise RoadmapPhaseError(
+            "Scope extension Roadmap requires saved extension Backlog before "
+            "generation or save.",
+        )
+    return saved_context
+
+
+def _capture_scope_extension_roadmap_baseline(state: dict[str, Any]) -> None:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        return
+    if isinstance(context.get("roadmap_extension_base_releases"), list):
+        return
+    releases = state.get("roadmap_releases")
+    context["roadmap_extension_base_releases"] = (
+        copy.deepcopy(releases) if isinstance(releases, list) else []
+    )
+
+
+def _roadmap_data_for_save(
+    state: dict[str, Any],
+    *,
+    roadmap_data: RoadmapBuilderOutput,
+    selected_attempt: dict[str, Any],
+) -> tuple[RoadmapBuilderOutput, dict[str, Any] | None]:
+    extension_context = _scope_extension_save_context(
+        state,
+        selected_attempt=selected_attempt,
+    )
+    _assert_exact_backlog_coverage(
+        state,
+        roadmap_data,
+        extension_context=extension_context,
+    )
+    if extension_context is None:
+        return roadmap_data, None
+
+    return (
+        _append_scope_extension_roadmap(
+            existing_releases=_existing_roadmap_releases_for_extension(
+                state,
+                selected_attempt=selected_attempt,
+            ),
+            roadmap_data=roadmap_data,
+            extension_context=extension_context,
+        ),
+        extension_context,
+    )
+
+
+def _existing_roadmap_releases_for_extension(
+    state: dict[str, Any],
+    *,
+    selected_attempt: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context = state.get("scope_extension_context")
+    if isinstance(context, dict):
+        base_releases = context.get("roadmap_extension_base_releases")
+        if isinstance(base_releases, list):
+            return [
+                dict(release) for release in base_releases if isinstance(release, dict)
+            ]
+
+    input_context = _attempt_input_context(selected_attempt)
+    existing_context = input_context.get("existing_roadmap_context")
+    if isinstance(existing_context, list):
+        return [
+            dict(release) for release in existing_context if isinstance(release, dict)
+        ]
+
+    releases = state.get("roadmap_releases")
+    if isinstance(releases, list):
+        return [dict(release) for release in releases if isinstance(release, dict)]
+    return []
+
+
+def _append_scope_extension_roadmap(
+    *,
+    existing_releases: list[dict[str, Any]],
+    roadmap_data: RoadmapBuilderOutput,
+    extension_context: dict[str, Any],
+) -> RoadmapBuilderOutput:
+    source_item_ids = _string_list(extension_context.get("added_source_item_ids"))
+    extension_of_spec_version_id = _coerce_int(
+        extension_context.get("base_spec_version_id")
+    )
+    accepted_spec_version_id = _coerce_int(
+        extension_context.get("amended_spec_version_id")
+    )
+    appended_releases = []
+    for raw_release in roadmap_data.model_dump(mode="json")["roadmap_releases"]:
+        release = dict(raw_release)
+        release["extension_of_spec_version_id"] = extension_of_spec_version_id
+        release["accepted_spec_version_id"] = accepted_spec_version_id
+        release["source_item_ids"] = source_item_ids
+        appended_releases.append(release)
+    return RoadmapBuilderOutput.model_validate(
+        {
+            "roadmap_releases": [*existing_releases, *appended_releases],
+            "roadmap_summary": roadmap_data.roadmap_summary,
+            "is_complete": roadmap_data.is_complete,
+            "clarifying_questions": roadmap_data.clarifying_questions,
+        }
+    )
+
+
+def _is_extension_backlog_item(
+    item: Mapping[str, Any],
+    *,
+    extension_context: Mapping[str, Any],
+) -> bool:
+    if item.get("story_origin") == "scope_extension":
+        return True
+    amended_spec_version_id = _coerce_int(
+        extension_context.get("amended_spec_version_id")
+    )
+    if (
+        amended_spec_version_id is not None
+        and _coerce_int(item.get("accepted_spec_version_id"))
+        == amended_spec_version_id
+    ):
+        return True
+    item_source_ids = set(
+        _string_list(item.get("source_item_ids")),
+    )
+    extension_source_ids = set(
+        _string_list(extension_context.get("added_source_item_ids")),
+    )
+    return bool(item_source_ids.intersection(extension_source_ids))
+
+
 def _assert_exact_backlog_coverage(
     state: dict[str, Any],
     roadmap_data: RoadmapBuilderOutput,
+    *,
+    extension_context: dict[str, Any] | None = None,
 ) -> None:
-    expected_items = _active_backlog_requirement_names(state)
+    expected_items = _active_backlog_requirement_names(
+        state,
+        extension_context=extension_context,
+    )
     scheduled_items = [
         item.strip()
         for release in roadmap_data.roadmap_releases
@@ -573,7 +831,11 @@ def _assert_exact_backlog_coverage(
         )
 
 
-def _active_backlog_requirement_names(state: dict[str, Any]) -> list[str]:
+def _active_backlog_requirement_names(
+    state: dict[str, Any],
+    *,
+    extension_context: dict[str, Any] | None = None,
+) -> list[str]:
     backlog_items = state.get("backlog_items")
     if not isinstance(backlog_items, list) or not backlog_items:
         raise RoadmapPhaseError("Roadmap save requires active Backlog items")
@@ -582,11 +844,21 @@ def _active_backlog_requirement_names(state: dict[str, Any]) -> list[str]:
     for item in backlog_items:
         if not isinstance(item, dict):
             continue
+        if extension_context is not None and not _is_extension_backlog_item(
+            item,
+            extension_context=extension_context,
+        ):
+            continue
         raw_name = item.get("requirement") or item.get("title")
         if isinstance(raw_name, str) and raw_name.strip():
             names.append(raw_name.strip())
     if not names:
-        raise RoadmapPhaseError("Roadmap save requires active Backlog items")
+        message = (
+            "Roadmap save requires extension Backlog items"
+            if extension_context is not None
+            else "Roadmap save requires active Backlog items"
+        )
+        raise RoadmapPhaseError(message)
     return names
 
 

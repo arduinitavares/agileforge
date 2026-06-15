@@ -38,6 +38,10 @@ const PRE_REVIEW_SETUP_STATUSES = new Set([
     'authority_compile_failed',
 ]);
 const WORKFLOW_CONTROL_SETUP_STATUSES = new Set(['authority_pending_review', 'passed']);
+const SCOPE_EXTENSION_WORKFLOW_STATUSES = new Set([
+    'project_scope_extension_available',
+    'project_scope_extension_blocked',
+]);
 const AUTHORITY_COMPILE_REQUIRED_ARGS = [
     'project_id',
     'spec_version_id',
@@ -4281,6 +4285,38 @@ function shouldStartFreshSprintCycle() {
     return getCreateNextSprintActionState().canCreate;
 }
 
+function getScopeExtensionWorkflowStatus() {
+    return sprintRuntimeSummary?.status
+        || sprintRuntimeSummary?.workflow_next_status
+        || sprintRuntimeSummary?.scope_extension_status
+        || null;
+}
+
+function isScopeExtensionWorkflowNextStatus(status = getScopeExtensionWorkflowStatus()) {
+    return SCOPE_EXTENSION_WORKFLOW_STATUSES.has(status);
+}
+
+function getScopeExtensionPrimaryAction() {
+    if (!isScopeExtensionWorkflowNextStatus()) return null;
+    const action = sprintRuntimeSummary?.primary_action
+        || sprintRuntimeSummary?.scope_extension_primary_action
+        || safeArray(sprintRuntimeSummary?.next_actions)[0]
+        || safeArray(sprintRuntimeSummary?.scope_extension_actions)[0]
+        || {};
+    return {
+        label: action.label || 'Extend Project Scope',
+        command: action.command || `agileforge scope extension validate --project-id ${selectedProjectId} --spec-file <amended_spec_file>`,
+        reason: action.reason || '',
+    };
+}
+
+function showScopeExtensionCommand() {
+    const action = getScopeExtensionPrimaryAction();
+    if (action?.command) {
+        alert(action.command);
+    }
+}
+
 function renderOverviewPanel() {
     const container = document.getElementById('overview-panel-content');
     if (!container) return;
@@ -4297,6 +4333,10 @@ function renderOverviewPanel() {
     const createNextAction = getCreateNextSprintActionState();
     const savedSprintCount = savedSprints.length;
     const scopedSummary = storySelectionScopeSummary();
+    const scopeExtensionStatus = getScopeExtensionWorkflowStatus();
+    const scopeExtensionAction = getScopeExtensionPrimaryAction();
+    const isScopeExtensionRuntime = Boolean(scopeExtensionAction);
+    const isScopeExtensionAvailable = scopeExtensionStatus === 'project_scope_extension_available';
     const overviewTitle = scopedSummary
         ? 'Sprint planning is scoped to selected stories'
         : `Planning is ${planningComplete ? 'complete' : 'still in progress'}`;
@@ -4344,7 +4384,34 @@ function renderOverviewPanel() {
                 ? 'The last sprint is closed and available as read-only history.'
                 : 'Create the first sprint to begin iterative runtime.';
 
-    const primaryActionHtml = postSprintTriageRequired
+    const displayOverviewTitle = isScopeExtensionRuntime
+        ? (isScopeExtensionAvailable ? 'Project Scope Extension Available' : 'Project Scope Extension Blocked')
+        : overviewTitle;
+    const displayOverviewText = isScopeExtensionRuntime
+        ? (isScopeExtensionAvailable
+            ? 'Current execution scope is exhausted. Validate an amended spec before creating new work.'
+            : escapeHtml(scopeExtensionAction.reason || 'Project scope extension is not available yet.'))
+        : overviewText;
+    const displaySprintRuntimeTitle = isScopeExtensionRuntime
+        ? (isScopeExtensionAvailable ? 'Project Scope Extension Available' : 'Project Scope Extension Blocked')
+        : sprintRuntimeTitle;
+    const displaySprintRuntimeText = isScopeExtensionRuntime
+        ? (isScopeExtensionAvailable
+            ? 'Current execution scope is exhausted. Validate an amended spec before creating new work.'
+            : escapeHtml(scopeExtensionAction.reason || 'Project scope extension is not available yet.'))
+        : sprintRuntimeText;
+
+    const primaryActionHtml = isScopeExtensionRuntime
+        ? (isScopeExtensionAvailable
+            ? `<button type="button" onclick="showScopeExtensionCommand()" class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700">
+                <span class="material-symbols-outlined text-sm">add_circle</span>
+                ${escapeHtml(scopeExtensionAction.label)}
+           </button>`
+            : `<button type="button" disabled class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                <span class="material-symbols-outlined text-sm">block</span>
+                ${escapeHtml(scopeExtensionAction.label)}
+           </button>`)
+        : postSprintTriageRequired
         ? `<button type="button" disabled class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
                 <span class="material-symbols-outlined text-sm">rule</span>
                 Triage Required
@@ -4387,9 +4454,9 @@ function renderOverviewPanel() {
                             Workflow Overview
                         </div>
                         <div>
-                            <h3 class="text-2xl font-black text-slate-800 dark:text-white">${overviewTitle}</h3>
+                            <h3 class="text-2xl font-black text-slate-800 dark:text-white">${displayOverviewTitle}</h3>
                             <p class="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                                ${overviewText}
+                                ${displayOverviewText}
                             </p>
                         </div>
                     </div>
@@ -4417,8 +4484,8 @@ function renderOverviewPanel() {
                 </div>
                 <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900">
                     <div class="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sprint Runtime</div>
-                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${sprintRuntimeTitle}</div>
-                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${sprintRuntimeText}</p>
+                    <div class="mt-3 text-xl font-black text-slate-800 dark:text-white">${displaySprintRuntimeTitle}</div>
+                    <p class="mt-1 text-[11px] text-slate-500 dark:text-slate-400">${displaySprintRuntimeText}</p>
                 </div>
             </div>
         </div>
@@ -4438,6 +4505,19 @@ const escapeHtml = (str) => {
 const escapeAttribute = (value) => escapeHtml(value);
 
 function getCreateNextSprintActionState() {
+    if (isScopeExtensionWorkflowNextStatus()) {
+        const action = getScopeExtensionPrimaryAction();
+        return {
+            mode: 'scope_extension',
+            canCreate: false,
+            canOpen: false,
+            label: action?.label || 'Extend Project Scope',
+            icon: 'add_circle',
+            reasonText: action?.reason || 'Current execution scope is exhausted.',
+            reasonHtml: '',
+        };
+    }
+
     const hasDraftToReview = hasReviewableSprintDraft();
     const normalizedState = typeof activeFsmState === 'string'
         ? activeFsmState.trim().toUpperCase()
@@ -4523,6 +4603,21 @@ function renderSprintSavedWorkspace() {
     const selectedSprint = currentSprintDetail && currentSprintDetail.id === currentSprintId
         ? currentSprintDetail
         : null;
+
+    if (isScopeExtensionWorkflowNextStatus()) {
+        const isAvailable = getScopeExtensionWorkflowStatus() === 'project_scope_extension_available';
+        savedWorkspace.classList.add('hidden');
+        plannerWorkspace.classList.add('hidden');
+        resetSprintClosePanel();
+        phaseTitle.innerText = isAvailable
+            ? 'Project Scope Extension Available'
+            : 'Project Scope Extension Blocked';
+        phaseSubtitle.innerText = isAvailable
+            ? 'Current execution scope is exhausted. Validate an amended spec before creating new work.'
+            : 'Project scope extension is not available yet.';
+        return;
+    }
+
     const sprintRecord = selectedSprint || selectedSprintLite;
     const shouldShowSavedWorkspace = viewPhaseId === 'sprint'
         && Boolean(sprintRecord)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
@@ -46,8 +47,6 @@ from services.agent_workbench.schema_readiness import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from sqlalchemy.engine import Engine
 
 JsonDict = dict[str, Any]
@@ -64,6 +63,29 @@ _ACCEPTANCE_STATUS: Any = SpecAuthorityAcceptance.status
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
 _LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
+
+
+@dataclass(frozen=True)
+class _AcceptedAuthorityRoute:
+    """Post-accept routing for initial specs versus scope extensions."""
+
+    fsm_state: Literal["VISION_INTERVIEW", "BACKLOG_INTERVIEW"]
+    next_command: Literal["vision generate", "backlog generate"]
+    next_reason: str
+    write_accepted_spec_version_id: bool = False
+
+
+_INITIAL_ACCEPTED_ROUTE = _AcceptedAuthorityRoute(
+    fsm_state="VISION_INTERVIEW",
+    next_command="vision generate",
+    next_reason="Authority is accepted and Vision is unlocked.",
+)
+_SCOPE_EXTENSION_ACCEPTED_ROUTE = _AcceptedAuthorityRoute(
+    fsm_state="BACKLOG_INTERVIEW",
+    next_command="backlog generate",
+    next_reason="Scope extension authority is accepted and Backlog is unlocked.",
+    write_accepted_spec_version_id=True,
+)
 
 
 class AuthorityDecisionWorkflowPort(Protocol):
@@ -417,7 +439,7 @@ class AuthorityDecisionRunner:
             return recorded
 
         try:
-            self._write_workflow_state(
+            accepted_route = self._write_workflow_state(
                 decision=decision,
                 snapshot=snapshot,
                 request=request,
@@ -442,7 +464,7 @@ class AuthorityDecisionRunner:
                 next_step="workflow_state_written",
             )
 
-        response = _success(_response_data(row=recorded))
+        response = _success(_response_data(row=recorded, accepted_route=accepted_route))
         if not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
             lease_owner=lease_owner,
@@ -869,18 +891,20 @@ class AuthorityDecisionRunner:
         decision: Literal["accept", "reject"],
         snapshot: ReviewedAuthoritySnapshot,
         request: AuthorityAcceptRequest | AuthorityRejectRequest,
-    ) -> None:
+    ) -> _AcceptedAuthorityRoute | None:
         if decision == "accept":
+            accepted_route = self._accepted_authority_route(
+                project_id=snapshot.project_id,
+                spec_version_id=snapshot.spec_version_id,
+            )
             self._workflow.update_session_status(
                 str(snapshot.project_id),
-                {
-                    "setup_status": "passed",
-                    "fsm_state": "VISION_INTERVIEW",
-                    "setup_error": None,
-                    "setup_error_code": None,
-                },
+                _accepted_workflow_update(
+                    route=accepted_route,
+                    spec_version_id=snapshot.spec_version_id,
+                ),
             )
-            return
+            return accepted_route
         self._workflow.update_session_status(
             str(snapshot.project_id),
             {
@@ -890,6 +914,21 @@ class AuthorityDecisionRunner:
                 "setup_error_code": "AUTHORITY_REJECTED",
             },
         )
+        return None
+
+    def _accepted_authority_route(
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int | None,
+    ) -> _AcceptedAuthorityRoute:
+        state = self._workflow.get_session_status(str(project_id))
+        if _is_scope_extension_acceptance(
+            workflow_state=state,
+            spec_version_id=spec_version_id,
+        ):
+            return _SCOPE_EXTENSION_ACCEPTED_ROUTE
+        return _INITIAL_ACCEPTED_ROUTE
 
     def _mark_recovery_required_after_decision(
         self,
@@ -961,7 +1000,7 @@ class AuthorityDecisionRunner:
                 next_step="workflow_state_written",
             )
         try:
-            self._write_workflow_state_from_row(row)
+            accepted_route = self._write_workflow_state_from_row(row)
         except Exception as exc:  # noqa: BLE001
             marked = self._mark_recovery_required_after_decision(
                 command=command,
@@ -997,7 +1036,7 @@ class AuthorityDecisionRunner:
                     mutation_event_id=mutation_event_id,
                 )
             return response
-        response = _success(_response_data(row=row))
+        response = _success(_response_data(row=row, accepted_route=accepted_route))
         if not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
             lease_owner=recovery_owner,
@@ -1035,18 +1074,22 @@ class AuthorityDecisionRunner:
                 return None
             return session.exec(statement).first()
 
-    def _write_workflow_state_from_row(self, row: SpecAuthorityAcceptance) -> None:
+    def _write_workflow_state_from_row(
+        self, row: SpecAuthorityAcceptance
+    ) -> _AcceptedAuthorityRoute | None:
         if row.status == "accepted":
+            accepted_route = self._accepted_authority_route(
+                project_id=row.product_id,
+                spec_version_id=row.spec_version_id,
+            )
             self._workflow.update_session_status(
                 str(row.product_id),
-                {
-                    "setup_status": "passed",
-                    "fsm_state": "VISION_INTERVIEW",
-                    "setup_error": None,
-                    "setup_error_code": None,
-                },
+                _accepted_workflow_update(
+                    route=accepted_route,
+                    spec_version_id=row.spec_version_id,
+                ),
             )
-            return
+            return accepted_route
         self._workflow.update_session_status(
             str(row.product_id),
             {
@@ -1056,6 +1099,7 @@ class AuthorityDecisionRunner:
                 "setup_error_code": "AUTHORITY_REJECTED",
             },
         )
+        return None
 
     def _finalize_validation_failed(
         self,
@@ -1403,11 +1447,63 @@ def _invalid_override_error(
     )
 
 
+def _accepted_workflow_update(
+    *,
+    route: _AcceptedAuthorityRoute,
+    spec_version_id: int | None,
+) -> JsonDict:
+    update: JsonDict = {
+        "setup_status": "passed",
+        "fsm_state": route.fsm_state,
+        "setup_error": None,
+        "setup_error_code": None,
+    }
+    if route.write_accepted_spec_version_id and spec_version_id is not None:
+        update["accepted_spec_version_id"] = spec_version_id
+    return update
+
+
+def _is_scope_extension_acceptance(
+    *,
+    workflow_state: Mapping[str, Any],
+    spec_version_id: int | None,
+) -> bool:
+    if spec_version_id is None:
+        return False
+    if workflow_state.get("setup_status") != "authority_pending_review":
+        return False
+    context = workflow_state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return False
+    if context.get("schema") != "agileforge.scope_extension.v1":
+        return False
+    amended_spec_version_id = _workflow_int(
+        context.get("amended_spec_version_id")
+    )
+    if amended_spec_version_id != spec_version_id:
+        return False
+    pending_spec_version_id = _workflow_int(
+        workflow_state.get("pending_compiled_spec_version_id")
+    )
+    setup_spec_version_id = _workflow_int(workflow_state.get("setup_spec_version_id"))
+    return spec_version_id in {pending_spec_version_id, setup_spec_version_id}
+
+
+def _workflow_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
 def _response_data(
     *,
     row: SpecAuthorityAcceptance,
+    accepted_route: _AcceptedAuthorityRoute | None = None,
 ) -> JsonDict:
     if row.status == "accepted":
+        route = accepted_route or _INITIAL_ACCEPTED_ROUTE
         return {
             "project_id": row.product_id,
             "authority_id": row.pending_authority_id,
@@ -1415,13 +1511,14 @@ def _response_data(
             "accepted_spec_version_id": row.spec_version_id,
             "authority_fingerprint": row.authority_fingerprint,
             "setup_status": "passed",
-            "fsm_state": "VISION_INTERVIEW",
+            "fsm_state": route.fsm_state,
             "next_actions": [
                 {
                     "command": (
-                        f"agileforge vision generate --project-id {row.product_id}"
+                        f"agileforge {route.next_command} --project-id "
+                        f"{row.product_id}"
                     ),
-                    "reason": "Authority is accepted and Vision is unlocked.",
+                    "reason": route.next_reason,
                 }
             ],
         }

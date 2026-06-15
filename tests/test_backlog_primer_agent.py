@@ -181,6 +181,32 @@ class TestBacklogPrimerSchemas:
 class TestSaveBacklogTool:
     """Tests for save_backlog_tool."""
 
+    def test_save_backlog_input_rejects_public_append_only_options(self) -> None:
+        """Append/provenance controls must not be public tool-callable input."""
+        with pytest.raises(ValidationError) as exc_info:
+            SaveBacklogInput.model_validate(
+                {
+                    "product_id": 1,
+                    "append_only": True,
+                    "story_origin": "scope_extension",
+                    "accepted_spec_version_id": 12,
+                    "backlog_items": [
+                        {
+                            "priority": 1,
+                            "requirement": "User authentication",
+                            "value_driver": "Customer Satisfaction",
+                            "justification": "Security baseline",
+                            "estimated_effort": "M",
+                        },
+                    ],
+                }
+            )
+
+        error_fields = {error["loc"][0] for error in exc_info.value.errors()}
+        assert {"append_only", "story_origin", "accepted_spec_version_id"}.issubset(
+            error_fields
+        )
+
     @pytest.mark.asyncio
     async def test_save_backlog_stores_in_session_state(self) -> None:
         """Valid backlog items are stored in session state."""

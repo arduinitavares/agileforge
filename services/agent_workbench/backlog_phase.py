@@ -902,6 +902,18 @@ def _backlog_runtime_error(*, project_id: int, data: dict[str, Any]) -> dict[str
         "attempt_count": data.get("attempt_count"),
         "fsm_state": data.get("fsm_state"),
     }
+    if data.get("failure_stage") == "authority_review_required":
+        return _error_envelope(
+            ErrorCode.AUTHORITY_REVIEW_REQUIRED,
+            message,
+            details={
+                key: value for key, value in details.items() if value is not None
+            },
+            remediation=[
+                "Complete authority review for the pending scope extension.",
+                "Accept the amended authority before generating extension backlog.",
+            ],
+        )
     return _error_envelope(
         ErrorCode.MUTATION_FAILED,
         message,

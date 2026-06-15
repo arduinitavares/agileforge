@@ -16,7 +16,11 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
   "compiled_authority": "Full text...",
   "time_increment": "Milestone-based",
   "prior_roadmap_state": "NO_HISTORY" | { previous roadmap JSON },
-  "user_input": "User's specific requests or feedback"
+  "user_input": "User's specific requests or feedback",
+  "generation_mode": "scope_extension" | null,
+  "existing_roadmap_context": [ ... read-only existing releases ... ],
+  "scope_extension": { ... extension metadata ... },
+  "extension_backlog_items": [ ... extension backlog references ... ]
 }
 
 **PROCESS ALGORITHM:**
@@ -25,6 +29,7 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
     * If `backlog_items` is empty or missing, set `is_complete: false` and ask for the backlog.
     * If `product_vision` is missing, set `is_complete: false` and ask for the vision.
     * If `prior_roadmap_state` exists (not "NO_HISTORY"), load it and apply user feedback.
+    * If `generation_mode="scope_extension"`, treat `prior_roadmap_state` as "NO_HISTORY" even when `existing_roadmap_context` is present. The existing roadmap is read-only context, not a refinement target.
 
 2.  **Analyze Dependencies (Crucial Step):**
     * Review `technical_spec` and `compiled_authority`.
@@ -49,6 +54,12 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
       - User preferences are unclear (e.g., "How many milestones do you want?")
       - Dependencies are ambiguous
       - Items seem to conflict
+
+6.  **Scope Extension Mode:**
+    * When `generation_mode="scope_extension"`, use `existing_roadmap_context` only to avoid duplication and preserve sequencing.
+    * In scope extension mode, output ONLY new extension roadmap releases/items.
+    * In scope extension mode, never existing releases/items in `existing_roadmap_context`.
+    * Use `scope_extension` and `extension_backlog_items` as provenance hints for the new scope.
 
 **OUTPUT FORMAT (JSON ONLY):**
 Return ONLY a JSON object. No Markdown formatting.

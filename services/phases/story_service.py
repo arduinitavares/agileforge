@@ -58,6 +58,18 @@ def _roadmap_milestone_requirements(
     scope_id: str,
 ) -> list[str] | None:
     """Return requirement names for a milestone scope, or None when absent."""
+    release_data = _roadmap_milestone_release(state, scope_id=scope_id)
+    if release_data is None:
+        return None
+    return release_data[1]
+
+
+def _roadmap_milestone_release(
+    state: dict[str, Any],
+    *,
+    scope_id: str,
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Return a milestone release and its requirement names, or None when absent."""
     roadmap_releases = state.get("roadmap_releases")
     if not isinstance(roadmap_releases, list):
         return None
@@ -70,9 +82,223 @@ def _roadmap_milestone_requirements(
         release_data = cast("dict[str, Any]", release)
         items = release_data.get("items")
         if not isinstance(items, list):
-            return []
-        return [item for item in items if isinstance(item, str)]
+            return release_data, []
+        return release_data, [item for item in items if isinstance(item, str)]
     return None
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(cast("Any", value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _scope_extension_context(state: dict[str, Any]) -> dict[str, Any] | None:
+    context = state.get("scope_extension_context")
+    return context if isinstance(context, dict) else None
+
+
+def _release_extension_metadata(
+    release: dict[str, Any],
+    *,
+    extension_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    amended_spec_version_id = _coerce_int(
+        extension_context.get("amended_spec_version_id")
+    )
+    release_spec_version_id = _coerce_int(release.get("accepted_spec_version_id"))
+    source_item_ids = _string_list(release.get("source_item_ids"))
+    extension_source_ids = set(
+        _string_list(extension_context.get("added_source_item_ids"))
+    )
+    is_extension = bool(
+        release.get("extension_of_spec_version_id") is not None
+        or (
+            amended_spec_version_id is not None
+            and release_spec_version_id == amended_spec_version_id
+        )
+        or set(source_item_ids).intersection(extension_source_ids)
+    )
+    if not is_extension:
+        return None
+
+    metadata: dict[str, Any] = {"extension_scope": True}
+    if release_spec_version_id is not None:
+        metadata["accepted_spec_version_id"] = release_spec_version_id
+    elif amended_spec_version_id is not None:
+        metadata["accepted_spec_version_id"] = amended_spec_version_id
+    if source_item_ids:
+        metadata["source_item_ids"] = source_item_ids
+    return metadata
+
+
+def _requirement_extension_metadata(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> dict[str, Any] | None:
+    requirement_key = normalize_requirement_key(parent_requirement)
+    context = _scope_extension_context(state)
+    releases = state.get("roadmap_releases")
+    if context is None or not isinstance(releases, list):
+        return None
+
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        items = release.get("items")
+        if not isinstance(items, list):
+            continue
+        if not any(
+            isinstance(item, str)
+            and normalize_requirement_key(item) == requirement_key
+            for item in items
+        ):
+            continue
+        metadata = _release_extension_metadata(release, extension_context=context)
+        if metadata is not None:
+            return metadata
+    return None
+
+
+def _metadata_matches_extension_scope(
+    metadata: dict[str, Any] | None,
+    expected_metadata: dict[str, Any] | None,
+) -> bool:
+    if expected_metadata is None:
+        return True
+    if not isinstance(metadata, dict) or metadata.get("extension_scope") is not True:
+        return False
+
+    expected_spec_version_id = _coerce_int(
+        expected_metadata.get("accepted_spec_version_id")
+    )
+    if expected_spec_version_id is not None and _coerce_int(
+        metadata.get("accepted_spec_version_id")
+    ) != expected_spec_version_id:
+        return False
+
+    expected_source_item_ids = set(
+        _string_list(expected_metadata.get("source_item_ids"))
+    )
+    return not expected_source_item_ids or expected_source_item_ids.issubset(
+        set(_string_list(metadata.get("source_item_ids")))
+    )
+
+
+def _story_saved_metadata(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> dict[str, Any] | None:
+    saved_metadata = state.get("story_saved_metadata")
+    if not isinstance(saved_metadata, dict):
+        return None
+    metadata = saved_metadata.get(parent_requirement)
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _story_saved_for_scope(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+    saved_reqs_dict: dict[str, Any],
+    extension_metadata: dict[str, Any] | None,
+) -> bool:
+    if saved_reqs_dict.get(parent_requirement) is not True:
+        return False
+    if extension_metadata is None:
+        return True
+    return _metadata_matches_extension_scope(
+        _story_saved_metadata(state, parent_requirement=parent_requirement),
+        extension_metadata,
+    )
+
+
+def _mark_story_saved(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> None:
+    saved_reqs_dict = state.get("story_saved", {})
+    if not isinstance(saved_reqs_dict, dict):
+        saved_reqs_dict = {}
+    saved_reqs_dict[parent_requirement] = True
+    state["story_saved"] = saved_reqs_dict
+
+    extension_metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=parent_requirement,
+    )
+    saved_metadata = state.get("story_saved_metadata")
+    if not isinstance(saved_metadata, dict):
+        saved_metadata = {}
+        state["story_saved_metadata"] = saved_metadata
+    if extension_metadata is not None:
+        saved_metadata[parent_requirement] = extension_metadata
+    else:
+        saved_metadata.pop(parent_requirement, None)
+
+
+def _story_resolution_for_scope(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    resolution = story_current_resolution(runtime)
+    if resolution is None:
+        return None
+    if extension_metadata is None:
+        return resolution
+    resolution_projection = runtime.get("resolution_projection")
+    if not isinstance(resolution_projection, dict):
+        return None
+    if not _metadata_matches_extension_scope(resolution_projection, extension_metadata):
+        return None
+    return resolution
+
+
+def _scope_extension_metadata_for_requirements(
+    state: dict[str, Any],
+    *,
+    requirements: list[str],
+) -> dict[str, Any]:
+    if not requirements:
+        return {}
+
+    metadata_items = [
+        _requirement_extension_metadata(state, parent_requirement=requirement)
+        for requirement in requirements
+    ]
+    if not all(isinstance(item, dict) for item in metadata_items):
+        return {}
+
+    source_item_ids: list[str] = []
+    accepted_spec_version_id: int | None = None
+    for item in cast("list[dict[str, Any]]", metadata_items):
+        if accepted_spec_version_id is None:
+            accepted_spec_version_id = _coerce_int(
+                item.get("accepted_spec_version_id")
+            )
+        for source_item_id in _string_list(item.get("source_item_ids")):
+            if source_item_id not in source_item_ids:
+                source_item_ids.append(source_item_id)
+
+    metadata: dict[str, Any] = {"extension_scope": True}
+    if accepted_spec_version_id is not None:
+        metadata["accepted_spec_version_id"] = accepted_spec_version_id
+    if source_item_ids:
+        metadata["source_item_ids"] = source_item_ids
+    return metadata
 
 
 def _normalized_parent_requirements(
@@ -182,6 +408,10 @@ def _story_completion_scope_requirements(
             "scope": normalized_scope,
             "scope_id": _selection_scope_id(requirements),
             "requirements": requirements,
+            **_scope_extension_metadata_for_requirements(
+                state,
+                requirements=requirements,
+            ),
         }
 
     if not normalized_scope and not normalized_scope_id:
@@ -197,22 +427,30 @@ def _story_completion_scope_requirements(
             status_code=400,
         )
 
-    requirements = _roadmap_milestone_requirements(
+    release_data = _roadmap_milestone_release(
         state,
         scope_id=normalized_scope_id,
     )
-    if requirements is None:
+    if release_data is None:
         raise StoryPhaseError(
             "Story completion scope "
             f"{normalized_scope_id} does not match any roadmap milestone.",
             status_code=400,
         )
+    release, requirements = release_data
+    extension_context = _scope_extension_context(state)
+    extension_metadata = (
+        _release_extension_metadata(release, extension_context=extension_context)
+        if extension_context is not None
+        else None
+    )
 
     return requirements, {
         "schema_version": _STORY_COMPLETION_SCOPE_SCHEMA_VERSION,
         "scope": normalized_scope,
         "scope_id": normalized_scope_id,
         "requirements": requirements,
+        **(extension_metadata or {}),
     }
 
 
@@ -1132,6 +1370,7 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
     roadmap_releases = state.get("roadmap_releases") or []
     if not isinstance(roadmap_releases, list):
         roadmap_releases = []
+    extension_context = _scope_extension_context(state)
 
     attempts_dict = state.get("story_attempts")
     if not isinstance(attempts_dict, dict):
@@ -1148,6 +1387,13 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
     for release_index, rel in enumerate(roadmap_releases):
         if not isinstance(rel, dict):
             continue
+        extension_metadata = (
+            _release_extension_metadata(rel, extension_context=extension_context)
+            if extension_context is not None
+            else None
+        )
+        if extension_context is not None and extension_metadata is None:
+            continue
 
         reqs = rel.get("items") or []
         if not isinstance(reqs, list):
@@ -1161,6 +1407,8 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
             "reasoning": reasoning,
             "requirements": [],
         }
+        if extension_metadata is not None:
+            milestone_group.update(extension_metadata)
 
         for req in reqs:
             if not isinstance(req, str):
@@ -1174,10 +1422,18 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(attempts, list):
                 attempts = []
 
-            if saved_reqs_dict.get(req):
+            if _story_saved_for_scope(
+                state,
+                parent_requirement=req,
+                saved_reqs_dict=saved_reqs_dict,
+                extension_metadata=extension_metadata,
+            ):
                 status = "Saved"
                 saved_count += 1
-            elif story_current_resolution(runtime):
+            elif _story_resolution_for_scope(
+                runtime,
+                extension_metadata=extension_metadata,
+            ):
                 status = "Merged"
             elif story_has_working_state(runtime):
                 status = "Attempted"
@@ -1189,6 +1445,7 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
                     "requirement": req,
                     "status": status,
                     "attempt_count": len(attempts),
+                    **(extension_metadata or {}),
                 }
             )
             total_count += 1
@@ -1200,6 +1457,24 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
         "total_count": total_count,
         "saved_count": saved_count,
     }
+
+
+def _story_save_extension_metadata(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> dict[str, Any]:
+    metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=parent_requirement,
+    )
+    if metadata is None:
+        return {}
+    result: dict[str, Any] = {"story_origin": "scope_extension"}
+    accepted_spec_version_id = _coerce_int(metadata.get("accepted_spec_version_id"))
+    if accepted_spec_version_id is not None:
+        result["accepted_spec_version_id"] = accepted_spec_version_id
+    return result
 
 
 def _story_request_payload(request_payload: Any) -> dict[str, Any]:
@@ -1675,6 +1950,10 @@ async def save_story_draft(
             parent_rank=story_parent_rank(state, normalized_parent_requirement),
             idempotency_key=idempotency_key,
             stories=stories,
+            **_story_save_extension_metadata(
+                state,
+                parent_requirement=normalized_parent_requirement,
+            ),
         ),
         build_tool_context(context),
     )
@@ -1692,11 +1971,10 @@ async def save_story_draft(
             status_code=500,
         )
 
-    saved_reqs_dict = context.state.get("story_saved", {})
-    if not isinstance(saved_reqs_dict, dict):
-        saved_reqs_dict = {}
-    saved_reqs_dict[normalized_parent_requirement] = True
-    context.state["story_saved"] = saved_reqs_dict
+    _mark_story_saved(
+        context.state,
+        parent_requirement=normalized_parent_requirement,
+    )
     context.state["fsm_state"] = OrchestratorState.STORY_PERSISTENCE.value
     sync_story_legacy_mirrors(
         context.state,
@@ -1747,12 +2025,17 @@ async def merge_story_resolution(
             status_code=409,
         )
 
+    extension_metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
     runtime["resolution_projection"] = {
         "status": "merged",
         "owner_requirement": recommendation["owner_requirement"],
         "reason": recommendation["reason"],
         "acceptance_criteria_to_move": recommendation["acceptance_criteria_to_move"],
         "resolved_at": now_iso(),
+        **(extension_metadata or {}),
     }
 
     sync_story_legacy_mirrors(
@@ -1801,6 +2084,9 @@ async def delete_story_requirement(
     story_saved = state.get("story_saved")
     if isinstance(story_saved, dict):
         story_saved.pop(normalized_parent_requirement, None)
+    story_saved_metadata = state.get("story_saved_metadata")
+    if isinstance(story_saved_metadata, dict):
+        story_saved_metadata.pop(normalized_parent_requirement, None)
 
     sync_story_legacy_mirrors(
         state,
@@ -1874,6 +2160,9 @@ async def reopen_story_requirement(
 
     if isinstance(story_saved, dict):
         story_saved.pop(normalized_parent_requirement, None)
+    story_saved_metadata = state.get("story_saved_metadata")
+    if isinstance(story_saved_metadata, dict):
+        story_saved_metadata.pop(normalized_parent_requirement, None)
 
     story_outputs = state.get("story_outputs")
     if isinstance(story_outputs, dict):
@@ -2023,13 +2312,27 @@ async def complete_story_phase(
 
     saved_count = 0
     merged_count = 0
+    extension_metadata = (
+        scope_payload
+        if isinstance(scope_payload, dict)
+        and scope_payload.get("extension_scope") is True
+        else None
+    )
     for requirement in req_names:
-        if saved_reqs_dict.get(requirement) is True:
+        if _story_saved_for_scope(
+            state,
+            parent_requirement=requirement,
+            saved_reqs_dict=saved_reqs_dict,
+            extension_metadata=extension_metadata,
+        ):
             saved_count += 1
             continue
 
         runtime = existing_story_runtime(state, parent_requirement=requirement)
-        if runtime is not None and story_current_resolution(runtime):
+        if runtime is not None and _story_resolution_for_scope(
+            runtime,
+            extension_metadata=extension_metadata,
+        ):
             merged_count += 1
 
     total_count = len(req_names)

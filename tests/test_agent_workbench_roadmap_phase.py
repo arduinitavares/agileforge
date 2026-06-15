@@ -12,7 +12,12 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from models.core import Product, UserStory
 from models.enums import StoryStatus
+from models.specs import SpecRegistry
 from services.agent_workbench.roadmap_phase import RoadmapPhaseRunner
+from services.roadmap_runtime import build_roadmap_input_context
+
+BASE_SPEC_VERSION_ID = 11
+AMENDED_SPEC_VERSION_ID = 12
 
 
 class _FakeProductRepo:
@@ -338,6 +343,323 @@ def test_roadmap_generate_reloads_active_seed_backlog_after_reset(
             "requirement": "Validate Captain-Aware Optimization Contract",
             "value_driver": "Strategic",
             "justification": "Verify existing captain multiplier behavior.",
+            "estimated_effort": "M",
+        }
+    ]
+
+
+def test_roadmap_generate_uses_scope_extension_backlog_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope extension Roadmap generation must hydrate appended extension backlog."""
+    engine = create_engine("sqlite://", echo=False)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Product(product_id=2, name="Cartola"))
+        session.add(
+            SpecRegistry(
+                spec_version_id=12,
+                product_id=2,
+                spec_hash="sha256:amended",
+                content="AMENDED SPEC",
+                status="approved",
+            )
+        )
+        session.commit()
+        session.add(
+            UserStory(
+                product_id=2,
+                title="Add analyst export",
+                status=StoryStatus.TO_DO,
+                rank="2",
+                story_points=1,
+                story_description="New scope from amended spec.",
+                story_origin="scope_extension",
+                accepted_spec_version_id=12,
+                is_superseded=False,
+            )
+        )
+        session.commit()
+
+    workflow = _FakeWorkflowService()
+    existing_roadmap = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Choose weekly squad"],
+            "reasoning": "Already approved.",
+        }
+    ]
+    workflow.state.update(
+        {
+            "fsm_state": "BACKLOG_PERSISTENCE",
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": BASE_SPEC_VERSION_ID,
+                "base_spec_hash": "sha256:base",
+                "amended_spec_version_id": AMENDED_SPEC_VERSION_ID,
+                "amended_spec_hash": "sha256:amended",
+                "added_source_item_ids": ["REQ.new-analytics"],
+                "backlog_extension_saved_at": "2026-06-14T10:00:00Z",
+                "backlog_extension_attempt_id": "backlog-attempt-4",
+                "backlog_extension_artifact_fingerprint": "sha256:backlog",
+            },
+            "roadmap_releases": existing_roadmap,
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Choose weekly squad",
+                    "value_driver": "Strategic",
+                    "justification": "Old backlog item.",
+                    "estimated_effort": "M",
+                }
+            ],
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "AMENDED SPEC"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_roadmap_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del project_id
+        input_context = build_roadmap_input_context(state, user_input=user_input)
+        captured["state"] = dict(state)
+        captured["input_context"] = input_context
+        return {
+            "success": True,
+            "input_context": input_context,
+            "output_artifact": {
+                "roadmap_releases": [
+                    {
+                        "release_name": "Milestone 2",
+                        "theme": "Analytics",
+                        "focus_area": "User Value",
+                        "items": ["Add analyst export"],
+                        "reasoning": "Append the accepted extension scope.",
+                    }
+                ],
+                "roadmap_summary": "Extension roadmap",
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+            "is_complete": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.get_engine",
+        lambda: engine,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.run_roadmap_agent_from_state",
+        fake_run_roadmap_agent_from_state,
+    )
+    runner = RoadmapPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.generate(project_id=2)
+
+    assert result["ok"] is True
+    assert captured["state"]["backlog_items"] == [
+        {
+            "priority": 2,
+            "requirement": "Add analyst export",
+            "value_driver": "Strategic",
+            "justification": "New scope from amended spec.",
+            "estimated_effort": "S",
+            "story_origin": "scope_extension",
+            "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+        }
+    ]
+    assert captured["input_context"]["generation_mode"] == "scope_extension"
+    assert captured["input_context"]["existing_roadmap_context"] == existing_roadmap
+    assert captured["input_context"]["extension_backlog_items"] == [
+        {
+            "requirement": "Add analyst export",
+            "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            "source_item_ids": ["REQ.new-analytics"],
+        }
+    ]
+
+
+def test_roadmap_generate_after_extension_save_hydrates_normal_backlog_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed extension Roadmap saves must not force extension-only hydration."""
+    engine = create_engine("sqlite://", echo=False)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Product(product_id=2, name="Cartola"))
+        session.add(
+            SpecRegistry(
+                spec_version_id=12,
+                product_id=2,
+                spec_hash="sha256:amended",
+                content="AMENDED SPEC",
+                status="approved",
+            )
+        )
+        session.commit()
+        session.add(
+            UserStory(
+                product_id=2,
+                title="Choose weekly squad",
+                status=StoryStatus.TO_DO,
+                rank="1",
+                story_points=3,
+                story_description="Core normal backlog item.",
+                story_origin="backlog_seed",
+                is_superseded=False,
+            )
+        )
+        session.add(
+            UserStory(
+                product_id=2,
+                title="Add analyst export",
+                status=StoryStatus.TO_DO,
+                rank="2",
+                story_points=1,
+                story_description="New scope from amended spec.",
+                story_origin="scope_extension",
+                accepted_spec_version_id=12,
+                is_superseded=False,
+            )
+        )
+        session.commit()
+
+    workflow = _FakeWorkflowService()
+    workflow.state.update(
+        {
+            "fsm_state": "STORY_INTERVIEW",
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": BASE_SPEC_VERSION_ID,
+                "base_spec_hash": "sha256:base",
+                "amended_spec_version_id": AMENDED_SPEC_VERSION_ID,
+                "amended_spec_hash": "sha256:amended",
+                "added_source_item_ids": ["REQ.new-analytics"],
+                "backlog_extension_saved_at": "2026-06-14T10:00:00Z",
+                "backlog_extension_attempt_id": "backlog-attempt-4",
+                "backlog_extension_artifact_fingerprint": "sha256:backlog",
+                "roadmap_extension_saved_at": "2026-06-14T12:00:00Z",
+                "roadmap_extension_attempt_id": "roadmap-attempt-2",
+                "roadmap_extension_artifact_fingerprint": "sha256:roadmap",
+            },
+            "roadmap_releases": [
+                {
+                    "release_name": "Milestone 1",
+                    "theme": "Foundation",
+                    "focus_area": "Technical Foundation",
+                    "items": ["Choose weekly squad"],
+                    "reasoning": "Already approved.",
+                },
+                {
+                    "release_name": "Milestone 2",
+                    "theme": "Analytics",
+                    "focus_area": "User Value",
+                    "items": ["Add analyst export"],
+                    "reasoning": "Saved extension scope.",
+                },
+            ],
+            "backlog_items": [],
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "AMENDED SPEC"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_roadmap_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del project_id
+        input_context = build_roadmap_input_context(state, user_input=user_input)
+        captured["state"] = dict(state)
+        captured["input_context"] = input_context
+        return {
+            "success": True,
+            "input_context": input_context,
+            "output_artifact": {
+                "roadmap_releases": [
+                    {
+                        "release_name": "Milestone 1",
+                        "theme": "Foundation",
+                        "focus_area": "Technical Foundation",
+                        "items": ["Choose weekly squad"],
+                        "reasoning": "Normal roadmap refinement.",
+                    }
+                ],
+                "roadmap_summary": "Normal roadmap",
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.get_engine",
+        lambda: engine,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.run_roadmap_agent_from_state",
+        fake_run_roadmap_agent_from_state,
+    )
+    runner = RoadmapPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.generate(project_id=2, user_input="refine normal roadmap")
+
+    assert result["ok"] is True
+    assert captured["state"]["backlog_items"] == [
+        {
+            "priority": 1,
+            "requirement": "Choose weekly squad",
+            "value_driver": "Strategic",
+            "justification": "Core normal backlog item.",
+            "estimated_effort": "M",
+        }
+    ]
+    assert "generation_mode" not in captured["input_context"]
+    assert "existing_roadmap_context" not in captured["input_context"]
+    assert captured["input_context"]["backlog_items"] == [
+        {
+            "priority": 1,
+            "requirement": "Choose weekly squad",
+            "value_driver": "Strategic",
+            "justification": "Core normal backlog item.",
             "estimated_effort": "M",
         }
     ]

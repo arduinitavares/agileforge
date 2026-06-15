@@ -2,11 +2,23 @@
 
 import copy
 from types import SimpleNamespace
-from typing import Any, Never
+from typing import Any, Never, Protocol, cast
+from unittest.mock import patch
 
 import pytest
+from sqlmodel import Session as SqlSession
+from sqlmodel import SQLModel, create_engine, select
 
-from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from agile_sqlmodel import Product, UserStory
+from models.enums import StoryStatus
+from orchestrator_agent.agent_tools.backlog_primer.tools import (
+    INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
+    INTERNAL_BACKLOG_SAVE_OPTIONS_KEY,
+    SaveBacklogInput,
+)
+from orchestrator_agent.agent_tools.backlog_primer.tools import (
+    save_backlog_tool as real_save_backlog_tool,
+)
 from services.agent_workbench.backlog_active_reset import (
     ActiveBacklogResetRequest,
     reset_request_fingerprint,
@@ -32,6 +44,10 @@ from services.phases.backlog_service import (
 )
 
 JsonDict = dict[str, Any]
+
+
+class _StatefulToolContext(Protocol):
+    state: dict[str, Any]
 
 
 def _review_state_for_artifact(output_artifact: JsonDict) -> JsonDict:
@@ -497,6 +513,197 @@ async def test_generate_backlog_draft_rejects_setup_required_state() -> None:
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert "Setup required before backlog" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_generate_records_scope_extension_authority_blocker() -> None:
+    """Pending extension authority should persist as a Backlog runtime failure."""
+    state: JsonDict = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "authority_pending_review",
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_backlog_agent(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id, user_input
+        message = (
+            "AUTHORITY_REVIEW_REQUIRED: scope extension authority must be accepted "
+            "before backlog generation."
+        )
+        return {
+            "success": False,
+            "input_context": {
+                "generation_mode": "scope_extension",
+                "scope_extension": {
+                    "amended_spec_version_id": 12,
+                    "added_source_item_ids": ["REQ.reporting-export"],
+                },
+                "authority_scope_filter": {
+                    "source_item_ids": ["REQ.reporting-export"]
+                },
+            },
+            "output_artifact": {
+                "error": "AUTHORITY_REVIEW_REQUIRED",
+                "message": message,
+                "is_complete": False,
+                "clarifying_questions": [],
+                "failure_stage": "authority_review_required",
+                "failure_summary": message,
+            },
+            "is_complete": None,
+            "error": message,
+            "failure_artifact_id": "backlog-failure-1",
+            "failure_stage": "authority_review_required",
+            "failure_summary": message,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        }
+
+    payload = await generate_backlog_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_backlog_agent=fake_run_backlog_agent,
+        user_input=None,
+    )
+
+    assert payload["backlog_run_success"] is False
+    assert payload["failure_stage"] == "authority_review_required"
+    assert payload["fsm_state"] == "SETUP_REQUIRED"
+    assert saved["state"]["fsm_state"] == "SETUP_REQUIRED"
+    attempt = saved["state"]["backlog_attempts"][0]
+    assert attempt["failure_stage"] == "authority_review_required"
+    assert attempt["input_context"]["generation_mode"] == "scope_extension"
+    assert "AUTHORITY_REVIEW_REQUIRED" in attempt["failure_summary"]
+
+
+@pytest.mark.asyncio
+async def test_scope_extension_existing_backlog_skips_feedback_gate() -> None:
+    """Existing Backlog rows are read-only context for scope-extension generation."""
+    state: JsonDict = {
+        "fsm_state": "VISION_PERSISTENCE",
+        "setup_status": "passed",
+        "backlog_items": [{"requirement": "Existing backlog item"}],
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+    }
+    saved: JsonDict = {}
+    captured: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = dict(updated)
+
+    async def fake_run_backlog_agent(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        captured["state"] = state
+        captured["project_id"] = project_id
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {
+                "generation_mode": "scope_extension",
+                "scope_extension": {
+                    "amended_spec_version_id": 12,
+                    "added_source_item_ids": ["REQ.reporting-export"],
+                },
+                "authority_scope_filter": {
+                    "source_item_ids": ["REQ.reporting-export"]
+                },
+            },
+            "output_artifact": {
+                "backlog_items": [_savable_backlog_item()],
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+            "is_complete": True,
+            "error": None,
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        }
+
+    payload = await generate_backlog_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_backlog_agent=fake_run_backlog_agent,
+        user_input=None,
+    )
+
+    assert captured["user_input"] == ""
+    assert payload["backlog_run_success"] is True
+    assert payload["fsm_state"] == "BACKLOG_REVIEW"
+    assert saved["state"]["backlog_attempts"][0]["input_context"][
+        "generation_mode"
+    ] == "scope_extension"
+
+
+@pytest.mark.asyncio
+async def test_scope_extension_saved_context_requires_feedback_gate() -> None:
+    """Consumed scope-extension context must not bypass normal refinement feedback."""
+    state: JsonDict = {
+        "fsm_state": "VISION_PERSISTENCE",
+        "setup_status": "passed",
+        "backlog_items": [{"requirement": "Existing backlog item"}],
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+            "backlog_extension_saved_at": "2026-04-04T00:00:00Z",
+        },
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_backlog_agent(**_kwargs: object) -> Never:
+        msg = "runner should not be called"
+        raise AssertionError(msg)
+
+    with pytest.raises(BacklogPhaseError) as exc_info:
+        await generate_backlog_draft(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            run_backlog_agent=fake_run_backlog_agent,
+            user_input=None,
+        )
+
+    assert "Feedback is required" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
@@ -1953,11 +2160,237 @@ async def test_save_backlog_draft_persists_persistence_state() -> None:
     assert payload["fsm_state"] == "BACKLOG_PERSISTENCE"
     assert payload["save_result"]["success"] is True
     assert captured["backlog_input"].product_id == 7  # noqa: PLR2004
+    assert not hasattr(captured["backlog_input"], "append_only")
+    assert not hasattr(captured["backlog_input"], "story_origin")
+    assert not hasattr(captured["backlog_input"], "accepted_spec_version_id")
+    assert (
+        "_agileforge_internal_backlog_save_options"
+        not in captured["tool_context"].state
+    )
     assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
     assert saved["state"]["backlog_saved_at"] == "2026-04-04T00:00:00Z"
     assert (
         saved["state"]["backlog_save_idempotency_keys"]["save-backlog-1"]["fsm_state"]
         == "BACKLOG_PERSISTENCE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_masks_stale_internal_backlog_save_options() -> None:
+    """Normal Backlog saves must hide stale host-only append options."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item()],
+            "is_complete": True,
+        }
+    )
+    state[INTERNAL_BACKLOG_SAVE_OPTIONS_KEY] = {
+        "authorized_by": INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
+        "append_only": True,
+        "story_origin": "scope_extension",
+        "accepted_spec_version_id": None,
+    }
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    saved: JsonDict = {}
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        context = cast("_StatefulToolContext", tool_context)
+        captured["internal_options_visible"] = (
+            INTERNAL_BACKLOG_SAVE_OPTIONS_KEY in context.state
+        )
+        return {
+            "success": True,
+            "product_id": backlog_input.product_id,
+            "saved_count": len(backlog_input.backlog_items),
+        }
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-backlog-stale-internal-options",
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    assert payload["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert captured["internal_options_visible"] is False
+    assert INTERNAL_BACKLOG_SAVE_OPTIONS_KEY not in saved["state"]
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_internal_backlog_save_options_guarded() -> None:
+    """Stale host-only append options must not bypass replacement blocking."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [_savable_backlog_item(requirement="Replacement backlog")],
+            "is_complete": True,
+        }
+    )
+    state[INTERNAL_BACKLOG_SAVE_OPTIONS_KEY] = {
+        "authorized_by": INTERNAL_BACKLOG_SAVE_OPTIONS_AUTHORITY,
+        "append_only": True,
+        "story_origin": "scope_extension",
+        "accepted_spec_version_id": None,
+    }
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    saved: JsonDict = {}
+    test_engine = create_engine("sqlite://", echo=False)
+    SQLModel.metadata.create_all(test_engine)
+    with SqlSession(test_engine) as session:
+        session.add(Product(name="Backlog Project"))
+        session.commit()
+        session.add(
+            UserStory(
+                product_id=1,
+                title="Progressed seed backlog",
+                status=StoryStatus.TO_DO,
+                story_description="Already refined.",
+                acceptance_criteria="- Verify existing story",
+                source_requirement="progressed-seed-backlog",
+                refinement_slot=1,
+                story_origin="backlog_seed",
+                is_refined=True,
+                is_superseded=False,
+            )
+        )
+        session.commit()
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    with (
+        patch(
+            "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+            return_value=test_engine,
+        ),
+        pytest.raises(BacklogPhaseError) as exc_info,
+    ):
+        await save_backlog_draft(
+            project_id=1,
+            project_name="Backlog Project",
+            attempt_id="backlog-attempt-1",
+            expected_artifact_fingerprint=expected_fingerprint,
+            expected_state="BACKLOG_REVIEW",
+            idempotency_key="save-backlog-stale-internal-options-guard",
+            save_state=lambda updated: saved.update({"state": dict(updated)}),
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_backlog_tool=real_save_backlog_tool,
+        )
+
+    assert exc_info.value.detail == "BACKLOG_REPLACEMENT_BLOCKED"
+    assert saved == {}
+    with SqlSession(test_engine) as session:
+        rows = session.exec(select(UserStory).where(UserStory.product_id == 1)).all()
+    assert [row.title for row in rows] == ["Progressed seed backlog"]
+
+
+@pytest.mark.asyncio
+async def test_save_backlog_draft_scope_extension_uses_internal_options() -> None:
+    """Scope-extension saves must authorize append/provenance outside tool input."""
+    state = _review_state_for_artifact(
+        {
+            "backlog_items": [
+                _savable_backlog_item(
+                    requirement="Add new reporting export",
+                    authority_ref="REQ.reporting-export",
+                )
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+    input_context = {
+        "generation_mode": "scope_extension",
+        "scope_extension": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+        "authority_scope_filter": {"source_item_ids": ["REQ.reporting-export"]},
+    }
+    state["scope_extension_context"] = dict(input_context["scope_extension"])
+    state["backlog_attempts"][0]["input_context"] = input_context
+    state["backlog_last_input_context"] = input_context
+    expected_fingerprint = state["product_backlog_assessment"]["artifact_fingerprint"]
+    captured: JsonDict = {}
+    saved: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state), session_id="7")
+
+    def fake_save_backlog_tool(
+        backlog_input: SaveBacklogInput,
+        tool_context: object,
+    ) -> JsonDict:
+        context = cast("_StatefulToolContext", tool_context)
+        captured["backlog_input"] = backlog_input
+        captured["tool_context"] = tool_context
+        captured["internal_options"] = dict(
+            context.state["_agileforge_internal_backlog_save_options"]
+        )
+        return {
+            "success": True,
+            "product_id": backlog_input.product_id,
+            "saved_count": len(backlog_input.backlog_items),
+        }
+
+    payload = await save_backlog_draft(
+        project_id=7,
+        project_name="Backlog Project",
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=expected_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-scope-extension-backlog",
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_backlog_tool=fake_save_backlog_tool,
+    )
+
+    backlog_input = captured["backlog_input"]
+    assert payload["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert not hasattr(backlog_input, "append_only")
+    assert captured["internal_options"] == {
+        "authorized_by": "services.phases.backlog_service",
+        "append_only": True,
+        "story_origin": "scope_extension",
+        "accepted_spec_version_id": 12,
+    }
+    assert (
+        "_agileforge_internal_backlog_save_options"
+        not in captured["tool_context"].state
+    )
+    assert saved["state"]["fsm_state"] == "BACKLOG_PERSISTENCE"
+    assert (
+        "_agileforge_internal_backlog_save_options"
+        not in saved["state"]
+    )
+    assert (
+        saved["state"]["scope_extension_context"]["backlog_extension_saved_at"]
+        == "2026-04-04T00:00:00Z"
+    )
+    assert (
+        saved["state"]["scope_extension_context"]["backlog_extension_attempt_id"]
+        == "backlog-attempt-1"
     )
 
 

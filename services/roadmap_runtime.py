@@ -75,6 +75,141 @@ def _normalize_prior_roadmap_state(value: object) -> str:
     return "NO_HISTORY"
 
 
+def _json_safe_copy(value: object) -> object:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _saved_scope_extension_context(
+    state: Mapping[str, Any],
+) -> dict[str, object] | None:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return None
+    if not context.get("backlog_extension_saved_at"):
+        return None
+    if context.get("roadmap_extension_saved_at"):
+        return None
+    added_source_item_ids = _string_list(context.get("added_source_item_ids"))
+    if not added_source_item_ids:
+        return None
+
+    projected: dict[str, object] = {}
+    for key in (
+        "schema",
+        "base_spec_version_id",
+        "base_spec_hash",
+        "amended_spec_version_id",
+        "amended_spec_hash",
+        "backlog_extension_saved_at",
+        "backlog_extension_attempt_id",
+        "backlog_extension_artifact_fingerprint",
+    ):
+        if key in context:
+            projected[key] = context[key]
+    projected["added_source_item_ids"] = added_source_item_ids
+    return projected
+
+
+def _scope_extension_base_releases(state: Mapping[str, Any]) -> object:
+    context = state.get("scope_extension_context")
+    if isinstance(context, Mapping):
+        base_releases = context.get("roadmap_extension_base_releases")
+        if isinstance(base_releases, list):
+            return _json_safe_copy(base_releases)
+
+    releases = state.get("roadmap_releases")
+    return _json_safe_copy(releases) if isinstance(releases, list) else []
+
+
+def _is_extension_backlog_item(
+    item: Mapping[str, Any],
+    *,
+    amended_spec_version_id: int | None,
+    added_source_item_ids: list[str],
+) -> bool:
+    if item.get("story_origin") == "scope_extension":
+        return True
+    if (
+        amended_spec_version_id is not None
+        and _coerce_int(item.get("accepted_spec_version_id"))
+        == amended_spec_version_id
+    ):
+        return True
+    item_source_ids = set(_string_list(item.get("source_item_ids")))
+    return bool(item_source_ids.intersection(added_source_item_ids))
+
+
+def _extension_backlog_items(
+    state: Mapping[str, Any],
+    scope_extension: Mapping[str, object],
+) -> list[dict[str, object]]:
+    rows = _extension_backlog_item_rows(state, scope_extension)
+    added_source_item_ids = _string_list(scope_extension.get("added_source_item_ids"))
+    amended_spec_version_id = _coerce_int(
+        scope_extension.get("amended_spec_version_id")
+    )
+    projected: list[dict[str, object]] = []
+    for item_map in rows:
+        requirement = item_map.get("requirement") or item_map.get("title")
+        if not isinstance(requirement, str) or not requirement.strip():
+            continue
+        source_item_ids = _string_list(item_map.get("source_item_ids"))
+        projected.append(
+            {
+                "requirement": requirement.strip(),
+                "accepted_spec_version_id": amended_spec_version_id,
+                "source_item_ids": source_item_ids or added_source_item_ids,
+            }
+        )
+    return projected
+
+
+def _extension_backlog_item_rows(
+    state: Mapping[str, Any],
+    scope_extension: Mapping[str, object],
+) -> list[dict[str, object]]:
+    backlog_items = state.get("backlog_items")
+    if not isinstance(backlog_items, list):
+        return []
+
+    added_source_item_ids = _string_list(scope_extension.get("added_source_item_ids"))
+    amended_spec_version_id = _coerce_int(
+        scope_extension.get("amended_spec_version_id")
+    )
+    rows: list[dict[str, object]] = []
+    for item in backlog_items:
+        if not isinstance(item, Mapping):
+            continue
+        item_map = {str(key): value for key, value in item.items()}
+        if not _is_extension_backlog_item(
+            item_map,
+            amended_spec_version_id=amended_spec_version_id,
+            added_source_item_ids=added_source_item_ids,
+        ):
+            continue
+        rows.append(item_map)
+    return rows
+
+
 def _normalize_validation_errors(errors: object) -> ValidationErrors:
     normalized: ValidationErrors = []
     if not isinstance(errors, list):
@@ -124,9 +259,20 @@ def build_roadmap_input_context(
 
     # backlog_items comes from session state; strip refinement lineage metadata
     # before passing nested items into RoadmapBuilderInput(extra="forbid").
-    backlog_items = _project_roadmap_backlog_items(state.get("backlog_items"))
+    scope_extension = _saved_scope_extension_context(state)
+    extension_backlog_items = (
+        _extension_backlog_items(state, scope_extension)
+        if scope_extension is not None
+        else []
+    )
+    raw_backlog_items: object = (
+        _extension_backlog_item_rows(state, scope_extension)
+        if scope_extension is not None
+        else state.get("backlog_items")
+    )
+    backlog_items = _project_roadmap_backlog_items(raw_backlog_items)
 
-    return {
+    input_context: RoadmapInputContext = {
         "backlog_items": backlog_items,
         "product_vision": vision_stmt,
         "technical_spec": _as_text(state.get("pending_spec_content")),
@@ -137,13 +283,24 @@ def build_roadmap_input_context(
         ),
         "user_input": user_input or "",
     }
+    if scope_extension is not None:
+        input_context.update(
+            {
+                "generation_mode": "scope_extension",
+                "prior_roadmap_state": "NO_HISTORY",
+                "existing_roadmap_context": _scope_extension_base_releases(state),
+                "scope_extension": dict(scope_extension),
+                "extension_backlog_items": extension_backlog_items,
+            }
+        )
+    return input_context
 
 
 async def _invoke_roadmap_agent(payload: RoadmapBuilderInput) -> str:
     return await invoke_agent_to_text(
         agent=roadmap_agent,
         runner_identity=ROADMAP_RUNNER_IDENTITY,
-        payload_json=payload.model_dump_json(),
+        payload_json=payload.model_dump_json(exclude_none=True),
         no_text_error="Roadmap agent returned no text response",
     )
 

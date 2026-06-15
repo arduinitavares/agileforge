@@ -565,6 +565,81 @@ class FakeAuthorityApplication:
             },
         )
 
+    def scope_extension_validate(
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int | None = None,
+    ) -> dict[str, object]:
+        """Capture a scope-extension validation request."""
+        self.calls.append(
+            (
+                "scope_extension_validate",
+                {
+                    "project_id": project_id,
+                    "spec_file": spec_file,
+                    "base_spec_version_id": base_spec_version_id,
+                },
+            )
+        )
+        return self.results.get(
+            "scope_extension_validate",
+            {
+                "ok": True,
+                "data": {
+                    "project_id": project_id,
+                    "status": "project_scope_extension_valid",
+                },
+                "warnings": [],
+                "errors": [],
+            },
+        )
+
+    def scope_extension_start(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int,
+        expected_state: str,
+        idempotency_key: str,
+        changed_by: str = "dashboard-agent",
+    ) -> dict[str, object]:
+        """Capture a guarded scope-extension start request."""
+        self.calls.append(
+            (
+                "scope_extension_start",
+                {
+                    "project_id": project_id,
+                    "spec_file": spec_file,
+                    "base_spec_version_id": base_spec_version_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return self.results.get(
+            "scope_extension_start",
+            {
+                "ok": True,
+                "data": {
+                    "project_id": project_id,
+                    "status": "project_scope_extension_started",
+                    "next_actions": [
+                        {
+                            "command": "agileforge authority compile",
+                            "args": {"project_id": project_id},
+                            "reason": "Compile authority for amended scope.",
+                        }
+                    ],
+                },
+                "warnings": [],
+                "errors": [],
+            },
+        )
+
     def authority_review(
         self,
         *,
@@ -786,6 +861,60 @@ def test_get_projects_uses_batch_session_lookup(
     assert payload["data"][1]["summary"] == "Second project"
     assert workflow.batch_calls == [["1", "2"]]
     assert workflow.single_calls == []
+
+
+def test_scope_extension_available_projects_sprint_runtime_primary_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard runtime projection exposes exhausted-scope extension action."""
+    project_id = 10
+
+    def workflow_next(*, project_id: int) -> dict[str, object]:
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "status": "project_scope_extension_available",
+                "next_actions": [
+                    {
+                        "command": (
+                            "agileforge scope extension validate --project-id 10 "
+                            "--spec-file <amended_spec_file>"
+                        ),
+                        "status": "project_scope_extension_available",
+                        "reason": (
+                            "The current execution scope is exhausted; validate an "
+                            "amended spec before generating new work."
+                        ),
+                    }
+                ],
+                "blocked_commands": [],
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "_workbench_application",
+        lambda: SimpleNamespace(workflow_next=workflow_next),
+    )
+
+    payload = {
+        "sprint_runtime": api_module._scope_extension_runtime_projection(project_id)
+    }
+    runtime = payload["sprint_runtime"]
+    assert isinstance(runtime, dict)
+
+    assert runtime["status"] == "project_scope_extension_available"
+    assert runtime["primary_action"]["label"] == "Extend Project Scope"
+    assert runtime["primary_action"]["command"].startswith(
+        "agileforge scope extension validate"
+    )
+    assert runtime["next_actions"] == [runtime["primary_action"]]
+    assert runtime["scope_extension_actions"] == [
+        runtime["scope_extension_primary_action"]
+    ]
 
 
 def test_create_project_returns_500_when_repository_does_not_persist(
@@ -1150,6 +1279,198 @@ def test_authority_compile_api_routes_guarded_request(
             "changed_by": "dashboard-ui",
         },
     )
+
+
+def test_scope_extension_validate_api_routes_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope-extension validate should mirror the CLI facade contract."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/scope-extension/validate",
+        json={"spec_file": "specs/amended.json", "base_spec_version_id": 3},
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["status"] == "project_scope_extension_valid"
+    assert fake_app.calls[-1] == (
+        "scope_extension_validate",
+        {
+            "project_id": project_id,
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+        },
+    )
+
+
+def test_scope_extension_validate_api_allows_optional_base_spec_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation can infer the base spec version when omitted."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/scope-extension/validate",
+        json={"spec_file": "specs/amended.json"},
+    )
+
+    assert response.status_code == HTTP_OK
+    assert fake_app.calls[-1][1]["base_spec_version_id"] is None
+
+
+def test_scope_extension_start_api_routes_request_with_next_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope-extension start should forward guarded mutation fields."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/scope-extension/start",
+        json={
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+            "expected_state": "SPRINT_COMPLETE",
+            "idempotency_key": "scope-extension-api-001",
+            "changed_by": "dashboard-human",
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["status"] == "project_scope_extension_started"
+    assert payload["data"]["next_actions"][0]["command"] == (
+        "agileforge authority compile"
+    )
+    assert fake_app.calls[-1] == (
+        "scope_extension_start",
+        {
+            "project_id": project_id,
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+            "expected_state": "SPRINT_COMPLETE",
+            "idempotency_key": "scope-extension-api-001",
+            "changed_by": "dashboard-human",
+        },
+    )
+
+
+def test_scope_extension_start_api_rejects_blank_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace-only idempotency keys should fail at the request boundary."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/scope-extension/start",
+        json={
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+            "expected_state": "SPRINT_COMPLETE",
+            "idempotency_key": "   ",
+        },
+    )
+
+    assert response.status_code == HTTP_UNPROCESSABLE
+    assert fake_app.calls == []
+
+
+def test_scope_extension_api_forbids_legacy_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removed or unrelated scope-extension fields should fail validation."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+
+    validate_response = client.post(
+        f"/api/projects/{project_id}/scope-extension/validate",
+        json={
+            "spec_file": "specs/amended.json",
+            "sprint_duration_days": 14,
+        },
+    )
+    start_response = client.post(
+        f"/api/projects/{project_id}/scope-extension/start",
+        json={
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+            "expected_state": "SPRINT_COMPLETE",
+            "idempotency_key": "scope-extension-api-001",
+            "legacy_field": "legacy",
+        },
+    )
+
+    assert validate_response.status_code == HTTP_UNPROCESSABLE
+    assert start_response.status_code == HTTP_UNPROCESSABLE
+
+
+def test_scope_extension_start_api_failure_uses_dashboard_error_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope-extension start failures should surface as structured errors."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id = 10
+    repo.products.append(DummyProduct(product_id=project_id, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    result: dict[str, object] = {
+        "ok": False,
+        "data": {
+            "project_id": project_id,
+            "expected_state": "SPRINT_COMPLETE",
+            "actual_state": "STORY_REVIEW",
+        },
+        "errors": [
+            {
+                "code": "SCOPE_EXTENSION_EXPECTED_STATE_STALE",
+                "message": "Scope extension expected state is stale.",
+            }
+        ],
+        "warnings": [
+            {
+                "code": "SCOPE_EXTENSION_REFRESH_REQUIRED",
+                "message": "Refresh workflow state and retry.",
+            }
+        ],
+    }
+    fake_app.results["scope_extension_start"] = result
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        f"/api/projects/{project_id}/scope-extension/start",
+        json={
+            "spec_file": "specs/amended.json",
+            "base_spec_version_id": 3,
+            "expected_state": "SPRINT_COMPLETE",
+            "idempotency_key": "scope-extension-api-001",
+        },
+    )
+
+    assert response.status_code == HTTP_BAD_REQUEST
+    detail = response.json()["detail"]
+    assert detail["status"] == "error"
+    assert detail["data"] == result["data"]
+    assert detail["errors"] == result["errors"]
+    assert detail["warnings"] == result["warnings"]
 
 
 def test_authority_compile_api_failure_uses_dashboard_error_envelope(

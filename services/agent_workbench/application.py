@@ -6,7 +6,11 @@ from pathlib import Path
 from shlex import quote
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
+from sqlmodel import Session
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.engine import Engine
 
     from services.agent_workbench.authority_decision import (
@@ -44,6 +48,13 @@ from services.agent_workbench.project_setup_fingerprints import (
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
+)
+from services.agent_workbench.scope_extension import (
+    ScopeExtensionPreconditions,
+    ScopeExtensionRunner,
+    ScopeExtensionStartRequest,
+    ScopeExtensionValidateRequest,
+    evaluate_scope_extension_preconditions,
 )
 from services.specs.profile_content import SpecContentNormalizationError
 
@@ -148,6 +159,91 @@ class _AuthorityRegenerateRunner(Protocol):
     def regenerate(self, request: AuthorityRegenerateRequest) -> dict[str, Any]:
         """Regenerate authority for an approved spec version."""
         ...
+
+
+class _ScopeExtensionRunner(Protocol):
+    """Scope-extension runner methods exposed through the facade."""
+
+    def preconditions(
+        self,
+        *,
+        project_id: int,
+        workflow: dict[str, Any],
+        sprint_candidate_count: int,
+    ) -> ScopeExtensionPreconditions | None:
+        """Return whether scope extension is available."""
+        ...
+
+    def validate(self, request: ScopeExtensionValidateRequest) -> dict[str, Any]:
+        """Validate an amended spec against accepted authority."""
+        ...
+
+    def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
+        """Start guarded scope extension."""
+        ...
+
+
+def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
+    """Return the direct-runner default when no read projection is available."""
+    return 0
+
+
+class _DefaultScopeExtensionRunner:
+    """Session-scoped adapter for scope-extension operations."""
+
+    def __init__(
+        self,
+        *,
+        sprint_candidate_count_resolver: Callable[[int], int] | None = None,
+    ) -> None:
+        """Initialize default runner dependencies."""
+        self._sprint_candidate_count_resolver = (
+            sprint_candidate_count_resolver
+            or _zero_scope_extension_sprint_candidate_count
+        )
+
+    def preconditions(
+        self,
+        *,
+        project_id: int,
+        workflow: dict[str, Any],
+        sprint_candidate_count: int,
+    ) -> ScopeExtensionPreconditions:
+        """Evaluate scope-extension availability with a short-lived session."""
+        state = workflow.get("state")
+        workflow_state = state if isinstance(state, dict) else {}
+        with Session(get_engine()) as session:
+            return evaluate_scope_extension_preconditions(
+                session=session,
+                product_id=project_id,
+                workflow_state=workflow_state,
+                sprint_candidate_count=sprint_candidate_count,
+            )
+
+    def validate(self, request: ScopeExtensionValidateRequest) -> dict[str, Any]:
+        """Validate scope extension through a short-lived runner."""
+        from services.workflow import WorkflowService  # noqa: PLC0415
+
+        with Session(get_engine()) as session:
+            runner = ScopeExtensionRunner(
+                session=session,
+                workflow_service=WorkflowService(),
+            )
+            return runner.validate(request)
+
+    def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
+        """Start scope extension through a short-lived runner."""
+        from services.workflow import WorkflowService  # noqa: PLC0415
+
+        with Session(get_engine()) as session:
+            runner = ScopeExtensionRunner(
+                session=session,
+                workflow_service=WorkflowService(),
+                sprint_candidate_count_resolver=(
+                    self._sprint_candidate_count_resolver
+                ),
+            )
+            return runner.start(request)
 
 
 class _VisionPhaseRunner(Protocol):
@@ -663,6 +759,7 @@ class AgentWorkbenchApplication:
         authority_review: _AuthorityReview | None = None,
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
         authority_regenerate_runner: _AuthorityRegenerateRunner | None = None,
+        scope_extension_runner: _ScopeExtensionRunner | None = None,
         vision_runner: _VisionPhaseRunner | None = None,
         backlog_runner: _BacklogPhaseRunner | None = None,
         roadmap_runner: _RoadmapPhaseRunner | None = None,
@@ -678,6 +775,7 @@ class AgentWorkbenchApplication:
         self._authority_review = authority_review
         self._authority_decision_runner = authority_decision_runner
         self._authority_regenerate_runner = authority_regenerate_runner
+        self._scope_extension_runner = scope_extension_runner
         self._vision_runner = vision_runner
         self._backlog_runner = backlog_runner
         self._roadmap_runner = roadmap_runner
@@ -826,10 +924,23 @@ class AgentWorkbenchApplication:
                 and _stale_backlog_reason(workflow) is None
                 else None
             )
+            scope_extension_preconditions = None
+            if (
+                sprint_candidates is not None
+                and _sprint_candidate_count(sprint_candidates) == 0
+                and not _uncovered_story_requirements(workflow)
+            ):
+                scope_extension_runner = self._get_scope_extension_runner()
+                scope_extension_preconditions = scope_extension_runner.preconditions(
+                    project_id=project_id,
+                    workflow=_envelope_data(workflow),
+                    sprint_candidate_count=0,
+                )
             return _sprint_complete_workflow_next(
                 project_id=project_id,
                 workflow=workflow,
                 sprint_candidates=sprint_candidates,
+                scope_extension_preconditions=scope_extension_preconditions,
             )
 
         sprint_candidates_for_setup = (
@@ -1106,6 +1217,42 @@ class AgentWorkbenchApplication:
                 dry_run=dry_run,
             )
         )
+
+    def scope_extension_validate(
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Validate an amended spec through the scope-extension runner."""
+        request = ScopeExtensionValidateRequest(
+            project_id=project_id,
+            spec_file=spec_file,
+            base_spec_version_id=base_spec_version_id,
+        )
+        return self._get_scope_extension_runner().validate(request)
+
+    def scope_extension_start(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_file: str,
+        base_spec_version_id: int,
+        expected_state: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Start guarded scope extension through the runner."""
+        request = ScopeExtensionStartRequest(
+            project_id=project_id,
+            spec_file=spec_file,
+            base_spec_version_id=base_spec_version_id,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_extension_runner().start(request)
 
     def authority_status(self, *, project_id: int) -> dict[str, Any]:
         """Return authority status projection."""
@@ -1887,6 +2034,22 @@ class AgentWorkbenchApplication:
 
             self._authority_regenerate_runner = default_authority_regenerate_runner()
         return self._authority_regenerate_runner
+
+    def _get_scope_extension_runner(self) -> _ScopeExtensionRunner:
+        """Return the scope-extension runner, constructing the default lazily."""
+        if self._scope_extension_runner is None:
+            self._scope_extension_runner = _DefaultScopeExtensionRunner(
+                sprint_candidate_count_resolver=(
+                    self._scope_extension_sprint_candidate_count
+                )
+            )
+        return self._scope_extension_runner
+
+    def _scope_extension_sprint_candidate_count(self, project_id: int) -> int:
+        """Resolve candidate count from the same read projection as workflow-next."""
+        return _sprint_candidate_count(
+            self.sprint_candidates(project_id=project_id)
+        ) or 0
 
     def _get_vision_runner(self) -> _VisionPhaseRunner:
         """Return the Vision runner, constructing the default lazily."""
@@ -3587,6 +3750,7 @@ def _sprint_complete_workflow_next(
     project_id: int,
     workflow: dict[str, Any],
     sprint_candidates: dict[str, Any] | None = None,
+    scope_extension_preconditions: ScopeExtensionPreconditions | None = None,
 ) -> dict[str, Any]:
     """Return workflow-next routing for SPRINT_COMPLETE."""
     next_valid_commands: list[str] = []
@@ -3645,6 +3809,7 @@ def _sprint_complete_workflow_next(
         workflow=workflow,
         triage=current_triage,
         sprint_candidates=sprint_candidates,
+        scope_extension_preconditions=scope_extension_preconditions,
     )
     if impact_next is not None:
         return impact_next
@@ -3678,6 +3843,7 @@ def _post_sprint_triage_impact_next(
     workflow: dict[str, Any],
     triage: dict[str, Any] | None,
     sprint_candidates: dict[str, Any] | None = None,
+    scope_extension_preconditions: ScopeExtensionPreconditions | None = None,
 ) -> dict[str, Any] | None:
     """Return routed workflow-next data for recorded triage impacts."""
     if triage is None:
@@ -3688,6 +3854,7 @@ def _post_sprint_triage_impact_next(
             project_id=project_id,
             workflow=workflow,
             sprint_candidates=sprint_candidates,
+            scope_extension_preconditions=scope_extension_preconditions,
         )
     elif triage_impact == "story":
         impact_next = _post_sprint_story_next(
@@ -3727,6 +3894,7 @@ def _post_sprint_none_next(
     project_id: int,
     workflow: dict[str, Any],
     sprint_candidates: dict[str, Any] | None = None,
+    scope_extension_preconditions: ScopeExtensionPreconditions | None = None,
 ) -> dict[str, Any]:
     """Return next-cycle routing when triage records no follow-up impact."""
     planned_sprint_id = _planned_sprint_id(workflow)
@@ -3796,6 +3964,17 @@ def _post_sprint_none_next(
                     "requires_cli_installation": not story_command_installed,
                 }
             ],
+        )
+    if (
+        planned_sprint_id is None
+        and candidate_count == 0
+        and scope_extension_preconditions is not None
+    ):
+        return _post_sprint_scope_extension_next(
+            project_id=project_id,
+            workflow=workflow,
+            scope_extension_preconditions=scope_extension_preconditions,
+            commands=commands,
         )
     if planned_sprint_id is None and candidate_count == 0:
         next_valid_commands, blocked_future_commands = _installed_command_texts(
@@ -3890,6 +4069,84 @@ def _post_sprint_none_next(
         blocked_future_commands=blocked_future_commands,
         status=status,
         next_actions=next_actions,
+    )
+
+
+def _post_sprint_scope_extension_next(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    scope_extension_preconditions: ScopeExtensionPreconditions,
+    commands: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Return exhausted-project routing through scope extension."""
+    next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    validate_command = (
+        f"agileforge scope extension validate --project-id {project_id} "
+        "--spec-file <amended_spec_file>"
+    )
+    validate_command_installed = command_is_available(
+        "agileforge scope extension validate"
+    )
+    if validate_command_installed:
+        next_valid_commands.insert(0, validate_command)
+    else:
+        blocked_future_commands.insert(0, validate_command)
+    if scope_extension_preconditions.available:
+        status = scope_extension_preconditions.status
+        return _sprint_complete_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=[],
+            blocked_future_commands=blocked_future_commands,
+            status=status,
+            next_actions=[
+                {
+                    "command": validate_command,
+                    "status": status,
+                    "reason": (
+                        "The current execution scope is exhausted; validate an "
+                        "amended spec before generating new work."
+                    ),
+                    "runnable": validate_command_installed,
+                    "installed": validate_command_installed,
+                    "requires_cli_installation": not validate_command_installed,
+                }
+            ],
+        )
+
+    reason = (
+        scope_extension_preconditions.blocking_reason
+        or "SCOPE_EXTENSION_NOT_AVAILABLE"
+    )
+    status = scope_extension_preconditions.status
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=[
+            {
+                "command": "agileforge scope extension validate",
+                "reason": reason,
+                "message": (
+                    "Scope extension is blocked until current project work is "
+                    "exhausted."
+                ),
+            }
+        ],
+        blocked_future_commands=blocked_future_commands,
+        status=status,
+        next_actions=[
+            {
+                "command": validate_command,
+                "status": status,
+                "reason": reason,
+                "runnable": False,
+                "installed": validate_command_installed,
+                "requires_cli_installation": not validate_command_installed,
+            }
+        ],
     )
 
 

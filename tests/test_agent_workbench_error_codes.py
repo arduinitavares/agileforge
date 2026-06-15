@@ -61,6 +61,11 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.TRIAGE_REQUIRED_FIELD_MISSING: (2, False),
     ErrorCode.TRIAGE_FIELD_INVALID: (2, False),
     ErrorCode.BACKLOG_SOURCE_UNAVAILABLE: (2, False),
+    ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE: (4, False),
+    ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH: (3, True),
+    ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK: (4, False),
+    ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: (2, False),
+    ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS: (2, False),
 }
 
 
@@ -124,6 +129,20 @@ def test_authority_compile_stale_guard_error_codes_are_registered() -> None:
         metadata = error_metadata(code)
         assert metadata.default_exit_code == expected_exit_code
         assert metadata.retryable is True
+
+
+def test_scope_extension_guard_error_codes_are_registered() -> None:
+    """Expose stable metadata for scope-extension availability guards."""
+    codes = registered_error_codes()
+
+    assert "SCOPE_EXTENSION_NOT_AVAILABLE" in codes
+    assert "SCOPE_EXTENSION_UNRESOLVED_WORK" in codes
+    assert error_metadata(ErrorCode.SCOPE_EXTENSION_NOT_AVAILABLE).description == (
+        "Project scope extension is not available."
+    )
+    assert error_metadata(ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK).description == (
+        "Project scope extension is blocked by unresolved work."
+    )
 
 
 @pytest.mark.parametrize(
