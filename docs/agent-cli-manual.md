@@ -1516,6 +1516,25 @@ manual checkpoint. If a pending amended authority is produced, review and accept
 or reject it explicitly before generating Backlog, Roadmap, Story, or Sprint
 work for the extension.
 
+### Authority Compile Coverage Repair
+
+If `authority compile` fails with
+`STRUCTURED_COVERAGE_INCOMPLETE: MISSING_ACCEPTED_MUST_AUTHORITY`, do not edit
+the spec blindly. The compiler runs one explicit focused repair attempt for each
+missing accepted `MUST` or `MUST_NOT` item. If repair still fails, report:
+
+- compiler model;
+- failure artifact id;
+- missing item count;
+- first 10 missing item ids;
+- whether any repair attempt introduced source metadata errors.
+
+For scope extensions, unchanged accepted base authority is reused only when the
+amended spec marker proves the base spec version, base hash, and accepted
+compiled authority identity. Added scope is compiled separately and merged with
+the accepted base authority. If base authority identity cannot be proven, the
+compile fails closed.
+
 ## Agent Feedback Capture
 
 Agents using AgileForge should collect feedback when the CLI contract, routing,
