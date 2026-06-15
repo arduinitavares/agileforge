@@ -10,6 +10,10 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from agile_sqlmodel import (
+    BrownfieldScanAttempt,
+    BrownfieldSourceArtifact,
+    BrownfieldSpecApproval,
+    BrownfieldSpecDraftAttempt,
     CompiledSpecAuthority,
     Product,
     ProductTeam,
@@ -177,6 +181,71 @@ def test_delete_project_removes_compiled_spec_authority(tmp_path: Path) -> None:
     with Session(engine) as session:
         assert session.exec(select(CompiledSpecAuthority)).first() is None
         assert session.exec(select(SpecRegistry)).first() is None
+
+
+def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
+    """Ensure delete_project clears brownfield artifact records before product."""
+    db_path = tmp_path / "delete_project_brownfield.db"
+    engine = _create_sqlite_engine(db_path)
+
+    with Session(engine) as session:
+        product = Product(name="Brownfield Product")
+        session.add(product)
+        session.flush()
+        product_id = require_id(product.product_id, "product_id")
+
+        session.add(
+            BrownfieldSourceArtifact(
+                project_id=product_id,
+                attempt_id="source-attempt-1",
+                artifact_fingerprint="source-fingerprint-1",
+                request_hash="source-request-hash-1",
+            )
+        )
+        session.add(
+            BrownfieldScanAttempt(
+                project_id=product_id,
+                attempt_id="scan-attempt-1",
+                artifact_fingerprint="scan-artifact-fingerprint-1",
+                source_fingerprint="source-fingerprint-1",
+                repo_path=str(tmp_path / "repo"),
+                request_hash="scan-request-hash-1",
+            )
+        )
+        session.add(
+            BrownfieldSpecDraftAttempt(
+                project_id=product_id,
+                attempt_id="draft-attempt-1",
+                artifact_fingerprint="draft-artifact-fingerprint-1",
+                origin="scan",
+                source_fingerprint="source-fingerprint-1",
+                scan_attempt_id="scan-attempt-1",
+                scan_fingerprint="scan-fingerprint-1",
+                request_hash="draft-request-hash-1",
+            )
+        )
+        session.add(
+            BrownfieldSpecApproval(
+                project_id=product_id,
+                approval_attempt_id="approval-attempt-1",
+                approval_fingerprint="approval-fingerprint-1",
+                draft_attempt_id="draft-attempt-1",
+                draft_fingerprint="draft-fingerprint-1",
+                scan_fingerprint="scan-fingerprint-1",
+                source_fingerprint="source-fingerprint-1",
+                spec_hash="spec-hash-1",
+            )
+        )
+        session.commit()
+
+    delete_project(product_id, str(db_path))
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).first() is None
+        assert session.exec(select(BrownfieldSpecApproval)).first() is None
+        assert session.exec(select(BrownfieldSpecDraftAttempt)).first() is None
+        assert session.exec(select(BrownfieldScanAttempt)).first() is None
+        assert session.exec(select(BrownfieldSourceArtifact)).first() is None
 
 
 def test_resolve_db_path_prefers_explicit_argument(

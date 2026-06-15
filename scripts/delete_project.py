@@ -180,6 +180,27 @@ def delete_project(product_id: int, db_path: str) -> None:  # noqa: C901, PLR091
                 spec_version_ids,
             )
 
+        emit("  - Deleting brownfield_spec_approvals...")
+        cur.execute(
+            "DELETE FROM brownfield_spec_approvals WHERE project_id=?", (product_id,)
+        )
+
+        emit("  - Deleting brownfield_spec_draft_attempts...")
+        cur.execute(
+            "DELETE FROM brownfield_spec_draft_attempts WHERE project_id=?",
+            (product_id,),
+        )
+
+        emit("  - Deleting brownfield_scan_attempts...")
+        cur.execute(
+            "DELETE FROM brownfield_scan_attempts WHERE project_id=?", (product_id,)
+        )
+
+        emit("  - Deleting brownfield_source_artifacts...")
+        cur.execute(
+            "DELETE FROM brownfield_source_artifacts WHERE project_id=?", (product_id,)
+        )
+
         emit("  - Deleting spec_registry...")
         cur.execute("DELETE FROM spec_registry WHERE product_id=?", (product_id,))
 
