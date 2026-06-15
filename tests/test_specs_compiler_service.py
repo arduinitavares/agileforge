@@ -46,6 +46,8 @@ _TOTAL_BLOCKED_MUST_ITEMS = 2
 _EXPECTED_FOCUSED_RETRY_CALLS = 2
 _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT = 2
 _EXPECTED_REPAIR_CALLS = 2
+_EXPECTED_COVERAGE_REPAIR_CALLS = 5
+_EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS = 4
 
 
 def _compiled_success_json() -> str:
@@ -1119,6 +1121,100 @@ def test_preview_spec_authority_rejects_unaccounted_iterative_must_items(
         "REQ.todo-create",
         "REQ.todo-toggle",
     ]
+
+
+def test_preview_spec_authority_coverage_repair_succeeds_with_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing MUST/MUST_NOT coverage gets one explicit focused repair pass."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[dict[str, object]] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs["spec_content"]
+        assert isinstance(spec_content, str)
+        domain_hint = kwargs.get("domain_hint")
+        payload = json.loads(spec_content)
+        item_ids = [item["id"] for item in payload["items"]]
+        calls.append({"item_ids": item_ids, "domain_hint": domain_hint})
+        if domain_hint and "failed structured coverage validation" in str(
+            domain_hint
+        ):
+            item_id = item_ids[0]
+            source_level = payload["items"][0]["level"]
+            assert f"missing source_item_id: {item_id}" in str(domain_hint)
+            assert "single repair attempt" in str(domain_hint)
+            return _behavioral_payload_json(
+                source_item_id=cast("str", item_id),
+                source_level=cast("SpecAuthoritySourceLevel", source_level),
+            )
+        return _compiled_success_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert len(calls) == _EXPECTED_COVERAGE_REPAIR_CALLS
+    repair_hints = [
+        str(call["domain_hint"])
+        for call in calls
+        if call["domain_hint"] is not None
+    ]
+    assert any(
+        "missing source_item_id: REQ.todo-create" in hint for hint in repair_hints
+    )
+    assert any(
+        "missing source_item_id: REQ.todo-toggle" in hint for hint in repair_hints
+    )
+
+
+def test_preview_spec_authority_coverage_repair_fails_closed_on_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coverage repair does not enter a second metadata repair loop."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    calls: list[str | None] = []
+
+    def fake_compiler(**kwargs: object) -> str:
+        domain_hint = cast("str | None", kwargs.get("domain_hint"))
+        calls.append(domain_hint)
+        if domain_hint and "failed structured coverage validation" in domain_hint:
+            return _source_metadata_failure_json(
+                source_item_id="REQ.todo-create",
+                invariant_id="INV-badbadbadbadbad1",
+            )
+        return _compiled_success_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+
+    result = compiler_service.preview_spec_authority(
+        {"content": _accepted_multi_item_spec_profile_json()},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["details"]["error"] == "STRUCTURED_ITEM_COMPILATION_FAILED"
+    assert result["details"]["reason"] == "FOCUSED_ITEM_AUTHORITY_FAILED"
+    assert len(calls) == _EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS
+    assert sum(
+        1
+        for hint in calls
+        if hint and "failed structured coverage validation" in hint
+    ) == 1
 
 
 def test_preview_spec_authority_rejects_vacant_authority(
