@@ -1,11 +1,15 @@
 """Tests for roadmap phase service."""
 
+import copy
+import json
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Never
 
 import pytest
 
+from orchestrator_agent.agent_tools.roadmap_builder.schemes import RoadmapBuilderInput
 from orchestrator_agent.agent_tools.roadmap_builder.tools import SaveRoadmapToolInput
 from services.agent_workbench.fingerprints import canonical_hash
 from services.phases import workflow_state
@@ -19,8 +23,11 @@ from services.phases.roadmap_service import (
     save_roadmap_draft,
     set_roadmap_fsm_state,
 )
+from services.roadmap_runtime import build_roadmap_input_context
 
 JsonDict = dict[str, Any]
+BASE_SPEC_VERSION_ID = 11
+AMENDED_SPEC_VERSION_ID = 12
 
 
 def _complete_roadmap_artifact(
@@ -79,6 +86,26 @@ def _fingerprint_from_state(state: JsonDict) -> str:
     fingerprint = state["product_roadmap_assessment"]["artifact_fingerprint"]
     assert isinstance(fingerprint, str)
     return fingerprint
+
+
+def _scope_extension_context(*, backlog_saved: bool = True) -> JsonDict:
+    context: JsonDict = {
+        "schema": "agileforge.scope_extension.v1",
+        "base_spec_version_id": BASE_SPEC_VERSION_ID,
+        "base_spec_hash": "sha256:base",
+        "amended_spec_version_id": AMENDED_SPEC_VERSION_ID,
+        "amended_spec_hash": "sha256:amended",
+        "added_source_item_ids": ["REQ.new-analytics"],
+    }
+    if backlog_saved:
+        context.update(
+            {
+                "backlog_extension_saved_at": "2026-06-14T10:00:00Z",
+                "backlog_extension_attempt_id": "backlog-attempt-4",
+                "backlog_extension_artifact_fingerprint": "sha256:backlog",
+            }
+        )
+    return context
 
 
 def _merged_session_save(
@@ -194,6 +221,199 @@ def test_ensure_roadmap_attempts_returns_existing_list() -> None:
     assert ensure_roadmap_attempts(state) is attempts
 
 
+def test_build_roadmap_input_context_includes_scope_extension_append_context() -> None:
+    """Scope extension Roadmap generation must carry append-only context."""
+    existing_roadmap = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Seed backlog item"],
+            "reasoning": "Already planned.",
+        }
+    ]
+    state: JsonDict = {
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision."
+        },
+        "pending_spec_content": "AMENDED SPEC",
+        "compiled_authority_cached": {"authority": True},
+        "roadmap_releases": copy.deepcopy(existing_roadmap),
+        "scope_extension_context": _scope_extension_context(),
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Seed backlog item",
+                "value_driver": "Strategic",
+                "justification": "Already planned.",
+                "estimated_effort": "M",
+                "story_origin": "backlog_seed",
+            },
+            {
+                "priority": 2,
+                "requirement": "Add analyst export",
+                "value_driver": "Strategic",
+                "justification": "New extension scope.",
+                "estimated_effort": "S",
+                "story_origin": "scope_extension",
+                "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+                "source_item_ids": ["REQ.new-analytics"],
+            },
+        ],
+    }
+
+    context = build_roadmap_input_context(state, user_input=None)
+
+    assert context["generation_mode"] == "scope_extension"
+    assert context["existing_roadmap_context"] == existing_roadmap
+    assert context["prior_roadmap_state"] == "NO_HISTORY"
+    assert (
+        context["scope_extension"]["base_spec_version_id"] == BASE_SPEC_VERSION_ID
+    )
+    assert (
+        context["scope_extension"]["amended_spec_version_id"]
+        == AMENDED_SPEC_VERSION_ID
+    )
+    assert context["scope_extension"]["added_source_item_ids"] == ["REQ.new-analytics"]
+    assert context["extension_backlog_items"] == [
+        {
+            "requirement": "Add analyst export",
+            "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            "source_item_ids": ["REQ.new-analytics"],
+        }
+    ]
+    assert context["backlog_items"] == [
+        {
+            "priority": 2,
+            "requirement": "Add analyst export",
+            "value_driver": "Strategic",
+            "justification": "New extension scope.",
+            "estimated_effort": "S",
+        }
+    ]
+
+
+def test_scope_extension_input_filters_rows_by_provenance() -> None:
+    """Duplicate titles must not pull existing backlog rows into extension input."""
+    state: JsonDict = {
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision."
+        },
+        "pending_spec_content": "AMENDED SPEC",
+        "compiled_authority_cached": {"authority": True},
+        "roadmap_releases": [{"release_name": "Milestone 1"}],
+        "scope_extension_context": _scope_extension_context(),
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Add analyst export",
+                "value_driver": "Strategic",
+                "justification": "Existing same-title backlog item.",
+                "estimated_effort": "M",
+                "story_origin": "backlog_seed",
+            },
+            {
+                "priority": 2,
+                "requirement": "Add analyst export",
+                "value_driver": "Strategic",
+                "justification": "New extension scope.",
+                "estimated_effort": "S",
+                "story_origin": "scope_extension",
+                "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            },
+        ],
+    }
+
+    context = build_roadmap_input_context(state, user_input=None)
+
+    assert context["extension_backlog_items"] == [
+        {
+            "requirement": "Add analyst export",
+            "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            "source_item_ids": ["REQ.new-analytics"],
+        }
+    ]
+    assert context["backlog_items"] == [
+        {
+            "priority": 2,
+            "requirement": "Add analyst export",
+            "value_driver": "Strategic",
+            "justification": "New extension scope.",
+            "estimated_effort": "S",
+        }
+    ]
+
+
+def test_roadmap_scope_extension_context_deactivates_after_roadmap_save() -> None:
+    """Saved extension Roadmap context must not force future extension mode."""
+    existing_roadmap = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Seed backlog item"],
+            "reasoning": "Already planned.",
+        }
+    ]
+    scope_context = _scope_extension_context()
+    scope_context["roadmap_extension_saved_at"] = "2026-06-14T12:00:00Z"
+    state: JsonDict = {
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision."
+        },
+        "pending_spec_content": "AMENDED SPEC",
+        "compiled_authority_cached": {"authority": True},
+        "roadmap_releases": existing_roadmap,
+        "scope_extension_context": scope_context,
+        "backlog_items": [{"requirement": "Seed backlog item"}],
+    }
+
+    context = build_roadmap_input_context(state, user_input="refine roadmap")
+
+    assert "generation_mode" not in context
+    assert "existing_roadmap_context" not in context
+    assert json.loads(str(context["prior_roadmap_state"])) == existing_roadmap
+
+
+def test_roadmap_builder_scope_extension_instruction_contract() -> None:
+    """Prompt and schema must define extension-only Roadmap output."""
+    payload = RoadmapBuilderInput.model_validate(
+        {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Add analyst export",
+                    "value_driver": "Strategic",
+                    "justification": "New extension scope.",
+                    "estimated_effort": "S",
+                }
+            ],
+            "product_vision": "Vision",
+            "technical_spec": "Spec",
+            "compiled_authority": "Authority",
+            "generation_mode": "scope_extension",
+            "prior_roadmap_state": "NO_HISTORY",
+            "existing_roadmap_context": [{"release_name": "Milestone 1"}],
+            "scope_extension": {"added_source_item_ids": ["REQ.new-analytics"]},
+            "extension_backlog_items": [
+                {
+                    "requirement": "Add analyst export",
+                    "source_item_ids": ["REQ.new-analytics"],
+                }
+            ],
+        }
+    )
+    instructions = Path(
+        "orchestrator_agent/agent_tools/roadmap_builder/instructions.txt"
+    ).read_text(encoding="utf-8")
+
+    assert payload.generation_mode == "scope_extension"
+    assert 'generation_mode="scope_extension"' in instructions
+    assert "existing roadmap is read-only" in instructions
+    assert "ONLY new extension roadmap releases/items" in instructions
+    assert "never existing releases/items" in instructions
+
+
 @pytest.mark.asyncio
 async def test_generate_roadmap_draft_blocks_stale_downstream_backlog() -> None:
     """Verify roadmap generation stops when downstream backlog is stale."""
@@ -248,6 +468,211 @@ async def test_generate_roadmap_draft_blocks_stale_downstream_backlog() -> None:
     assert state["downstream_backlog_stale"] is True
     assert state["stale_backlog_reason"] == "backlog refinement changed"
     assert state["stale_since_backlog_attempt_id"] == "backlog-attempt-7"
+
+
+@pytest.mark.asyncio
+async def test_generate_roadmap_blocks_scope_extension_before_backlog_save() -> None:
+    """Extension Roadmap generation must not run before extension Backlog save."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_REVIEW",
+        "scope_extension_context": _scope_extension_context(backlog_saved=False),
+        "roadmap_releases": [{"release_name": "Milestone 1", "items": ["Seed"]}],
+        "backlog_items": [{"requirement": "Seed"}],
+    }
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_roadmap_agent_from_state(
+        _state: object, **_kwargs: object
+    ) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {}
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await generate_roadmap_draft(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-06-14T12:00:00Z",
+            run_roadmap_agent=fake_run_roadmap_agent_from_state,
+            user_input=None,
+        )
+
+    assert "Scope extension Roadmap requires saved extension Backlog" in (
+        exc_info.value.detail
+    )
+    assert captured["agent_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_roadmap_generate_uses_normal_rules_after_extension_save() -> None:
+    """Completed extension context must not bypass normal Roadmap refinement rules."""
+    scope_context = _scope_extension_context()
+    scope_context["roadmap_extension_saved_at"] = "2026-06-14T12:00:00Z"
+    state: JsonDict = {
+        "fsm_state": "STORY_INTERVIEW",
+        "scope_extension_context": scope_context,
+        "roadmap_releases": [{"release_name": "Milestone 1", "items": ["Seed"]}],
+        "backlog_items": [{"requirement": "Seed"}],
+    }
+    captured: JsonDict = {"agent_calls": 0}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_roadmap_agent_from_state(
+        _state: object, **_kwargs: object
+    ) -> JsonDict:
+        captured["agent_calls"] += 1
+        return {}
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await generate_roadmap_draft(
+            project_id=7,
+            load_state=load_state,
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-06-14T12:00:00Z",
+            run_roadmap_agent=fake_run_roadmap_agent_from_state,
+            user_input=None,
+        )
+
+    assert exc_info.value.detail == (
+        "User input is required to refine an existing roadmap."
+    )
+    assert captured["agent_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scope_extension_repeated_generation_preserves_baseline() -> None:
+    """Repeated extension drafts must keep appending against the original roadmap."""
+    existing_releases = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Seed backlog item"],
+            "reasoning": "Already approved.",
+        }
+    ]
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_PERSISTENCE",
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision."
+        },
+        "pending_spec_content": "AMENDED SPEC",
+        "compiled_authority_cached": {"authority": True},
+        "scope_extension_context": _scope_extension_context(),
+        "roadmap_releases": copy.deepcopy(existing_releases),
+        "backlog_items": [
+            {
+                "priority": 2,
+                "requirement": "Add analyst export",
+                "value_driver": "Strategic",
+                "justification": "New extension scope.",
+                "estimated_effort": "S",
+                "story_origin": "scope_extension",
+                "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            }
+        ],
+    }
+    saved: JsonDict = {}
+    captured_contexts: list[JsonDict] = []
+    captured_save: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = copy.deepcopy(updated)
+
+    async def fake_run_roadmap_agent_from_state(
+        state: JsonDict,
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> JsonDict:
+        del project_id, user_input
+        input_context = build_roadmap_input_context(state, user_input=None)
+        captured_contexts.append(copy.deepcopy(input_context))
+        attempt_number = len(captured_contexts)
+        return {
+            "success": True,
+            "input_context": input_context,
+            "output_artifact": {
+                "roadmap_releases": [
+                    {
+                        "release_name": f"Extension Milestone {attempt_number}",
+                        "theme": "Analytics",
+                        "focus_area": "User Value",
+                        "items": ["Add analyst export"],
+                        "reasoning": f"Extension draft {attempt_number}.",
+                    }
+                ],
+                "roadmap_summary": f"Extension roadmap {attempt_number}",
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+            "is_complete": True,
+            "error": None,
+        }
+
+    first = await generate_roadmap_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-06-14T12:00:00Z",
+        run_roadmap_agent=fake_run_roadmap_agent_from_state,
+        user_input=None,
+    )
+    second = await generate_roadmap_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        now_iso=lambda: "2026-06-14T12:01:00Z",
+        run_roadmap_agent=fake_run_roadmap_agent_from_state,
+        user_input=None,
+    )
+
+    assert first["attempt_id"] == "roadmap-attempt-1"
+    assert second["attempt_id"] == "roadmap-attempt-2"
+    assert captured_contexts[0]["existing_roadmap_context"] == existing_releases
+    assert captured_contexts[1]["existing_roadmap_context"] == existing_releases
+    assert captured_contexts[1]["prior_roadmap_state"] == "NO_HISTORY"
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=state, session_id="7")
+
+    def fake_save_roadmap_tool(
+        roadmap_input: SaveRoadmapToolInput,
+        _tool_context: object,
+    ) -> JsonDict:
+        captured_save["roadmap"] = roadmap_input.roadmap_data.model_dump(mode="json")
+        return {
+            "success": True,
+            "product_id": roadmap_input.product_id,
+            "saved_roadmap": captured_save["roadmap"],
+        }
+
+    payload = await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-2",
+        expected_artifact_fingerprint=str(second["artifact_fingerprint"]),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-extension-2",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-14T12:02:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=fake_save_roadmap_tool,
+    )
+
+    saved_releases = saved["state"]["roadmap_releases"]
+    assert payload["fsm_state"] == "STORY_INTERVIEW"
+    assert saved_releases[:1] == existing_releases
+    assert saved_releases[1]["release_name"] == "Extension Milestone 2"
+    assert captured_save["roadmap"]["roadmap_releases"] == saved_releases
 
 
 @pytest.mark.asyncio
@@ -793,6 +1218,7 @@ async def test_save_roadmap_draft_persists_persistence_state() -> None:
     assert payload["fsm_state"] == "ROADMAP_PERSISTENCE"
     assert payload["save_result"]["success"] is True
     assert captured["roadmap_input"].roadmap_data.is_complete is True
+    assert len(captured["roadmap_input"].roadmap_data.roadmap_releases) == 1
     assert captured["roadmap_input"].idempotency_key == "save-roadmap-1"
     assert saved["state"]["fsm_state"] == "ROADMAP_PERSISTENCE"
     assert saved["state"]["roadmap_saved_at"] == "2026-04-04T00:00:00Z"
@@ -800,6 +1226,148 @@ async def test_save_roadmap_draft_persists_persistence_state() -> None:
         saved["state"]["roadmap_save_idempotency_keys"]["save-roadmap-1"]["attempt_id"]
         == "roadmap-attempt-1"
     )
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_appends_scope_extension_with_provenance() -> None:
+    """Extension Roadmap save appends after existing releases without mutation."""
+    existing_releases = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Seed backlog item"],
+            "reasoning": "Already approved.",
+        }
+    ]
+    original_existing_json = json.dumps(existing_releases, sort_keys=True)
+    state = _state_for_guarded_save(
+        artifact=_complete_roadmap_artifact(items=["Add analyst export"]),
+        backlog_items=[
+            {
+                "requirement": "Add analyst export",
+                "story_origin": "scope_extension",
+                "accepted_spec_version_id": AMENDED_SPEC_VERSION_ID,
+            }
+        ],
+        input_context={
+            "generation_mode": "scope_extension",
+            "scope_extension": _scope_extension_context(),
+        },
+    )
+    state["scope_extension_context"] = _scope_extension_context()
+    state["roadmap_releases"] = copy.deepcopy(existing_releases)
+    saved: JsonDict = {}
+    captured: JsonDict = {}
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=copy.deepcopy(state), session_id="7")
+
+    def save_state(updated: JsonDict) -> None:
+        saved["state"] = copy.deepcopy(updated)
+
+    def fake_save_roadmap_tool(
+        roadmap_input: SaveRoadmapToolInput,
+        _tool_context: object,
+    ) -> JsonDict:
+        captured["roadmap_input"] = roadmap_input
+        return {
+            "success": True,
+            "product_id": roadmap_input.product_id,
+            "saved_roadmap": roadmap_input.roadmap_data.model_dump(mode="json"),
+        }
+
+    payload = await save_roadmap_draft(
+        project_id=7,
+        attempt_id="roadmap-attempt-1",
+        expected_artifact_fingerprint=_fingerprint_from_state(state),
+        expected_state="ROADMAP_REVIEW",
+        idempotency_key="save-roadmap-extension-1",
+        save_state=save_state,
+        now_iso=lambda: "2026-06-14T12:00:00Z",
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_roadmap_tool=fake_save_roadmap_tool,
+    )
+
+    saved_releases = saved["state"]["roadmap_releases"]
+    tool_releases = captured["roadmap_input"].roadmap_data.model_dump(mode="json")[
+        "roadmap_releases"
+    ]
+    assert payload["fsm_state"] == "STORY_INTERVIEW"
+    assert saved["state"]["fsm_state"] == "STORY_INTERVIEW"
+    assert json.dumps(saved_releases[:1], sort_keys=True) == original_existing_json
+    assert json.dumps(tool_releases[:1], sort_keys=True) == original_existing_json
+    assert saved_releases[1]["items"] == ["Add analyst export"]
+    assert saved_releases[1]["extension_of_spec_version_id"] == BASE_SPEC_VERSION_ID
+    assert saved_releases[1]["accepted_spec_version_id"] == AMENDED_SPEC_VERSION_ID
+    assert saved_releases[1]["source_item_ids"] == ["REQ.new-analytics"]
+    assert tool_releases == saved_releases
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_draft_blocks_scope_extension_before_backlog_save() -> None:
+    """Extension Roadmap save must fail closed before extension Backlog save."""
+    state = _state_for_guarded_save(
+        artifact=_complete_roadmap_artifact(items=["Add analyst export"]),
+        backlog_items=[{"requirement": "Add analyst export"}],
+        input_context={
+            "generation_mode": "scope_extension",
+            "scope_extension": _scope_extension_context(backlog_saved=False),
+        },
+    )
+    state["scope_extension_context"] = _scope_extension_context(backlog_saved=False)
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=copy.deepcopy(state), session_id="7")
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await save_roadmap_draft(
+            project_id=7,
+            attempt_id="roadmap-attempt-1",
+            expected_artifact_fingerprint=_fingerprint_from_state(state),
+            expected_state="ROADMAP_REVIEW",
+            idempotency_key="save-roadmap-extension-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-06-14T12:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_roadmap_tool=_fake_save_roadmap_tool,
+        )
+
+    assert "Scope extension Roadmap requires saved extension Backlog" in (
+        exc_info.value.detail
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_blocks_extension_without_generation_metadata() -> None:
+    """Extension Roadmap save must fail if the attempt lost extension mode."""
+    state = _state_for_guarded_save(
+        artifact=_complete_roadmap_artifact(items=["Add analyst export"]),
+        backlog_items=[{"requirement": "Add analyst export"}],
+        input_context={},
+    )
+    state["scope_extension_context"] = _scope_extension_context()
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=copy.deepcopy(state), session_id="7")
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await save_roadmap_draft(
+            project_id=7,
+            attempt_id="roadmap-attempt-1",
+            expected_artifact_fingerprint=_fingerprint_from_state(state),
+            expected_state="ROADMAP_REVIEW",
+            idempotency_key="save-roadmap-extension-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-06-14T12:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_roadmap_tool=_fake_save_roadmap_tool,
+        )
+
+    assert "missing scope extension generation metadata" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
