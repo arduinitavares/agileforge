@@ -23,6 +23,12 @@ if __name__ == "__main__":
 
 # Re-export model symbols from their new package locations and ensure SQLModel
 # metadata is populated when this compatibility shim is imported or executed.
+from models.brownfield import (
+    BrownfieldScanAttempt,
+    BrownfieldSourceArtifact,
+    BrownfieldSpecApproval,
+    BrownfieldSpecDraftAttempt,
+)
 from models.core import (
     Epic,
     Feature,
@@ -62,6 +68,10 @@ from models.specs import (
 )
 
 __all__ = [
+    "BrownfieldScanAttempt",
+    "BrownfieldSourceArtifact",
+    "BrownfieldSpecApproval",
+    "BrownfieldSpecDraftAttempt",
     "CompiledSpecAuthority",
     "Epic",
     "Feature",

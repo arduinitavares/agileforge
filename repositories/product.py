@@ -2,6 +2,12 @@ import logging
 
 from sqlmodel import Session, select
 
+from models.brownfield import (
+    BrownfieldScanAttempt,
+    BrownfieldSourceArtifact,
+    BrownfieldSpecApproval,
+    BrownfieldSpecDraftAttempt,
+)
 from models.core import (
     Epic,
     Feature,
@@ -131,6 +137,32 @@ class ProductRepository:
                 )
             ).all():
                 session.delete(sa)
+
+            # Delete Brownfield curation artifacts
+            for approval in session.exec(
+                select(BrownfieldSpecApproval).where(
+                    BrownfieldSpecApproval.project_id == product_id
+                )
+            ).all():
+                session.delete(approval)
+            for draft_attempt in session.exec(
+                select(BrownfieldSpecDraftAttempt).where(
+                    BrownfieldSpecDraftAttempt.project_id == product_id
+                )
+            ).all():
+                session.delete(draft_attempt)
+            for scan_attempt in session.exec(
+                select(BrownfieldScanAttempt).where(
+                    BrownfieldScanAttempt.project_id == product_id
+                )
+            ).all():
+                session.delete(scan_attempt)
+            for source_artifact in session.exec(
+                select(BrownfieldSourceArtifact).where(
+                    BrownfieldSourceArtifact.project_id == product_id
+                )
+            ).all():
+                session.delete(source_artifact)
 
             # Delete SpecRegistry (+ CompiledSpecAuthority is 1:1, but child records might need manual drop depending on FKs)
             for spec_ver in session.exec(

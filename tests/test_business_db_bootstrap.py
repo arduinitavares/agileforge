@@ -41,6 +41,30 @@ def test_ensure_business_db_ready_creates_core_tables(tmp_path: Path) -> None:
     assert spec_registry is not None
 
 
+def test_ensure_business_db_ready_creates_brownfield_tables(tmp_path: Path) -> None:
+    """Verify ensure business db ready creates brownfield artifact tables."""
+    db_path = tmp_path / "business_bootstrap.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+
+    ensure_business_db_ready(engine_override=engine)
+
+    expected_tables = {
+        "brownfield_source_artifacts",
+        "brownfield_scan_attempts",
+        "brownfield_spec_draft_attempts",
+        "brownfield_spec_approvals",
+    }
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        table_names = {row[0] for row in cursor.fetchall()}
+
+    assert expected_tables <= table_names
+
+
 def test_api_startup_bootstraps_business_db(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify api startup bootstraps business db."""
     called = {"value": False}
