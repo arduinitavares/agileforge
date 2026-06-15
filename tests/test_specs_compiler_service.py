@@ -2364,6 +2364,113 @@ def test_compile_spec_authority_repaired_item_cannot_skip_required_coverage(
     assert rows == []
 
 
+def test_compile_spec_authority_coverage_repair_does_not_chain_metadata_repair(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coverage repair failure is terminal and cannot start metadata repair."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=_accepted_multi_item_spec_profile_json(),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+    calls: list[str | None] = []
+
+    def fake_invoke(**kwargs: object) -> str:
+        domain_hint = cast("str | None", kwargs.get("domain_hint"))
+        calls.append(domain_hint)
+        if domain_hint and "failed structured coverage validation" in domain_hint:
+            return _source_metadata_failure_json(
+                source_item_id="REQ.todo-create",
+                invariant_id="INV-badbadbadbadbad1",
+            )
+        return _compiled_success_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=cast("Engine", session.get_bind()),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "STRUCTURED_ITEM_COMPILATION_FAILED"
+    assert result["reason"] == "FOCUSED_ITEM_AUTHORITY_FAILED"
+    assert len(calls) == _EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS
+    assert sum(
+        1
+        for hint in calls
+        if hint and "failed structured coverage validation" in hint
+    ) == 1
+    assert not any(
+        hint and "failed source metadata validation" in hint for hint in calls
+    )
+    assert result["details"]["coverage_repair_attempted"] is True
+    assert result["details"]["coverage_repair_item_ids"] == [
+        "REQ.todo-create",
+        "REQ.todo-toggle",
+    ]
+    assert result["details"]["coverage_repair_result"] == "failed"
+    with Session(session.get_bind()) as verify_session:
+        rows = verify_session.exec(select(CompiledSpecAuthority)).all()
+    assert rows == []
+
+
+def test_compile_spec_authority_repairs_missing_coverage_and_persists(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coverage repair can produce persisted authority when feedback succeeds."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    spec_row = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+        content=_accepted_multi_item_spec_profile_json(),
+    )
+    spec_version_id = require_id(spec_row.spec_version_id, "spec_version_id")
+
+    def fake_invoke(**kwargs: object) -> str:
+        spec_content = cast("str", kwargs["spec_content"])
+        domain_hint = cast("str | None", kwargs.get("domain_hint"))
+        payload = json.loads(spec_content)
+        item = payload["items"][0]
+        item_id = cast("str", item["id"])
+        if domain_hint and "failed structured coverage validation" in domain_hint:
+            return _behavioral_payload_json(
+                source_item_id=item_id,
+                source_level=cast("SpecAuthoritySourceLevel", item["level"]),
+            )
+        return _compiled_success_json()
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_invoke,
+    )
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=cast("Engine", session.get_bind()),
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    assert result["success"] is True
+    with Session(session.get_bind()) as verify_session:
+        rows = verify_session.exec(select(CompiledSpecAuthority)).all()
+    assert len(rows) == 1
+
+
 def test_compile_spec_authority_does_not_repair_over_promotion(
     session: Session,
     sample_product: Product,

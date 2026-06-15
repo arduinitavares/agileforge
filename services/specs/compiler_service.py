@@ -300,6 +300,9 @@ class _NormalizedCompilerInvocation:
 
     raw_json: str
     output: SpecAuthorityCompilerOutput
+    coverage_repair_attempted: bool = False
+    coverage_repair_item_ids: tuple[str, ...] = ()
+    coverage_repair_result: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1371,6 +1374,28 @@ def _with_repair_diagnostics(
     return enriched
 
 
+def _with_coverage_repair_diagnostics(
+    result: dict[str, Any],
+    *,
+    coverage_repair_attempted: bool,
+    coverage_repair_item_ids: tuple[str, ...],
+    coverage_repair_result: str | None,
+) -> dict[str, Any]:
+    """Copy a failure result and attach bounded coverage-repair diagnostics."""
+    enriched = dict(result)
+    details = enriched.get("details")
+    details = {} if not isinstance(details, dict) else dict(details)
+    details.update(
+        {
+            "coverage_repair_attempted": coverage_repair_attempted,
+            "coverage_repair_item_ids": list(coverage_repair_item_ids),
+            "coverage_repair_result": coverage_repair_result,
+        }
+    )
+    enriched["details"] = details
+    return enriched
+
+
 def _dedupe_strings(values: list[str]) -> list[str]:
     """Return unique strings in first-seen order."""
     deduped: list[str] = []
@@ -1660,6 +1685,17 @@ def _structured_missing_authority_failure(
         missing_item_ids=missing_item_ids,
         total_item_count=total_item_count,
     )
+
+
+def _coverage_repair_result(
+    output: SpecAuthorityCompilerOutput,
+) -> str:
+    """Return a compact diagnostic result for one coverage-repair round."""
+    if isinstance(output.root, SpecAuthorityCompilationSuccess):
+        return "succeeded"
+    if output.root.error == "STRUCTURED_COVERAGE_INCOMPLETE":
+        return "coverage_incomplete"
+    return "failed"
 
 
 def _repair_missing_iterative_authority(
@@ -2020,6 +2056,9 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
         return _NormalizedCompilerInvocation(
             raw_json=full_invocation.raw_json,
             output=repaired_output,
+            coverage_repair_attempted=True,
+            coverage_repair_item_ids=tuple(missing_item_ids),
+            coverage_repair_result=_coverage_repair_result(repaired_output),
         )
 
     return _NormalizedCompilerInvocation(
@@ -2907,6 +2946,26 @@ def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
         return _CompilerInvocationResult(success=normalized.root)
 
     initial_failure = normalized.root
+    if compiled.coverage_repair_attempted:
+        failure = _normalized_failure_result(
+            spec_version,
+            raw_json=raw_json,
+            failure=initial_failure,
+        )
+        return _CompilerInvocationResult(
+            failure=_attach_schema_retry_metadata(
+                _with_coverage_repair_diagnostics(
+                    failure,
+                    coverage_repair_attempted=True,
+                    coverage_repair_item_ids=compiled.coverage_repair_item_ids,
+                    coverage_repair_result=compiled.coverage_repair_result,
+                ),
+                attempted=False,
+                reason=None,
+                attempts=0,
+            )
+        )
+
     retry_reason = initial_failure.reason
     if retry_reason == _SOURCE_METADATA_MISMATCH:
         artifact = _structured_spec_artifact_or_none(spec_content)
