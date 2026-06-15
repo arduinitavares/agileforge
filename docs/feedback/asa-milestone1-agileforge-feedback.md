@@ -181,6 +181,28 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   non-Sprint panel is overridden and the dashboard lands on the current Sprint
   workspace. Manual navigation to Stories remains possible afterward.
 
+#### Project scope extension after exhausted execution scope
+
+- Source: ASA project reached `SPRINT_COMPLETE` with no refined Sprint
+  candidates after its original roadmap scope was effectively exhausted.
+- Product issue considered: real framework gap. Mature projects can need new
+  product scope after all accepted backlog/roadmap/story work is complete, and
+  the correct path should not be project recreation, manual spec bypass, or
+  forced backlog refinement.
+- Fix status: accepted/fixed by `dev/project-scope-extension`.
+- Why fixed: continuing a mature AgileForge project should preserve Sprint,
+  Story, roadmap, and velocity history while routing new scope through the same
+  evidence chain as initial scope: spec, authority, backlog, roadmap, stories,
+  and sprints.
+- Expected behavior after fix: when execution scope is exhausted,
+  `workflow next` can expose a project-agnostic scope-extension ritual. The
+  amended scope must pass additive spec validation, authority
+  compile/review/accept, delta backlog generation, appended roadmap phase, and
+  normal Story/Sprint rituals before producing new executable work.
+- Not included in v1: removal/deprecation of old accepted scope and smart
+  roadmap reordering. The v1 contract is add-only and appends new roadmap
+  phases conservatively.
+
 ### Considered but not fixed yet
 
 #### Sprint generation validation failure details
