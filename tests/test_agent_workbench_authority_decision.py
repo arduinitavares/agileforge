@@ -467,6 +467,63 @@ def test_accept_with_review_token_promotes_authority_and_advances_to_vision(
     assert workflow.get_session_status(str(project_id))["setup_error"] is None
 
 
+def test_accept_scope_extension_authority_routes_to_backlog(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_filename="scope-extension.json",
+    )
+    snapshot = _snapshot(session, project_id)
+    workflow = _workflow_for(project_id)
+    workflow.sessions[str(project_id)].update(
+        {
+            "setup_spec_version_id": spec_version_id,
+            "pending_compiled_spec_version_id": spec_version_id,
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "amended_spec_version_id": spec_version_id,
+                "amended_spec_hash": snapshot.source_spec_hash,
+            },
+        }
+    )
+
+    result = _runner(session, workflow).accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=snapshot.review_token,
+            idempotency_key="scope-extension-accept-key",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data == {
+        "project_id": project_id,
+        "authority_id": authority_id,
+        "accepted_decision_id": data["accepted_decision_id"],
+        "accepted_spec_version_id": spec_version_id,
+        "authority_fingerprint": snapshot.authority_fingerprint,
+        "setup_status": "passed",
+        "fsm_state": "BACKLOG_INTERVIEW",
+        "next_actions": [
+            {
+                "command": f"agileforge backlog generate --project-id {project_id}",
+                "reason": (
+                    "Scope extension authority is accepted and Backlog is unlocked."
+                ),
+            }
+        ],
+    }
+    state = workflow.get_session_status(str(project_id))
+    assert state["setup_status"] == "passed"
+    assert state["fsm_state"] == "BACKLOG_INTERVIEW"
+    assert state["accepted_spec_version_id"] == spec_version_id
+
+
 def test_accept_structured_spec_persists_prefixed_hash_for_projection(
     session: Session,
     tmp_path: Path,
