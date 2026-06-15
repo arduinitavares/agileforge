@@ -208,7 +208,8 @@ class _Application(Protocol):
         self,
         *,
         project_id: int,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         expected_state: str,
         expected_context_fingerprint: str,
         recovery_mutation_event_id: int | None = None,
@@ -1193,7 +1194,12 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     project_setup_retry = project_setup_sub.add_parser("retry", help="Retry setup.")
     project_setup_retry.add_argument("--project-id", type=int, required=True)
-    project_setup_retry.add_argument("--spec-file", required=True)
+    project_setup_retry.add_argument("--spec-file")
+    project_setup_retry.add_argument(
+        "--setup-mode",
+        choices=("greenfield", "brownfield"),
+        default="greenfield",
+    )
     project_setup_retry.add_argument("--expected-state", required=True)
     project_setup_retry.add_argument("--expected-context-fingerprint", required=True)
     project_setup_retry.add_argument("--recovery-mutation-event-id", type=int)
@@ -2199,6 +2205,7 @@ def _project_setup_retry(
     return command, application.project_setup_retry(
         project_id=args.project_id,
         spec_file=args.spec_file,
+        setup_mode=args.setup_mode,
         expected_state=args.expected_state,
         expected_context_fingerprint=args.expected_context_fingerprint,
         recovery_mutation_event_id=args.recovery_mutation_event_id,

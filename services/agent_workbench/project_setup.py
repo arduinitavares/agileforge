@@ -118,7 +118,8 @@ class ProjectSetupRetryRequest(BaseModel):
     """Validated request for `agileforge project setup retry`."""
 
     project_id: int
-    spec_file: str = Field(min_length=1)
+    spec_file: str | None = Field(default=None, min_length=1)
+    setup_mode: str = GREENFIELD_SETUP_MODE
     expected_state: str = Field(min_length=1)
     expected_context_fingerprint: str = Field(min_length=1)
     recovery_mutation_event_id: int | None = None
@@ -130,6 +131,12 @@ class ProjectSetupRetryRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mutation_keys(self) -> ProjectSetupRetryRequest:
+        if self.setup_mode not in {GREENFIELD_SETUP_MODE, BROWNFIELD_SETUP_MODE}:
+            raise ValueError("setup_mode must be greenfield or brownfield")
+        if self.setup_mode == GREENFIELD_SETUP_MODE and self.spec_file is None:
+            raise ValueError("spec_file is required for greenfield setup retry")
+        if self.setup_mode == BROWNFIELD_SETUP_MODE and self.spec_file is not None:
+            raise ValueError("spec_file is not allowed for brownfield setup retry")
         _validate_key_mode(
             dry_run=self.dry_run,
             idempotency_key=self.idempotency_key,
@@ -144,6 +151,7 @@ class ProjectSetupRetryRequest(BaseModel):
                 "command": PROJECT_SETUP_RETRY_COMMAND,
                 "project_id": self.project_id,
                 "spec_file": self.spec_file,
+                "setup_mode": self.setup_mode,
                 "expected_state": self.expected_state,
                 "expected_context_fingerprint": self.expected_context_fingerprint,
                 "recovery_mutation_event_id": self.recovery_mutation_event_id,
@@ -404,7 +412,10 @@ class ProjectSetupMutationRunner:
         if loaded.response is not None:
             return loaded.response
         if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
-            return _recovery_required_response(loaded.ledger, _required(request.spec_file))
+            return _recovery_required_response(
+                loaded.ledger,
+                spec_file=_required(request.spec_file),
+            )
         if loaded.error_code is not None:
             return _error_for_ledger(loaded.error_code, loaded.ledger)
 
@@ -458,7 +469,10 @@ class ProjectSetupMutationRunner:
         if loaded.response is not None:
             return loaded.response
         if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
-            return _recovery_required_response(loaded.ledger, BROWNFIELD_SETUP_MODE)
+            return _recovery_required_response(
+                loaded.ledger,
+                setup_mode=BROWNFIELD_SETUP_MODE,
+            )
         if loaded.error_code is not None:
             return _error_for_ledger(loaded.error_code, loaded.ledger)
 
@@ -495,7 +509,10 @@ class ProjectSetupMutationRunner:
             )
             if isinstance(marked, dict):
                 return marked
-            return _recovery_required_response(marked, BROWNFIELD_SETUP_MODE)
+            return _recovery_required_response(
+                marked,
+                setup_mode=BROWNFIELD_SETUP_MODE,
+            )
 
         data = {
             "project_id": project_id,
@@ -525,7 +542,10 @@ class ProjectSetupMutationRunner:
         return response
 
     def _run_retry(self, request: ProjectSetupRetryRequest) -> dict[str, Any]:
-        resolved_spec_path = Path(request.spec_file).expanduser().resolve()
+        if request.setup_mode == BROWNFIELD_SETUP_MODE:
+            return self._run_brownfield_retry(request)
+
+        resolved_spec_path = Path(_required(request.spec_file)).expanduser().resolve()
         spec_hash_result = _spec_hash_or_error(resolved_spec_path)
         if not isinstance(spec_hash_result, str):
             return spec_hash_result
@@ -679,7 +699,7 @@ class ProjectSetupMutationRunner:
 
         setup_result = self._run_setup_steps(
             request_name=None,
-            requested_spec_file=request.spec_file,
+            requested_spec_file=_required(request.spec_file),
             resolved_spec_path=resolved_spec_path,
             mutation_event_id=retry_event_id,
             lease_owner=retry_owner,
@@ -717,6 +737,233 @@ class ProjectSetupMutationRunner:
                 "recovery_mutation_event_id": original_event_id,
             }
         )
+        if original_event_id is None:
+            if not self._ledger.finalize_success(
+                mutation_event_id=retry_event_id,
+                lease_owner=retry_owner,
+                after=retry_response["data"],
+                response=retry_response,
+                now=_now(),
+            ):
+                return _mutation_resume_conflict(
+                    retry_mutation_event_id=retry_event_id,
+                    original_mutation_event_id=original_event_id,
+                )
+            return retry_response
+
+        linked = self._ledger.finalize_linked_retry_success(
+            retry_mutation_event_id=retry_event_id,
+            retry_lease_owner=retry_owner,
+            original_mutation_event_id=original_event_id,
+            original_recovery_lease_owner=original_recovery_owner,
+            after=retry_response["data"],
+            retry_response=retry_response,
+            original_replay_response=retry_response,
+            now=_now(),
+        )
+        if linked.error_code == MUTATION_RESUME_CONFLICT:
+            return _mutation_resume_conflict(
+                retry_mutation_event_id=retry_event_id,
+                original_mutation_event_id=original_event_id,
+            )
+        return retry_response
+
+    def _run_brownfield_retry(
+        self,
+        request: ProjectSetupRetryRequest,
+    ) -> dict[str, Any]:
+        original = self._validate_original_recovery_row(request)
+        if isinstance(original, dict):
+            return original
+        workflow_result = self._workflow_state_or_error(request)
+        if not workflow_result["ok"]:
+            return workflow_result
+        workflow_state = cast("dict[str, Any]", workflow_result["state"])
+        current_state = str(workflow_state.get("fsm_state") or "SETUP_REQUIRED")
+        if current_state != request.expected_state:
+            if request.dry_run:
+                return _error(
+                    ErrorCode.STALE_STATE.value,
+                    details={
+                        "expected_state": request.expected_state,
+                        "actual_state": current_state,
+                    },
+                    remediation=["Refresh setup retry stale guards before retrying."],
+                )
+            return self._guard_rejected_retry(
+                request=request,
+                code=ErrorCode.STALE_STATE.value,
+                details={
+                    "expected_state": request.expected_state,
+                    "actual_state": current_state,
+                },
+            )
+
+        current_fingerprint = _brownfield_retry_context_fingerprint(
+            project_id=request.project_id,
+            workflow_state=workflow_state,
+        )
+        if current_fingerprint != request.expected_context_fingerprint:
+            stale_context_data = _stale_context_retry_data(
+                request=request,
+                actual_context_fingerprint=current_fingerprint,
+            )
+            remediation = [
+                "Retry setup with data.next_actions[0] after confirming the "
+                "actual context fingerprint."
+            ]
+            if request.dry_run:
+                return _error(
+                    ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
+                    details={
+                        "expected_context_fingerprint": request.expected_context_fingerprint,
+                        "actual_context_fingerprint": current_fingerprint,
+                    },
+                    remediation=remediation,
+                    data=stale_context_data,
+                )
+            return self._guard_rejected_retry(
+                request=request,
+                code=ErrorCode.STALE_CONTEXT_FINGERPRINT.value,
+                details={
+                    "expected_context_fingerprint": request.expected_context_fingerprint,
+                    "actual_context_fingerprint": current_fingerprint,
+                },
+                remediation=remediation,
+                data=stale_context_data,
+            )
+        if request.dry_run:
+            if original is not None and _active_recovery_lease_blocks_retry(
+                original, now=_now()
+            ):
+                return _mutation_resume_conflict(
+                    retry_mutation_event_id=None,
+                    original_mutation_event_id=request.recovery_mutation_event_id,
+                )
+            return _success(
+                {
+                    "preview_available": True,
+                    "project_id": request.project_id,
+                    "setup_mode": BROWNFIELD_SETUP_MODE,
+                    "recovery_mutation_event_id": request.recovery_mutation_event_id,
+                    "recovery_status": original.status
+                    if original is not None
+                    else None,
+                    "next_actions": [
+                        _retry_action(request, request.recovery_mutation_event_id)
+                    ],
+                }
+            )
+
+        original_event_id = request.recovery_mutation_event_id
+        retry_owner = _lease_owner(
+            command=PROJECT_SETUP_RETRY_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            correlation_id=request.correlation_id,
+        )
+        loaded = self._ledger.create_or_load(
+            command=PROJECT_SETUP_RETRY_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            request_hash=request.normalized_request_hash(),
+            project_id=request.project_id,
+            correlation_id=_correlation_id(request.correlation_id),
+            changed_by=request.changed_by,
+            lease_owner=retry_owner,
+            now=_now(),
+            recovers_mutation_event_id=original_event_id,
+            lease_seconds=self._lease_seconds,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code is not None:
+            return _error_for_ledger(loaded.error_code, loaded.ledger)
+        retry_event_id = _event_id(loaded.ledger)
+
+        original_recovery_owner = (
+            f"project-setup-retry:{retry_event_id}:recovers:{original_event_id}"
+        )
+        if original_event_id is not None and not self._ledger.acquire_recovery_lease(
+            mutation_event_id=original_event_id,
+            expected_project_id=request.project_id,
+            recovery_lease_owner=original_recovery_owner,
+            now=_now(),
+            lease_seconds=self._lease_seconds,
+        ):
+            return _mutation_resume_conflict(
+                retry_mutation_event_id=retry_event_id,
+                original_mutation_event_id=original_event_id,
+            )
+
+        if self.fail_retry_before_side_effects_for_test:
+            response_data = _retry_pre_side_effect_failure_data(
+                request=request,
+                retry_mutation_event_id=retry_event_id,
+                original_mutation_event_id=original_event_id,
+            )
+            self._mark_retry_domain_failed(
+                retry_mutation_event_id=retry_event_id,
+                retry_lease_owner=retry_owner,
+                response_data=response_data,
+            )
+            if original_event_id is not None:
+                self._ledger.release_recovery_lease(
+                    mutation_event_id=original_event_id,
+                    recovery_lease_owner=original_recovery_owner,
+                    now=_now(),
+                )
+            return _error(
+                "MUTATION_FAILED",
+                details={"mutation_event_id": retry_event_id},
+                remediation=["Retry setup with a new idempotency key."],
+                data=response_data,
+            )
+
+        workflow_setup = self._ensure_brownfield_shell_workflow(
+            project_id=request.project_id,
+            mutation_event_id=retry_event_id,
+            lease_owner=retry_owner,
+        )
+        if not workflow_setup.get("ok"):
+            error_code = str(workflow_setup.get("error_code") or WORKFLOW_SESSION_FAILED)
+            if original_event_id is not None:
+                return self._transfer_retry_recovery(
+                    request=request,
+                    retry_mutation_event_id=retry_event_id,
+                    retry_lease_owner=retry_owner,
+                    original_mutation_event_id=original_event_id,
+                    original_recovery_lease_owner=original_recovery_owner,
+                    last_error={"code": error_code},
+                )
+            return _error(
+                error_code,
+                details={"project_id": request.project_id},
+                remediation=["Restore workflow session storage, then retry setup."],
+            )
+
+        if self.fail_retry_after_side_effects_for_test:
+            return self._transfer_retry_recovery(
+                request=request,
+                retry_mutation_event_id=retry_event_id,
+                retry_lease_owner=retry_owner,
+                original_mutation_event_id=_required_int(original_event_id),
+                original_recovery_lease_owner=original_recovery_owner,
+                last_error={"code": WORKFLOW_SESSION_FAILED},
+            )
+
+        data = {
+            "project_id": request.project_id,
+            "name": self._project_name(request.project_id),
+            "setup_mode": BROWNFIELD_SETUP_MODE,
+            "resolved_spec_path": None,
+            "spec_hash": None,
+            "spec_version_id": None,
+            "setup_status": BROWNFIELD_CURATION_REQUIRED,
+            "fsm_state": "SETUP_REQUIRED",
+            "mutation_event_id": retry_event_id,
+            "next_actions": _brownfield_next_actions(request.project_id),
+            "recovery_mutation_event_id": original_event_id,
+        }
+        retry_response = _success(data)
         if original_event_id is None:
             if not self._ledger.finalize_success(
                 mutation_event_id=retry_event_id,
@@ -1357,7 +1604,10 @@ class ProjectSetupMutationRunner:
                 )
                 if isinstance(marked, dict):
                     return marked
-                return _recovery_required_response(marked, requested_spec_file)
+                return _recovery_required_response(
+                    marked,
+                    spec_file=requested_spec_file,
+                )
             return self._mark_setup_validation_failed(
                 mutation_event_id=mutation_event_id,
                 lease_owner=lease_owner,
@@ -1398,7 +1648,10 @@ class ProjectSetupMutationRunner:
             )
             if isinstance(marked, dict):
                 return marked
-            return _recovery_required_response(marked, requested_spec_file)
+            return _recovery_required_response(
+                marked,
+                spec_file=requested_spec_file,
+            )
 
         data = {
             "project_id": project_id,
@@ -2029,7 +2282,10 @@ class ProjectSetupMutationRunner:
             )
             if isinstance(marked, dict):
                 return marked
-            return _recovery_required_response(marked, requested_spec_file)
+            return _recovery_required_response(
+                marked,
+                spec_file=requested_spec_file,
+            )
 
         data = {
             "project_id": project_id,
@@ -2334,6 +2590,21 @@ def _retry_context_fingerprint(
     )
 
 
+def _brownfield_retry_context_fingerprint(
+    *,
+    project_id: int,
+    workflow_state: dict[str, Any],
+) -> str:
+    return canonical_hash(
+        {
+            "command": PROJECT_SETUP_RETRY_COMMAND,
+            "project_id": project_id,
+            "setup_mode": BROWNFIELD_SETUP_MODE,
+            "workflow_state": workflow_state,
+        }
+    )
+
+
 def _spec_hash(path: Path) -> str:
     return setup_spec_hash(path)
 
@@ -2526,9 +2797,21 @@ def _failed_setup_retry_action(project_id: int, spec_file: str) -> dict[str, Any
 
 def _recovery_required_response(
     row: CliMutationLedger,
-    spec_file: str,
+    *,
+    spec_file: str | None = None,
+    setup_mode: str = GREENFIELD_SETUP_MODE,
 ) -> dict[str, Any]:
     project_id = row.project_id
+    retry_args: dict[str, Any] = {
+        "project_id": project_id,
+        "expected_state": "SETUP_REQUIRED",
+        "expected_context_fingerprint": "<refresh-context-fingerprint>",
+        "recovery_mutation_event_id": row.mutation_event_id,
+    }
+    if setup_mode == BROWNFIELD_SETUP_MODE:
+        retry_args["setup_mode"] = BROWNFIELD_SETUP_MODE
+    else:
+        retry_args["spec_file"] = _required(spec_file)
     data = {
         "project_id": project_id,
         "mutation_event_id": row.mutation_event_id,
@@ -2536,13 +2819,7 @@ def _recovery_required_response(
         "next_actions": [
             {
                 "command": PROJECT_SETUP_RETRY_COMMAND,
-                "args": {
-                    "project_id": project_id,
-                    "spec_file": spec_file,
-                    "expected_state": "SETUP_REQUIRED",
-                    "expected_context_fingerprint": "<refresh-context-fingerprint>",
-                    "recovery_mutation_event_id": row.mutation_event_id,
-                },
+                "args": retry_args,
                 "reason": "Retry project setup after resolving the recorded failure.",
             }
         ],
@@ -2625,15 +2902,19 @@ def _retry_action(
     request: ProjectSetupRetryRequest,
     recovery_mutation_event_id: int | None,
 ) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "project_id": request.project_id,
+        "expected_state": request.expected_state,
+        "expected_context_fingerprint": request.expected_context_fingerprint,
+        "recovery_mutation_event_id": recovery_mutation_event_id,
+    }
+    if request.setup_mode == BROWNFIELD_SETUP_MODE:
+        args["setup_mode"] = BROWNFIELD_SETUP_MODE
+    else:
+        args["spec_file"] = _required(request.spec_file)
     return {
         "command": PROJECT_SETUP_RETRY_COMMAND,
-        "args": {
-            "project_id": request.project_id,
-            "spec_file": request.spec_file,
-            "expected_state": request.expected_state,
-            "expected_context_fingerprint": request.expected_context_fingerprint,
-            "recovery_mutation_event_id": recovery_mutation_event_id,
-        },
+        "args": args,
         "reason": "Retry setup with a new idempotency key after fixing the reported error.",
     }
 
@@ -2662,7 +2943,10 @@ def _brownfield_source_import_action(project_id: int) -> dict[str, Any]:
     return {
         "command": "agileforge brownfield source import",
         "args": {"project_id": project_id},
-        "reason": "Import brownfield source evidence before product-spec curation.",
+        "reason": (
+            "Planned Task 3 command to import brownfield source evidence before "
+            "product-spec curation."
+        ),
     }
 
 
@@ -2670,7 +2954,10 @@ def _brownfield_scan_action(project_id: int) -> dict[str, Any]:
     return {
         "command": "agileforge brownfield scan",
         "args": {"project_id": project_id},
-        "reason": "Scan brownfield source evidence before product-spec curation.",
+        "reason": (
+            "Planned Task 3 command to scan brownfield source evidence before "
+            "product-spec curation."
+        ),
     }
 
 

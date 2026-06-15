@@ -23,6 +23,7 @@ from models.specs import (
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
+from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
     MUTATION_RESUME_CONFLICT,
     MutationLedgerRepository,
@@ -37,6 +38,7 @@ from services.agent_workbench.project_setup import (
     ProjectSetupRetryRequest,
 )
 from services.agent_workbench.project_setup_fingerprints import (
+    PROJECT_SETUP_RETRY_COMMAND,
     setup_retry_context_fingerprint,
 )
 from services.specs.profile_content import normalize_spec_content_for_registry
@@ -73,7 +75,10 @@ def _expected_brownfield_source_import_action(project_id: int) -> dict[str, Any]
     return {
         "command": "agileforge brownfield source import",
         "args": {"project_id": project_id},
-        "reason": "Import brownfield source evidence before product-spec curation.",
+        "reason": (
+            "Planned Task 3 command to import brownfield source evidence before "
+            "product-spec curation."
+        ),
     }
 
 
@@ -459,6 +464,21 @@ def _retry_fingerprint(
         project_id=project_id,
         resolved_spec_path=spec_file.resolve(),
         workflow_state=workflow_state,
+    )
+
+
+def _brownfield_retry_fingerprint(
+    *,
+    project_id: int,
+    workflow_state: dict[str, Any],
+) -> str:
+    return canonical_hash(
+        {
+            "command": PROJECT_SETUP_RETRY_COMMAND,
+            "project_id": project_id,
+            "setup_mode": "brownfield",
+            "workflow_state": workflow_state,
+        }
     )
 
 
@@ -936,6 +956,83 @@ def test_brownfield_project_create_writes_shell_without_spec_registry(
         assert len(projects) == 1
         assert projects[0].name == "Brownfield Shell"
         assert session.exec(select(SpecRegistry)).all() == []
+
+
+def test_brownfield_project_create_recovery_replays_shell_without_spec_registry(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    workflow = FakeWorkflowPort()
+    original_update_session_status = workflow.update_session_status
+
+    def fail_brownfield_shell_write(
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        if partial_update.get("setup_status") == "brownfield_curation_required":
+            message = "brownfield shell workflow write failed"
+            raise RuntimeError(message)
+        original_update_session_status(session_id, partial_update)
+
+    monkeypatch.setattr(workflow, "update_session_status", fail_brownfield_shell_write)
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    request = ProjectCreateRequest(
+        name="Recoverable Brownfield Shell",
+        setup_mode="brownfield",
+        idempotency_key="brownfield-recoverable-create-001",
+        changed_by="agent",
+    )
+
+    recovery = runner.create_project(request)
+
+    assert recovery["ok"] is False
+    assert _error_code(recovery) == "MUTATION_RECOVERY_REQUIRED"
+    recovery_data = recovery["data"]
+    project_id = recovery_data["project_id"]
+    retry_args = dict(recovery_data["next_actions"][0]["args"])
+    assert retry_args["setup_mode"] == "brownfield"
+    assert "spec_file" not in retry_args
+    retry_args["expected_context_fingerprint"] = _brownfield_retry_fingerprint(
+        project_id=project_id,
+        workflow_state=workflow.sessions.get(str(project_id), {}),
+    )
+    monkeypatch.setattr(workflow, "update_session_status", original_update_session_status)
+
+    retried = runner.retry_setup(
+        ProjectSetupRetryRequest(
+            **retry_args,
+            idempotency_key="brownfield-recoverable-retry-001",
+            changed_by="agent",
+        )
+    )
+
+    assert retried["ok"] is True
+    data = retried["data"]
+    assert data["project_id"] == project_id
+    assert data["recovery_mutation_event_id"] == recovery_data["mutation_event_id"]
+    assert data["setup_mode"] == "brownfield"
+    assert data["setup_status"] == "brownfield_curation_required"
+    assert data["spec_hash"] is None
+    assert data["spec_version_id"] is None
+    assert data["next_actions"][0] == _expected_brownfield_source_import_action(
+        project_id
+    )
+
+    replay = runner.create_project(request)
+    assert replay["ok"] is True
+    assert replay["data"]["mutation_event_id"] == data["mutation_event_id"]
+
+    with Session(engine) as session:
+        original = session.get(CliMutationLedger, recovery_data["mutation_event_id"])
+        retry = session.get(CliMutationLedger, data["mutation_event_id"])
+        assert original is not None
+        assert retry is not None
+        assert original.status == MutationStatus.SUPERSEDED.value
+        assert retry.status == MutationStatus.SUCCEEDED.value
+        assert len(session.exec(select(Product)).all()) == 1
+        assert session.exec(select(SpecRegistry)).all() == []
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_authority_compile_succeeds_from_compile_required(

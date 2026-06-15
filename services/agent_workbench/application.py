@@ -1116,7 +1116,8 @@ class AgentWorkbenchApplication:
         self,
         *,
         project_id: int,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         expected_state: str,
         expected_context_fingerprint: str,
         recovery_mutation_event_id: int | None = None,
@@ -1130,6 +1131,7 @@ class AgentWorkbenchApplication:
         request = ProjectSetupRetryRequest(
             project_id=project_id,
             spec_file=spec_file,
+            setup_mode=setup_mode,
             expected_state=expected_state,
             expected_context_fingerprint=expected_context_fingerprint,
             recovery_mutation_event_id=recovery_mutation_event_id,
