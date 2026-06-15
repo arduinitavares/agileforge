@@ -292,6 +292,7 @@ class FakeAuthorityApplication:
         *,
         name: str,
         spec_file: str,
+        setup_mode: str = "greenfield",
         idempotency_key: str,
         changed_by: str,
     ) -> dict[str, object]:
@@ -300,6 +301,7 @@ class FakeAuthorityApplication:
             {
                 "name": name,
                 "spec_file": spec_file,
+                "setup_mode": setup_mode,
                 "idempotency_key": idempotency_key,
                 "changed_by": changed_by,
             }
@@ -753,6 +755,17 @@ def test_create_project_requires_spec_file_path(
     assert response.status_code == HTTP_UNPROCESSABLE
 
 
+def test_dashboard_project_create_remains_greenfield_only() -> None:
+    """Keep dashboard project creation on the greenfield setup contract."""
+    schema = api_module.CreateProjectRequest.model_json_schema()
+
+    assert "name" in schema["properties"]
+    assert "spec_file_path" in schema["properties"]
+    assert "setup_mode" not in schema["properties"]
+    assert "source_file" not in schema["properties"]
+    assert "repo_path" not in schema["properties"]
+
+
 def test_create_project_success_advances_to_vision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -829,6 +842,7 @@ def test_create_project_returns_compile_required_without_pending_authority(
     assert payload["data"]["next_actions"][0]["command"] == (
         "agileforge authority compile"
     )
+    assert fake_app.create_calls[0]["setup_mode"] == "greenfield"
 
 
 def test_get_projects_uses_batch_session_lookup(

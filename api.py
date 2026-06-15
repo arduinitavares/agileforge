@@ -2349,6 +2349,7 @@ async def create_project(
         result = _workbench_application().project_create(
             name=req.name,
             spec_file=req.spec_file_path,
+            setup_mode="greenfield",
             idempotency_key=idempotency_key,
             changed_by="dashboard-ui",
         )
