@@ -1144,6 +1144,9 @@ def test_preview_spec_authority_coverage_repair_succeeds_with_feedback(
             item_id = item_ids[0]
             source_level = payload["items"][0]["level"]
             assert f"missing source_item_id: {item_id}" in str(domain_hint)
+            assert f"The previous attempt failed to cover {item_id}." in str(
+                domain_hint
+            )
             assert "single repair attempt" in str(domain_hint)
             return _behavioral_payload_json(
                 source_item_id=cast("str", item_id),

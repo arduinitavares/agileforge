@@ -1251,6 +1251,30 @@ def _focused_repair_domain_hint(candidate: _FocusedRepairCandidate) -> str:
     return "\n".join(lines)
 
 
+def _coverage_repair_domain_hint(item_id: str) -> str:
+    """Build explicit feedback for one missing structured coverage item."""
+    lines = [
+        "Your previous authority output failed structured coverage validation.",
+        "",
+        "Repair target:",
+        f"- missing source_item_id: {item_id}",
+        "",
+        f"The previous attempt failed to cover {item_id}.",
+        "This is the single repair attempt for this source item.",
+        "Retry only this source item.",
+        (
+            "You must either emit invariant with exact source_item_id "
+            f"(source_item_id exactly {item_id}), or emit an explicit gap "
+            f"mentioning item id {item_id} and explaining why no "
+            "runtime/product invariant maps."
+        ),
+        "Do not cite source item IDs other than the repair target.",
+        "Do not invent source references, source levels, or source excerpts.",
+        "Return only valid compiled authority JSON.",
+    ]
+    return "\n".join(lines)
+
+
 def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
     """Return operator commands for retrying a source-metadata compiler failure."""
     project_id = spec_version.product_id
@@ -1589,6 +1613,32 @@ def _invoke_focused_structured_item_authority(
     )
 
 
+def _invoke_coverage_repair_authority(
+    artifact: TechnicalSpecArtifact,
+    *,
+    item_id: str,
+    product_id: int | None,
+    spec_version_id: int | None,
+    compiler_model: str | None = None,
+) -> SpecAuthorityCompilationSuccess | _FocusedItemCompilationFailure:
+    """Run exactly one explicit repair attempt for missing structured coverage."""
+    focused_content = _focused_structured_spec_content(artifact, item_id=item_id)
+    invocation = _invoke_and_normalize_spec_authority(
+        spec_content=focused_content,
+        content_ref=None,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        domain_hint=_coverage_repair_domain_hint(item_id),
+        compiler_model=compiler_model,
+    )
+    if isinstance(invocation.output.root, SpecAuthorityCompilationFailure):
+        return _FocusedItemCompilationFailure(
+            item_id=item_id,
+            failure=invocation.output.root,
+        )
+    return cast("SpecAuthorityCompilationSuccess", invocation.output.root)
+
+
 def _structured_missing_authority_failure(
     *,
     missing_item_ids: list[str],
@@ -1610,6 +1660,56 @@ def _structured_missing_authority_failure(
         missing_item_ids=missing_item_ids,
         total_item_count=total_item_count,
     )
+
+
+def _repair_missing_iterative_authority(
+    *,
+    artifact: TechnicalSpecArtifact,
+    existing_successes: list[SpecAuthorityCompilationSuccess],
+    missing_item_ids: list[str],
+    product_id: int | None,
+    spec_version_id: int | None,
+    compiler_model: str | None,
+) -> SpecAuthorityCompilerOutput:
+    """Repair missing item coverage once and return success or fail-closed output."""
+    repair_successes: list[SpecAuthorityCompilationSuccess] = []
+    item_ids = _iterative_authority_item_ids(artifact)
+    for item_id in missing_item_ids:
+        repaired = _invoke_coverage_repair_authority(
+            artifact,
+            item_id=item_id,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            compiler_model=compiler_model,
+        )
+        if isinstance(repaired, _FocusedItemCompilationFailure):
+            return _structured_item_compilation_failure(
+                [repaired],
+                missing_item_ids=missing_item_ids,
+                total_item_count=len(item_ids),
+            )
+        repair_successes.append(repaired)
+
+    merged_output = normalize_compiler_output(
+        SpecAuthorityCompilerOutput(
+            root=_merge_compilation_successes([*existing_successes, *repair_successes])
+        ).model_dump_json(),
+        source_text=canonical_spec_json(artifact),
+        source_format="agileforge.spec.v1",
+    )
+    if isinstance(merged_output.root, SpecAuthorityCompilationFailure):
+        return merged_output
+    remaining_missing = _missing_iterative_authority_item_ids(
+        merged_output.root,
+        item_ids=item_ids,
+    )
+    if remaining_missing:
+        return _structured_missing_authority_failure(
+            missing_item_ids=remaining_missing,
+            focused_failures=[],
+            total_item_count=len(item_ids),
+        )
+    return merged_output
 
 
 def _vacant_authority_blocking_gaps(
@@ -1898,13 +1998,28 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
         item_ids=item_ids,
     )
     if missing_item_ids:
-        return _NormalizedCompilerInvocation(
-            raw_json=full_invocation.raw_json,
-            output=_structured_missing_authority_failure(
+        missing_failure_ids = {failure.item_id for failure in focused_failures} & set(
+            missing_item_ids
+        )
+        repaired_output = (
+            _structured_missing_authority_failure(
                 missing_item_ids=missing_item_ids,
                 focused_failures=focused_failures,
                 total_item_count=len(item_ids),
-            ),
+            )
+            if missing_failure_ids
+            else _repair_missing_iterative_authority(
+                artifact=artifact,
+                existing_successes=successes,
+                missing_item_ids=missing_item_ids,
+                product_id=product_id,
+                spec_version_id=spec_version_id,
+                compiler_model=compiler_model,
+            )
+        )
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=repaired_output,
         )
 
     return _NormalizedCompilerInvocation(
