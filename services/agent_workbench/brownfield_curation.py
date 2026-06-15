@@ -454,6 +454,38 @@ class SyncBrownfieldWorkflowAdapter(BrownfieldWorkflowPort):
         self._workflow.update_session_status(session_id, partial_update)
 
 
+def brownfield_progress(*, engine: Engine, project_id: int) -> dict[str, Any]:
+    """Return derived brownfield progress from artifact rows."""
+    with Session(engine) as session:
+        source = session.exec(
+            select(BrownfieldSourceArtifact)
+            .where(BrownfieldSourceArtifact.project_id == project_id)
+            .where(BrownfieldSourceArtifact.status == "complete")
+            .order_by(BrownfieldSourceArtifact.created_at.desc())
+        ).first()
+        scan = session.exec(
+            select(BrownfieldScanAttempt)
+            .where(BrownfieldScanAttempt.project_id == project_id)
+            .where(BrownfieldScanAttempt.status == "complete")
+            .order_by(BrownfieldScanAttempt.created_at.desc())
+        ).first()
+        draft = session.exec(
+            select(BrownfieldSpecDraftAttempt)
+            .where(BrownfieldSpecDraftAttempt.project_id == project_id)
+            .where(BrownfieldSpecDraftAttempt.status == "complete")
+            .order_by(BrownfieldSpecDraftAttempt.created_at.desc())
+        ).first()
+    return {
+        "source": "current" if source is not None else "missing",
+        "scan": "current" if scan is not None else "missing",
+        "draft": "ready" if draft is not None else "missing",
+        "approval": "required" if draft is not None else "blocked",
+        "recommended_draft_attempt_id": draft.attempt_id
+        if draft is not None
+        else None,
+    }
+
+
 class BrownfieldCurationRunner:
     """Run brownfield source and scan commands against durable rows."""
 

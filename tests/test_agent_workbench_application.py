@@ -5620,6 +5620,29 @@ def test_workflow_next_routes_brownfield_curation_to_setup_actions(
     ]
 
 
+def test_workflow_next_routes_brownfield_curation_required() -> None:
+    """Brownfield curation setup exposes curation commands, not authority compile."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_mode": "brownfield",
+                "setup_status": "brownfield_curation_required",
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=10)
+
+    assert result["ok"] is True
+    commands = result["data"]["next_valid_commands"]
+    assert "agileforge brownfield source import" in commands
+    assert "agileforge brownfield scan" in commands
+    assert "agileforge brownfield spec draft" in commands
+    assert "agileforge brownfield spec import" in commands
+    assert "agileforge authority compile" not in commands
+
+
 def test_workflow_next_routes_compile_required_without_spec_path_to_blocked() -> None:
     """Compile setup routing must not advertise unrunnable commands."""
     app = AgentWorkbenchApplication(

@@ -1009,6 +1009,24 @@ class ProjectSetupMutationRunner:
         if not workflow_result["ok"]:
             return workflow_result
         workflow_state = cast("dict[str, Any]", workflow_result["state"])
+        brownfield_guard = _brownfield_authority_compile_guard(
+            workflow_state=workflow_state
+        )
+        if brownfield_guard is not None:
+            code, details = brownfield_guard
+            if request.dry_run:
+                return _error(
+                    code,
+                    details=details,
+                    remediation=[
+                        "Approve a brownfield curated spec before authority compile."
+                    ],
+                )
+            return self._guard_rejected_authority_compile(
+                request=request,
+                code=code,
+                details=details,
+            )
         stale_guard = _authority_compile_stale_guard(
             request=request,
             workflow_state=workflow_state,
@@ -2743,6 +2761,33 @@ def _authority_compile_stale_guard(
             },
         )
 
+    return None
+
+
+def _brownfield_authority_compile_guard(
+    *,
+    workflow_state: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return brownfield-specific authority compile blockers."""
+    if workflow_state.get("setup_mode") != BROWNFIELD_SETUP_MODE:
+        return None
+    setup_status = str(workflow_state.get("setup_status") or "")
+    if setup_status != AUTHORITY_COMPILE_REQUIRED:
+        return (
+            ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD.value,
+            {"setup_status": setup_status},
+        )
+    required_fields = (
+        "setup_spec_file_path",
+        "setup_spec_hash",
+        "setup_spec_version_id",
+    )
+    missing_fields = [field for field in required_fields if not workflow_state.get(field)]
+    if missing_fields:
+        return (
+            ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD.value,
+            {"missing_fields": missing_fields},
+        )
     return None
 
 

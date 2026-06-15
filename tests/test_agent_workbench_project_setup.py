@@ -1035,6 +1035,36 @@ def test_brownfield_project_create_recovery_replays_shell_without_spec_registry(
         assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
+def test_authority_compile_rejects_brownfield_before_approval(
+    engine: Engine,
+) -> None:
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    create = runner.create_project(
+        ProjectCreateRequest(
+            name="Brownfield Compile Block",
+            setup_mode="brownfield",
+            spec_file=None,
+            idempotency_key="brownfield-compile-block-create",
+        )
+    )
+    project_id = create["data"]["project_id"]
+
+    result = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=1,
+            expected_spec_hash="sha256:missing",
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="brownfield_curation_required",
+            idempotency_key="brownfield-compile-block",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "BROWNFIELD_APPROVAL_STALE_GUARD"
+
+
 def test_authority_compile_succeeds_from_compile_required(
     engine: Engine,
     tmp_path: Path,

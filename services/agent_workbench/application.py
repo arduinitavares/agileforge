@@ -2618,16 +2618,29 @@ def _apply_brownfield_curation_routing(
                 "command": "agileforge brownfield source import",
                 "args": {"project_id": project_id},
                 "reason": (
-                    "Planned Task 3 command to import brownfield source evidence "
-                    "before product-spec curation."
+                    "Import brownfield source evidence before product-spec curation."
                 ),
             },
             {
                 "command": "agileforge brownfield scan",
                 "args": {"project_id": project_id},
                 "reason": (
-                    "Planned Task 3 command to scan brownfield source evidence "
-                    "before product-spec curation."
+                    "Record repository facts before product-spec curation."
+                ),
+            },
+            {
+                "command": "agileforge brownfield spec draft",
+                "args": {"project_id": project_id},
+                "reason": (
+                    "Create a reviewed product-spec candidate from current "
+                    "brownfield artifacts."
+                ),
+            },
+            {
+                "command": "agileforge brownfield spec import",
+                "args": {"project_id": project_id},
+                "reason": (
+                    "Import a human-edited agileforge.spec.v1 candidate for approval."
                 ),
             },
         ]
