@@ -14,6 +14,7 @@ from sqlmodel import create_engine, select
 from models.core import Product, Sprint, SprintStory, Task, Team, UserStory
 from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
 from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
+from models.specs import SpecRegistry
 from services.agent_workbench.backlog_phase import BacklogPhaseRunner
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.backlog_runtime import (
@@ -1246,6 +1247,194 @@ def test_build_backlog_input_context_serializes_cached_evidence() -> None:
     assert context["as_built_assessment"] == "NO_AS_BUILT_ASSESSMENT"
 
 
+def test_build_backlog_input_context_scope_extension_delta_metadata() -> None:
+    """Scope-extension generation context should carry the accepted delta filter."""
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            "backlog_items": [{"requirement": "Existing backlog item"}],
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": 11,
+                "base_spec_hash": "sha256:base",
+                "amended_spec_version_id": 12,
+                "amended_spec_hash": "sha256:amended",
+                "added_source_item_ids": [
+                    "REQ.new-capability",
+                    "REQ.reporting-export",
+                ],
+                "idempotency_key": "scope-ext-1",
+            },
+        },
+        user_input=None,
+    )
+
+    assert context["generation_mode"] == "scope_extension"
+    assert context["scope_extension"] == {
+        "schema": "agileforge.scope_extension.v1",
+        "base_spec_version_id": 11,
+        "base_spec_hash": "sha256:base",
+        "amended_spec_version_id": 12,
+        "amended_spec_hash": "sha256:amended",
+        "added_source_item_ids": [
+            "REQ.new-capability",
+            "REQ.reporting-export",
+        ],
+        "existing_backlog_item_count": 1,
+    }
+    assert context["authority_scope_filter"] == {
+        "source_item_ids": [
+            "REQ.new-capability",
+            "REQ.reporting-export",
+        ]
+    }
+
+
+def test_build_context_scope_extension_consumed_context_is_normal() -> None:
+    """Saved extension context should not trigger later extension generation."""
+    context = build_backlog_input_context(
+        {
+            "product_vision_assessment": {
+                "product_vision_statement": "A clear saved vision.",
+                "is_complete": True,
+            },
+            "pending_spec_content": "SPEC CONTENT",
+            "compiled_authority_cached": "AUTHORITY JSON",
+            "backlog_items": [{"requirement": "Existing backlog item"}],
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": 11,
+                "base_spec_hash": "sha256:base",
+                "amended_spec_version_id": 12,
+                "amended_spec_hash": "sha256:amended",
+                "added_source_item_ids": ["REQ.reporting-export"],
+                "backlog_extension_saved_at": "2026-04-04T00:00:00Z",
+            },
+        },
+        user_input=None,
+    )
+
+    assert "generation_mode" not in context
+    assert "scope_extension" not in context
+    assert "authority_scope_filter" not in context
+
+
+def test_run_backlog_scope_extension_blocks_until_authority_accepted() -> None:
+    """Scope-extension generation should return a runtime blocker payload."""
+    state = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "authority_pending_review",
+        "product_vision_assessment": {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        },
+        "pending_spec_content": "SPEC CONTENT",
+        "compiled_authority_cached": "AUTHORITY JSON",
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+    }
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            state,
+            project_id=2,
+            user_input=None,
+        )
+
+    result = anyio.run(call_runtime)
+
+    assert result["success"] is False
+    assert result["failure_stage"] == "authority_review_required"
+    assert "AUTHORITY_REVIEW_REQUIRED" in result["error"]
+    assert "must be accepted before backlog generation" in result["failure_summary"]
+    assert result["input_context"]["generation_mode"] == "scope_extension"
+    assert result["input_context"]["authority_scope_filter"] == {
+        "source_item_ids": ["REQ.reporting-export"]
+    }
+    assert result["output_artifact"]["failure_stage"] == "authority_review_required"
+    assert "AUTHORITY_REVIEW_REQUIRED" in result["output_artifact"]["message"]
+
+
+def test_run_backlog_scope_extension_sends_delta_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted scope-extension generation should pass metadata to the agent."""
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke_backlog_agent(payload: object) -> str:
+        captured["payload"] = payload
+        captured["payload_dump"] = payload.model_dump(mode="json")  # type: ignore[attr-defined]
+        return json.dumps(
+            {
+                "backlog_items": [
+                    {
+                        "priority": 1,
+                        "requirement": "Add reporting export",
+                        "authority_ref": "REQ.reporting-export",
+                        "capability_hint": "Reporting",
+                        "value_driver": "Strategic",
+                        "justification": "Covers accepted extension scope.",
+                        "estimated_effort": "M",
+                    }
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+            }
+        )
+
+    monkeypatch.setattr(
+        "services.backlog_runtime._invoke_backlog_agent",
+        fake_invoke_backlog_agent,
+    )
+
+    async def call_runtime() -> dict[str, Any]:
+        return await run_backlog_agent_from_state(
+            {
+                "fsm_state": "VISION_PERSISTENCE",
+                "setup_status": "passed",
+                "product_vision_assessment": {
+                    "product_vision_statement": "A clear saved vision.",
+                    "is_complete": True,
+                },
+                "pending_spec_content": "SPEC CONTENT",
+                "compiled_authority_cached": "AUTHORITY JSON",
+                "backlog_items": [{"requirement": "Existing backlog item"}],
+                "scope_extension_context": {
+                    "schema": "agileforge.scope_extension.v1",
+                    "base_spec_version_id": 11,
+                    "base_spec_hash": "sha256:base",
+                    "amended_spec_version_id": 12,
+                    "amended_spec_hash": "sha256:amended",
+                    "added_source_item_ids": ["REQ.reporting-export"],
+                },
+            },
+            project_id=2,
+            user_input=None,
+        )
+
+    result = anyio.run(call_runtime)
+
+    assert result["success"] is True
+    payload_dump = captured["payload_dump"]
+    assert payload_dump["generation_mode"] == "scope_extension"
+    assert payload_dump["scope_extension"]["amended_spec_version_id"] == 12  # noqa: PLR2004
+    assert payload_dump["scope_extension"]["existing_backlog_item_count"] == 1
+    assert payload_dump["authority_scope_filter"] == {
+        "source_item_ids": ["REQ.reporting-export"]
+    }
+
+
 def test_build_backlog_input_context_serializes_cached_as_built_assessment() -> None:
     """Backlog input context should pass fresh as-built assessment through."""
     assessment = _as_built_assessment_payload()
@@ -1713,6 +1902,82 @@ def test_backlog_generate_returns_failure_envelope_for_runtime_failure(
     assert result["errors"][0]["details"]["failure_stage"] == "invocation_exception"
 
 
+def test_backlog_generate_returns_authority_review_required_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority-review runtime blockers should keep their stable error code."""
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["scope_extension_context"] = {
+            "schema": "agileforge.scope_extension.v1",
+            "amended_spec_version_id": 12,
+            "added_source_item_ids": ["REQ.reporting-export"],
+        }
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_backlog_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del state, project_id, user_input
+        message = (
+            "AUTHORITY_REVIEW_REQUIRED: scope extension authority must be accepted "
+            "before backlog generation."
+        )
+        return {
+            "success": False,
+            "error": message,
+            "failure_stage": "authority_review_required",
+            "failure_summary": message,
+            "failure_artifact_id": None,
+            "input_context": {
+                "generation_mode": "scope_extension",
+                "scope_extension": {
+                    "amended_spec_version_id": 12,
+                    "added_source_item_ids": ["REQ.reporting-export"],
+                },
+                "authority_scope_filter": {
+                    "source_item_ids": ["REQ.reporting-export"]
+                },
+            },
+            "output_artifact": {
+                "is_complete": False,
+                "error": "AUTHORITY_REVIEW_REQUIRED",
+                "failure_stage": "authority_review_required",
+                "failure_summary": message,
+            },
+            "is_complete": False,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.run_backlog_agent_from_state",
+        fake_run_backlog_agent_from_state,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(project_id=2)
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "AUTHORITY_REVIEW_REQUIRED"
+    assert error["details"]["failure_stage"] == "authority_review_required"
+    assert "authority review" in " ".join(error["remediation"]).casefold()
+
+
 def test_backlog_reconcile_supersedes_legacy_duplicate_active_seed_rows(
     session: Session,
 ) -> None:
@@ -2003,6 +2268,152 @@ def test_backlog_reconcile_blocks_when_existing_backlog_progressed(
         ).all()
         == []
     )
+
+
+def test_save_backlog_scope_extension_appends_without_superseding(
+    monkeypatch: pytest.MonkeyPatch,
+    engine: Engine,
+    session: Session,
+) -> None:
+    """Scope-extension Backlog save appends provenance rows without reset."""
+    product = Product(name="Cartola")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    assert product.product_id is not None
+    product_id = product.product_id
+    session.add(
+        SpecRegistry(
+            spec_version_id=12,
+            product_id=product_id,
+            spec_hash="sha256:amended",
+            content="SPEC CONTENT",
+            status="approved",
+        )
+    )
+    session.add(
+        UserStory(
+            product_id=product_id,
+            title="Existing lineup import",
+            status=StoryStatus.TO_DO,
+            story_origin="backlog_seed",
+            is_refined=False,
+            is_superseded=False,
+        )
+    )
+    session.commit()
+
+    workflow = _FakeWorkflowService()
+    reviewed_artifact = {
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Add reporting export",
+                "authority_ref": "REQ.reporting-export",
+                "capability_hint": "Reporting",
+                "value_driver": "Strategic",
+                "justification": "Extends accepted scope with reporting export.",
+                "estimated_effort": "M",
+                "technical_note": None,
+            }
+        ],
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    artifact_fingerprint = _backlog_artifact_fingerprint(reviewed_artifact)
+    reviewed_artifact = {
+        **reviewed_artifact,
+        "attempt_id": "backlog-attempt-1",
+        "artifact_fingerprint": artifact_fingerprint,
+    }
+    input_context = {
+        "generation_mode": "scope_extension",
+        "scope_extension": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+        "authority_scope_filter": {"source_item_ids": ["REQ.reporting-export"]},
+    }
+    workflow.state = {
+        **workflow.state,
+        "fsm_state": "BACKLOG_REVIEW",
+        "product_backlog_assessment": reviewed_artifact,
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "artifact_fingerprint": artifact_fingerprint,
+                "input_context": input_context,
+                "output_artifact": dict(reviewed_artifact),
+            }
+        ],
+        "backlog_last_input_context": input_context,
+    }
+
+    def fake_select_project(
+        selected_product_id: int,
+        tool_context: SimpleNamespace,
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        return {"success": True, "project_id": selected_product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "orchestrator_agent.agent_tools.backlog_primer.tools.get_engine",
+        lambda: engine,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+        engine=engine,
+    )
+
+    result = runner.save(
+        project_id=product_id,
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-scope-extension-append-1",
+    )
+
+    assert result["ok"] is True, result
+    assert result["data"]["save_result"]["superseded_count"] == 0
+    session.expire_all()
+    rows = session.exec(
+        select(UserStory)
+        .where(UserStory.product_id == product_id)
+        .order_by(cast("Any", UserStory.story_id))
+    ).all()
+    assert [(row.title, row.story_origin, row.is_superseded) for row in rows] == [
+        ("Existing lineup import", "backlog_seed", False),
+        ("Add reporting export", "scope_extension", False),
+    ]
+    assert rows[1].accepted_spec_version_id == 12  # noqa: PLR2004
+    replay = runner.save(
+        project_id=product_id,
+        attempt_id="backlog-attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="BACKLOG_REVIEW",
+        idempotency_key="save-scope-extension-append-1",
+    )
+    session.expire_all()
+    assert replay["ok"] is True
+    replay_rows = session.exec(
+        select(UserStory).where(UserStory.product_id == product_id)
+    ).all()
+    assert len(replay_rows) == 2  # noqa: PLR2004
 
 
 def test_reset_active_returns_schema_not_ready_for_unmigrated_story_table() -> None:

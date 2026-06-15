@@ -633,6 +633,13 @@ def test_backlog_commands_are_registered_and_available() -> None:  # noqa: PLR09
     assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in as_built["errors"]
 
 
+def test_backlog_command_schema_declares_authority_review_required() -> None:
+    """Backlog generation schema should advertise authority-review blockers."""
+    generate = command_schema_payload("agileforge backlog generate")
+
+    assert ErrorCode.AUTHORITY_REVIEW_REQUIRED.value in generate["errors"]
+
+
 def test_roadmap_commands_are_registered_and_available() -> None:
     """Expose Roadmap phase commands as installed CLI capabilities."""
     names = installed_command_names()

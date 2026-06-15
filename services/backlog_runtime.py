@@ -58,6 +58,10 @@ _MIN_BROWNFIELD_TOKEN_LENGTH = 3
 _PLURAL_TRIM_TOKEN_LENGTH = 4
 _COMPACT_MATCH_TOKEN_LENGTH = 5
 _PREFIX_MATCH_TOKEN_LENGTH = 4
+_AUTHORITY_REVIEW_REQUIRED_MESSAGE = (
+    "AUTHORITY_REVIEW_REQUIRED: scope extension authority must be accepted "
+    "before backlog generation."
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,72 @@ def _normalize_prior_backlog_state(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return "NO_HISTORY"
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _existing_backlog_item_count(state: Mapping[str, Any]) -> int | None:
+    backlog_items = state.get("backlog_items")
+    if isinstance(backlog_items, list):
+        return len(backlog_items)
+    assessment = state.get("product_backlog_assessment")
+    if isinstance(assessment, Mapping):
+        assessment_items = assessment.get("backlog_items")
+        if isinstance(assessment_items, list):
+            return len(assessment_items)
+    return None
+
+
+def _scope_extension_authority_not_ready(state: Mapping[str, Any]) -> bool:
+    setup_status = state.get("setup_status")
+    if isinstance(setup_status, str) and setup_status.strip().lower() in {
+        "authority_compile_required",
+        "authority_compiling",
+        "authority_compile_failed",
+        "authority_pending_review",
+        "authority_rejected",
+    }:
+        return True
+    fsm_state = state.get("fsm_state")
+    return isinstance(fsm_state, str) and fsm_state.strip().upper() == "SETUP_REQUIRED"
+
+
+def _scope_extension_generation_metadata(
+    state: Mapping[str, Any],
+) -> dict[str, object]:
+    context = state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return {}
+    if context.get("backlog_extension_saved_at"):
+        return {}
+    added_source_item_ids = _string_list(context.get("added_source_item_ids"))
+    if not added_source_item_ids:
+        return {}
+
+    scope_extension: dict[str, object] = {}
+    for key in (
+        "schema",
+        "base_spec_version_id",
+        "base_spec_hash",
+        "amended_spec_version_id",
+        "amended_spec_hash",
+    ):
+        if key in context:
+            scope_extension[key] = context[key]
+    scope_extension["added_source_item_ids"] = added_source_item_ids
+    existing_count = _existing_backlog_item_count(state)
+    if existing_count is not None:
+        scope_extension["existing_backlog_item_count"] = existing_count
+
+    return {
+        "generation_mode": "scope_extension",
+        "scope_extension": scope_extension,
+        "authority_scope_filter": {"source_item_ids": added_source_item_ids},
+    }
 
 
 def _normalize_validation_errors(errors: object) -> ValidationErrors:
@@ -731,6 +801,7 @@ def build_backlog_input_context(
         "as_built_assessment": cached_assessment_for_backlog(state),
         "implementation_evidence": implementation_evidence or "NO_EVIDENCE",
         "user_input": user_input or "",
+        **_scope_extension_generation_metadata(state),
     }
 
 
@@ -738,7 +809,7 @@ async def _invoke_backlog_agent(payload: InputSchema) -> str:
     return await invoke_agent_to_text(
         agent=backlog_agent,
         runner_identity=BACKLOG_RUNNER_IDENTITY,
-        payload_json=payload.model_dump_json(),
+        payload_json=payload.model_dump_json(exclude_none=True),
         no_text_error="Backlog agent returned no text response",
     )
 
@@ -863,6 +934,16 @@ async def run_backlog_agent_from_state(
         state,
         user_input=user_input,
     )
+    if (
+        input_context.get("generation_mode") == "scope_extension"
+        and _scope_extension_authority_not_ready(state)
+    ):
+        return _failure(
+            project_id=project_id,
+            input_context=input_context,
+            failure_stage="authority_review_required",
+            details=_FailureDetails(message=_AUTHORITY_REVIEW_REQUIRED_MESSAGE),
+        )
 
     try:
         payload: InputSchema = InputSchema.model_validate(input_context)

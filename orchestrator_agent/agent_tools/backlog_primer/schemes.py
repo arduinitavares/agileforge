@@ -136,6 +136,36 @@ class InputSchema(BaseModel):
             description="User-provided notes, requirements, or answers to questions.",
         ),
     ]
+    generation_mode: Annotated[
+        Literal["scope_extension"] | None,
+        Field(
+            default=None,
+            description=(
+                "Optional generation mode. When scope_extension, generate only "
+                "additive backlog items for the accepted amended authority delta."
+            ),
+        ),
+    ] = None
+    scope_extension: Annotated[
+        dict[str, object] | None,
+        Field(
+            default=None,
+            description=(
+                "Read-only scope-extension provenance: base/amended spec ids and "
+                "hashes, added source item ids, and existing backlog count."
+            ),
+        ),
+    ] = None
+    authority_scope_filter: Annotated[
+        dict[str, list[str]] | None,
+        Field(
+            default=None,
+            description=(
+                "Accepted authority delta filter. In scope-extension mode, only "
+                "source_item_ids listed here should produce new backlog items."
+            ),
+        ),
+    ] = None
 
 
 class OutputSchema(BaseModel):

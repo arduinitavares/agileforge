@@ -452,6 +452,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.AUTHORITY_REVIEW_REQUIRED.value,
             ErrorCode.INVALID_COMMAND.value,
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
             ErrorCode.MUTATION_FAILED.value,
