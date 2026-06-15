@@ -18,6 +18,7 @@ The installed CLI supports:
 - Project setup retry for interrupted creation/setup recovery.
 - Brownfield source import, repository scan, curated spec draft/import, and
   approval before authority compilation.
+- Completed-project scope extension validation and guarded start.
 - Workflow and status inspection.
 - Spec Authority status, review, accept, reject, and invariant inspection.
 - Vision generate, history, and save.
@@ -1461,6 +1462,78 @@ Sprint close safety rules:
 - Successful close snapshots the Sprint, marks it `Completed`, records a
   `SPRINT_COMPLETED` workflow event, and moves the workflow to
   `SPRINT_COMPLETE`.
+
+## Completed Project Scope Extension
+
+When a project reaches `SPRINT_COMPLETE`, do not assume another normal Sprint is
+available. Ask AgileForge first:
+
+```sh
+agileforge workflow next --project-id "$PROJECT_ID"
+agileforge sprint candidates --project-id "$PROJECT_ID"
+```
+
+If `workflow next` returns `status: project_scope_extension_available` and
+Sprint candidates are empty, the next step is a scope/spec amendment, not
+`sprint generate`.
+
+Agent rule:
+
+- Do not force Sprint generation when there are no refined Sprint candidates.
+- Do not create a new AgileForge project for the same product just to add scope.
+- Do not pass Markdown, prose notes, route dumps, or raw source files to scope
+  extension commands.
+- Create a complete amended `agileforge.spec.v1` JSON file. The safest pattern
+  is to copy the accepted `specs/spec.json`, keep existing items unchanged, and
+  append additive requirements, constraints, data contracts, quality gates, or
+  non-goals for the new scope.
+- Validate first. Start only after validation succeeds and the user agrees to
+  mutate state.
+
+Read-only validation:
+
+```sh
+agileforge scope extension validate \
+  --project-id "$PROJECT_ID" \
+  --spec-file specs/scope_extension_<topic>.json \
+  --base-spec-version-id "$BASE_SPEC_VERSION_ID"
+```
+
+Guarded start:
+
+```sh
+agileforge scope extension start \
+  --project-id "$PROJECT_ID" \
+  --spec-file specs/scope_extension_<topic>.json \
+  --base-spec-version-id "$BASE_SPEC_VERSION_ID" \
+  --expected-state SPRINT_COMPLETE \
+  --idempotency-key "scope-extension-$PROJECT_ID-$(date +%Y%m%d%H%M%S)" \
+  --changed-by codex
+```
+
+After `scope extension start`, inspect `workflow next` and stop at the next
+manual checkpoint. If a pending amended authority is produced, review and accept
+or reject it explicitly before generating Backlog, Roadmap, Story, or Sprint
+work for the extension.
+
+## Agent Feedback Capture
+
+Agents using AgileForge should collect feedback when the CLI contract, routing,
+or docs make the next safe action unclear. Do not invent commands or bypass
+guarded flows. Capture a small feedback packet and report it to the user:
+
+- project id and caller repository path;
+- exact command attempted;
+- command `ok` value and first error code;
+- relevant scalar state from `workflow next`, `status`, or `command schema`;
+- expected next action;
+- actual next action or blocker;
+- missing command, confusing field, unclear remediation, or docs gap;
+- whether the gap blocked progress or only made the workflow harder.
+
+Keep feedback bounded. Do not paste raw JSON envelopes into chat or docs. Save
+large command responses to temporary files and summarize only selected scalar
+fields, counts, ids, guard values, and first error codes.
 
 ## JSON Envelope Contract
 
