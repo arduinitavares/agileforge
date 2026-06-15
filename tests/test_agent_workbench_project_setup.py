@@ -762,6 +762,14 @@ def test_project_create_request_validation_rules() -> None:
         )
 
 
+def test_greenfield_project_create_requires_spec_file() -> None:
+    with pytest.raises(ValidationError, match="spec_file is required"):
+        ProjectCreateRequest(
+            name="Greenfield Missing Spec",
+            idempotency_key="greenfield-missing-spec-001",
+        )
+
+
 def test_brownfield_project_create_rejects_spec_file() -> None:
     with pytest.raises(ValidationError):
         ProjectCreateRequest(
