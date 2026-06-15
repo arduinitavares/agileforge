@@ -882,6 +882,7 @@ class AgentWorkbenchApplication:
             "authority_compiling",
             "authority_pending_review",
             "authority_rejected",
+            "brownfield_curation_required",
             "failed",
         }:
             authority = (
@@ -2344,6 +2345,12 @@ def _setup_workflow_next(
             project_id=project_id,
             workflow=workflow,
         )
+    elif setup_status == "brownfield_curation_required":
+        _apply_brownfield_curation_routing(
+            data=data,
+            project_id=project_id,
+            workflow=workflow,
+        )
 
     data["source_fingerprint"] = canonical_hash(
         {
@@ -2399,6 +2406,44 @@ def _setup_workflow_next(
         ],
         "errors": [],
     }
+
+
+def _apply_brownfield_curation_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    workflow: dict[str, Any],
+) -> None:
+    """Publish brownfield curation setup actions without sprint planning."""
+    state = _envelope_data(workflow).get("state")
+    workflow_state = state if isinstance(state, dict) else {}
+    actions = [
+        dict(action)
+        for action in _as_list(workflow_state.get("setup_next_actions"))
+        if isinstance(action, dict) and isinstance(action.get("command"), str)
+    ]
+    if not actions:
+        actions = [
+            {
+                "command": "agileforge brownfield source import",
+                "args": {"project_id": project_id},
+                "reason": (
+                    "Planned Task 3 command to import brownfield source evidence "
+                    "before product-spec curation."
+                ),
+            },
+            {
+                "command": "agileforge brownfield scan",
+                "args": {"project_id": project_id},
+                "reason": (
+                    "Planned Task 3 command to scan brownfield source evidence "
+                    "before product-spec curation."
+                ),
+            },
+        ]
+
+    data["next_actions"] = actions
+    data["next_valid_commands"] = [str(action["command"]) for action in actions]
 
 
 def _apply_authority_pending_review_routing(

@@ -5559,6 +5559,67 @@ def test_workflow_next_routes_compile_required_to_authority_compile() -> None:
     assert data["next_actions"][0]["command"] == data["next_valid_commands"][0]
 
 
+def test_workflow_next_routes_brownfield_curation_to_setup_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brownfield shell setup must not fall through to sprint planning."""
+    next_actions = [
+        {
+            "command": "agileforge brownfield source import",
+            "args": {"project_id": PROJECT_ID},
+            "reason": (
+                "Planned Task 3 command to import brownfield source evidence before "
+                "product-spec curation."
+            ),
+        },
+        {
+            "command": "agileforge brownfield scan",
+            "args": {"project_id": PROJECT_ID},
+            "reason": (
+                "Planned Task 3 command to scan brownfield source evidence before "
+                "product-spec curation."
+            ),
+        },
+    ]
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "brownfield_curation_required",
+                "setup_next_actions": next_actions,
+            }
+        )
+    )
+
+    def forbidden_sprint_candidates(*, project_id: int) -> NoReturn:
+        del project_id
+        message = "workflow_next must not call sprint_candidates"
+        raise AssertionError(message)
+
+    def forbidden_context_pack(
+        *,
+        project_id: int,
+        phase: str = "overview",
+    ) -> NoReturn:
+        del project_id, phase
+        message = "workflow_next must not call context_pack"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(app, "sprint_candidates", forbidden_sprint_candidates)
+    monkeypatch.setattr(app, "context_pack", forbidden_context_pack)
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "brownfield_curation_required"
+    assert data["next_actions"] == next_actions
+    assert data["next_valid_commands"] == [
+        "agileforge brownfield source import",
+        "agileforge brownfield scan",
+    ]
+
+
 def test_workflow_next_routes_compile_required_without_spec_path_to_blocked() -> None:
     """Compile setup routing must not advertise unrunnable commands."""
     app = AgentWorkbenchApplication(
