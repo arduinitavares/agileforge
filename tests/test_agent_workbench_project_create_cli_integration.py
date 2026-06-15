@@ -392,6 +392,38 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
+def test_project_create_brownfield_cli_creates_shell(
+    engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    app = AgentWorkbenchApplication(project_setup_runner=runner)
+
+    create_rc = main(
+        [
+            "project",
+            "create",
+            "--setup-mode",
+            "brownfield",
+            "--name",
+            "Brownfield CLI Shell",
+            "--idempotency-key",
+            "brownfield-cli-shell-001",
+        ],
+        application=app,
+    )
+    payload = _captured_payload(capsys)
+
+    assert create_rc == 0
+    assert payload["ok"] is True
+    data = payload["data"]
+    assert data["setup_mode"] == "brownfield"
+    assert data["setup_status"] == "brownfield_curation_required"
+    assert data["spec_hash"] is None
+    assert data["next_actions"][0]["command"] == "agileforge brownfield source import"
+
+
 def test_project_create_then_authority_compile_cli_flow(
     engine: Engine,
     tmp_path: Path,

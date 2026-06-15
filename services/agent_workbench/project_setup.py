@@ -59,6 +59,9 @@ PROJECT_ALREADY_EXISTS = "PROJECT_ALREADY_EXISTS"
 AUTHORITY_COMPILE_FAILED = "authority_compile_failed"
 AUTHORITY_COMPILE_REQUIRED = "authority_compile_required"
 AUTHORITY_PENDING_REVIEW = "authority_pending_review"
+BROWNFIELD_CURATION_REQUIRED = "brownfield_curation_required"
+GREENFIELD_SETUP_MODE = "greenfield"
+BROWNFIELD_SETUP_MODE = "brownfield"
 MUTATION_RECOVERY_INVALID = "MUTATION_RECOVERY_INVALID"
 SPEC_COMPILE_FAILED = "SPEC_COMPILE_FAILED"
 WORKFLOW_SESSION_FAILED = "WORKFLOW_SESSION_FAILED"
@@ -87,7 +90,8 @@ class ProjectCreateRequest(BaseModel):
     """Validated request for `agileforge project create`."""
 
     name: str = Field(min_length=1)
-    spec_file: str = Field(min_length=1)
+    spec_file: str | None = Field(default=None, min_length=1)
+    setup_mode: str = GREENFIELD_SETUP_MODE
     idempotency_key: str | None = None
     dry_run: bool = False
     dry_run_id: str | None = None
@@ -96,6 +100,12 @@ class ProjectCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mutation_keys(self) -> ProjectCreateRequest:
+        if self.setup_mode not in {GREENFIELD_SETUP_MODE, BROWNFIELD_SETUP_MODE}:
+            raise ValueError("setup_mode must be greenfield or brownfield")
+        if self.setup_mode == GREENFIELD_SETUP_MODE and self.spec_file is None:
+            raise ValueError("spec_file is required for greenfield setup")
+        if self.setup_mode == BROWNFIELD_SETUP_MODE and self.spec_file is not None:
+            raise ValueError("spec_file is not allowed for brownfield setup")
         _validate_key_mode(
             dry_run=self.dry_run,
             idempotency_key=self.idempotency_key,
@@ -345,7 +355,10 @@ class ProjectSetupMutationRunner:
         return self._run_authority_compile(request)
 
     def _run_create(self, request: ProjectCreateRequest) -> dict[str, Any]:
-        resolved_spec_path = Path(request.spec_file).expanduser().resolve()
+        if request.setup_mode == BROWNFIELD_SETUP_MODE:
+            return self._run_brownfield_create(request)
+
+        resolved_spec_path = Path(_required(request.spec_file)).expanduser().resolve()
         spec_hash_result = _spec_hash_or_error(resolved_spec_path)
         if not isinstance(spec_hash_result, str):
             return spec_hash_result
@@ -391,7 +404,7 @@ class ProjectSetupMutationRunner:
         if loaded.response is not None:
             return loaded.response
         if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
-            return _recovery_required_response(loaded.ledger, request.spec_file)
+            return _recovery_required_response(loaded.ledger, _required(request.spec_file))
         if loaded.error_code is not None:
             return _error_for_ledger(loaded.error_code, loaded.ledger)
 
@@ -399,12 +412,117 @@ class ProjectSetupMutationRunner:
         lease_owner = _required(loaded.ledger.lease_owner)
         return self._run_setup_steps(
             request_name=request.name,
-            requested_spec_file=request.spec_file,
+            requested_spec_file=_required(request.spec_file),
             resolved_spec_path=resolved_spec_path,
             mutation_event_id=event_id,
             lease_owner=lease_owner,
             create_product=True,
         )
+
+    def _run_brownfield_create(self, request: ProjectCreateRequest) -> dict[str, Any]:
+        if request.dry_run:
+            return _success(
+                {
+                    "preview_available": True,
+                    "name": request.name,
+                    "setup_mode": BROWNFIELD_SETUP_MODE,
+                }
+            )
+
+        existing_key_row = self._find_ledger(
+            command=PROJECT_CREATE_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+        )
+        if existing_key_row is None and self._product_name_exists(request.name):
+            return _error(
+                PROJECT_ALREADY_EXISTS,
+                details={"name": request.name},
+                remediation=["Choose a different project name."],
+            )
+
+        loaded = self._ledger.create_or_load(
+            command=PROJECT_CREATE_COMMAND,
+            idempotency_key=_required(request.idempotency_key),
+            request_hash=_brownfield_create_request_hash(request),
+            project_id=None,
+            correlation_id=_correlation_id(request.correlation_id),
+            changed_by=request.changed_by,
+            lease_owner=_lease_owner(
+                command=PROJECT_CREATE_COMMAND,
+                idempotency_key=_required(request.idempotency_key),
+                correlation_id=request.correlation_id,
+            ),
+            now=_now(),
+            lease_seconds=self._lease_seconds,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
+            return _recovery_required_response(loaded.ledger, BROWNFIELD_SETUP_MODE)
+        if loaded.error_code is not None:
+            return _error_for_ledger(loaded.error_code, loaded.ledger)
+
+        mutation_event_id = _event_id(loaded.ledger)
+        lease_owner = _required(loaded.ledger.lease_owner)
+        completed_steps = self._completed_steps(mutation_event_id)
+        project_id = self._project_id_for_event(mutation_event_id)
+        if "product_created" not in completed_steps:
+            project_id = self._create_product_and_record_progress(
+                name=request.name,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+            )
+        if project_id is None:
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT.value,
+                details={"mutation_event_id": mutation_event_id},
+                remediation=["Re-read mutation state before retrying recovery."],
+            )
+
+        workflow_result = self._ensure_brownfield_shell_workflow(
+            project_id=project_id,
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+        )
+        if not workflow_result.get("ok"):
+            marked = self._mark_create_recovery_required(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                project_id=project_id,
+                code=WORKFLOW_SESSION_FAILED,
+                spec_file=BROWNFIELD_SETUP_MODE,
+                safe_to_auto_resume=True,
+            )
+            if isinstance(marked, dict):
+                return marked
+            return _recovery_required_response(marked, BROWNFIELD_SETUP_MODE)
+
+        data = {
+            "project_id": project_id,
+            "name": self._project_name(project_id),
+            "setup_mode": BROWNFIELD_SETUP_MODE,
+            "resolved_spec_path": None,
+            "spec_hash": None,
+            "spec_version_id": None,
+            "setup_status": BROWNFIELD_CURATION_REQUIRED,
+            "fsm_state": "SETUP_REQUIRED",
+            "mutation_event_id": mutation_event_id,
+            "next_actions": _brownfield_next_actions(project_id),
+        }
+        response = _success(data)
+        if not self._ledger.finalize_success(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            after=data,
+            response=response,
+            now=_now(),
+        ):
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT.value,
+                details={"mutation_event_id": mutation_event_id},
+                remediation=["Re-read mutation state before retrying recovery."],
+            )
+        return response
 
     def _run_retry(self, request: ProjectSetupRetryRequest) -> dict[str, Any]:
         resolved_spec_path = Path(request.spec_file).expanduser().resolve()
@@ -1574,6 +1692,90 @@ class ProjectSetupMutationRunner:
             return {"ok": False, "error_code": MUTATION_RECOVERY_REQUIRED}
         return result
 
+    def _ensure_brownfield_shell_workflow(
+        self,
+        *,
+        project_id: int,
+        mutation_event_id: int,
+        lease_owner: str,
+    ) -> dict[str, Any]:
+        completed_steps = self._completed_steps(mutation_event_id)
+        if "workflow_session_initialized" in completed_steps:
+            try:
+                state = self._workflow.get_session_status(str(project_id))
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "error_code": WORKFLOW_SESSION_FAILED,
+                    "error": str(exc),
+                }
+            if _workflow_has_required_brownfield_shell_state(
+                state,
+                project_id=project_id,
+            ):
+                return {"ok": True, "state": state}
+
+        session_id = str(project_id)
+        try:
+            current = self._workflow.get_session_status(session_id)
+            if current == {}:
+                if not self._ledger.require_active_owner(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    now=_now(),
+                    lease_seconds=self._lease_seconds,
+                ):
+                    return {"ok": False, "error_code": MUTATION_IN_PROGRESS}
+                self._workflow.initialize_session(session_id=session_id)
+                current = self._workflow.get_session_status(session_id)
+            if not self._ledger.mark_step_complete(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                step="workflow_session_created",
+                next_step="workflow_session_created",
+                now=_now(),
+            ):
+                return {"ok": False, "error_code": MUTATION_RECOVERY_REQUIRED}
+
+            required_state = _brownfield_shell_workflow_state(project_id)
+            merged = {**current, **required_state}
+            if current != merged:
+                if not self._ledger.require_active_owner(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    now=_now(),
+                    lease_seconds=self._lease_seconds,
+                ):
+                    return {"ok": False, "error_code": MUTATION_IN_PROGRESS}
+                self._workflow.update_session_status(session_id, required_state)
+            if not self._ledger.mark_step_complete(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                step="workflow_session_status_written",
+                next_step="workflow_session_status_written",
+                now=_now(),
+            ):
+                return {"ok": False, "error_code": MUTATION_RECOVERY_REQUIRED}
+            if not self._ledger.mark_step_complete(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                step="workflow_session_initialized",
+                next_step="done",
+                now=_now(),
+            ):
+                return {"ok": False, "error_code": MUTATION_RECOVERY_REQUIRED}
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "state": self._workflow.get_session_status(session_id),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error_code": WORKFLOW_SESSION_FAILED,
+                "error": str(exc),
+            }
+
     def _validate_original_recovery_row(
         self,
         request: ProjectSetupRetryRequest,
@@ -2108,6 +2310,17 @@ def _create_request_hash(
     )
 
 
+def _brownfield_create_request_hash(request: ProjectCreateRequest) -> str:
+    return canonical_hash(
+        {
+            "command": PROJECT_CREATE_COMMAND,
+            "name": request.name,
+            "setup_mode": BROWNFIELD_SETUP_MODE,
+            "changed_by": request.changed_by,
+        }
+    )
+
+
 def _retry_context_fingerprint(
     *,
     project_id: int,
@@ -2190,6 +2403,30 @@ def _workflow_has_required_setup_state(
         and state.get("setup_spec_hash") == spec_hash
         and state.get("setup_spec_version_id") == spec_version_id
         and state.get("setup_next_actions") == [expected_action]
+    )
+
+
+def _brownfield_shell_workflow_state(project_id: int) -> dict[str, Any]:
+    return {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_mode": BROWNFIELD_SETUP_MODE,
+        "setup_status": BROWNFIELD_CURATION_REQUIRED,
+        "setup_error": None,
+        "setup_spec_file_path": None,
+        "setup_spec_hash": None,
+        "setup_spec_version_id": None,
+        "setup_next_actions": _brownfield_next_actions(project_id),
+    }
+
+
+def _workflow_has_required_brownfield_shell_state(
+    state: dict[str, Any],
+    *,
+    project_id: int,
+) -> bool:
+    return all(
+        state.get(key) == value
+        for key, value in _brownfield_shell_workflow_state(project_id).items()
     )
 
 
@@ -2419,6 +2656,29 @@ def _authority_compile_action(
         },
         "reason": "Compile pending authority before authority review.",
     }
+
+
+def _brownfield_source_import_action(project_id: int) -> dict[str, Any]:
+    return {
+        "command": "agileforge brownfield source import",
+        "args": {"project_id": project_id},
+        "reason": "Import brownfield source evidence before product-spec curation.",
+    }
+
+
+def _brownfield_scan_action(project_id: int) -> dict[str, Any]:
+    return {
+        "command": "agileforge brownfield scan",
+        "args": {"project_id": project_id},
+        "reason": "Scan brownfield source evidence before product-spec curation.",
+    }
+
+
+def _brownfield_next_actions(project_id: int) -> list[dict[str, Any]]:
+    return [
+        _brownfield_source_import_action(project_id),
+        _brownfield_scan_action(project_id),
+    ]
 
 
 def _cleared_authority_compile_failure_metadata() -> dict[str, None]:

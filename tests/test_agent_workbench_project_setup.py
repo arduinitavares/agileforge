@@ -69,6 +69,14 @@ def _expected_authority_review_action(project_id: int) -> dict[str, Any]:
     }
 
 
+def _expected_brownfield_source_import_action(project_id: int) -> dict[str, Any]:
+    return {
+        "command": "agileforge brownfield source import",
+        "args": {"project_id": project_id},
+        "reason": "Import brownfield source evidence before product-spec curation.",
+    }
+
+
 def _assert_authority_compile_action(
     action: dict[str, Any],
     *,
@@ -754,6 +762,16 @@ def test_project_create_request_validation_rules() -> None:
         )
 
 
+def test_brownfield_project_create_rejects_spec_file() -> None:
+    with pytest.raises(ValidationError):
+        ProjectCreateRequest(
+            name="Brownfield Project",
+            setup_mode="brownfield",
+            spec_file="specs/spec.json",
+            idempotency_key="brownfield-create-001",
+        )
+
+
 def test_authority_compile_request_validation_rules() -> None:
     project_id = 1
     spec_version_id = 2
@@ -871,6 +889,45 @@ def test_project_create_success_registers_spec_without_compiling_authority(
         spec_hash=data["spec_hash"],
         spec_version_id=data["spec_version_id"],
     )
+
+
+def test_brownfield_project_create_writes_shell_without_spec_registry(
+    engine: Engine,
+) -> None:
+    ensure_schema_current(engine)
+    fake_workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Brownfield Shell",
+            setup_mode="brownfield",
+            idempotency_key="brownfield-shell-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["name"] == "Brownfield Shell"
+    assert data["setup_mode"] == "brownfield"
+    assert data["setup_status"] == "brownfield_curation_required"
+    assert data["fsm_state"] == "SETUP_REQUIRED"
+    assert data["spec_hash"] is None
+    assert data["spec_version_id"] is None
+    assert data["next_actions"][0] == _expected_brownfield_source_import_action(
+        data["project_id"]
+    )
+
+    workflow_state = fake_workflow.sessions[str(data["project_id"])]
+    assert workflow_state["setup_status"] == "brownfield_curation_required"
+    assert workflow_state["setup_spec_file_path"] is None
+
+    with Session(engine) as session:
+        projects = session.exec(select(Product)).all()
+        assert len(projects) == 1
+        assert projects[0].name == "Brownfield Shell"
+        assert session.exec(select(SpecRegistry)).all() == []
 
 
 def test_authority_compile_succeeds_from_compile_required(

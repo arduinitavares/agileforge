@@ -1091,7 +1091,8 @@ class AgentWorkbenchApplication:
         self,
         *,
         name: str,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -1102,6 +1103,7 @@ class AgentWorkbenchApplication:
         request = ProjectCreateRequest(
             name=name,
             spec_file=spec_file,
+            setup_mode=setup_mode,
             idempotency_key=idempotency_key,
             dry_run=dry_run,
             dry_run_id=dry_run_id,

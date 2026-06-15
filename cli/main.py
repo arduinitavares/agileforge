@@ -193,7 +193,8 @@ class _Application(Protocol):
         self,
         *,
         name: str,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -1172,7 +1173,12 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     project_show.set_defaults(command_handler=_project_show)
     project_create = project_sub.add_parser("create", help="Create a project.")
     project_create.add_argument("--name", required=True)
-    project_create.add_argument("--spec-file", required=True)
+    project_create.add_argument("--spec-file")
+    project_create.add_argument(
+        "--setup-mode",
+        choices=("greenfield", "brownfield"),
+        default="greenfield",
+    )
     project_create.add_argument("--idempotency-key")
     project_create.add_argument("--dry-run", action="store_true")
     project_create.add_argument("--dry-run-id")
@@ -2172,6 +2178,7 @@ def _project_create(
     return command, application.project_create(
         name=args.name,
         spec_file=args.spec_file,
+        setup_mode=args.setup_mode,
         idempotency_key=args.idempotency_key,
         dry_run=args.dry_run,
         dry_run_id=args.dry_run_id,
