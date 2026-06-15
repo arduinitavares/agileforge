@@ -88,7 +88,7 @@ class BrownfieldSpecDraftAttempt(SQLModel, table=True):
     attempt_id: str
     artifact_fingerprint: str
     origin: str = Field(index=True)
-    status: str = Field(index=True)
+    status: str = Field(default="complete", index=True)
     source_fingerprint: str = Field(index=True)
     scan_attempt_id: str = Field(index=True)
     scan_fingerprint: str = Field(index=True)
@@ -134,6 +134,7 @@ class BrownfieldSpecApproval(SQLModel, table=True):
     mutation_event_id: int | None = Field(default=None, index=True)
     status: str = Field(default="started")
     error_metadata_json: str = Field(default="[]", sa_type=Text)
+    tool_version: str = Field(default=_TOOL_VERSION, index=True)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         nullable=False,
