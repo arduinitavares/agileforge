@@ -438,6 +438,24 @@ _BROWNFIELD_ERROR_REGISTRY: dict[str, ErrorMetadata] = {
         retryable=False,
         description="Brownfield source attempt was not found.",
     ),
+    "BROWNFIELD_SCAN_NOT_FOUND": ErrorMetadata(
+        code="BROWNFIELD_SCAN_NOT_FOUND",
+        default_exit_code=4,
+        retryable=False,
+        description="Brownfield scan attempt was not found.",
+    ),
+    "BROWNFIELD_DRAFT_NOT_FOUND": ErrorMetadata(
+        code="BROWNFIELD_DRAFT_NOT_FOUND",
+        default_exit_code=4,
+        retryable=False,
+        description="Brownfield draft attempt was not found.",
+    ),
+    "BROWNFIELD_APPROVAL_CHAIN_MISMATCH": ErrorMetadata(
+        code="BROWNFIELD_APPROVAL_CHAIN_MISMATCH",
+        default_exit_code=3,
+        retryable=True,
+        description="Brownfield approval chain does not match current source and scan.",
+    ),
 }
 
 

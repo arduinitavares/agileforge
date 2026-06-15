@@ -14,26 +14,65 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session, select
 
-from models.brownfield import BrownfieldScanAttempt, BrownfieldSourceArtifact
+from models.brownfield import (
+    BrownfieldScanAttempt,
+    BrownfieldSourceArtifact,
+    BrownfieldSpecDraftAttempt,
+)
 from models.core import Product
 from models.db import get_engine
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import MutationLedgerRepository
+from services.specs.profile_content import (
+    SpecContentNormalizationError,
+    normalize_spec_content_for_registry,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 BROWNFIELD_SOURCE_IMPORT_COMMAND = "agileforge brownfield source import"
 BROWNFIELD_SCAN_COMMAND = "agileforge brownfield scan"
+BROWNFIELD_SPEC_DRAFT_COMMAND = "agileforge brownfield spec draft"
+BROWNFIELD_SPEC_IMPORT_COMMAND = "agileforge brownfield spec import"
 BROWNFIELD_COMMAND_VERSION = "brownfield-curation.v1"
 BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
 BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
 BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
+BROWNFIELD_SCAN_NOT_FOUND = "BROWNFIELD_SCAN_NOT_FOUND"
+BROWNFIELD_DRAFT_NOT_FOUND = "BROWNFIELD_DRAFT_NOT_FOUND"
+BROWNFIELD_APPROVAL_CHAIN_MISMATCH = "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
+BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY = "BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY"
 NO_SOURCE_FINGERPRINT = "sha256:no-source"
 MAX_SCAN_FILE_BYTES = 200_000
 MAX_SCAN_MANIFEST_FILES = 1_000
 GIT_BINARY = "git"
+PRODUCT_ITEM_TYPES = {
+    "GOAL",
+    "REQ",
+    "QUALITY",
+    "CONSTRAINT",
+    "INTERFACE",
+    "DATA",
+    "DECISION",
+    "NON_GOAL",
+    "RISK",
+    "OPEN_QUESTION",
+}
+NORMATIVE_ITEM_TYPES = {"REQ", "QUALITY", "CONSTRAINT", "INTERFACE", "DATA"}
+IMPLEMENTATION_TERMS = {
+    "route",
+    "endpoint",
+    "table",
+    "column",
+    "model",
+    "serializer",
+    "controller",
+    "worker",
+    "queue",
+    "framework",
+}
 
 
 def _now() -> datetime:
@@ -182,6 +221,96 @@ def _scan_file_skip_reason(
             "size_bytes": file_size,
         }
     return None
+
+
+def _typed_item(line: str, index: int) -> dict[str, Any] | None:
+    """Parse a product-level typed source line into a spec item."""
+    prefix, separator, body = line.partition(":")
+    item_type = prefix.strip().upper()
+    statement = body.strip()
+    if separator != ":" or item_type not in PRODUCT_ITEM_TYPES or not statement:
+        return None
+    item: dict[str, Any] = {
+        "id": f"{item_type}.brownfield.{index:03d}",
+        "type": item_type,
+        "status": "proposed",
+        "title": statement[:80],
+        "statement": statement,
+        "verification": "manual-review",
+        "acceptance": [statement],
+    }
+    if item_type in NORMATIVE_ITEM_TYPES:
+        item["level"] = "MUST"
+    return item
+
+
+def _candidate_spec_from_source(
+    *,
+    project_id: int,
+    source_text: str,
+    user_input: str | None,
+) -> tuple[dict[str, Any], str, list[str]]:
+    """Build a deterministic candidate agileforge.spec.v1 artifact."""
+    warnings: list[str] = []
+    items = [
+        item
+        for index, line in enumerate(source_text.splitlines(), start=1)
+        if (item := _typed_item(line, index)) is not None
+    ]
+    implementation_hits = sum(
+        source_text.lower().count(term) for term in IMPLEMENTATION_TERMS
+    )
+    if implementation_hits >= max(3, len(items) * 2):
+        warnings.append(BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY)
+    if not items:
+        items = [
+            {
+                "id": "OPEN_QUESTION.brownfield.001",
+                "type": "OPEN_QUESTION",
+                "status": "proposed",
+                "title": "Curated product requirements needed",
+                "statement": (
+                    "Human review must provide product-level requirements before "
+                    "approval."
+                ),
+                "verification": "manual-review",
+                "acceptance": ["A human imports a curated agileforge.spec.v1 file."],
+            }
+        ]
+
+    spec = {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": f"SPEC.brownfield.{project_id}",
+        "title": f"Brownfield Curated Spec {project_id}",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-06-15",
+        "updated_at": "2026-06-15",
+        "summary": user_input or "Curated brownfield product specification.",
+        "problem_statement": (
+            "Brownfield setup needs reviewed product requirements before authority "
+            "compilation."
+        ),
+        "items": items,
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
+    status = (
+        "complete"
+        if any(item["type"] != "OPEN_QUESTION" for item in items)
+        else "incomplete"
+    )
+    return spec, status, warnings
+
+
+def _normalization_error_response(exc: SpecContentNormalizationError) -> dict[str, Any]:
+    """Return a workbench error response for invalid curated spec content."""
+    return _error(exc.error_code, details={"message": str(exc)})
 
 
 class BrownfieldCurationRunner:
@@ -419,6 +548,314 @@ class BrownfieldCurationRunner:
                     implementation_facts_json=_json_dump(facts),
                     request_hash=request_hash,
                     warning_metadata_json=_json_dump(skip_warnings),
+                    tool_version=BROWNFIELD_COMMAND_VERSION,
+                )
+            )
+            session.commit()
+
+        response = _success(data)
+        self._ledger.finalize_success(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            after=data,
+            response=response,
+            now=_now(),
+        )
+        return response
+
+    def spec_draft(
+        self,
+        *,
+        project_id: int,
+        scan_attempt_id: str,
+        user_input: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Create a deterministic generated curated-spec draft candidate."""
+        if not self._project_exists(project_id):
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": project_id},
+            )
+
+        with Session(self._engine) as session:
+            scan = session.exec(
+                select(BrownfieldScanAttempt).where(
+                    BrownfieldScanAttempt.project_id == project_id,
+                    BrownfieldScanAttempt.attempt_id == scan_attempt_id,
+                    BrownfieldScanAttempt.status == "complete",
+                )
+            ).first()
+            if scan is None:
+                return _error(
+                    BROWNFIELD_SCAN_NOT_FOUND,
+                    details={
+                        "project_id": project_id,
+                        "scan_attempt_id": scan_attempt_id,
+                    },
+                )
+            scan_fingerprint = scan.artifact_fingerprint
+            source_fingerprint = scan.source_fingerprint
+            source_attempt_id = scan.source_attempt_id
+            source_text = ""
+            if source_attempt_id is not None:
+                source = session.exec(
+                    select(BrownfieldSourceArtifact).where(
+                        BrownfieldSourceArtifact.project_id == project_id,
+                        BrownfieldSourceArtifact.attempt_id == source_attempt_id,
+                        BrownfieldSourceArtifact.status == "complete",
+                    )
+                ).first()
+                if source is not None and source.content_preview:
+                    source_text = source.content_preview
+
+        spec, draft_status, warning_codes = _candidate_spec_from_source(
+            project_id=project_id,
+            source_text=source_text,
+            user_input=user_input,
+        )
+        try:
+            normalized = normalize_spec_content_for_registry(_json_dump(spec))
+        except SpecContentNormalizationError as exc:
+            return _normalization_error_response(exc)
+
+        request_hash = canonical_hash(
+            {
+                "command": BROWNFIELD_SPEC_DRAFT_COMMAND,
+                "project_id": project_id,
+                "scan_attempt_id": scan_attempt_id,
+                "scan_fingerprint": scan_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "user_input": user_input,
+                "changed_by": changed_by,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        lease_owner = f"brownfield-draft:{idempotency_key}"
+        loaded = self._ledger.create_or_load(
+            command=BROWNFIELD_SPEC_DRAFT_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=correlation_id or idempotency_key,
+            changed_by=changed_by,
+            lease_owner=lease_owner,
+            now=_now(),
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code is not None:
+            return _error(
+                loaded.error_code,
+                details={"idempotency_key": idempotency_key},
+            )
+
+        mutation_event_id = loaded.ledger.mutation_event_id
+        if mutation_event_id is None:
+            message = "Brownfield draft mutation event id was not persisted."
+            raise RuntimeError(message)
+        attempt_id = f"draft-{mutation_event_id}"
+        artifact_fingerprint = canonical_hash(
+            {
+                "project_id": project_id,
+                "attempt_id": attempt_id,
+                "origin": "generated",
+                "status": draft_status,
+                "scan_fingerprint": scan_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "spec_hash": normalized.spec_hash,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        data = {
+            "project_id": project_id,
+            "attempt_id": attempt_id,
+            "artifact_fingerprint": artifact_fingerprint,
+            "origin": "generated",
+            "status": draft_status,
+            "scan_attempt_id": scan_attempt_id,
+            "scan_fingerprint": scan_fingerprint,
+            "source_fingerprint": source_fingerprint,
+            "spec_hash": normalized.spec_hash,
+            "warnings": warning_codes,
+            "mutation_event_id": mutation_event_id,
+        }
+        with Session(self._engine) as session:
+            session.add(
+                BrownfieldSpecDraftAttempt(
+                    project_id=project_id,
+                    attempt_id=attempt_id,
+                    artifact_fingerprint=artifact_fingerprint,
+                    origin="generated",
+                    status=draft_status,
+                    source_fingerprint=source_fingerprint,
+                    scan_attempt_id=scan_attempt_id,
+                    scan_fingerprint=scan_fingerprint,
+                    spec_hash=normalized.spec_hash,
+                    curated_spec_json=normalized.content,
+                    request_hash=request_hash,
+                    user_input_hash=canonical_hash({"user_input": user_input}),
+                    warning_metadata_json=_json_dump(warning_codes),
+                    tool_version=BROWNFIELD_COMMAND_VERSION,
+                )
+            )
+            session.commit()
+
+        response = _success(data)
+        response["warnings"] = [{"code": code} for code in warning_codes]
+        self._ledger.finalize_success(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            after=data,
+            response=response,
+            now=_now(),
+        )
+        return response
+
+    def spec_import(  # noqa: PLR0911
+        self,
+        *,
+        project_id: int,
+        curated_spec_file: str,
+        expected_scan_fingerprint: str,
+        parent_draft_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a human-imported curated spec candidate."""
+        if not self._project_exists(project_id):
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": project_id},
+            )
+        resolved = Path(curated_spec_file).expanduser().resolve()
+        if not resolved.is_file():
+            return _error(
+                ErrorCode.SPEC_FILE_NOT_FOUND,
+                details={"curated_spec_file": str(resolved)},
+            )
+        try:
+            normalized = normalize_spec_content_for_registry(
+                resolved.read_text(encoding="utf-8")
+            )
+        except SpecContentNormalizationError as exc:
+            return _normalization_error_response(exc)
+
+        with Session(self._engine) as session:
+            scan = session.exec(
+                select(BrownfieldScanAttempt).where(
+                    BrownfieldScanAttempt.project_id == project_id,
+                    BrownfieldScanAttempt.artifact_fingerprint
+                    == expected_scan_fingerprint,
+                    BrownfieldScanAttempt.status == "complete",
+                )
+            ).first()
+            if scan is None:
+                return _error(
+                    BROWNFIELD_APPROVAL_CHAIN_MISMATCH,
+                    details={
+                        "project_id": project_id,
+                        "expected_scan_fingerprint": expected_scan_fingerprint,
+                    },
+                )
+            scan_attempt_id = scan.attempt_id
+            scan_fingerprint = scan.artifact_fingerprint
+            source_fingerprint = scan.source_fingerprint
+            if parent_draft_attempt_id is not None:
+                parent = session.exec(
+                    select(BrownfieldSpecDraftAttempt).where(
+                        BrownfieldSpecDraftAttempt.project_id == project_id,
+                        BrownfieldSpecDraftAttempt.attempt_id
+                        == parent_draft_attempt_id,
+                    )
+                ).first()
+                if parent is None:
+                    return _error(
+                        BROWNFIELD_DRAFT_NOT_FOUND,
+                        details={
+                            "project_id": project_id,
+                            "parent_draft_attempt_id": parent_draft_attempt_id,
+                        },
+                    )
+
+        request_hash = canonical_hash(
+            {
+                "command": BROWNFIELD_SPEC_IMPORT_COMMAND,
+                "project_id": project_id,
+                "curated_spec_file": str(resolved),
+                "spec_hash": normalized.spec_hash,
+                "expected_scan_fingerprint": expected_scan_fingerprint,
+                "parent_draft_attempt_id": parent_draft_attempt_id,
+                "changed_by": changed_by,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        lease_owner = f"brownfield-import:{idempotency_key}"
+        loaded = self._ledger.create_or_load(
+            command=BROWNFIELD_SPEC_IMPORT_COMMAND,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=correlation_id or idempotency_key,
+            changed_by=changed_by,
+            lease_owner=lease_owner,
+            now=_now(),
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code is not None:
+            return _error(
+                loaded.error_code,
+                details={"idempotency_key": idempotency_key},
+            )
+
+        mutation_event_id = loaded.ledger.mutation_event_id
+        if mutation_event_id is None:
+            message = "Brownfield import mutation event id was not persisted."
+            raise RuntimeError(message)
+        attempt_id = f"draft-import-{mutation_event_id}"
+        artifact_fingerprint = canonical_hash(
+            {
+                "project_id": project_id,
+                "attempt_id": attempt_id,
+                "origin": "human_import",
+                "scan_fingerprint": scan_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "spec_hash": normalized.spec_hash,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        data = {
+            "project_id": project_id,
+            "attempt_id": attempt_id,
+            "artifact_fingerprint": artifact_fingerprint,
+            "origin": "human_import",
+            "status": "complete",
+            "scan_attempt_id": scan_attempt_id,
+            "scan_fingerprint": scan_fingerprint,
+            "source_fingerprint": source_fingerprint,
+            "spec_hash": normalized.spec_hash,
+            "mutation_event_id": mutation_event_id,
+        }
+        with Session(self._engine) as session:
+            session.add(
+                BrownfieldSpecDraftAttempt(
+                    project_id=project_id,
+                    attempt_id=attempt_id,
+                    artifact_fingerprint=artifact_fingerprint,
+                    origin="human_import",
+                    status="complete",
+                    source_fingerprint=source_fingerprint,
+                    scan_attempt_id=scan_attempt_id,
+                    scan_fingerprint=scan_fingerprint,
+                    parent_draft_attempt_id=parent_draft_attempt_id,
+                    spec_hash=normalized.spec_hash,
+                    curated_spec_json=normalized.content,
+                    imported_file_path=str(resolved),
+                    request_hash=request_hash,
                     tool_version=BROWNFIELD_COMMAND_VERSION,
                 )
             )

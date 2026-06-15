@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING, Any
 from sqlmodel import Session, select
 
 from cli.main import main
-from models.brownfield import BrownfieldScanAttempt, BrownfieldSourceArtifact
+from models.brownfield import (
+    BrownfieldScanAttempt,
+    BrownfieldSourceArtifact,
+    BrownfieldSpecDraftAttempt,
+)
 from models.core import Product
-from models.specs import SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.brownfield_curation import BrownfieldCurationRunner
 from services.agent_workbench.error_codes import ErrorCode
@@ -39,6 +43,46 @@ def _stdout_payload(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
     payload = json.loads(captured.out)
     assert isinstance(payload, dict)
     return payload
+
+
+def _structured_spec_payload(*, title: str = "Curated Spec") -> dict[str, object]:
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.curated",
+        "title": title,
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-06-15",
+        "updated_at": "2026-06-15",
+        "summary": "Curated brownfield product specification.",
+        "problem_statement": (
+            "Operators need a reviewed product spec before authority compilation."
+        ),
+        "items": [
+            {
+                "id": "REQ.curated.001",
+                "type": "REQ",
+                "status": "proposed",
+                "level": "MUST",
+                "title": "Reviewed curated spec",
+                "statement": (
+                    "The system MUST compile authority only from reviewed "
+                    "curated specs."
+                ),
+                "verification": "system-test",
+                "acceptance": [
+                    "Authority compile uses the managed approved spec path."
+                ],
+            }
+        ],
+        "relations": [],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {
+            "markdown_profile": "agileforge.spec_markdown.v1",
+            "rendered_markdown_sha256": None,
+        },
+    }
 
 
 class _FakeBrownfieldRunner:
@@ -358,6 +402,223 @@ def test_scan_manifest_skips_git_env_secret_and_large_files(
             "size_bytes": len("print('safe')\n"),
         }
     ]
+
+
+def test_spec_draft_from_typed_source_creates_reusable_candidate(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine)
+    source = tmp_path / "notes.md"
+    source.write_text(
+        "REQ: The system MUST reconcile invoices.\n"
+        "DECISION: Operators approve imported invoices before posting.\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "routes.py").write_text("POST /invoices/import\n", encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+    imported = runner.source_import(
+        project_id=project_id,
+        source_file=str(source),
+        source_kind="notes",
+        idempotency_key="draft-source-001",
+        changed_by="agent",
+    )
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        source_attempt_id=imported["data"]["attempt_id"],
+        idempotency_key="draft-scan-001",
+        changed_by="agent",
+    )
+
+    result = runner.spec_draft(
+        project_id=project_id,
+        scan_attempt_id=scan["data"]["attempt_id"],
+        user_input="prioritize operator-visible behavior",
+        idempotency_key="draft-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["attempt_id"].startswith("draft-")
+    assert data["status"] == "complete"
+    assert data["origin"] == "generated"
+    assert data["spec_hash"].startswith("sha256:")
+    assert data["artifact_fingerprint"].startswith("sha256:")
+    assert data["scan_fingerprint"] == scan["data"]["artifact_fingerprint"]
+    assert data["source_fingerprint"] == imported["data"]["artifact_fingerprint"]
+    with Session(engine) as session:
+        drafts = session.exec(select(BrownfieldSpecDraftAttempt)).all()
+        assert len(drafts) == 1
+        assert drafts[0].origin == "generated"
+        assert drafts[0].curated_spec_json is not None
+        assert json.loads(drafts[0].curated_spec_json)["schema_version"] == (
+            "agileforge.spec.v1"
+        )
+        assert session.exec(select(SpecRegistry)).all() == []
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_spec_draft_replays_same_idempotency_key(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine)
+    source = tmp_path / "notes.md"
+    source.write_text("REQ: The system MUST reconcile invoices.\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+    imported = runner.source_import(
+        project_id=project_id,
+        source_file=str(source),
+        source_kind="notes",
+        idempotency_key="draft-replay-source-001",
+        changed_by="agent",
+    )
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        source_attempt_id=imported["data"]["attempt_id"],
+        idempotency_key="draft-replay-scan-001",
+        changed_by="agent",
+    )
+
+    first = runner.spec_draft(
+        project_id=project_id,
+        scan_attempt_id=scan["data"]["attempt_id"],
+        idempotency_key="draft-replay-001",
+        changed_by="agent",
+    )
+    replay = runner.spec_draft(
+        project_id=project_id,
+        scan_attempt_id=scan["data"]["attempt_id"],
+        idempotency_key="draft-replay-001",
+        changed_by="agent",
+    )
+
+    assert replay == first
+    with Session(engine) as session:
+        assert len(session.exec(select(BrownfieldSpecDraftAttempt)).all()) == 1
+
+
+def test_spec_draft_rejects_missing_scan(
+    engine: Engine,
+) -> None:
+    project_id = _project(engine)
+    runner = BrownfieldCurationRunner(engine=engine)
+
+    result = runner.spec_draft(
+        project_id=project_id,
+        scan_attempt_id="scan-missing",
+        idempotency_key="draft-missing-scan-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "BROWNFIELD_SCAN_NOT_FOUND"
+
+
+def test_spec_import_records_human_imported_candidate(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine, name="Human Import Product")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        source_attempt_id=None,
+        idempotency_key="import-scan-001",
+        changed_by="agent",
+    )
+    curated = tmp_path / "curated.json"
+    curated.write_text(
+        json.dumps(_structured_spec_payload(title="Human Curated Spec")),
+        encoding="utf-8",
+    )
+
+    result = runner.spec_import(
+        project_id=project_id,
+        curated_spec_file=str(curated),
+        expected_scan_fingerprint=scan["data"]["artifact_fingerprint"],
+        parent_draft_attempt_id=None,
+        idempotency_key="import-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["origin"] == "human_import"
+    assert data["status"] == "complete"
+    assert data["spec_hash"].startswith("sha256:")
+    with Session(engine) as session:
+        drafts = session.exec(select(BrownfieldSpecDraftAttempt)).all()
+        assert len(drafts) == 1
+        assert drafts[0].origin == "human_import"
+        assert drafts[0].imported_file_path == str(curated.resolve())
+        assert session.exec(select(SpecRegistry)).all() == []
+        assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
+def test_spec_import_rejects_missing_parent_draft(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    curated = tmp_path / "curated.json"
+    curated.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        idempotency_key="import-parent-scan-001",
+        changed_by="agent",
+    )
+
+    result = runner.spec_import(
+        project_id=project_id,
+        curated_spec_file=str(curated),
+        expected_scan_fingerprint=scan["data"]["artifact_fingerprint"],
+        parent_draft_attempt_id="draft-missing",
+        idempotency_key="import-missing-parent-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "BROWNFIELD_DRAFT_NOT_FOUND"
+
+
+def test_spec_import_rejects_scan_fingerprint_mismatch(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    project_id = _project(engine)
+    curated = tmp_path / "curated.json"
+    curated.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+    runner = BrownfieldCurationRunner(engine=engine)
+
+    result = runner.spec_import(
+        project_id=project_id,
+        curated_spec_file=str(curated),
+        expected_scan_fingerprint="sha256:wrong",
+        idempotency_key="import-chain-mismatch-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
 
 
 def test_application_delegates_brownfield_source_and_scan() -> None:
