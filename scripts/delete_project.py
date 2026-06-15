@@ -28,6 +28,26 @@ def _delete_by_ids(cur: sqlite3.Cursor, query: str, ids: list[int]) -> None:
     cur.executemany(query, ((record_id,) for record_id in ids))
 
 
+def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    return cur.fetchone() is not None
+
+
+def _delete_project_rows_if_table_exists(
+    cur: sqlite3.Cursor,
+    table_name: str,
+    delete_query: str,
+    product_id: int,
+) -> None:
+    if not _table_exists(cur, table_name):
+        return
+    emit(f"  - Deleting {table_name}...")
+    cur.execute(delete_query, (product_id,))
+
+
 def resolve_db_path(explicit_path: str | None = None) -> str:
     """Resolve a database path from CLI input or required runtime config."""
     return resolve_database_target(
@@ -180,25 +200,32 @@ def delete_project(product_id: int, db_path: str) -> None:  # noqa: C901, PLR091
                 spec_version_ids,
             )
 
-        emit("  - Deleting brownfield_spec_approvals...")
-        cur.execute(
-            "DELETE FROM brownfield_spec_approvals WHERE project_id=?", (product_id,)
+        _delete_project_rows_if_table_exists(
+            cur,
+            "brownfield_spec_approvals",
+            "DELETE FROM brownfield_spec_approvals WHERE project_id=?",
+            product_id,
         )
 
-        emit("  - Deleting brownfield_spec_draft_attempts...")
-        cur.execute(
+        _delete_project_rows_if_table_exists(
+            cur,
+            "brownfield_spec_draft_attempts",
             "DELETE FROM brownfield_spec_draft_attempts WHERE project_id=?",
-            (product_id,),
+            product_id,
         )
 
-        emit("  - Deleting brownfield_scan_attempts...")
-        cur.execute(
-            "DELETE FROM brownfield_scan_attempts WHERE project_id=?", (product_id,)
+        _delete_project_rows_if_table_exists(
+            cur,
+            "brownfield_scan_attempts",
+            "DELETE FROM brownfield_scan_attempts WHERE project_id=?",
+            product_id,
         )
 
-        emit("  - Deleting brownfield_source_artifacts...")
-        cur.execute(
-            "DELETE FROM brownfield_source_artifacts WHERE project_id=?", (product_id,)
+        _delete_project_rows_if_table_exists(
+            cur,
+            "brownfield_source_artifacts",
+            "DELETE FROM brownfield_source_artifacts WHERE project_id=?",
+            product_id,
         )
 
         emit("  - Deleting spec_registry...")

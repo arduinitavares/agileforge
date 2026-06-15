@@ -248,6 +248,30 @@ def test_delete_project_removes_brownfield_artifacts(tmp_path: Path) -> None:
         assert session.exec(select(BrownfieldSourceArtifact)).first() is None
 
 
+def test_delete_project_tolerates_missing_brownfield_tables(tmp_path: Path) -> None:
+    """Ensure delete_project supports legacy schemas without brownfield tables."""
+    db_path = tmp_path / "delete_project_legacy.db"
+    engine = _create_sqlite_engine(db_path)
+
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE brownfield_spec_approvals")
+        conn.exec_driver_sql("DROP TABLE brownfield_spec_draft_attempts")
+        conn.exec_driver_sql("DROP TABLE brownfield_scan_attempts")
+        conn.exec_driver_sql("DROP TABLE brownfield_source_artifacts")
+
+    with Session(engine) as session:
+        product = Product(name="Legacy Product")
+        session.add(product)
+        session.flush()
+        product_id = require_id(product.product_id, "product_id")
+        session.commit()
+
+    delete_project(product_id, str(db_path))
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).first() is None
+
+
 def test_resolve_db_path_prefers_explicit_argument(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
