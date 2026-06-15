@@ -16,6 +16,8 @@ The installed CLI supports:
 - Project inspection.
 - Project creation with a guarded mutation ledger.
 - Project setup retry for interrupted creation/setup recovery.
+- Brownfield source import, repository scan, curated spec draft/import, and
+  approval before authority compilation.
 - Workflow and status inspection.
 - Spec Authority status, review, accept, reject, and invariant inspection.
 - Vision generate, history, and save.
@@ -270,6 +272,49 @@ Bootstrap precondition:
   mutation with an explicit `--idempotency-key`.
 - After project creation, stop at authority review/accept unless the user
   clearly authorizes continuing into Vision, Backlog, Roadmap, Story, or Sprint.
+
+### Brownfield Product-Spec Curation
+
+Use brownfield setup only when the available input is raw source, repository
+facts, notes, route dumps, or another non-authoritative artifact that must be
+curated before authority compilation.
+
+```sh
+agileforge project create \
+  --setup-mode brownfield \
+  --name "InvoicePortal" \
+  --idempotency-key "create-invoiceportal-brownfield-001"
+
+agileforge brownfield source import \
+  --project-id 42 \
+  --source-file notes.md \
+  --source-kind notes \
+  --idempotency-key "invoiceportal-source-001"
+
+agileforge brownfield scan \
+  --project-id 42 \
+  --repo-path /workspace/invoice-portal \
+  --source-attempt-id source-123 \
+  --idempotency-key "invoiceportal-scan-001"
+
+agileforge brownfield spec import \
+  --project-id 42 \
+  --curated-spec-file curated/spec.json \
+  --expected-scan-fingerprint sha256:... \
+  --idempotency-key "invoiceportal-import-001"
+
+agileforge brownfield spec approve \
+  --project-id 42 \
+  --attempt-id draft-import-456 \
+  --expected-artifact-fingerprint sha256:... \
+  --expected-state SETUP_REQUIRED \
+  --expected-setup-status brownfield_curation_required \
+  --idempotency-key "invoiceportal-approve-001"
+```
+
+Do not pass raw brownfield notes, Markdown, route dumps, or repository paths to
+`project create --spec-file`. `authority compile` is available only after
+approval writes a managed curated spec path and setup spec fields.
 
 Validate the structured spec and rendered Markdown pair when both are present:
 
