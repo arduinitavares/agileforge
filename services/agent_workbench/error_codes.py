@@ -450,11 +450,41 @@ _BROWNFIELD_ERROR_REGISTRY: dict[str, ErrorMetadata] = {
         retryable=False,
         description="Brownfield draft attempt was not found.",
     ),
+    "BROWNFIELD_DRAFT_STALE": ErrorMetadata(
+        code="BROWNFIELD_DRAFT_STALE",
+        default_exit_code=3,
+        retryable=True,
+        description="Brownfield draft fingerprint or freshness guard is stale.",
+    ),
+    "BROWNFIELD_DRAFT_INCOMPLETE": ErrorMetadata(
+        code="BROWNFIELD_DRAFT_INCOMPLETE",
+        default_exit_code=4,
+        retryable=False,
+        description="Brownfield draft is incomplete or not reusable.",
+    ),
+    "BROWNFIELD_SOURCE_SUPERSEDED": ErrorMetadata(
+        code="BROWNFIELD_SOURCE_SUPERSEDED",
+        default_exit_code=3,
+        retryable=True,
+        description="A newer brownfield source or scan superseded the draft chain.",
+    ),
     "BROWNFIELD_APPROVAL_CHAIN_MISMATCH": ErrorMetadata(
         code="BROWNFIELD_APPROVAL_CHAIN_MISMATCH",
         default_exit_code=3,
         retryable=True,
         description="Brownfield approval chain does not match current source and scan.",
+    ),
+    "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED": ErrorMetadata(
+        code="BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED",
+        default_exit_code=10,
+        retryable=False,
+        description="Curated brownfield spec is already registered.",
+    ),
+    "BROWNFIELD_APPROVAL_STALE_GUARD": ErrorMetadata(
+        code="BROWNFIELD_APPROVAL_STALE_GUARD",
+        default_exit_code=3,
+        retryable=True,
+        description="Brownfield approval stale guards do not match workflow state.",
     ),
 }
 

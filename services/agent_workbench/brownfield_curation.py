@@ -12,22 +12,34 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
+from models.agent_workbench import CliMutationLedger
 from models.brownfield import (
     BrownfieldScanAttempt,
     BrownfieldSourceArtifact,
+    BrownfieldSpecApproval,
     BrownfieldSpecDraftAttempt,
 )
 from models.core import Product
 from models.db import get_engine
+from models.specs import SpecRegistry
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
-from services.agent_workbench.mutation_ledger import MutationLedgerRepository
+from services.agent_workbench.mutation_ledger import (
+    MutationLedgerRepository,
+    MutationStatus,
+    RecoveryAction,
+)
+from services.specs.pending_authority_service import (
+    ensure_pending_spec_version_for_project,
+)
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
+from utils.runtime_config import get_config_root
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -42,12 +54,23 @@ BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
 BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
 BROWNFIELD_SCAN_NOT_FOUND = "BROWNFIELD_SCAN_NOT_FOUND"
 BROWNFIELD_DRAFT_NOT_FOUND = "BROWNFIELD_DRAFT_NOT_FOUND"
+BROWNFIELD_DRAFT_STALE = "BROWNFIELD_DRAFT_STALE"
+BROWNFIELD_DRAFT_INCOMPLETE = "BROWNFIELD_DRAFT_INCOMPLETE"
+BROWNFIELD_SOURCE_SUPERSEDED = "BROWNFIELD_SOURCE_SUPERSEDED"
 BROWNFIELD_APPROVAL_CHAIN_MISMATCH = "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
+BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED = (
+    "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED"
+)
+BROWNFIELD_APPROVAL_STALE_GUARD = "BROWNFIELD_APPROVAL_STALE_GUARD"
 BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY = "BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY"
 NO_SOURCE_FINGERPRINT = "sha256:no-source"
 MAX_SCAN_FILE_BYTES = 200_000
 MAX_SCAN_MANIFEST_FILES = 1_000
 GIT_BINARY = "git"
+LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
+LEDGER_STATUS: Any = CliMutationLedger.status
+LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
+LEDGER_LEASE_EXPIRES_AT: Any = CliMutationLedger.lease_expires_at
 PRODUCT_ITEM_TYPES = {
     "GOAL",
     "REQ",
@@ -80,6 +103,13 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _db_datetime(value: datetime) -> datetime:
+    """Normalize a timestamp for SQLite persistence."""
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value.replace(tzinfo=None)
+
+
 def _success(data: dict[str, Any]) -> dict[str, Any]:
     """Return the standard workbench success envelope."""
     return {"ok": True, "data": data, "warnings": [], "errors": []}
@@ -109,6 +139,43 @@ def _error(
 def _json_dump(value: object) -> str:
     """Serialize deterministic JSON for artifact rows."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _managed_approved_spec_path(
+    *,
+    project_id: int,
+    approval_attempt_id: str,
+) -> Path:
+    """Return the managed path for an approved curated brownfield spec."""
+    return (
+        get_config_root()
+        / "artifacts"
+        / "brownfield"
+        / str(project_id)
+        / "approvals"
+        / approval_attempt_id
+        / "spec.json"
+    )
+
+
+def _authority_compile_action(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+) -> dict[str, Any]:
+    """Return the next command after brownfield approval registers a spec."""
+    return {
+        "command": "agileforge authority compile",
+        "args": {
+            "project_id": project_id,
+            "spec_version_id": spec_version_id,
+            "expected_spec_hash": spec_hash,
+            "expected_state": "SETUP_REQUIRED",
+            "expected_setup_status": "authority_compile_required",
+        },
+        "reason": "Compile approved brownfield spec before authority review.",
+    }
 
 
 def _file_sha256(file_path: Path) -> str:
@@ -313,13 +380,91 @@ def _normalization_error_response(exc: SpecContentNormalizationError) -> dict[st
     return _error(exc.error_code, details={"message": str(exc)})
 
 
+def _finalize_ledger_response(
+    *,
+    engine: Engine,
+    mutation_event_id: int,
+    lease_owner: str,
+    status: MutationStatus,
+    response: dict[str, Any],
+) -> bool:
+    """Store a non-success response for replayable approval guard failures."""
+    now = _now()
+    db_now = _db_datetime(now)
+    with Session(engine) as session:
+        result = session.exec(
+            update(CliMutationLedger)
+            .where(mutation_event_id == LEDGER_MUTATION_EVENT_ID)
+            .where(MutationStatus.PENDING.value == LEDGER_STATUS)
+            .where(lease_owner == LEDGER_LEASE_OWNER)
+            .where(db_now < LEDGER_LEASE_EXPIRES_AT)
+            .values(
+                status=status.value,
+                response_json=_json_dump(response),
+                recovery_action=RecoveryAction.NONE.value,
+                recovery_safe_to_auto_resume=False,
+                lease_owner=None,
+                lease_acquired_at=None,
+                last_heartbeat_at=None,
+                lease_expires_at=None,
+                updated_at=db_now,
+            )
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+class BrownfieldWorkflowPort:
+    """Workflow state operations used by brownfield approval."""
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        """Return workflow state for a project session."""
+        raise NotImplementedError
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        """Patch workflow state for a project session."""
+        raise NotImplementedError
+
+
+class SyncBrownfieldWorkflowAdapter(BrownfieldWorkflowPort):
+    """Synchronous adapter over WorkflowService."""
+
+    def __init__(self) -> None:
+        """Initialize the default workflow service adapter."""
+        from services.workflow import WorkflowService  # noqa: PLC0415
+
+        self._workflow = WorkflowService()
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        """Return persisted workflow state."""
+        return self._workflow.get_session_status(session_id)
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        """Patch persisted workflow state."""
+        self._workflow.update_session_status(session_id, partial_update)
+
+
 class BrownfieldCurationRunner:
     """Run brownfield source and scan commands against durable rows."""
 
-    def __init__(self, *, engine: Engine | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine | None = None,
+        workflow: BrownfieldWorkflowPort | None = None,
+    ) -> None:
         """Initialize runner with explicit or default business DB engine."""
         self._engine = engine or get_engine()
         self._ledger = MutationLedgerRepository(engine=self._engine)
+        self._workflow = workflow or SyncBrownfieldWorkflowAdapter()
 
     def source_import(
         self,
@@ -870,6 +1015,447 @@ class BrownfieldCurationRunner:
             now=_now(),
         )
         return response
+
+    def spec_approve(  # noqa: C901, PLR0911, PLR0915
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Approve one exact curated draft into the compileable spec registry."""
+        if not self._project_exists(project_id):
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": project_id},
+            )
+
+        with Session(self._engine) as session:
+            draft = session.exec(
+                select(BrownfieldSpecDraftAttempt).where(
+                    BrownfieldSpecDraftAttempt.project_id == project_id,
+                    BrownfieldSpecDraftAttempt.attempt_id == attempt_id,
+                )
+            ).first()
+            if draft is None:
+                return _error(
+                    BROWNFIELD_DRAFT_NOT_FOUND,
+                    details={"project_id": project_id, "attempt_id": attempt_id},
+                )
+            draft_fingerprint = draft.artifact_fingerprint
+            draft_status = draft.status
+            draft_spec_json = draft.curated_spec_json
+            draft_spec_hash = draft.spec_hash
+            draft_scan_fingerprint = draft.scan_fingerprint
+            draft_source_fingerprint = draft.source_fingerprint
+            draft_scan_attempt_id = draft.scan_attempt_id
+
+        request_hash = canonical_hash(
+            {
+                "command": "agileforge brownfield spec approve",
+                "project_id": project_id,
+                "attempt_id": attempt_id,
+                "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                "expected_state": expected_state,
+                "expected_setup_status": expected_setup_status,
+                "draft_fingerprint": draft_fingerprint,
+                "spec_hash": draft_spec_hash,
+                "scan_fingerprint": draft_scan_fingerprint,
+                "source_fingerprint": draft_source_fingerprint,
+                "changed_by": changed_by,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        lease_owner = f"brownfield-approve:{idempotency_key}"
+        loaded = self._ledger.create_or_load(
+            command="agileforge brownfield spec approve",
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            project_id=project_id,
+            correlation_id=correlation_id or idempotency_key,
+            changed_by=changed_by,
+            lease_owner=lease_owner,
+            now=_now(),
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code is not None:
+            return _error(
+                loaded.error_code,
+                details={"idempotency_key": idempotency_key},
+            )
+        mutation_event_id = loaded.ledger.mutation_event_id
+        if mutation_event_id is None:
+            message = "Brownfield approval mutation event id was not persisted."
+            raise RuntimeError(message)
+
+        validation = self._approval_validation_error(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            draft_fingerprint=draft_fingerprint,
+            draft_status=draft_status,
+            draft_spec_json=draft_spec_json,
+            draft_spec_hash=draft_spec_hash,
+            draft_scan_attempt_id=draft_scan_attempt_id,
+            draft_scan_fingerprint=draft_scan_fingerprint,
+            draft_source_fingerprint=draft_source_fingerprint,
+            expected_state=expected_state,
+            expected_setup_status=expected_setup_status,
+        )
+        if validation is not None:
+            response, status = validation
+            _finalize_ledger_response(
+                engine=self._engine,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                status=status,
+                response=response,
+            )
+            return response
+
+        approval_attempt_id = f"approval-{mutation_event_id}"
+        approval_fingerprint = canonical_hash(
+            {
+                "project_id": project_id,
+                "approval_attempt_id": approval_attempt_id,
+                "draft_fingerprint": draft_fingerprint,
+                "scan_fingerprint": draft_scan_fingerprint,
+                "source_fingerprint": draft_source_fingerprint,
+                "spec_hash": draft_spec_hash,
+                "tool_version": BROWNFIELD_COMMAND_VERSION,
+            }
+        )
+        managed_path = _managed_approved_spec_path(
+            project_id=project_id,
+            approval_attempt_id=approval_attempt_id,
+        )
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        if draft_spec_json is None or draft_spec_hash is None:
+            return _error(
+                BROWNFIELD_DRAFT_INCOMPLETE,
+                details={"project_id": project_id, "attempt_id": attempt_id},
+            )
+        managed_path.write_text(draft_spec_json, encoding="utf-8")
+
+        with Session(self._engine) as session:
+            approval = BrownfieldSpecApproval(
+                project_id=project_id,
+                approval_attempt_id=approval_attempt_id,
+                approval_fingerprint=approval_fingerprint,
+                draft_attempt_id=attempt_id,
+                draft_fingerprint=draft_fingerprint,
+                scan_fingerprint=draft_scan_fingerprint,
+                source_fingerprint=draft_source_fingerprint,
+                spec_hash=draft_spec_hash,
+                managed_spec_file_path=str(managed_path),
+                mutation_event_id=mutation_event_id,
+                status="started",
+            )
+            session.add(approval)
+            session.commit()
+
+            result = ensure_pending_spec_version_for_project(
+                session=session,
+                product_id=project_id,
+                spec_path=managed_path,
+                approved_by="brownfield-spec-approve",
+                lease_guard=lambda _boundary: self._ledger.require_active_owner(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    now=_now(),
+                ),
+                record_progress=lambda boundary: self._ledger.mark_step_complete(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    step=boundary,
+                    next_step=boundary,
+                    now=_now(),
+                ),
+            )
+            if not result.ok or result.spec_version_id is None:
+                approval.status = "recovery_required"
+                approval.error_metadata_json = _json_dump(
+                    {
+                        "error_code": result.error_code,
+                        "error": result.error,
+                    }
+                )
+                approval.updated_at = _now()
+                session.add(approval)
+                session.commit()
+                self._ledger.mark_recovery_required(
+                    mutation_event_id=mutation_event_id,
+                    lease_owner=lease_owner,
+                    recovery_action=RecoveryAction.RECONCILE_THEN_RESUME,
+                    safe_to_auto_resume=True,
+                    last_error={
+                        "code": result.error_code
+                        or ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+                        "error": result.error,
+                    },
+                    now=_now(),
+                )
+                return _error(
+                    result.error_code or ErrorCode.MUTATION_RECOVERY_REQUIRED,
+                    details={"mutation_event_id": mutation_event_id},
+                )
+
+            spec_version_id = int(result.spec_version_id)
+            approval.spec_version_id = spec_version_id
+            approval.status = "spec_registered"
+            approval.updated_at = _now()
+            session.add(approval)
+            session.commit()
+
+        next_actions = [
+            _authority_compile_action(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                spec_hash=draft_spec_hash,
+            )
+        ]
+        required_state = {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_mode": "brownfield",
+            "setup_status": "authority_compile_required",
+            "setup_error": None,
+            "setup_spec_file_path": str(managed_path),
+            "setup_spec_hash": draft_spec_hash,
+            "setup_spec_version_id": spec_version_id,
+            "setup_next_actions": next_actions,
+        }
+        try:
+            self._workflow.update_session_status(str(project_id), required_state)
+        except Exception as exc:  # noqa: BLE001
+            with Session(self._engine) as session:
+                approval = session.exec(
+                    select(BrownfieldSpecApproval).where(
+                        BrownfieldSpecApproval.approval_fingerprint
+                        == approval_fingerprint
+                    )
+                ).one()
+                approval.status = "recovery_required"
+                approval.error_metadata_json = _json_dump(
+                    {"error_code": "WORKFLOW_SESSION_FAILED", "error": str(exc)}
+                )
+                approval.updated_at = _now()
+                session.add(approval)
+                session.commit()
+            self._ledger.mark_recovery_required(
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                recovery_action=RecoveryAction.RECONCILE_THEN_RESUME,
+                safe_to_auto_resume=True,
+                last_error={
+                    "code": "WORKFLOW_SESSION_FAILED",
+                    "error": str(exc),
+                    "spec_version_id": spec_version_id,
+                },
+                now=_now(),
+            )
+            return _error(
+                ErrorCode.MUTATION_RECOVERY_REQUIRED,
+                details={
+                    "mutation_event_id": mutation_event_id,
+                    "spec_version_id": spec_version_id,
+                },
+            )
+
+        with Session(self._engine) as session:
+            approval = session.exec(
+                select(BrownfieldSpecApproval).where(
+                    BrownfieldSpecApproval.approval_fingerprint == approval_fingerprint
+                )
+            ).one()
+            approval.status = "complete"
+            approval.updated_at = _now()
+            session.add(approval)
+            session.commit()
+
+        data = {
+            "project_id": project_id,
+            "approval_attempt_id": approval_attempt_id,
+            "approval_fingerprint": approval_fingerprint,
+            "setup_status": "authority_compile_required",
+            "setup_spec_file_path": str(managed_path),
+            "spec_hash": draft_spec_hash,
+            "spec_version_id": spec_version_id,
+            "mutation_event_id": mutation_event_id,
+            "next_actions": next_actions,
+        }
+        response = _success(data)
+        if not self._ledger.finalize_success(
+            mutation_event_id=mutation_event_id,
+            lease_owner=lease_owner,
+            after=data,
+            response=response,
+            now=_now(),
+        ):
+            return _error(
+                ErrorCode.MUTATION_RESUME_CONFLICT,
+                details={"mutation_event_id": mutation_event_id},
+            )
+        return response
+
+    def _approval_validation_error(  # noqa: PLR0911
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        draft_fingerprint: str,
+        draft_status: str,
+        draft_spec_json: str | None,
+        draft_spec_hash: str | None,
+        draft_scan_attempt_id: str,
+        draft_scan_fingerprint: str,
+        draft_source_fingerprint: str,
+        expected_state: str,
+        expected_setup_status: str,
+    ) -> tuple[dict[str, Any], MutationStatus] | None:
+        """Return a replayable validation error for brownfield approval."""
+        if draft_status != "complete" or not draft_spec_json or not draft_spec_hash:
+            return (
+                _error(
+                    BROWNFIELD_DRAFT_INCOMPLETE,
+                    details={"project_id": project_id, "attempt_id": attempt_id},
+                ),
+                MutationStatus.VALIDATION_FAILED,
+            )
+        if draft_fingerprint != expected_artifact_fingerprint:
+            return (
+                _error(
+                    BROWNFIELD_DRAFT_STALE,
+                    details={
+                        "project_id": project_id,
+                        "attempt_id": attempt_id,
+                        "expected_artifact_fingerprint": (
+                            expected_artifact_fingerprint
+                        ),
+                        "actual_artifact_fingerprint": draft_fingerprint,
+                    },
+                ),
+                MutationStatus.GUARD_REJECTED,
+            )
+
+        with Session(self._engine) as session:
+            latest_source = session.exec(
+                select(BrownfieldSourceArtifact)
+                .where(BrownfieldSourceArtifact.project_id == project_id)
+                .where(BrownfieldSourceArtifact.status == "complete")
+                .order_by(BrownfieldSourceArtifact.created_at.desc())
+            ).first()
+            if (
+                latest_source is not None
+                and latest_source.artifact_fingerprint != draft_source_fingerprint
+            ):
+                return (
+                    _error(
+                        BROWNFIELD_SOURCE_SUPERSEDED,
+                        details={
+                            "project_id": project_id,
+                            "attempt_id": attempt_id,
+                            "current_source_fingerprint": (
+                                latest_source.artifact_fingerprint
+                            ),
+                            "draft_source_fingerprint": draft_source_fingerprint,
+                        },
+                    ),
+                    MutationStatus.GUARD_REJECTED,
+                )
+
+            current_scan = session.exec(
+                select(BrownfieldScanAttempt)
+                .where(BrownfieldScanAttempt.project_id == project_id)
+                .where(BrownfieldScanAttempt.status == "complete")
+                .order_by(BrownfieldScanAttempt.created_at.desc())
+            ).first()
+            if (
+                current_scan is None
+                or current_scan.artifact_fingerprint != draft_scan_fingerprint
+                or current_scan.attempt_id != draft_scan_attempt_id
+                or current_scan.source_fingerprint != draft_source_fingerprint
+            ):
+                return (
+                    _error(
+                        BROWNFIELD_APPROVAL_CHAIN_MISMATCH,
+                        details={
+                            "project_id": project_id,
+                            "attempt_id": attempt_id,
+                            "draft_scan_fingerprint": draft_scan_fingerprint,
+                            "current_scan_fingerprint": (
+                                current_scan.artifact_fingerprint
+                                if current_scan is not None
+                                else None
+                            ),
+                        },
+                    ),
+                    MutationStatus.GUARD_REJECTED,
+                )
+            existing_spec = session.exec(
+                select(SpecRegistry).where(SpecRegistry.product_id == project_id)
+            ).first()
+            existing_approval = session.exec(
+                select(BrownfieldSpecApproval).where(
+                    BrownfieldSpecApproval.project_id == project_id,
+                    BrownfieldSpecApproval.status == "complete",
+                )
+            ).first()
+            if existing_spec is not None or existing_approval is not None:
+                return (
+                    _error(
+                        BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED,
+                        details={
+                            "project_id": project_id,
+                            "attempt_id": attempt_id,
+                        },
+                    ),
+                    MutationStatus.VALIDATION_FAILED,
+                )
+
+        workflow_state = self._workflow.get_session_status(str(project_id))
+        if workflow_state.get("fsm_state") != expected_state:
+            return (
+                _error(
+                    ErrorCode.STALE_STATE,
+                    details={
+                        "project_id": project_id,
+                        "expected_state": expected_state,
+                        "actual_state": workflow_state.get("fsm_state"),
+                    },
+                ),
+                MutationStatus.GUARD_REJECTED,
+            )
+        if workflow_state.get("setup_status") != expected_setup_status:
+            return (
+                _error(
+                    ErrorCode.STALE_SETUP_STATUS,
+                    details={
+                        "project_id": project_id,
+                        "expected_setup_status": expected_setup_status,
+                        "actual_setup_status": workflow_state.get("setup_status"),
+                    },
+                ),
+                MutationStatus.GUARD_REJECTED,
+            )
+        if expected_setup_status != "brownfield_curation_required":
+            return (
+                _error(
+                    BROWNFIELD_APPROVAL_STALE_GUARD,
+                    details={
+                        "project_id": project_id,
+                        "expected_setup_status": expected_setup_status,
+                    },
+                ),
+                MutationStatus.GUARD_REJECTED,
+            )
+        return None
 
     def _project_exists(self, project_id: int) -> bool:
         """Return whether the project id exists."""

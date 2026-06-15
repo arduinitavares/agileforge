@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session, select
@@ -13,6 +14,7 @@ from cli.main import main
 from models.brownfield import (
     BrownfieldScanAttempt,
     BrownfieldSourceArtifact,
+    BrownfieldSpecApproval,
     BrownfieldSpecDraftAttempt,
 )
 from models.core import Product
@@ -22,8 +24,6 @@ from services.agent_workbench.brownfield_curation import BrownfieldCurationRunne
 from services.agent_workbench.error_codes import ErrorCode
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
     from sqlalchemy.engine import Engine
 
@@ -148,6 +148,27 @@ class _FakeBrownfieldRunner:
             "warnings": [],
             "errors": [],
         }
+
+
+class FakeBrownfieldWorkflow:
+    """In-memory workflow port for brownfield approval tests."""
+
+    def __init__(self) -> None:
+        """Initialize empty fake workflow state."""
+        self.sessions: dict[str, dict[str, object]] = {}
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return fake workflow state for a session."""
+        return dict(self.sessions.get(session_id, {}))
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Patch fake workflow state for a session."""
+        current = self.sessions.setdefault(session_id, {})
+        current.update(partial_update)
 
 
 def test_source_import_records_non_authoritative_artifact(
@@ -619,6 +640,129 @@ def test_spec_import_rejects_scan_fingerprint_mismatch(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
+
+
+def test_spec_approve_registers_managed_spec_and_workflow_state(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_root = tmp_path / "config-root"
+    config_root.mkdir()
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    project_id = _project(engine, name="Approval Product")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    curated = tmp_path / "curated.json"
+    curated.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+    workflow = FakeBrownfieldWorkflow()
+    workflow.sessions[str(project_id)] = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_mode": "brownfield",
+        "setup_status": "brownfield_curation_required",
+    }
+    runner = BrownfieldCurationRunner(engine=engine, workflow=workflow)
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        source_attempt_id=None,
+        idempotency_key="approve-scan-001",
+        changed_by="agent",
+    )
+    imported = runner.spec_import(
+        project_id=project_id,
+        curated_spec_file=str(curated),
+        expected_scan_fingerprint=scan["data"]["artifact_fingerprint"],
+        parent_draft_attempt_id=None,
+        idempotency_key="approve-import-001",
+        changed_by="agent",
+    )
+
+    result = runner.spec_approve(
+        project_id=project_id,
+        attempt_id=imported["data"]["attempt_id"],
+        expected_artifact_fingerprint=imported["data"]["artifact_fingerprint"],
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="brownfield_curation_required",
+        idempotency_key="approve-001",
+        changed_by="agent",
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["setup_status"] == "authority_compile_required"
+    assert data["spec_version_id"] is not None
+    managed_path = Path(data["setup_spec_file_path"])
+    assert managed_path.exists()
+    assert managed_path.is_relative_to(config_root / "artifacts" / "brownfield")
+    assert workflow.sessions[str(project_id)]["setup_spec_file_path"] == str(
+        managed_path
+    )
+    with Session(engine) as session:
+        spec = session.get(SpecRegistry, data["spec_version_id"])
+        assert spec is not None
+        assert spec.content_ref == str(managed_path)
+        approvals = session.exec(select(BrownfieldSpecApproval)).all()
+        assert len(approvals) == 1
+        assert approvals[0].spec_version_id == data["spec_version_id"]
+        assert approvals[0].status == "complete"
+
+
+def test_spec_approve_replay_does_not_duplicate_spec_registry(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_root = tmp_path / "config-root"
+    config_root.mkdir()
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    project_id = _project(engine, name="Replay Approval Product")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    curated = tmp_path / "curated.json"
+    curated.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+    workflow = FakeBrownfieldWorkflow()
+    workflow.sessions[str(project_id)] = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_mode": "brownfield",
+        "setup_status": "brownfield_curation_required",
+    }
+    runner = BrownfieldCurationRunner(engine=engine, workflow=workflow)
+    scan = runner.scan(
+        project_id=project_id,
+        repo_path=str(repo),
+        source_attempt_id=None,
+        idempotency_key="replay-scan-001",
+        changed_by="agent",
+    )
+    imported = runner.spec_import(
+        project_id=project_id,
+        curated_spec_file=str(curated),
+        expected_scan_fingerprint=scan["data"]["artifact_fingerprint"],
+        parent_draft_attempt_id=None,
+        idempotency_key="replay-import-001",
+        changed_by="agent",
+    )
+    args = {
+        "project_id": project_id,
+        "attempt_id": imported["data"]["attempt_id"],
+        "expected_artifact_fingerprint": imported["data"]["artifact_fingerprint"],
+        "expected_state": "SETUP_REQUIRED",
+        "expected_setup_status": "brownfield_curation_required",
+        "idempotency_key": "replay-approve-001",
+        "changed_by": "agent",
+    }
+
+    first = runner.spec_approve(**args)
+    replay = runner.spec_approve(**args)
+
+    assert replay["ok"] is True
+    assert replay["data"]["spec_version_id"] == first["data"]["spec_version_id"]
+    with Session(engine) as session:
+        assert len(session.exec(select(SpecRegistry)).all()) == 1
+        assert len(session.exec(select(BrownfieldSpecApproval)).all()) == 1
 
 
 def test_application_delegates_brownfield_source_and_scan() -> None:
