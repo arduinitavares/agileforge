@@ -492,6 +492,27 @@ class _Application(Protocol):
         """Record a brownfield repository scan attempt."""
         ...
 
+    def brownfield_spec_draft(
+        self,
+        **kwargs: object,
+    ) -> JsonObject:
+        """Create a generated curated spec draft attempt."""
+        ...
+
+    def brownfield_spec_import(
+        self,
+        **kwargs: object,
+    ) -> JsonObject:
+        """Record a human-imported curated spec attempt."""
+        ...
+
+    def brownfield_spec_approve(
+        self,
+        **kwargs: object,
+    ) -> JsonObject:
+        """Approve a curated spec attempt."""
+        ...
+
     def roadmap_generate(
         self,
         *,
@@ -1619,6 +1640,54 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     brownfield_scan.add_argument("--correlation-id")
     brownfield_scan.add_argument("--changed-by", default="cli-agent")
     brownfield_scan.set_defaults(command_handler=_brownfield_scan)
+    brownfield_spec = brownfield_sub.add_parser(
+        "spec",
+        help="Draft, import, or approve curated brownfield specs.",
+    )
+    brownfield_spec_sub = brownfield_spec.add_subparsers(
+        dest="spec_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    brownfield_spec_draft = brownfield_spec_sub.add_parser(
+        "draft",
+        help="Create a generated curated spec draft.",
+    )
+    brownfield_spec_draft.add_argument("--project-id", type=int, required=True)
+    brownfield_spec_draft.add_argument("--scan-attempt-id", required=True)
+    brownfield_spec_draft.add_argument("--user-input")
+    brownfield_spec_draft.add_argument("--idempotency-key", required=True)
+    brownfield_spec_draft.add_argument("--correlation-id")
+    brownfield_spec_draft.add_argument("--changed-by", default="cli-agent")
+    brownfield_spec_draft.set_defaults(command_handler=_brownfield_spec_draft)
+    brownfield_spec_import = brownfield_spec_sub.add_parser(
+        "import",
+        help="Import a human-curated brownfield spec.",
+    )
+    brownfield_spec_import.add_argument("--project-id", type=int, required=True)
+    brownfield_spec_import.add_argument("--curated-spec-file", required=True)
+    brownfield_spec_import.add_argument("--expected-scan-fingerprint", required=True)
+    brownfield_spec_import.add_argument("--parent-draft-attempt-id")
+    brownfield_spec_import.add_argument("--idempotency-key", required=True)
+    brownfield_spec_import.add_argument("--correlation-id")
+    brownfield_spec_import.add_argument("--changed-by", default="cli-agent")
+    brownfield_spec_import.set_defaults(command_handler=_brownfield_spec_import)
+    brownfield_spec_approve = brownfield_spec_sub.add_parser(
+        "approve",
+        help="Approve a curated brownfield spec for authority compilation.",
+    )
+    brownfield_spec_approve.add_argument("--project-id", type=int, required=True)
+    brownfield_spec_approve.add_argument("--attempt-id", required=True)
+    brownfield_spec_approve.add_argument(
+        "--expected-artifact-fingerprint",
+        required=True,
+    )
+    brownfield_spec_approve.add_argument("--expected-state", required=True)
+    brownfield_spec_approve.add_argument("--expected-setup-status", required=True)
+    brownfield_spec_approve.add_argument("--idempotency-key", required=True)
+    brownfield_spec_approve.add_argument("--correlation-id")
+    brownfield_spec_approve.add_argument("--changed-by", default="cli-agent")
+    brownfield_spec_approve.set_defaults(command_handler=_brownfield_spec_approve)
 
     roadmap = subparsers.add_parser("roadmap", help="Run Roadmap phase commands.")
     roadmap_sub = roadmap.add_subparsers(
@@ -3261,6 +3330,54 @@ def _brownfield_scan(
         project_id=args.project_id,
         repo_path=args.repo_path,
         source_attempt_id=args.source_attempt_id,
+        idempotency_key=args.idempotency_key,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _brownfield_spec_draft(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route brownfield spec draft to the application facade."""
+    return "agileforge brownfield spec draft", application.brownfield_spec_draft(
+        project_id=args.project_id,
+        scan_attempt_id=args.scan_attempt_id,
+        user_input=args.user_input,
+        idempotency_key=args.idempotency_key,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _brownfield_spec_import(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route brownfield spec import to the application facade."""
+    return "agileforge brownfield spec import", application.brownfield_spec_import(
+        project_id=args.project_id,
+        curated_spec_file=args.curated_spec_file,
+        expected_scan_fingerprint=args.expected_scan_fingerprint,
+        parent_draft_attempt_id=args.parent_draft_attempt_id,
+        idempotency_key=args.idempotency_key,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _brownfield_spec_approve(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route brownfield spec approve to the application facade."""
+    return "agileforge brownfield spec approve", application.brownfield_spec_approve(
+        project_id=args.project_id,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        expected_setup_status=args.expected_setup_status,
         idempotency_key=args.idempotency_key,
         correlation_id=args.correlation_id,
         changed_by=args.changed_by,

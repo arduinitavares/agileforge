@@ -66,6 +66,17 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK: (4, False),
     ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE: (2, False),
     ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS: (2, False),
+    ErrorCode.BROWNFIELD_SOURCE_FILE_NOT_FOUND: (2, False),
+    ErrorCode.BROWNFIELD_REPO_PATH_NOT_FOUND: (2, False),
+    ErrorCode.BROWNFIELD_SOURCE_NOT_FOUND: (4, False),
+    ErrorCode.BROWNFIELD_SCAN_NOT_FOUND: (4, False),
+    ErrorCode.BROWNFIELD_DRAFT_NOT_FOUND: (4, False),
+    ErrorCode.BROWNFIELD_DRAFT_STALE: (3, True),
+    ErrorCode.BROWNFIELD_DRAFT_INCOMPLETE: (4, False),
+    ErrorCode.BROWNFIELD_SOURCE_SUPERSEDED: (3, True),
+    ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH: (3, True),
+    ErrorCode.BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED: (10, False),
+    ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD: (3, True),
 }
 
 
@@ -81,6 +92,9 @@ def test_registry_covers_representative_phase_2a_error_codes() -> None:
         "CONFIRMATION_REQUIRED",
         "MUTATION_RECOVERY_REQUIRED",
         "IDEMPOTENCY_KEY_REUSED",
+        "BROWNFIELD_DRAFT_NOT_FOUND",
+        "BROWNFIELD_APPROVAL_CHAIN_MISMATCH",
+        "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED",
     }.issubset(codes)
     assert "STALE_FINGERPRINT" not in codes
     assert codes == {code.value for code in ErrorCode}

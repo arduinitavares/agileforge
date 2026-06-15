@@ -78,6 +78,19 @@ class ErrorCode(StrEnum):
     SCOPE_EXTENSION_UNRESOLVED_WORK = "SCOPE_EXTENSION_UNRESOLVED_WORK"
     SCOPE_EXTENSION_NOT_ADDITIVE = "SCOPE_EXTENSION_NOT_ADDITIVE"
     SCOPE_EXTENSION_NO_ADDED_ITEMS = "SCOPE_EXTENSION_NO_ADDED_ITEMS"
+    BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
+    BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
+    BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
+    BROWNFIELD_SCAN_NOT_FOUND = "BROWNFIELD_SCAN_NOT_FOUND"
+    BROWNFIELD_DRAFT_NOT_FOUND = "BROWNFIELD_DRAFT_NOT_FOUND"
+    BROWNFIELD_DRAFT_STALE = "BROWNFIELD_DRAFT_STALE"
+    BROWNFIELD_DRAFT_INCOMPLETE = "BROWNFIELD_DRAFT_INCOMPLETE"
+    BROWNFIELD_SOURCE_SUPERSEDED = "BROWNFIELD_SOURCE_SUPERSEDED"
+    BROWNFIELD_APPROVAL_CHAIN_MISMATCH = "BROWNFIELD_APPROVAL_CHAIN_MISMATCH"
+    BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED = (
+        "BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED"
+    )
+    BROWNFIELD_APPROVAL_STALE_GUARD = "BROWNFIELD_APPROVAL_STALE_GUARD"
 
 
 _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
@@ -498,6 +511,8 @@ def _normalize_code(code: ErrorCode | str) -> ErrorCode:
 
 def error_metadata(code: ErrorCode | str) -> ErrorMetadata:
     """Return stable metadata for a registered error code."""
+    if isinstance(code, ErrorCode) and code.value in _BROWNFIELD_ERROR_REGISTRY:
+        return _BROWNFIELD_ERROR_REGISTRY[code.value]
     if isinstance(code, str) and code in _BROWNFIELD_ERROR_REGISTRY:
         return _BROWNFIELD_ERROR_REGISTRY[code]
     return _ERROR_REGISTRY[_normalize_code(code)]
@@ -505,7 +520,13 @@ def error_metadata(code: ErrorCode | str) -> ErrorMetadata:
 
 def registered_error_codes() -> set[str]:
     """Return the complete registered CLI error code set."""
-    return {metadata.code for metadata in _ERROR_REGISTRY.values()}
+    return {
+        metadata.code
+        for metadata in (
+            *_ERROR_REGISTRY.values(),
+            *_BROWNFIELD_ERROR_REGISTRY.values(),
+        )
+    }
 
 
 def workbench_error(

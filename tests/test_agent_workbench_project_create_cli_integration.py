@@ -424,6 +424,110 @@ def test_project_create_brownfield_cli_creates_shell(
     assert data["next_actions"][0]["command"] == "agileforge brownfield source import"
 
 
+def test_brownfield_cli_source_scan_import_approve_flow(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_root = tmp_path / "config-root"
+    config_root.mkdir()
+    monkeypatch.setenv("AGILEFORGE_CONFIG_ROOT", str(config_root))
+    workflow = FakeWorkflowPort()
+    setup_runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    from services.agent_workbench.brownfield_curation import BrownfieldCurationRunner
+
+    brownfield_runner = BrownfieldCurationRunner(engine=engine, workflow=workflow)
+    app = AgentWorkbenchApplication(
+        project_setup_runner=setup_runner,
+        brownfield_runner=brownfield_runner,
+    )
+
+    create_rc = main(
+        [
+            "project",
+            "create",
+            "--setup-mode",
+            "brownfield",
+            "--name",
+            "CLI Brownfield Flow",
+            "--idempotency-key",
+            "cli-brownfield-flow-create",
+        ],
+        application=app,
+    )
+    create_payload = _captured_payload(capsys)
+    assert create_rc == 0
+    project_id = create_payload["data"]["project_id"]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    curated = tmp_path / "curated.json"
+    curated.write_text(json.dumps(_structured_spec_payload()), encoding="utf-8")
+
+    scan_rc = main(
+        [
+            "brownfield",
+            "scan",
+            "--project-id",
+            str(project_id),
+            "--repo-path",
+            str(repo),
+            "--idempotency-key",
+            "cli-brownfield-flow-scan",
+        ],
+        application=app,
+    )
+    scan_payload = _captured_payload(capsys)
+    assert scan_rc == 0
+
+    import_rc = main(
+        [
+            "brownfield",
+            "spec",
+            "import",
+            "--project-id",
+            str(project_id),
+            "--curated-spec-file",
+            str(curated),
+            "--expected-scan-fingerprint",
+            scan_payload["data"]["artifact_fingerprint"],
+            "--idempotency-key",
+            "cli-brownfield-flow-import",
+        ],
+        application=app,
+    )
+    import_payload = _captured_payload(capsys)
+    assert import_rc == 0
+
+    approve_rc = main(
+        [
+            "brownfield",
+            "spec",
+            "approve",
+            "--project-id",
+            str(project_id),
+            "--attempt-id",
+            import_payload["data"]["attempt_id"],
+            "--expected-artifact-fingerprint",
+            import_payload["data"]["artifact_fingerprint"],
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "brownfield_curation_required",
+            "--idempotency-key",
+            "cli-brownfield-flow-approve",
+        ],
+        application=app,
+    )
+    approve_payload = _captured_payload(capsys)
+
+    assert approve_rc == 0
+    assert approve_payload["data"]["setup_status"] == "authority_compile_required"
+    assert Path(approve_payload["data"]["setup_spec_file_path"]).exists()
+
+
 def test_project_create_then_authority_compile_cli_flow(
     engine: Engine,
     tmp_path: Path,

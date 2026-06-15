@@ -1204,6 +1204,116 @@ _SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_BROWNFIELD_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge brownfield source import",
+        mutates=True,
+        phase="phase_2b",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=("project_id", "source_file", "idempotency_key"),
+        input_optional=("source_kind", "correlation_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.BROWNFIELD_SOURCE_FILE_NOT_FOUND.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge brownfield scan",
+        mutates=True,
+        phase="phase_2b",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=("project_id", "repo_path", "idempotency_key"),
+        input_optional=("source_attempt_id", "correlation_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.BROWNFIELD_REPO_PATH_NOT_FOUND.value,
+            ErrorCode.BROWNFIELD_SOURCE_NOT_FOUND.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge brownfield spec draft",
+        mutates=True,
+        phase="phase_2b",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=("project_id", "scan_attempt_id", "idempotency_key"),
+        input_optional=("user_input", "correlation_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.BROWNFIELD_SCAN_NOT_FOUND.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge brownfield spec import",
+        mutates=True,
+        phase="phase_2b",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "curated_spec_file",
+            "expected_scan_fingerprint",
+            "idempotency_key",
+        ),
+        input_optional=("parent_draft_attempt_id", "correlation_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.SPEC_SOURCE_FORMAT_UNSUPPORTED.value,
+            ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH.value,
+            ErrorCode.BROWNFIELD_DRAFT_NOT_FOUND.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge brownfield spec approve",
+        mutates=True,
+        phase="phase_2b",
+        requires_idempotency_key=True,
+        accepts_expected_state=True,
+        accepts_expected_artifact_fingerprint=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "attempt_id",
+            "expected_artifact_fingerprint",
+            "expected_state",
+            "expected_setup_status",
+        ),
+        input_optional=("idempotency_key", "correlation_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.STALE_SETUP_STATUS.value,
+            ErrorCode.BROWNFIELD_DRAFT_NOT_FOUND.value,
+            ErrorCode.BROWNFIELD_DRAFT_STALE.value,
+            ErrorCode.BROWNFIELD_DRAFT_INCOMPLETE.value,
+            ErrorCode.BROWNFIELD_SOURCE_SUPERSEDED.value,
+            ErrorCode.BROWNFIELD_APPROVAL_CHAIN_MISMATCH.value,
+            ErrorCode.BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED.value,
+            ErrorCode.BROWNFIELD_APPROVAL_STALE_GUARD.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_IN_PROGRESS.value,
+            ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+        ),
+    ),
+)
+
+
 _PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge spec profile schema",
@@ -1234,6 +1344,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2C_COMMANDS,
         *_PHASE_2D_COMMANDS,
         *_SCOPE_EXTENSION_COMMANDS,
+        *_BROWNFIELD_COMMANDS,
         *_PHASE_2E_COMMANDS,
     )
 

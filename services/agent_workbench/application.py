@@ -776,6 +776,48 @@ class _BrownfieldCurationRunner(Protocol):
         """Record a repository scan attempt."""
         ...
 
+    def spec_draft(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        scan_attempt_id: str,
+        user_input: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Create a generated curated spec draft attempt."""
+        ...
+
+    def spec_import(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        curated_spec_file: str,
+        expected_scan_fingerprint: str,
+        parent_draft_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a human-imported curated spec attempt."""
+        ...
+
+    def spec_approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Approve a curated spec attempt into setup authority compilation."""
+        ...
+
 
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
@@ -1560,6 +1602,72 @@ class AgentWorkbenchApplication:
             project_id=project_id,
             repo_path=repo_path,
             source_attempt_id=source_attempt_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+
+    def brownfield_spec_draft(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        scan_attempt_id: str,
+        user_input: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Create a generated curated spec draft attempt."""
+        return self._get_brownfield_runner().spec_draft(
+            project_id=project_id,
+            scan_attempt_id=scan_attempt_id,
+            user_input=user_input,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+
+    def brownfield_spec_import(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        curated_spec_file: str,
+        expected_scan_fingerprint: str,
+        parent_draft_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a human-imported curated spec attempt."""
+        return self._get_brownfield_runner().spec_import(
+            project_id=project_id,
+            curated_spec_file=curated_spec_file,
+            expected_scan_fingerprint=expected_scan_fingerprint,
+            parent_draft_attempt_id=parent_draft_attempt_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+
+    def brownfield_spec_approve(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Approve a curated spec attempt."""
+        return self._get_brownfield_runner().spec_approve(
+            project_id=project_id,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            expected_setup_status=expected_setup_status,
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
             changed_by=changed_by,

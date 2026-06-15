@@ -97,6 +97,14 @@ EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
     "agileforge scope extension start",
 }
 
+EXPECTED_BROWNFIELD_COMMAND_NAMES = {
+    "agileforge brownfield source import",
+    "agileforge brownfield scan",
+    "agileforge brownfield spec draft",
+    "agileforge brownfield spec import",
+    "agileforge brownfield spec approve",
+}
+
 EXPECTED_PHASE_1_INPUTS = {
     "agileforge status": (["project_id"], []),
     "agileforge project list": ([], []),
@@ -176,6 +184,7 @@ def test_command_schema_payloads_are_available() -> None:
         | EXPECTED_PHASE_2D_COMMAND_NAMES
         | EXPECTED_PHASE_2E_COMMAND_NAMES
         | EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES
+        | EXPECTED_BROWNFIELD_COMMAND_NAMES
     )
 
     payload_names = {
@@ -326,6 +335,31 @@ def test_phase_2b_commands_are_registered_and_available() -> None:
     assert EXPECTED_PHASE_2B_COMMAND_NAMES.issubset(names)
     for command_name in EXPECTED_PHASE_2B_COMMAND_NAMES:
         assert command_is_available(command_name) is True
+
+
+def test_brownfield_command_contracts_are_guarded() -> None:
+    """Publish brownfield curation command contracts for agents."""
+    names = installed_command_names()
+    approve = command_schema_payload("agileforge brownfield spec approve")
+
+    assert EXPECTED_BROWNFIELD_COMMAND_NAMES.issubset(names)
+    assert approve["mutates"] is True
+    assert approve["idempotency_required"] is True
+    assert approve["input"]["required"] == [
+        "project_id",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "expected_setup_status",
+    ]
+    assert approve["guard_policy"] == [
+        "expected_state",
+        "expected_artifact_fingerprint",
+    ]
+    assert (
+        ErrorCode.BROWNFIELD_CURATED_SPEC_ALREADY_REGISTERED.value
+        in approve["errors"]
+    )
 
 
 def test_authority_review_is_registered_as_read_only_command() -> None:
