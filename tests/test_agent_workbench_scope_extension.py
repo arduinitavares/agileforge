@@ -26,6 +26,7 @@ from services.agent_workbench.scope_extension import (
     ScopeExtensionRunner,
     ScopeExtensionStartRequest,
     ScopeExtensionValidateRequest,
+    _recovery_marker_from_notes,
     evaluate_scope_extension_preconditions,
     load_structured_spec_file,
     validate_additive_scope_extension,
@@ -659,6 +660,10 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
     assert pending is not None
     assert pending.spec_hash == data["scope_extension_context"]["amended_spec_hash"]
     assert pending.content_ref == str(amended_file.resolve())
+    marker = _recovery_marker_from_notes(pending.approval_notes)
+    assert marker["base_spec_version_id"] == base_spec.spec_version_id
+    assert marker["base_spec_hash"] == base_spec.spec_hash
+    assert marker["added_source_item_ids"] == ["REQ.new-capability"]
     assert workflow.state["fsm_state"] == "SETUP_REQUIRED"
     assert workflow.state["setup_spec_version_id"] == data["spec_version_id"]
     assert workflow.state["setup_next_actions"] == data["next_actions"]

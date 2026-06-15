@@ -271,6 +271,11 @@ class ScopeExtensionRunner:
             spec_version_id=spec_version_id,
             resolved_spec_path=resolved_spec_path,
             request_fingerprint=request_fingerprint,
+            base_spec_version_id=int(validation_data["base_spec_version_id"]),
+            base_spec_hash=str(validation_data["base_spec_hash"]),
+            added_source_item_ids=[
+                str(item_id) for item_id in validation_data["added_source_item_ids"]
+            ],
         )
 
         context = {
@@ -385,6 +390,9 @@ class ScopeExtensionRunner:
         spec_version_id: int,
         resolved_spec_path: Path,
         request_fingerprint: str,
+        base_spec_version_id: int,
+        base_spec_hash: str,
+        added_source_item_ids: list[str],
     ) -> None:
         spec = self._session.get(SpecRegistry, spec_version_id)
         if spec is None:
@@ -393,6 +401,9 @@ class ScopeExtensionRunner:
             "idempotency_key": request.idempotency_key,
             "request_fingerprint": request_fingerprint,
             "spec_file": str(resolved_spec_path),
+            "base_spec_version_id": base_spec_version_id,
+            "base_spec_hash": base_spec_hash,
+            "added_source_item_ids": list(added_source_item_ids),
         }
         spec.approval_notes = _recovery_notes(marker)
         self._session.add(spec)
