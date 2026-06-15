@@ -1156,18 +1156,62 @@ def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | Non
     if not isinstance(data, dict):
         return None
     status = data.get("status")
-    if status != "project_scope_extension_available":
+    if status not in {
+        "project_scope_extension_available",
+        "project_scope_extension_blocked",
+    }:
         return None
 
+    default_primary_action = {
+        "label": "Extend Project Scope",
+        "command": (
+            f"agileforge scope extension validate --project-id {project_id} "
+            "--spec-file <amended_spec_file>"
+        ),
+        "status": status,
+        "reason": (
+            "The current execution scope is exhausted; validate an amended spec "
+            "before generating new work."
+        ),
+    }
+
+    def _normalize_action(action: object) -> dict[str, Any]:
+        """Return the dashboard-normalized scope-extension action shape."""
+        if not isinstance(action, dict):
+            return dict(default_primary_action)
+        return {
+            **default_primary_action,
+            **action,
+            "label": action.get("label") or default_primary_action["label"],
+            "command": action.get("command")
+            or default_primary_action["command"],
+        }
+
     raw_actions = data.get("next_actions", [])
-    actions = raw_actions if isinstance(raw_actions, list) else []
-    primary_action = actions[0] if actions else None
+    actions = (
+        [_normalize_action(action) for action in raw_actions]
+        if isinstance(raw_actions, list)
+        else []
+    )
+    if not actions:
+        actions = [dict(default_primary_action)]
+    primary_action = actions[0]
+    blocked_reasons = data.get("blocked_reasons")
+    if not isinstance(blocked_reasons, list):
+        blocked_reasons = data.get("blocked_commands", [])
+    if not isinstance(blocked_reasons, list):
+        blocked_reasons = []
     return {
+        "status": status,
+        "next_actions": actions,
+        "blocked_reasons": blocked_reasons,
+        "primary_action": primary_action,
         "workflow_next_status": status,
         "scope_extension_status": status,
-        "scope_extension_available": True,
+        "scope_extension_available": status == "project_scope_extension_available",
         "scope_extension_actions": actions,
         "scope_extension_primary_action": primary_action,
+        "scope_extension_blocked_reasons": blocked_reasons,
     }
 
 

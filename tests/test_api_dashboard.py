@@ -863,6 +863,63 @@ def test_get_projects_uses_batch_session_lookup(
     assert workflow.single_calls == []
 
 
+def test_scope_extension_available_projects_sprint_runtime_primary_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard runtime projection exposes exhausted-scope extension action."""
+    project_id = 10
+
+    def workflow_next(*, project_id: int) -> dict[str, object]:
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "status": "project_scope_extension_available",
+                "next_actions": [
+                    {
+                        "command": (
+                            "agileforge scope extension validate --project-id 10 "
+                            "--spec-file <amended_spec_file>"
+                        ),
+                        "status": "project_scope_extension_available",
+                        "reason": (
+                            "The current execution scope is exhausted; validate an "
+                            "amended spec before generating new work."
+                        ),
+                    }
+                ],
+                "blocked_commands": [],
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "_workbench_application",
+        lambda: SimpleNamespace(workflow_next=workflow_next),
+    )
+
+    payload = {
+        "sprint_runtime": api_module._scope_extension_runtime_projection(project_id)
+    }
+
+    assert payload["sprint_runtime"]["status"] == "project_scope_extension_available"
+    assert (
+        payload["sprint_runtime"]["primary_action"]["label"]
+        == "Extend Project Scope"
+    )
+    assert payload["sprint_runtime"]["primary_action"]["command"].startswith(
+        "agileforge scope extension validate"
+    )
+    assert payload["sprint_runtime"]["next_actions"] == [
+        payload["sprint_runtime"]["primary_action"]
+    ]
+    assert payload["sprint_runtime"]["scope_extension_actions"] == [
+        payload["sprint_runtime"]["scope_extension_primary_action"]
+    ]
+
+
 def test_create_project_returns_500_when_repository_does_not_persist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
