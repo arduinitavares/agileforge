@@ -34,6 +34,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer imp
     normalize_compiler_output,
 )
 from services.agent_workbench.error_codes import ErrorCode
+from services.agent_workbench.fingerprints import canonical_hash
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.profile_content import (
@@ -345,6 +346,15 @@ class _FocusedRepairCandidate:
     observed_source_level: str | None
     reason: str
     source_excerpt: str | None = None
+
+
+@dataclass(frozen=True)
+class _ScopeExtensionCompileMarker:
+    """Scope-extension metadata stored on amended spec rows."""
+
+    base_spec_version_id: int
+    base_spec_hash: str
+    added_source_item_ids: list[str]
 
 
 class _CompilerFailureOptions(TypedDict, total=False):
@@ -1305,6 +1315,106 @@ def _source_metadata_retry_commands(spec_version: SpecRegistry) -> list[str]:
     ]
 
 
+def _scope_extension_marker_from_notes(  # noqa: PLR0911
+    notes: str | None,
+) -> _ScopeExtensionCompileMarker | None:
+    """Parse amended spec scope-extension marker from approval notes."""
+    if not notes:
+        return None
+    prefix = "scope_extension_start_recovery="
+    for line in notes.splitlines():
+        if not line.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(line.removeprefix(prefix))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        base_spec_version_id = payload.get("base_spec_version_id")
+        base_spec_hash = payload.get("base_spec_hash")
+        added_source_item_ids = payload.get("added_source_item_ids")
+        if not isinstance(base_spec_version_id, int):
+            return None
+        if not isinstance(base_spec_hash, str):
+            return None
+        if not isinstance(added_source_item_ids, list) or not all(
+            isinstance(item_id, str) for item_id in added_source_item_ids
+        ):
+            return None
+        return _ScopeExtensionCompileMarker(
+            base_spec_version_id=base_spec_version_id,
+            base_spec_hash=base_spec_hash,
+            added_source_item_ids=list(added_source_item_ids),
+        )
+    return None
+
+
+def _extension_only_artifact(
+    artifact: TechnicalSpecArtifact,
+    *,
+    added_source_item_ids: list[str],
+) -> TechnicalSpecArtifact:
+    """Return a structured spec containing only added scope-extension items."""
+    added = set(added_source_item_ids)
+    focused = artifact.model_copy(deep=True)
+    focused.items = [item for item in focused.items if item.id in added]
+    focused.relations = [
+        relation
+        for relation in focused.relations
+        if relation.from_ in added and relation.to in added
+    ]
+    return focused
+
+
+def _json_field_for_authority_fingerprint(raw: str | None) -> object:
+    """Return a canonical JSON field value for authority fingerprints."""
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"malformed_json": raw}
+
+
+def _pending_authority_fingerprint(
+    authority: CompiledSpecAuthority | None,
+) -> str | None:
+    """Return the same pending authority fingerprint used by projections."""
+    if authority is None:
+        return None
+    return canonical_hash(
+        {
+            "command": "agileforge authority status",
+            "pending_compiled": {
+                "authority_id": authority.authority_id,
+                "spec_version_id": authority.spec_version_id,
+                "compiler_version": authority.compiler_version,
+                "prompt_hash": authority.prompt_hash,
+                "compiled_at": authority.compiled_at,
+                "compiled_artifact_json": _json_field_for_authority_fingerprint(
+                    authority.compiled_artifact_json
+                ),
+                "scope_themes": _json_field_for_authority_fingerprint(
+                    authority.scope_themes
+                ),
+                "invariants": _json_field_for_authority_fingerprint(
+                    authority.invariants
+                ),
+                "eligible_feature_ids": _json_field_for_authority_fingerprint(
+                    authority.eligible_feature_ids
+                ),
+                "rejected_features": _json_field_for_authority_fingerprint(
+                    authority.rejected_features
+                ),
+                "spec_gaps": _json_field_for_authority_fingerprint(
+                    authority.spec_gaps
+                ),
+            },
+        }
+    )
+
+
 def _source_metadata_failure_detail_fields(
     failure: SpecAuthorityCompilationFailure,
     *,
@@ -1698,7 +1808,7 @@ def _coverage_repair_result(
     return "failed"
 
 
-def _repair_missing_iterative_authority(
+def _repair_missing_iterative_authority(  # noqa: PLR0913
     *,
     artifact: TechnicalSpecArtifact,
     existing_successes: list[SpecAuthorityCompilationSuccess],
@@ -3152,6 +3262,322 @@ def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
     )
 
 
+def _scope_extension_compile_failure(
+    spec_version: SpecRegistry,
+    *,
+    reason: str,
+    blocking_gap: str,
+) -> _CompilerInvocationResult:
+    """Return a fail-closed scope-extension compile failure."""
+    failure = _compiler_failure_result(
+        product_id=spec_version.product_id,
+        spec_version_id=spec_version.spec_version_id,
+        content_ref=spec_version.content_ref,
+        failure_stage="scope_extension_base_authority",
+        error=ErrorCode.SPEC_COMPILE_FAILED.value,
+        reason=reason,
+        blocking_gaps=[blocking_gap],
+    )
+    return _CompilerInvocationResult(
+        failure=_attach_schema_retry_metadata(
+            failure,
+            attempted=False,
+            reason=None,
+            attempts=0,
+        )
+    )
+
+
+def _accepted_authority_identity_matches(
+    authority: CompiledSpecAuthority,
+    acceptance: SpecAuthorityAcceptance,
+) -> bool:
+    """Return whether a compiled authority still matches its acceptance row."""
+    if authority.compiler_version != acceptance.compiler_version:
+        return False
+    if authority.prompt_hash != acceptance.prompt_hash:
+        return False
+    if acceptance.pending_authority_id is not None:
+        if authority.authority_id != acceptance.pending_authority_id:
+            return False
+    elif acceptance.authority_fingerprint is None:
+        return False
+    if acceptance.authority_fingerprint is not None:
+        return (
+            _pending_authority_fingerprint(authority)
+            == acceptance.authority_fingerprint
+        )
+    return True
+
+
+def _latest_matching_base_authority(
+    session: Session,
+    *,
+    marker: _ScopeExtensionCompileMarker,
+    acceptance: SpecAuthorityAcceptance,
+) -> CompiledSpecAuthority | None:
+    """Return a base authority only when it still matches the accepted decision."""
+    if acceptance.pending_authority_id is not None:
+        authority = session.get(CompiledSpecAuthority, acceptance.pending_authority_id)
+        if (
+            authority is not None
+            and authority.spec_version_id == marker.base_spec_version_id
+            and _accepted_authority_identity_matches(authority, acceptance)
+        ):
+            return authority
+        return None
+
+    rows = session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == marker.base_spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
+    ).all()
+    return next(
+        (
+            authority
+            for authority in rows
+            if _accepted_authority_identity_matches(authority, acceptance)
+        ),
+        None,
+    )
+
+
+def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
+    session: Session,
+    *,
+    spec_version: SpecRegistry,
+    marker: _ScopeExtensionCompileMarker,
+) -> SpecAuthorityCompilationSuccess | _CompilerInvocationResult:
+    """Load the accepted base authority referenced by a scope-extension marker."""
+    base_spec = session.get(SpecRegistry, marker.base_spec_version_id)
+    if base_spec is None or base_spec.product_id != spec_version.product_id:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_SPEC_NOT_FOUND",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"base spec {marker.base_spec_version_id} was not found "
+                "for this project."
+            ),
+        )
+    if base_spec.spec_hash != marker.base_spec_hash:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_SPEC_HASH_MISMATCH",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"base spec {marker.base_spec_version_id} hash changed."
+            ),
+        )
+
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance)
+        .where(
+            SpecAuthorityAcceptance.product_id == spec_version.product_id,
+            SpecAuthorityAcceptance.spec_version_id == marker.base_spec_version_id,
+            SpecAuthorityAcceptance.status == "accepted",
+        )
+        .order_by(
+            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+            cast("Any", SpecAuthorityAcceptance.id).desc(),
+        )
+    ).first()
+    if acceptance is None:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_AUTHORITY_NOT_ACCEPTED",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"base spec {marker.base_spec_version_id} has no accepted "
+                "authority decision."
+            ),
+        )
+    if acceptance.spec_hash != marker.base_spec_hash:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_AUTHORITY_HASH_MISMATCH",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"accepted decision for base spec {marker.base_spec_version_id} "
+                "does not match the marker hash."
+            ),
+        )
+
+    authority = _latest_matching_base_authority(
+        session,
+        marker=marker,
+        acceptance=acceptance,
+    )
+    if authority is None:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_AUTHORITY_ACCEPTANCE_MISMATCH",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"base spec {marker.base_spec_version_id} compiled authority "
+                "does not match its accepted decision."
+            ),
+        )
+
+    load_result = load_compiled_artifact(authority)
+    if not load_result.ok or load_result.artifact is None:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_BASE_AUTHORITY_INVALID",
+            blocking_gap=(
+                "Scope extension base authority reuse failed: "
+                f"base spec {marker.base_spec_version_id} compiled artifact "
+                f"is not usable ({load_result.status})."
+            ),
+        )
+    return load_result.artifact
+
+
+def _scope_extension_normalized_failure(
+    spec_version: SpecRegistry,
+    *,
+    raw_json: str,
+    output: SpecAuthorityCompilerOutput,
+    coverage_repair_item_ids: tuple[str, ...] = (),
+) -> _CompilerInvocationResult:
+    """Convert a scope-extension normalized failure into a persisted result."""
+    failure = cast("SpecAuthorityCompilationFailure", output.root)
+    failure_result = _normalized_failure_result(
+        spec_version,
+        raw_json=raw_json,
+        failure=failure,
+    )
+    if coverage_repair_item_ids:
+        failure_result = _with_coverage_repair_diagnostics(
+            failure_result,
+            coverage_repair_attempted=True,
+            coverage_repair_item_ids=coverage_repair_item_ids,
+            coverage_repair_result=_coverage_repair_result(output),
+        )
+    return _CompilerInvocationResult(
+        failure=_attach_schema_retry_metadata(
+            failure_result,
+            attempted=False,
+            reason=None,
+            attempts=0,
+        )
+    )
+
+
+def _invoke_scope_extension_compiler_for_version(  # noqa: PLR0911, PLR0913
+    session: Session,
+    *,
+    spec_version: SpecRegistry,
+    spec_content: str,
+    marker: _ScopeExtensionCompileMarker,
+    compiler_model: str | None,
+    lease_guard: Callable[[str], bool] | None,
+) -> _CompilerInvocationResult:
+    """Compile only added scope and merge it with accepted base authority."""
+    base_authority = _accepted_base_authority_for_scope_extension(
+        session,
+        spec_version=spec_version,
+        marker=marker,
+    )
+    if isinstance(base_authority, _CompilerInvocationResult):
+        return base_authority
+    try:
+        artifact = TechnicalSpecArtifact.model_validate_json(spec_content)
+    except ValidationError as exc:
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_AMENDED_SPEC_INVALID",
+            blocking_gap=f"Scope extension amended spec is invalid: {exc}",
+        )
+
+    extension_artifact = _extension_only_artifact(
+        artifact,
+        added_source_item_ids=marker.added_source_item_ids,
+    )
+    if len(extension_artifact.items) != len(set(marker.added_source_item_ids)):
+        return _scope_extension_compile_failure(
+            spec_version,
+            reason="SCOPE_EXTENSION_ADDED_ITEMS_MISSING",
+            blocking_gap=(
+                "Scope extension marker references added items that are not "
+                "present in the amended spec."
+            ),
+        )
+
+    extension_invocation = _invoke_compiler_for_version(
+        spec_version,
+        spec_content=canonical_spec_json(extension_artifact),
+        compiler_model=compiler_model,
+        lease_guard=lease_guard,
+    )
+    if extension_invocation.failure is not None:
+        return extension_invocation
+    extension_authority = extension_invocation.success
+    if extension_authority is None:
+        raise _compiler_invocation_returned_no_success_artifact_error()
+
+    merged_raw_json = SpecAuthorityCompilerOutput(
+        root=_merge_compilation_successes([base_authority, extension_authority])
+    ).model_dump_json()
+    merged_output = normalize_compiler_output(
+        merged_raw_json,
+        source_text=spec_content,
+        source_format=_detect_spec_source_format(spec_content),
+    )
+    if isinstance(merged_output.root, SpecAuthorityCompilationFailure):
+        return _scope_extension_normalized_failure(
+            spec_version,
+            raw_json=merged_raw_json,
+            output=merged_output,
+        )
+
+    item_ids = _iterative_authority_item_ids(artifact)
+    missing_item_ids = _missing_iterative_authority_item_ids(
+        merged_output.root,
+        item_ids=item_ids,
+    )
+    if missing_item_ids:
+        added = set(marker.added_source_item_ids)
+        base_missing = [item_id for item_id in missing_item_ids if item_id not in added]
+        if base_missing:
+            coverage_output = _structured_missing_authority_failure(
+                missing_item_ids=base_missing,
+                focused_failures=[],
+                total_item_count=len(item_ids),
+            )
+            return _scope_extension_normalized_failure(
+                spec_version,
+                raw_json=coverage_output.model_dump_json(),
+                output=coverage_output,
+            )
+        repaired_output = _repair_missing_iterative_authority(
+            artifact=artifact,
+            existing_successes=[base_authority, extension_authority],
+            missing_item_ids=missing_item_ids,
+            product_id=spec_version.product_id,
+            spec_version_id=spec_version.spec_version_id,
+            compiler_model=compiler_model,
+        )
+        if isinstance(repaired_output.root, SpecAuthorityCompilationFailure):
+            return _scope_extension_normalized_failure(
+                spec_version,
+                raw_json=repaired_output.model_dump_json(),
+                output=repaired_output,
+                coverage_repair_item_ids=tuple(missing_item_ids),
+            )
+        merged_output = repaired_output
+
+    return _CompilerInvocationResult(
+        success=cast("SpecAuthorityCompilationSuccess", merged_output.root),
+        schema_retry_attempted=extension_invocation.schema_retry_attempted,
+        schema_retry_reason=extension_invocation.schema_retry_reason,
+        schema_retry_attempts=extension_invocation.schema_retry_attempts,
+        schema_retry_failure_details=(
+            extension_invocation.schema_retry_failure_details
+        ),
+    )
+
+
 def _persist_compiled_authority(  # noqa: PLR0913
     session: Session,
     *,
@@ -3273,12 +3699,23 @@ def _compile_spec_authority_for_version_in_session(  # noqa: PLR0913
         return spec_content_result
     spec_content, content_source = spec_content_result
 
-    invocation = _invoke_compiler_for_version(
-        context.spec_version,
-        spec_content=spec_content,
-        compiler_model=compiler_model,
-        lease_guard=lease_guard,
-    )
+    marker = _scope_extension_marker_from_notes(context.spec_version.approval_notes)
+    if marker is None:
+        invocation = _invoke_compiler_for_version(
+            context.spec_version,
+            spec_content=spec_content,
+            compiler_model=compiler_model,
+            lease_guard=lease_guard,
+        )
+    else:
+        invocation = _invoke_scope_extension_compiler_for_version(
+            session,
+            spec_version=context.spec_version,
+            spec_content=spec_content,
+            marker=marker,
+            compiler_model=compiler_model,
+            lease_guard=lease_guard,
+        )
     if invocation.failure is not None:
         return invocation.failure
     compiled = invocation.success
