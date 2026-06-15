@@ -466,6 +466,32 @@ class _Application(Protocol):
         """Assess implementation state and cache it in workflow state."""
         ...
 
+    def brownfield_source_import(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_file: str,
+        source_kind: str = "source_file",
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a raw brownfield source artifact."""
+        ...
+
+    def brownfield_scan(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        source_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a brownfield repository scan attempt."""
+        ...
+
     def roadmap_generate(
         self,
         *,
@@ -1550,6 +1576,49 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     as_built_assess.add_argument("--user-input")
     as_built_assess.add_argument("--idempotency-key", required=True)
     as_built_assess.set_defaults(command_handler=_as_built_assess)
+
+    brownfield = subparsers.add_parser(
+        "brownfield",
+        help="Record brownfield curation sources and repository scans.",
+    )
+    brownfield_sub = brownfield.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    brownfield_source = brownfield_sub.add_parser(
+        "source",
+        help="Record raw brownfield source artifacts.",
+    )
+    brownfield_source_sub = brownfield_source.add_subparsers(
+        dest="source_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    brownfield_source_import = brownfield_source_sub.add_parser(
+        "import",
+        help="Import a raw brownfield source file.",
+    )
+    brownfield_source_import.add_argument("--project-id", type=int, required=True)
+    brownfield_source_import.add_argument("--source-file", required=True)
+    brownfield_source_import.add_argument("--source-kind", default="source_file")
+    brownfield_source_import.add_argument("--idempotency-key", required=True)
+    brownfield_source_import.add_argument("--correlation-id")
+    brownfield_source_import.add_argument("--changed-by", default="cli-agent")
+    brownfield_source_import.set_defaults(
+        command_handler=_brownfield_source_import
+    )
+    brownfield_scan = brownfield_sub.add_parser(
+        "scan",
+        help="Record a bounded brownfield repository scan.",
+    )
+    brownfield_scan.add_argument("--project-id", type=int, required=True)
+    brownfield_scan.add_argument("--repo-path", required=True)
+    brownfield_scan.add_argument("--source-attempt-id")
+    brownfield_scan.add_argument("--idempotency-key", required=True)
+    brownfield_scan.add_argument("--correlation-id")
+    brownfield_scan.add_argument("--changed-by", default="cli-agent")
+    brownfield_scan.set_defaults(command_handler=_brownfield_scan)
 
     roadmap = subparsers.add_parser("roadmap", help="Run Roadmap phase commands.")
     roadmap_sub = roadmap.add_subparsers(
@@ -3165,6 +3234,36 @@ def _as_built_assess(
         spec_mode=args.spec_mode,
         user_input=args.user_input,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _brownfield_source_import(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route brownfield source import to the application facade."""
+    return "agileforge brownfield source import", application.brownfield_source_import(
+        project_id=args.project_id,
+        source_file=args.source_file,
+        source_kind=args.source_kind,
+        idempotency_key=args.idempotency_key,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _brownfield_scan(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route brownfield scan to the application facade."""
+    return "agileforge brownfield scan", application.brownfield_scan(
+        project_id=args.project_id,
+        repo_path=args.repo_path,
+        source_attempt_id=args.source_attempt_id,
+        idempotency_key=args.idempotency_key,
+        correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
     )
 
 

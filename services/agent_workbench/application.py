@@ -747,6 +747,36 @@ class _AsBuiltAssessmentRunner(Protocol):
         ...
 
 
+class _BrownfieldCurationRunner(Protocol):
+    """Brownfield curation commands exposed through the facade."""
+
+    def source_import(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_file: str,
+        source_kind: str = "source_file",
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a raw brownfield source artifact."""
+        ...
+
+    def scan(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        source_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a repository scan attempt."""
+        ...
+
+
 class AgentWorkbenchApplication:
     """Thin facade shared by CLI transport and future API parity paths."""
 
@@ -767,6 +797,7 @@ class AgentWorkbenchApplication:
         sprint_runner: _SprintPhaseRunner | None = None,
         evidence_runner: _EvidenceCollectionRunner | None = None,
         as_built_runner: _AsBuiltAssessmentRunner | None = None,
+        brownfield_runner: _BrownfieldCurationRunner | None = None,
     ) -> None:
         """Initialize the facade with explicit projection dependencies."""
         self._read_projection = read_projection
@@ -783,6 +814,7 @@ class AgentWorkbenchApplication:
         self._sprint_runner = sprint_runner
         self._evidence_runner = evidence_runner
         self._as_built_runner = as_built_runner
+        self._brownfield_runner = brownfield_runner
         self._context_pack: ContextPackService | None = None
 
     def project_list(self) -> dict[str, Any]:
@@ -1493,6 +1525,46 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
+    def brownfield_source_import(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        source_file: str,
+        source_kind: str = "source_file",
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a raw brownfield source artifact."""
+        return self._get_brownfield_runner().source_import(
+            project_id=project_id,
+            source_file=source_file,
+            source_kind=source_kind,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+
+    def brownfield_scan(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        repo_path: str,
+        source_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a brownfield repository scan attempt."""
+        return self._get_brownfield_runner().scan(
+            project_id=project_id,
+            repo_path=repo_path,
+            source_attempt_id=source_attempt_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            changed_by=changed_by,
+        )
+
     def roadmap_generate(
         self,
         *,
@@ -2125,6 +2197,16 @@ class AgentWorkbenchApplication:
 
             self._as_built_runner = AsBuiltAssessmentRunner()
         return self._as_built_runner
+
+    def _get_brownfield_runner(self) -> _BrownfieldCurationRunner:
+        """Return the brownfield curation runner, constructing it lazily."""
+        if self._brownfield_runner is None:
+            from services.agent_workbench.brownfield_curation import (  # noqa: PLC0415
+                BrownfieldCurationRunner,
+            )
+
+            self._brownfield_runner = BrownfieldCurationRunner()
+        return self._brownfield_runner
 
 
 def _envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:

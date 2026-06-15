@@ -419,6 +419,27 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
     ),
 }
 
+_BROWNFIELD_ERROR_REGISTRY: dict[str, ErrorMetadata] = {
+    "BROWNFIELD_SOURCE_FILE_NOT_FOUND": ErrorMetadata(
+        code="BROWNFIELD_SOURCE_FILE_NOT_FOUND",
+        default_exit_code=2,
+        retryable=False,
+        description="Brownfield source file was not found.",
+    ),
+    "BROWNFIELD_REPO_PATH_NOT_FOUND": ErrorMetadata(
+        code="BROWNFIELD_REPO_PATH_NOT_FOUND",
+        default_exit_code=2,
+        retryable=False,
+        description="Brownfield repository path was not found.",
+    ),
+    "BROWNFIELD_SOURCE_NOT_FOUND": ErrorMetadata(
+        code="BROWNFIELD_SOURCE_NOT_FOUND",
+        default_exit_code=4,
+        retryable=False,
+        description="Brownfield source attempt was not found.",
+    ),
+}
+
 
 def _normalize_code(code: ErrorCode | str) -> ErrorCode:
     """Return a registered ErrorCode from enum or string input."""
@@ -429,6 +450,8 @@ def _normalize_code(code: ErrorCode | str) -> ErrorCode:
 
 def error_metadata(code: ErrorCode | str) -> ErrorMetadata:
     """Return stable metadata for a registered error code."""
+    if isinstance(code, str) and code in _BROWNFIELD_ERROR_REGISTRY:
+        return _BROWNFIELD_ERROR_REGISTRY[code]
     return _ERROR_REGISTRY[_normalize_code(code)]
 
 
