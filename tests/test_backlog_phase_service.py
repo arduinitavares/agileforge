@@ -2,7 +2,7 @@
 
 import copy
 from types import SimpleNamespace
-from typing import Any, Never
+from typing import Any, Never, Protocol, cast
 from unittest.mock import patch
 
 import pytest
@@ -44,6 +44,10 @@ from services.phases.backlog_service import (
 )
 
 JsonDict = dict[str, Any]
+
+
+class _StatefulToolContext(Protocol):
+    state: dict[str, Any]
 
 
 def _review_state_for_artifact(output_artifact: JsonDict) -> JsonDict:
@@ -2197,8 +2201,9 @@ async def test_save_backlog_draft_masks_stale_internal_backlog_save_options() ->
         backlog_input: SaveBacklogInput,
         tool_context: object,
     ) -> JsonDict:
+        context = cast("_StatefulToolContext", tool_context)
         captured["internal_options_visible"] = (
-            INTERNAL_BACKLOG_SAVE_OPTIONS_KEY in tool_context.state
+            INTERNAL_BACKLOG_SAVE_OPTIONS_KEY in context.state
         )
         return {
             "success": True,
@@ -2335,10 +2340,11 @@ async def test_save_backlog_draft_scope_extension_uses_internal_options() -> Non
         backlog_input: SaveBacklogInput,
         tool_context: object,
     ) -> JsonDict:
+        context = cast("_StatefulToolContext", tool_context)
         captured["backlog_input"] = backlog_input
         captured["tool_context"] = tool_context
         captured["internal_options"] = dict(
-            tool_context.state["_agileforge_internal_backlog_save_options"]
+            context.state["_agileforge_internal_backlog_save_options"]
         )
         return {
             "success": True,

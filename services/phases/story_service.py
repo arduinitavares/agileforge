@@ -91,7 +91,7 @@ def _coerce_int(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        return int(value)
+        return int(cast("Any", value))
     except (TypeError, ValueError):
         return None
 

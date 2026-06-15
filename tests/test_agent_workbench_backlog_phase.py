@@ -1374,7 +1374,7 @@ def test_run_backlog_scope_extension_sends_delta_metadata(
 
     async def fake_invoke_backlog_agent(payload: object) -> str:
         captured["payload"] = payload
-        captured["payload_dump"] = payload.model_dump(mode="json")  # type: ignore[attr-defined]
+        captured["payload_dump"] = cast("Any", payload).model_dump(mode="json")
         return json.dumps(
             {
                 "backlog_items": [

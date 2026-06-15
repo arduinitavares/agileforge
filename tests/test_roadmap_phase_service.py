@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Never
+from typing import Any, Never, cast
 
 import pytest
 
@@ -263,18 +263,14 @@ def test_build_roadmap_input_context_includes_scope_extension_append_context() -
     }
 
     context = build_roadmap_input_context(state, user_input=None)
+    scope_extension = cast("JsonDict", context["scope_extension"])
 
     assert context["generation_mode"] == "scope_extension"
     assert context["existing_roadmap_context"] == existing_roadmap
     assert context["prior_roadmap_state"] == "NO_HISTORY"
-    assert (
-        context["scope_extension"]["base_spec_version_id"] == BASE_SPEC_VERSION_ID
-    )
-    assert (
-        context["scope_extension"]["amended_spec_version_id"]
-        == AMENDED_SPEC_VERSION_ID
-    )
-    assert context["scope_extension"]["added_source_item_ids"] == ["REQ.new-analytics"]
+    assert scope_extension["base_spec_version_id"] == BASE_SPEC_VERSION_ID
+    assert scope_extension["amended_spec_version_id"] == AMENDED_SPEC_VERSION_ID
+    assert scope_extension["added_source_item_ids"] == ["REQ.new-analytics"]
     assert context["extension_backlog_items"] == [
         {
             "requirement": "Add analyst export",

@@ -903,20 +903,17 @@ def test_scope_extension_available_projects_sprint_runtime_primary_action(
     payload = {
         "sprint_runtime": api_module._scope_extension_runtime_projection(project_id)
     }
+    runtime = payload["sprint_runtime"]
+    assert isinstance(runtime, dict)
 
-    assert payload["sprint_runtime"]["status"] == "project_scope_extension_available"
-    assert (
-        payload["sprint_runtime"]["primary_action"]["label"]
-        == "Extend Project Scope"
-    )
-    assert payload["sprint_runtime"]["primary_action"]["command"].startswith(
+    assert runtime["status"] == "project_scope_extension_available"
+    assert runtime["primary_action"]["label"] == "Extend Project Scope"
+    assert runtime["primary_action"]["command"].startswith(
         "agileforge scope extension validate"
     )
-    assert payload["sprint_runtime"]["next_actions"] == [
-        payload["sprint_runtime"]["primary_action"]
-    ]
-    assert payload["sprint_runtime"]["scope_extension_actions"] == [
-        payload["sprint_runtime"]["scope_extension_primary_action"]
+    assert runtime["next_actions"] == [runtime["primary_action"]]
+    assert runtime["scope_extension_actions"] == [
+        runtime["scope_extension_primary_action"]
     ]
 
 

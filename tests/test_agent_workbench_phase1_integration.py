@@ -34,7 +34,10 @@ from services.agent_workbench.evidence_collect import (
 from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.read_projection import ReadProjectionService
 from services.agent_workbench.scope_extension import (
+    ScopeExtensionPreconditions,
     ScopeExtensionRunner,
+    ScopeExtensionStartRequest,
+    ScopeExtensionValidateRequest,
     evaluate_scope_extension_preconditions,
 )
 from tests.typing_helpers import require_id
@@ -49,7 +52,14 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
-    from services.agent_workbench.authority_decision import AuthorityAcceptRequest
+    from services.agent_workbench.application import (
+        _BacklogPhaseRunner,
+        _StoryPhaseRunner,
+    )
+    from services.agent_workbench.authority_decision import (
+        AuthorityAcceptRequest,
+        AuthorityRejectRequest,
+    )
     from services.agent_workbench.session_reader import ReadOnlySessionReader
 
 type JsonObject = dict[str, object]
@@ -249,12 +259,14 @@ class _ScopeExtensionIntegrationRunner:
         self,
         *,
         project_id: int,
-        workflow: dict[str, object],
+        workflow: dict[str, Any],
         sprint_candidate_count: int,
-    ) -> object:
+    ) -> ScopeExtensionPreconditions | None:
         """Evaluate scope-extension availability against real DB state."""
         state = workflow.get("state")
-        workflow_state = state if isinstance(state, dict) else {}
+        workflow_state = (
+            cast("dict[str, Any]", state) if isinstance(state, dict) else {}
+        )
         return evaluate_scope_extension_preconditions(
             session=self._session,
             product_id=project_id,
@@ -262,13 +274,13 @@ class _ScopeExtensionIntegrationRunner:
             sprint_candidate_count=sprint_candidate_count,
         )
 
-    def validate(self, request: object) -> dict[str, Any]:
+    def validate(self, request: ScopeExtensionValidateRequest) -> dict[str, Any]:
         """Delegate validation to the real scope-extension runner."""
-        return self._runner().validate(request)  # type: ignore[arg-type]
+        return self._runner().validate(request)
 
-    def start(self, request: object) -> dict[str, Any]:
+    def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
         """Delegate start to the real scope-extension runner."""
-        return self._runner().start(request)  # type: ignore[arg-type]
+        return self._runner().start(request)
 
     def _runner(self) -> ScopeExtensionRunner:
         """Build a real runner over the shared test session."""
@@ -427,9 +439,11 @@ class _ExtensionAuthorityDecisionRunner:
 
     def accept(self, request: AuthorityAcceptRequest) -> dict[str, Any]:
         """Accept pending amended authority and resume phase generation."""
-        spec_version_id = int(
-            self._workflow.state.get("pending_compiled_spec_version_id") or 0
+        pending_spec_version_id = self._workflow.state.get(
+            "pending_compiled_spec_version_id"
         )
+        assert isinstance(pending_spec_version_id, int)
+        spec_version_id = pending_spec_version_id
         spec = self._session.get(SpecRegistry, spec_version_id)
         assert spec is not None
         spec.status = "approved"
@@ -474,8 +488,9 @@ class _ExtensionAuthorityDecisionRunner:
             "errors": [],
         }
 
-    def reject(self, _request: object) -> dict[str, Any]:
+    def reject(self, request: AuthorityRejectRequest) -> dict[str, Any]:
         """Reject is outside this regression path."""
+        _ = request
         return {"ok": False, "data": None, "warnings": [], "errors": []}
 
 
@@ -535,7 +550,9 @@ class _ExtensionBacklogRunner:
     ) -> dict[str, Any]:
         """Persist one extension story candidate without touching completed work."""
         _ = attempt_id, expected_artifact_fingerprint, expected_state, idempotency_key
-        spec_version_id = int(self._workflow.state["accepted_spec_version_id"])
+        accepted_spec_version_id = self._workflow.state["accepted_spec_version_id"]
+        assert isinstance(accepted_spec_version_id, int)
+        spec_version_id = accepted_spec_version_id
         story = UserStory(
             product_id=project_id,
             title=EXTENSION_STORY_TITLE,
@@ -1264,9 +1281,12 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
             session=session,
             workflow=workflow,
         ),
-        backlog_runner=_ExtensionBacklogRunner(session=session, workflow=workflow),
+        backlog_runner=cast(
+            "_BacklogPhaseRunner",
+            _ExtensionBacklogRunner(session=session, workflow=workflow),
+        ),
         roadmap_runner=_ExtensionRoadmapRunner(workflow),
-        story_runner=_ExtensionStoryRunner(workflow),
+        story_runner=cast("_StoryPhaseRunner", _ExtensionStoryRunner(workflow)),
     )
     before_counts = _completed_counts(session, project_id)
 
@@ -1332,7 +1352,9 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
     )
     start_data = _mapping(start_payload["data"])
     assert start_data["setup_status"] == "authority_compile_required"
-    amended_spec_version_id = int(start_data["spec_version_id"])
+    spec_version_value = start_data["spec_version_id"]
+    assert isinstance(spec_version_value, int)
+    amended_spec_version_id = spec_version_value
     amended_spec_hash = str(
         _mapping(start_data["scope_extension_context"])["amended_spec_hash"]
     )

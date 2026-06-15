@@ -113,14 +113,16 @@ class _WorkflowServiceDouble:
         self.state = state or {}
         self.updates: list[dict[str, Any]] = []
 
-    def get_session_status(self, _session_id: str) -> dict[str, Any]:
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        _ = session_id
         return dict(self.state)
 
     def update_session_status(
         self,
-        _session_id: str,
+        session_id: str,
         partial_update: dict[str, Any],
     ) -> None:
+        _ = session_id
         self.updates.append(dict(partial_update))
         self.state.update(partial_update)
 
@@ -148,6 +150,12 @@ def _product(session: Session) -> Product:
     session.commit()
     session.refresh(product)
     return product
+
+
+def _product_id(product: Product) -> int:
+    product_id = product.product_id
+    assert product_id is not None
+    return product_id
 
 
 def _team(session: Session) -> Team:
@@ -236,9 +244,11 @@ def _accepted_base_spec(
 
 
 def _spec_rows(session: Session, product_id: int) -> list[SpecRegistry]:
-    return session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
-    ).all()
+    return list(
+        session.exec(
+            select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+        ).all()
+    )
 
 
 def test_scope_extension_preconditions_available_when_sprint_complete_and_no_open_work(
@@ -249,7 +259,7 @@ def test_scope_extension_preconditions_available_when_sprint_complete_and_no_ope
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=0,
     )
@@ -264,11 +274,11 @@ def test_scope_extension_preconditions_block_active_sprint(
 ) -> None:
     """Block extension while an active sprint exists."""
     product = _product(session)
-    _sprint(session, product.product_id, status=SprintStatus.ACTIVE)
+    _sprint(session, _product_id(product), status=SprintStatus.ACTIVE)
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=0,
     )
@@ -283,11 +293,11 @@ def test_scope_extension_preconditions_block_planned_sprint(
 ) -> None:
     """Block extension while a planned sprint exists."""
     product = _product(session)
-    _sprint(session, product.product_id, status=SprintStatus.PLANNED)
+    _sprint(session, _product_id(product), status=SprintStatus.PLANNED)
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=0,
     )
@@ -302,11 +312,11 @@ def test_scope_extension_preconditions_block_open_story(
 ) -> None:
     """Block extension while any non-terminal story remains."""
     product = _product(session)
-    _story(session, product.product_id, status=StoryStatus.IN_PROGRESS)
+    _story(session, _product_id(product), status=StoryStatus.IN_PROGRESS)
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=0,
     )
@@ -324,7 +334,7 @@ def test_scope_extension_preconditions_block_remaining_sprint_candidates(
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=1,
     )
@@ -342,7 +352,7 @@ def test_scope_extension_preconditions_block_non_sprint_complete_state(
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state("SPRINT_PLANNING"),
         sprint_candidate_count=0,
     )
@@ -357,14 +367,14 @@ def test_scope_extension_preconditions_allow_terminal_stories(
 ) -> None:
     """Treat accepted, done, superseded, and archived stories as terminal."""
     product = _product(session)
-    _story(session, product.product_id, status=StoryStatus.DONE)
-    _story(session, product.product_id, status=StoryStatus.ACCEPTED)
-    _story(session, product.product_id, is_superseded=True)
-    _story(session, product.product_id, archived_reason="scope_reset")
+    _story(session, _product_id(product), status=StoryStatus.DONE)
+    _story(session, _product_id(product), status=StoryStatus.ACCEPTED)
+    _story(session, _product_id(product), is_superseded=True)
+    _story(session, _product_id(product), archived_reason="scope_reset")
 
     result = evaluate_scope_extension_preconditions(
         session=session,
-        product_id=product.product_id,
+        product_id=_product_id(product),
         workflow_state=_workflow_state(),
         sprint_candidate_count=0,
     )
@@ -545,7 +555,7 @@ def test_runner_validate_returns_added_items_and_base_guard_info(
 ) -> None:
     """Validate amended spec against latest accepted base without mutation."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -558,7 +568,7 @@ def test_runner_validate_returns_added_items_and_base_guard_info(
 
     result = runner.validate(
         ScopeExtensionValidateRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id,
         )
@@ -568,7 +578,7 @@ def test_runner_validate_returns_added_items_and_base_guard_info(
     data = result["data"]
     assert data["status"] == SCOPE_EXTENSION_VALID
     assert data["valid"] is True
-    assert data["project_id"] == product.product_id
+    assert data["project_id"] == _product_id(product)
     assert data["base_spec_version_id"] == base_spec.spec_version_id
     assert data["base_spec_hash"] == base_spec.spec_hash
     assert data["amended_spec_hash"]
@@ -585,7 +595,7 @@ def test_runner_validate_blocks_mismatched_base_spec_version_id(
     """Reject stale base guards before loading amendment side effects."""
     mismatched_base_spec_version_id = 999_999
     product = _product(session)
-    _accepted_base_spec(session, product.product_id)
+    _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -598,7 +608,7 @@ def test_runner_validate_blocks_mismatched_base_spec_version_id(
 
     result = runner.validate(
         ScopeExtensionValidateRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=mismatched_base_spec_version_id,
         )
@@ -619,7 +629,7 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
 ) -> None:
     """Start extension by registering amended spec and requiring authority compile."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -630,7 +640,7 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -644,7 +654,7 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
     assert data["setup_status"] == "authority_compile_required"
     assert data["spec_version_id"] != base_spec.spec_version_id
     assert data["next_actions"][0]["command"] == "agileforge authority compile"
-    assert data["next_actions"][0]["args"]["project_id"] == product.product_id
+    assert data["next_actions"][0]["args"]["project_id"] == _product_id(product)
     pending = session.get(SpecRegistry, data["spec_version_id"])
     assert pending is not None
     assert pending.spec_hash == data["scope_extension_context"]["amended_spec_hash"]
@@ -664,7 +674,7 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
         "request_fingerprint": canonical_hash(
             {
                 "request": ScopeExtensionStartRequest(
-                    project_id=product.product_id,
+                    project_id=_product_id(product),
                     spec_file=str(amended_file),
                     base_spec_version_id=base_spec.spec_version_id or 0,
                     expected_state="SPRINT_COMPLETE",
@@ -683,8 +693,8 @@ def test_runner_start_blocks_active_sprint_without_pending_spec_registration(
 ) -> None:
     """Reject start while an active Sprint means execution scope is not exhausted."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
-    _sprint(session, product.product_id, status=SprintStatus.ACTIVE)
+    base_spec = _accepted_base_spec(session, _product_id(product))
+    _sprint(session, _product_id(product), status=SprintStatus.ACTIVE)
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -695,7 +705,7 @@ def test_runner_start_blocks_active_sprint_without_pending_spec_registration(
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -708,7 +718,7 @@ def test_runner_start_blocks_active_sprint_without_pending_spec_registration(
     assert result["errors"][0]["details"]["blocking_reason"] == "ACTIVE_SPRINT_EXISTS"
     assert workflow.updates == []
     spec_version_ids = [
-        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+        spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
     ]
     assert spec_version_ids == [base_spec.spec_version_id]
 
@@ -719,8 +729,8 @@ def test_runner_start_blocks_open_story_without_pending_spec_registration(
 ) -> None:
     """Reject start while unresolved story work still exists."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
-    _story(session, product.product_id, status=StoryStatus.IN_PROGRESS)
+    base_spec = _accepted_base_spec(session, _product_id(product))
+    _story(session, _product_id(product), status=StoryStatus.IN_PROGRESS)
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -731,7 +741,7 @@ def test_runner_start_blocks_open_story_without_pending_spec_registration(
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -744,7 +754,7 @@ def test_runner_start_blocks_open_story_without_pending_spec_registration(
     assert result["errors"][0]["details"]["blocking_reason"] == "OPEN_STORY_EXISTS"
     assert workflow.updates == []
     spec_version_ids = [
-        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+        spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
     ]
     assert spec_version_ids == [base_spec.spec_version_id]
 
@@ -755,7 +765,7 @@ def test_runner_start_blocks_remaining_candidates_without_pending_spec_registrat
 ) -> None:
     """Reject start when injected planning candidate count says scope remains."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -770,7 +780,7 @@ def test_runner_start_blocks_remaining_candidates_without_pending_spec_registrat
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -786,7 +796,7 @@ def test_runner_start_blocks_remaining_candidates_without_pending_spec_registrat
     )
     assert workflow.updates == []
     spec_version_ids = [
-        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+        spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
     ]
     assert spec_version_ids == [base_spec.spec_version_id]
 
@@ -797,7 +807,7 @@ def test_runner_start_replays_same_idempotency_key_without_mutation(
 ) -> None:
     """Replay successful start when request identity matches stored context."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -806,21 +816,21 @@ def test_runner_start_replays_same_idempotency_key_without_mutation(
     workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     request = ScopeExtensionStartRequest(
-        project_id=product.product_id,
+        project_id=_product_id(product),
         spec_file=str(amended_file),
         base_spec_version_id=base_spec.spec_version_id or 0,
         expected_state="SPRINT_COMPLETE",
         idempotency_key="scope-ext-replay",
     )
     first = runner.start(request)
-    spec_count = len(_spec_rows(session, product.product_id))
+    spec_count = len(_spec_rows(session, _product_id(product)))
     update_count = len(workflow.updates)
 
     replay = runner.start(request)
 
     assert replay["ok"] is True
     assert replay["data"] == first["data"]
-    assert len(_spec_rows(session, product.product_id)) == spec_count
+    assert len(_spec_rows(session, _product_id(product))) == spec_count
     assert len(workflow.updates) == update_count
 
 
@@ -830,7 +840,7 @@ def test_runner_start_rejects_reused_idempotency_key_with_changed_request(
 ) -> None:
     """Reject same idempotency key when request fingerprint differs."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     first_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -843,19 +853,19 @@ def test_runner_start_rejects_reused_idempotency_key_with_changed_request(
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     first = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(first_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
             idempotency_key="scope-ext-conflict",
         )
     )
-    spec_count = len(_spec_rows(session, product.product_id))
+    spec_count = len(_spec_rows(session, _product_id(product)))
     update_count = len(workflow.updates)
 
     conflict = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(second_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -867,7 +877,7 @@ def test_runner_start_rejects_reused_idempotency_key_with_changed_request(
     assert conflict["ok"] is False
     assert conflict["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
     assert conflict["errors"][0]["message"] != "Command failed."
-    assert len(_spec_rows(session, product.product_id)) == spec_count
+    assert len(_spec_rows(session, _product_id(product))) == spec_count
     assert len(workflow.updates) == update_count
 
 
@@ -877,7 +887,7 @@ def test_runner_start_rejects_reused_idempotency_key_when_same_path_content_chan
 ) -> None:
     """Reject same idempotency key when amended spec content changes in place."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -886,14 +896,14 @@ def test_runner_start_rejects_reused_idempotency_key_when_same_path_content_chan
     workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     request = ScopeExtensionStartRequest(
-        project_id=product.product_id,
+        project_id=_product_id(product),
         spec_file=str(amended_file),
         base_spec_version_id=base_spec.spec_version_id or 0,
         expected_state="SPRINT_COMPLETE",
         idempotency_key="scope-ext-same-path-conflict",
     )
     first = runner.start(request)
-    spec_count = len(_spec_rows(session, product.product_id))
+    spec_count = len(_spec_rows(session, _product_id(product)))
     update_count = len(workflow.updates)
     changed = _with_new_item(_artifact())
     changed["items"][-1]["id"] = "REQ.same-path-different-capability"
@@ -905,7 +915,7 @@ def test_runner_start_rejects_reused_idempotency_key_when_same_path_content_chan
     assert first["ok"] is True
     assert conflict["ok"] is False
     assert conflict["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
-    assert len(_spec_rows(session, product.product_id)) == spec_count
+    assert len(_spec_rows(session, _product_id(product))) == spec_count
     assert len(workflow.updates) == update_count
 
 
@@ -915,7 +925,7 @@ def test_runner_start_rejects_stale_expected_state_without_workflow_mutation(
 ) -> None:
     """Reject stale workflow guards before pending spec registration."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -926,7 +936,7 @@ def test_runner_start_rejects_stale_expected_state_without_workflow_mutation(
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(amended_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -938,7 +948,7 @@ def test_runner_start_rejects_stale_expected_state_without_workflow_mutation(
     assert result["errors"][0]["code"] == "STALE_STATE"
     assert workflow.updates == []
     specs = session.exec(
-        select(SpecRegistry).where(SpecRegistry.product_id == product.product_id)
+        select(SpecRegistry).where(SpecRegistry.product_id == _product_id(product))
     ).all()
     assert [spec.spec_version_id for spec in specs] == [base_spec.spec_version_id]
 
@@ -949,14 +959,14 @@ def test_runner_start_does_not_mutate_workflow_when_additive_validation_fails(
 ) -> None:
     """Return invalid validation payload without starting setup."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     invalid_file = _write_spec_file(tmp_path, "invalid.json", deepcopy(_artifact()))
     workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(invalid_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -968,7 +978,7 @@ def test_runner_start_does_not_mutate_workflow_when_additive_validation_fails(
     assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_NO_ADDED_ITEMS
     assert workflow.updates == []
     spec_version_ids = [
-        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+        spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
     ]
     assert spec_version_ids == [base_spec.spec_version_id]
 
@@ -979,7 +989,7 @@ def test_runner_start_recovers_after_pending_spec_registered_before_workflow_upd
 ) -> None:
     """Allow retry to finish setup when first workflow update fails after DB write."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -988,7 +998,7 @@ def test_runner_start_recovers_after_pending_spec_registered_before_workflow_upd
     workflow = _FailOnceWorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     request = ScopeExtensionStartRequest(
-        project_id=product.product_id,
+        project_id=_product_id(product),
         spec_file=str(amended_file),
         base_spec_version_id=base_spec.spec_version_id or 0,
         expected_state="SPRINT_COMPLETE",
@@ -996,7 +1006,7 @@ def test_runner_start_recovers_after_pending_spec_registered_before_workflow_upd
     )
 
     first = runner.start(request)
-    rows_after_failure = _spec_rows(session, product.product_id)
+    rows_after_failure = _spec_rows(session, _product_id(product))
     retry = runner.start(request)
     registered_spec_count = 2
 
@@ -1005,7 +1015,7 @@ def test_runner_start_recovers_after_pending_spec_registered_before_workflow_upd
     assert len(rows_after_failure) == registered_spec_count
     assert retry["ok"] is True
     assert retry["data"]["status"] == SCOPE_EXTENSION_STARTED
-    assert len(_spec_rows(session, product.product_id)) == registered_spec_count
+    assert len(_spec_rows(session, _product_id(product))) == registered_spec_count
     assert workflow.state["fsm_state"] == "SETUP_REQUIRED"
     assert workflow.state["scope_extension_context"]["idempotency_key"] == (
         "scope-ext-recover"
@@ -1018,7 +1028,7 @@ def test_runner_start_rejects_changed_retry_after_pending_spec_recovery_marker(
 ) -> None:
     """Reject changed same-key retry after failed workflow update."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     amended_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -1027,14 +1037,14 @@ def test_runner_start_rejects_changed_retry_after_pending_spec_recovery_marker(
     workflow = _FailOnceWorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     request = ScopeExtensionStartRequest(
-        project_id=product.product_id,
+        project_id=_product_id(product),
         spec_file=str(amended_file),
         base_spec_version_id=base_spec.spec_version_id or 0,
         expected_state="SPRINT_COMPLETE",
         idempotency_key="scope-ext-recover-conflict",
     )
     first = runner.start(request)
-    rows_after_failure = _spec_rows(session, product.product_id)
+    rows_after_failure = _spec_rows(session, _product_id(product))
     registered_spec_count = 2
     changed = _with_new_item(_artifact())
     changed["items"][-1]["id"] = "REQ.recovery-different-capability"
@@ -1049,7 +1059,7 @@ def test_runner_start_rejects_changed_retry_after_pending_spec_recovery_marker(
     assert retry["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
     assert workflow.updates == []
     assert len(rows_after_failure) == registered_spec_count
-    assert len(_spec_rows(session, product.product_id)) == len(rows_after_failure)
+    assert len(_spec_rows(session, _product_id(product))) == len(rows_after_failure)
 
 
 def test_runner_start_rejects_changed_path_retry_after_pending_spec_marker(
@@ -1058,7 +1068,7 @@ def test_runner_start_rejects_changed_path_retry_after_pending_spec_marker(
 ) -> None:
     """Reject same-key retry with a different path after failed workflow update."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     first_file = _write_spec_file(
         tmp_path,
         "amended.json",
@@ -1072,18 +1082,18 @@ def test_runner_start_rejects_changed_path_retry_after_pending_spec_marker(
     runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
     first = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(first_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
             idempotency_key="scope-ext-recover-path-conflict",
         )
     )
-    rows_after_failure = _spec_rows(session, product.product_id)
+    rows_after_failure = _spec_rows(session, _product_id(product))
 
     retry = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(second_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -1096,7 +1106,7 @@ def test_runner_start_rejects_changed_path_retry_after_pending_spec_marker(
     assert retry["ok"] is False
     assert retry["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
     assert workflow.updates == []
-    assert len(_spec_rows(session, product.product_id)) == len(rows_after_failure)
+    assert len(_spec_rows(session, _product_id(product))) == len(rows_after_failure)
     assert all(
         row.content_ref != str(second_file.resolve()) for row in rows_after_failure
     )
@@ -1108,7 +1118,7 @@ def test_runner_start_invalid_modified_scope_uses_not_additive_error(
 ) -> None:
     """Return a failed mutation envelope for non-additive amended specs."""
     product = _product(session)
-    base_spec = _accepted_base_spec(session, product.product_id)
+    base_spec = _accepted_base_spec(session, _product_id(product))
     invalid = _with_new_item(_artifact())
     invalid["items"][1]["statement"] = "The system MUST rewrite old scope."
     invalid_file = _write_spec_file(tmp_path, "invalid-modified.json", invalid)
@@ -1117,7 +1127,7 @@ def test_runner_start_invalid_modified_scope_uses_not_additive_error(
 
     result = runner.start(
         ScopeExtensionStartRequest(
-            project_id=product.product_id,
+            project_id=_product_id(product),
             spec_file=str(invalid_file),
             base_spec_version_id=base_spec.spec_version_id or 0,
             expected_state="SPRINT_COMPLETE",
@@ -1129,6 +1139,6 @@ def test_runner_start_invalid_modified_scope_uses_not_additive_error(
     assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_NOT_ADDITIVE
     assert workflow.updates == []
     spec_version_ids = [
-        spec.spec_version_id for spec in _spec_rows(session, product.product_id)
+        spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
     ]
     assert spec_version_ids == [base_spec.spec_version_id]

@@ -850,7 +850,8 @@ def _recovery_notes(marker: Mapping[str, Any]) -> str:
 
 
 def _invalid_start_error(validation_data: Mapping[str, Any]) -> dict[str, Any]:
-    issues = validation_data.get("blocking_issues")
+    raw_issues = validation_data.get("blocking_issues")
+    issues = raw_issues if raw_issues is not None else []
     issue_codes = {
         str(issue.get("code"))
         for issue in issues

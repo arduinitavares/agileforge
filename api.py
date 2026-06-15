@@ -1179,11 +1179,12 @@ def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | Non
         """Return the dashboard-normalized scope-extension action shape."""
         if not isinstance(action, dict):
             return dict(default_primary_action)
+        action_data = cast("dict[str, Any]", action)
         return {
             **default_primary_action,
-            **action,
-            "label": action.get("label") or default_primary_action["label"],
-            "command": action.get("command")
+            **action_data,
+            "label": action_data.get("label") or default_primary_action["label"],
+            "command": action_data.get("command")
             or default_primary_action["command"],
         }
 
