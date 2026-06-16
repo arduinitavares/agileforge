@@ -54,7 +54,8 @@ class _FakeApplication:
         self,
         *,
         name: str,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         idempotency_key: str | None = None,
         dry_run: bool = False,
         dry_run_id: str | None = None,
@@ -68,6 +69,7 @@ class _FakeApplication:
                 {
                     "name": name,
                     "spec_file": spec_file,
+                    "setup_mode": setup_mode,
                     "idempotency_key": idempotency_key,
                     "dry_run": dry_run,
                     "dry_run_id": dry_run_id,
@@ -82,7 +84,8 @@ class _FakeApplication:
         self,
         *,
         project_id: int,
-        spec_file: str,
+        spec_file: str | None = None,
+        setup_mode: str = "greenfield",
         expected_state: str,
         expected_context_fingerprint: str,
         recovery_mutation_event_id: int | None = None,
@@ -99,6 +102,7 @@ class _FakeApplication:
                 {
                     "project_id": project_id,
                     "spec_file": spec_file,
+                    "setup_mode": setup_mode,
                     "expected_state": expected_state,
                     "expected_context_fingerprint": expected_context_fingerprint,
                     "recovery_mutation_event_id": recovery_mutation_event_id,
@@ -1927,6 +1931,7 @@ def test_cli_routes_project_create_to_application(
             {
                 "name": "CLI Project",
                 "spec_file": "specs/app.md",
+                "setup_mode": "greenfield",
                 "idempotency_key": "create-cli-project-001",
                 "dry_run": False,
                 "dry_run_id": None,
@@ -1967,6 +1972,7 @@ def test_cli_routes_project_create_dry_run_without_idempotency_key(
             {
                 "name": "CLI Project",
                 "spec_file": "specs/app.md",
+                "setup_mode": "greenfield",
                 "idempotency_key": None,
                 "dry_run": True,
                 "dry_run_id": "preview-001",
@@ -2191,6 +2197,7 @@ def test_cli_routes_project_setup_retry_to_application(
             {
                 "project_id": PROJECT_ID,
                 "spec_file": "specs/app.md",
+                "setup_mode": "greenfield",
                 "expected_state": "SETUP_REQUIRED",
                 "expected_context_fingerprint": "ctx123",
                 "recovery_mutation_event_id": 42,
@@ -2241,6 +2248,7 @@ def test_cli_routes_project_setup_retry_dry_run_without_idempotency_key(
             {
                 "project_id": PROJECT_ID,
                 "spec_file": "specs/app.md",
+                "setup_mode": "greenfield",
                 "expected_state": "SETUP_REQUIRED",
                 "expected_context_fingerprint": "ctx123",
                 "recovery_mutation_event_id": 42,

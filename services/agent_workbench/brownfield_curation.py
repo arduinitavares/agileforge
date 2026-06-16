@@ -7,10 +7,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import update
 from sqlmodel import Session, select
@@ -68,11 +67,23 @@ BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY = "BROWNFIELD_SPEC_IMPLEMENTATION_HEAVY"
 NO_SOURCE_FINGERPRINT = "sha256:no-source"
 MAX_SCAN_FILE_BYTES = 200_000
 MAX_SCAN_MANIFEST_FILES = 1_000
-GIT_BINARY = "git"
-LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
-LEDGER_STATUS: Any = CliMutationLedger.status
-LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
-LEDGER_LEASE_EXPIRES_AT: Any = CliMutationLedger.lease_expires_at
+GIT_OBJECT_ID_LENGTHS = {40, 64}
+GIT_INDEX_SIGNATURE = b"DIRC"
+GIT_INDEX_HEADER_BYTES = 12
+GIT_INDEX_VERSION_OFFSET = 4
+GIT_INDEX_ENTRY_COUNT_OFFSET = 8
+GIT_INDEX_ENTRY_FIXED_BYTES = 62
+GIT_INDEX_ENTRY_MTIME_SECONDS_OFFSET = 8
+GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET = 12
+GIT_INDEX_ENTRY_DEVICE_OFFSET = 16
+GIT_INDEX_ENTRY_FILE_SIZE_OFFSET = 36
+GIT_INDEX_ENTRY_FILE_SIZE_END_OFFSET = 40
+GIT_INDEX_ENTRY_PADDING_BYTES = 8
+GIT_INDEX_SUPPORTED_VERSIONS = {2, 3}
+NANOSECONDS_PER_SECOND = 1_000_000_000
+SOURCE_ARTIFACT_CREATED_AT: Any = BrownfieldSourceArtifact.created_at
+SCAN_ATTEMPT_CREATED_AT: Any = BrownfieldScanAttempt.created_at
+DRAFT_ATTEMPT_CREATED_AT: Any = BrownfieldSpecDraftAttempt.created_at
 PRODUCT_ITEM_TYPES = {
     "GOAL",
     "REQ",
@@ -196,24 +207,175 @@ def _preview_text(file_path: Path, limit: int = 1000) -> str:
 
 def _repo_metadata(repo_path: Path) -> dict[str, Any]:
     """Return best-effort git metadata without requiring a git repository."""
-    git_commit: str | None = None
-    dirty = False
-    commit = subprocess.run(  # noqa: S603
-        [GIT_BINARY, "-C", str(repo_path), "rev-parse", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
+    git_dir = _git_dir_for_repo(repo_path)
+    if git_dir is None:
+        return {"repo_commit": None, "repo_dirty": False}
+    return {
+        "repo_commit": _read_head_commit(git_dir),
+        "repo_dirty": _git_index_has_modified_tracked_files(repo_path, git_dir),
+    }
+
+
+def _git_dir_for_repo(repo_path: Path) -> Path | None:
+    """Resolve the git metadata directory for a normal repo or linked worktree."""
+    git_path = repo_path / ".git"
+    if git_path.is_dir():
+        return git_path
+    if not git_path.is_file():
+        return None
+    try:
+        marker = git_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not marker.lower().startswith(prefix):
+        return None
+    raw_git_dir = marker[len(prefix) :].strip()
+    if not raw_git_dir:
+        return None
+    git_dir = Path(raw_git_dir)
+    if not git_dir.is_absolute():
+        git_dir = (repo_path / git_dir).resolve()
+    return git_dir if git_dir.is_dir() else None
+
+
+def _read_head_commit(git_dir: Path) -> str | None:
+    """Read the current HEAD object id from loose or packed refs."""
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if head.startswith("ref:"):
+        return _read_git_ref(git_dir, head.removeprefix("ref:").strip())
+    return head if _is_git_object_id(head) else None
+
+
+def _read_git_ref(git_dir: Path, ref_name: str) -> str | None:
+    """Read a git ref from loose refs first, then packed-refs."""
+    ref_path = _safe_git_ref_path(git_dir, ref_name)
+    if ref_path is None:
+        return None
+    try:
+        ref_value = ref_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        ref_value = ""
+    if _is_git_object_id(ref_value):
+        return ref_value
+    return _read_packed_git_ref(git_dir, ref_name)
+
+
+def _safe_git_ref_path(git_dir: Path, ref_name: str) -> Path | None:
+    """Return a safe path for a relative git ref name."""
+    ref_parts = Path(ref_name).parts
+    if not ref_parts or ref_name.startswith("/") or ".." in ref_parts:
+        return None
+    return git_dir.joinpath(*ref_parts)
+
+
+def _read_packed_git_ref(git_dir: Path, ref_name: str) -> str | None:
+    """Read a packed ref value if the current ref has been packed."""
+    try:
+        packed_refs = (git_dir / "packed-refs").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in packed_refs.splitlines():
+        if not line or line.startswith(("#", "^")):
+            continue
+        object_id, _, packed_ref_name = line.partition(" ")
+        if packed_ref_name == ref_name and _is_git_object_id(object_id):
+            return object_id
+    return None
+
+
+def _is_git_object_id(value: str) -> bool:
+    """Return whether a string looks like a git object id."""
+    return len(value) in GIT_OBJECT_ID_LENGTHS and all(
+        character in "0123456789abcdefABCDEF" for character in value
     )
-    if commit.returncode == 0:
-        git_commit = commit.stdout.strip() or None
-        status = subprocess.run(  # noqa: S603
-            [GIT_BINARY, "-C", str(repo_path), "status", "--porcelain"],
-            check=False,
-            capture_output=True,
-            text=True,
+
+
+def _git_index_has_modified_tracked_files(repo_path: Path, git_dir: Path) -> bool:
+    """Return whether tracked files differ from the git index stat metadata."""
+    entries = _read_git_index_entries(git_dir / "index")
+    if entries is None:
+        return False
+    for relative_path, indexed_mtime_ns, indexed_size in entries:
+        file_path = repo_path / relative_path
+        try:
+            file_stat = file_path.lstat()
+        except OSError:
+            return True
+        if file_stat.st_size != indexed_size:
+            return True
+        if file_stat.st_mtime_ns != indexed_mtime_ns:
+            return True
+    return False
+
+
+def _read_git_index_entries(index_path: Path) -> list[tuple[str, int, int]] | None:
+    """Read path, mtime, and size entries from a v2/v3 git index."""
+    try:
+        index = index_path.read_bytes()
+    except OSError:
+        return None
+    if (
+        len(index) < GIT_INDEX_HEADER_BYTES
+        or index[:GIT_INDEX_VERSION_OFFSET] != GIT_INDEX_SIGNATURE
+    ):
+        return None
+    version = int.from_bytes(
+        index[GIT_INDEX_VERSION_OFFSET:GIT_INDEX_ENTRY_COUNT_OFFSET],
+        byteorder="big",
+    )
+    if version not in GIT_INDEX_SUPPORTED_VERSIONS:
+        return None
+    entry_count = int.from_bytes(
+        index[GIT_INDEX_ENTRY_COUNT_OFFSET:GIT_INDEX_HEADER_BYTES],
+        byteorder="big",
+    )
+    offset = GIT_INDEX_HEADER_BYTES
+    entries: list[tuple[str, int, int]] = []
+    for _ in range(entry_count):
+        entry_start = offset
+        fixed_header_end = offset + GIT_INDEX_ENTRY_FIXED_BYTES
+        if fixed_header_end > len(index):
+            return None
+        mtime_s = int.from_bytes(
+            index[
+                offset + GIT_INDEX_ENTRY_MTIME_SECONDS_OFFSET : offset
+                + GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET
+            ],
+            byteorder="big",
         )
-        dirty = bool(status.stdout.strip()) if status.returncode == 0 else False
-    return {"repo_commit": git_commit, "repo_dirty": dirty}
+        mtime_ns = int.from_bytes(
+            index[
+                offset
+                + GIT_INDEX_ENTRY_MTIME_NANOSECONDS_OFFSET : offset
+                + GIT_INDEX_ENTRY_DEVICE_OFFSET
+            ],
+            byteorder="big",
+        )
+        file_size = int.from_bytes(
+            index[
+                offset + GIT_INDEX_ENTRY_FILE_SIZE_OFFSET : offset
+                + GIT_INDEX_ENTRY_FILE_SIZE_END_OFFSET
+            ],
+            byteorder="big",
+        )
+        path_start = fixed_header_end
+        path_end = index.find(b"\0", path_start)
+        if path_end == -1:
+            return None
+        relative_path = index[path_start:path_end].decode(
+            "utf-8", errors="surrogateescape"
+        )
+        entries.append(
+            (relative_path, (mtime_s * NANOSECONDS_PER_SECOND) + mtime_ns, file_size)
+        )
+        offset = path_end + 1
+        while (offset - entry_start) % GIT_INDEX_ENTRY_PADDING_BYTES != 0:
+            offset += 1
+    return entries
 
 
 def _is_secret_or_env_file(relative_path: str) -> bool:
@@ -393,13 +555,17 @@ def _finalize_ledger_response(
     """Store a non-success response for replayable approval guard failures."""
     now = _now()
     db_now = _db_datetime(now)
+    mutation_event_id_col: Any = CliMutationLedger.mutation_event_id
+    status_col: Any = CliMutationLedger.status
+    lease_owner_col: Any = CliMutationLedger.lease_owner
+    lease_expires_at_col: Any = CliMutationLedger.lease_expires_at
     with Session(engine) as session:
         result = session.exec(
             update(CliMutationLedger)
-            .where(mutation_event_id == LEDGER_MUTATION_EVENT_ID)
-            .where(MutationStatus.PENDING.value == LEDGER_STATUS)
-            .where(lease_owner == LEDGER_LEASE_OWNER)
-            .where(db_now < LEDGER_LEASE_EXPIRES_AT)
+            .where(mutation_event_id_col == mutation_event_id)
+            .where(status_col == MutationStatus.PENDING.value)
+            .where(lease_owner_col == lease_owner)
+            .where(lease_expires_at_col > db_now)
             .values(
                 status=status.value,
                 response_json=_json_dump(response),
@@ -416,7 +582,7 @@ def _finalize_ledger_response(
         return result.rowcount == 1
 
 
-class BrownfieldWorkflowPort:
+class BrownfieldWorkflowPort(Protocol):
     """Workflow state operations used by brownfield approval."""
 
     def get_session_status(self, session_id: str) -> dict[str, Any]:
@@ -461,19 +627,19 @@ def brownfield_progress(*, engine: Engine, project_id: int) -> dict[str, Any]:
             select(BrownfieldSourceArtifact)
             .where(BrownfieldSourceArtifact.project_id == project_id)
             .where(BrownfieldSourceArtifact.status == "complete")
-            .order_by(BrownfieldSourceArtifact.created_at.desc())
+            .order_by(SOURCE_ARTIFACT_CREATED_AT.desc())
         ).first()
         scan = session.exec(
             select(BrownfieldScanAttempt)
             .where(BrownfieldScanAttempt.project_id == project_id)
             .where(BrownfieldScanAttempt.status == "complete")
-            .order_by(BrownfieldScanAttempt.created_at.desc())
+            .order_by(SCAN_ATTEMPT_CREATED_AT.desc())
         ).first()
         draft = session.exec(
             select(BrownfieldSpecDraftAttempt)
             .where(BrownfieldSpecDraftAttempt.project_id == project_id)
             .where(BrownfieldSpecDraftAttempt.status == "complete")
-            .order_by(BrownfieldSpecDraftAttempt.created_at.desc())
+            .order_by(DRAFT_ATTEMPT_CREATED_AT.desc())
         ).first()
     return {
         "source": "current" if source is not None else "missing",
@@ -1383,7 +1549,7 @@ class BrownfieldCurationRunner:
                 select(BrownfieldSourceArtifact)
                 .where(BrownfieldSourceArtifact.project_id == project_id)
                 .where(BrownfieldSourceArtifact.status == "complete")
-                .order_by(BrownfieldSourceArtifact.created_at.desc())
+                .order_by(SOURCE_ARTIFACT_CREATED_AT.desc())
             ).first()
             if (
                 latest_source is not None
@@ -1408,7 +1574,7 @@ class BrownfieldCurationRunner:
                 select(BrownfieldScanAttempt)
                 .where(BrownfieldScanAttempt.project_id == project_id)
                 .where(BrownfieldScanAttempt.status == "complete")
-                .order_by(BrownfieldScanAttempt.created_at.desc())
+                .order_by(SCAN_ATTEMPT_CREATED_AT.desc())
             ).first()
             if (
                 current_scan is None

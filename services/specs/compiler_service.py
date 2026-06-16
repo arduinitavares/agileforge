@@ -1342,10 +1342,13 @@ def _scope_extension_marker_from_notes(  # noqa: PLR0911
             isinstance(item_id, str) for item_id in added_source_item_ids
         ):
             return None
+        typed_added_source_item_ids = [
+            str(item_id) for item_id in added_source_item_ids
+        ]
         return _ScopeExtensionCompileMarker(
             base_spec_version_id=base_spec_version_id,
             base_spec_hash=base_spec_hash,
-            added_source_item_ids=list(added_source_item_ids),
+            added_source_item_ids=typed_added_source_item_ids,
         )
     return None
 

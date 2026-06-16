@@ -149,22 +149,103 @@ class _FakeBrownfieldRunner:
             "errors": [],
         }
 
+    def spec_draft(
+        self,
+        *,
+        project_id: int,
+        scan_attempt_id: str,
+        user_input: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "spec_draft",
+                {
+                    "project_id": project_id,
+                    "scan_attempt_id": scan_attempt_id,
+                    "user_input": user_input,
+                    "idempotency_key": idempotency_key,
+                    "correlation_id": correlation_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {"ok": True, "data": {"project_id": project_id}, "errors": []}
+
+    def spec_import(
+        self,
+        *,
+        project_id: int,
+        curated_spec_file: str,
+        expected_scan_fingerprint: str,
+        parent_draft_attempt_id: str | None = None,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "spec_import",
+                {
+                    "project_id": project_id,
+                    "curated_spec_file": curated_spec_file,
+                    "expected_scan_fingerprint": expected_scan_fingerprint,
+                    "parent_draft_attempt_id": parent_draft_attempt_id,
+                    "idempotency_key": idempotency_key,
+                    "correlation_id": correlation_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {"ok": True, "data": {"project_id": project_id}, "errors": []}
+
+    def spec_approve(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                "spec_approve",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "expected_setup_status": expected_setup_status,
+                    "idempotency_key": idempotency_key,
+                    "correlation_id": correlation_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {"ok": True, "data": {"project_id": project_id}, "errors": []}
+
 
 class FakeBrownfieldWorkflow:
     """In-memory workflow port for brownfield approval tests."""
 
     def __init__(self) -> None:
         """Initialize empty fake workflow state."""
-        self.sessions: dict[str, dict[str, object]] = {}
+        self.sessions: dict[str, dict[str, Any]] = {}
 
-    def get_session_status(self, session_id: str) -> dict[str, object]:
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
         """Return fake workflow state for a session."""
         return dict(self.sessions.get(session_id, {}))
 
     def update_session_status(
         self,
         session_id: str,
-        partial_update: dict[str, object],
+        partial_update: dict[str, Any],
     ) -> None:
         """Patch fake workflow state for a session."""
         current = self.sessions.setdefault(session_id, {})
@@ -745,18 +826,24 @@ def test_spec_approve_replay_does_not_duplicate_spec_registry(
         idempotency_key="replay-import-001",
         changed_by="agent",
     )
-    args = {
-        "project_id": project_id,
-        "attempt_id": imported["data"]["attempt_id"],
-        "expected_artifact_fingerprint": imported["data"]["artifact_fingerprint"],
-        "expected_state": "SETUP_REQUIRED",
-        "expected_setup_status": "brownfield_curation_required",
-        "idempotency_key": "replay-approve-001",
-        "changed_by": "agent",
-    }
-
-    first = runner.spec_approve(**args)
-    replay = runner.spec_approve(**args)
+    first = runner.spec_approve(
+        project_id=project_id,
+        attempt_id=imported["data"]["attempt_id"],
+        expected_artifact_fingerprint=imported["data"]["artifact_fingerprint"],
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="brownfield_curation_required",
+        idempotency_key="replay-approve-001",
+        changed_by="agent",
+    )
+    replay = runner.spec_approve(
+        project_id=project_id,
+        attempt_id=imported["data"]["attempt_id"],
+        expected_artifact_fingerprint=imported["data"]["artifact_fingerprint"],
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="brownfield_curation_required",
+        idempotency_key="replay-approve-001",
+        changed_by="agent",
+    )
 
     assert replay["ok"] is True
     assert replay["data"]["spec_version_id"] == first["data"]["spec_version_id"]

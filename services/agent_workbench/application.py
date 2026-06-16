@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from shlex import quote
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -2607,11 +2608,13 @@ def _apply_brownfield_curation_routing(
     """Publish brownfield curation setup actions without sprint planning."""
     state = _envelope_data(workflow).get("state")
     workflow_state = state if isinstance(state, dict) else {}
-    actions = [
-        dict(action)
-        for action in _as_list(workflow_state.get("setup_next_actions"))
-        if isinstance(action, dict) and isinstance(action.get("command"), str)
-    ]
+    actions: list[dict[str, object]] = []
+    for action in _as_list(workflow_state.get("setup_next_actions")):
+        if not isinstance(action, Mapping):
+            continue
+        normalized_action = {str(key): value for key, value in action.items()}
+        if isinstance(normalized_action.get("command"), str):
+            actions.append(normalized_action)
     if not actions:
         actions = [
             {
