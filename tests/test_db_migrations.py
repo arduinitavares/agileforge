@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+    from sqlalchemy.engine.reflection import Inspector
 
 
 CLI_MUTATION_LEDGER_CREATE_SQL_PHASE_2A = """
@@ -230,6 +231,11 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     }
     assert "ix_authority_feedback_project_status" in feedback_indexes
     assert "ix_authority_feedback_source_authority" in feedback_indexes
+    assert _has_unique_columns(
+        inspector,
+        table_name="authority_feedback_attempts",
+        columns=("project_id", "idempotency_key"),
+    )
 
     curation_indexes = {
         index["name"]
@@ -237,3 +243,24 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     }
     assert "ix_authority_curation_project_status" in curation_indexes
     assert "ix_authority_curation_source_authority" in curation_indexes
+    assert _has_unique_columns(
+        inspector,
+        table_name="authority_curation_attempts",
+        columns=("project_id", "idempotency_key"),
+    )
+
+
+def _has_unique_columns(
+    inspector: Inspector,
+    *,
+    table_name: str,
+    columns: tuple[str, ...],
+) -> bool:
+    """Return whether a table has a unique constraint or index on columns."""
+    for constraint in inspector.get_unique_constraints(table_name):
+        if tuple(constraint.get("column_names") or ()) == columns:
+            return True
+    for index in inspector.get_indexes(table_name):
+        if index.get("unique") and tuple(index.get("column_names") or ()) == columns:
+            return True
+    return False

@@ -9,6 +9,7 @@ from sqlmodel import SQLModel
 
 from models.core import Product
 from services.agent_workbench.schema_readiness import (
+    AUTHORITY_CURATION_REQUIREMENTS,
     SchemaRequirement,
     check_schema_readiness,
 )
@@ -112,6 +113,23 @@ def test_check_schema_readiness_reports_missing_unique_constraint() -> None:
     assert result.missing == {
         "curation_probe": ["unique(project_id, feedback_attempt_id)"]
     }
+
+
+def test_authority_curation_readiness_requires_idempotency_uniqueness() -> None:
+    """Curation readiness must guard durable idempotency uniqueness."""
+    requirements_by_table = {
+        requirement.table: requirement
+        for requirement in AUTHORITY_CURATION_REQUIREMENTS
+    }
+
+    assert (
+        "project_id",
+        "idempotency_key",
+    ) in requirements_by_table["authority_feedback_attempts"].unique_columns
+    assert (
+        "project_id",
+        "idempotency_key",
+    ) in requirements_by_table["authority_curation_attempts"].unique_columns
 
 
 def test_schema_requirement_rejects_bare_string_columns() -> None:

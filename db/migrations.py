@@ -145,6 +145,40 @@ def _ensure_index_exists(
     return True
 
 
+def _ensure_unique_index_exists(
+    engine: Engine,
+    table_name: str,
+    index_name: str,
+    column_names: list[str],
+) -> bool:
+    """Ensure a table enforces uniqueness for a column tuple."""
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names():
+        return False
+
+    requested_columns = tuple(column_names)
+    for constraint in inspector.get_unique_constraints(table_name):
+        if tuple(constraint.get("column_names") or ()) == requested_columns:
+            return False
+    for index in inspector.get_indexes(table_name):
+        if not index.get("unique"):
+            continue
+        if tuple(index.get("column_names") or ()) == requested_columns:
+            return False
+
+    columns_str = ", ".join(column_names)
+    create_index_sql = (
+        f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({columns_str})"
+    )
+    logger.info(
+        "db.migration.create_unique_index",
+        extra={"table_name": table_name, "index_name": index_name},
+    )
+    with engine.begin() as conn:
+        conn.execute(text(create_index_sql))
+    return True
+
+
 # =============================================================================
 # SPEC AUTHORITY TABLES MIGRATION
 # =============================================================================
@@ -1527,7 +1561,9 @@ CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     CONSTRAINT uq_authority_feedback_project_attempt
-        UNIQUE (project_id, feedback_attempt_id)
+        UNIQUE (project_id, feedback_attempt_id),
+    CONSTRAINT uq_authority_feedback_project_idempotency
+        UNIQUE (project_id, idempotency_key)
 )
 """
 
@@ -1558,7 +1594,9 @@ CREATE TABLE IF NOT EXISTS authority_curation_attempts (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     CONSTRAINT uq_authority_curation_project_attempt
-        UNIQUE (project_id, curation_attempt_id)
+        UNIQUE (project_id, curation_attempt_id),
+    CONSTRAINT uq_authority_curation_project_idempotency
+        UNIQUE (project_id, idempotency_key)
 )
 """
 
@@ -1658,6 +1696,16 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
     ):
         actions.append("created index: ix_authority_feedback_source_authority")
 
+    if _ensure_unique_index_exists(
+        engine,
+        "authority_feedback_attempts",
+        "uq_authority_feedback_project_idempotency",
+        ["project_id", "idempotency_key"],
+    ):
+        actions.append(
+            "created unique index: uq_authority_feedback_project_idempotency"
+        )
+
     if _ensure_table_exists(
         engine,
         "authority_curation_attempts",
@@ -1680,6 +1728,16 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
         ["source_authority_id"],
     ):
         actions.append("created index: ix_authority_curation_source_authority")
+
+    if _ensure_unique_index_exists(
+        engine,
+        "authority_curation_attempts",
+        "uq_authority_curation_project_idempotency",
+        ["project_id", "idempotency_key"],
+    ):
+        actions.append(
+            "created unique index: uq_authority_curation_project_idempotency"
+        )
 
     return actions
 

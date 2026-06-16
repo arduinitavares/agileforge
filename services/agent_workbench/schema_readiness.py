@@ -132,7 +132,10 @@ AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
             "ix_authority_feedback_project_status",
             "ix_authority_feedback_source_authority",
         ),
-        unique_columns=(("project_id", "feedback_attempt_id"),),
+        unique_columns=(
+            ("project_id", "feedback_attempt_id"),
+            ("project_id", "idempotency_key"),
+        ),
     ),
     SchemaRequirement(
         table="authority_curation_attempts",
@@ -166,7 +169,10 @@ AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
             "ix_authority_curation_project_status",
             "ix_authority_curation_source_authority",
         ),
-        unique_columns=(("project_id", "curation_attempt_id"),),
+        unique_columns=(
+            ("project_id", "curation_attempt_id"),
+            ("project_id", "idempotency_key"),
+        ),
     ),
 )
 

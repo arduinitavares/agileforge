@@ -44,6 +44,10 @@ class ErrorCode(StrEnum):
     AUTHORITY_SOURCE_UNAVAILABLE = "AUTHORITY_SOURCE_UNAVAILABLE"
     AUTHORITY_REVIEW_INCOMPLETE = "AUTHORITY_REVIEW_INCOMPLETE"
     AUTHORITY_GUARD_INCOMPLETE = "AUTHORITY_GUARD_INCOMPLETE"
+    AUTHORITY_FEEDBACK_TARGET_NOT_FOUND = "AUTHORITY_FEEDBACK_TARGET_NOT_FOUND"
+    AUTHORITY_FEEDBACK_SCHEMA_INVALID = "AUTHORITY_FEEDBACK_SCHEMA_INVALID"
+    AUTHORITY_CURATED_DIFF_UNBOUNDED = "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    AUTHORITY_CURATION_MAX_ITERATIONS = "AUTHORITY_CURATION_MAX_ITERATIONS"
     STALE_STATE = "STALE_STATE"
     STALE_SETUP_STATUS = "STALE_SETUP_STATUS"
     STALE_SPEC_HASH = "STALE_SPEC_HASH"
@@ -237,6 +241,30 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="Required authority review guard inputs are incomplete.",
+    ),
+    ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Authority feedback references a target that does not exist.",
+    ),
+    ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Authority feedback payload is invalid.",
+    ),
+    ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED.value,
+        default_exit_code=1,
+        retryable=False,
+        description="Authority curation changed untargeted authority items.",
+    ),
+    ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS.value,
+        default_exit_code=1,
+        retryable=True,
+        description="Authority curation reached its maximum iteration count.",
     ),
     ErrorCode.STALE_STATE: ErrorMetadata(
         code=ErrorCode.STALE_STATE.value,

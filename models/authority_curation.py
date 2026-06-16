@@ -25,6 +25,11 @@ class AuthorityFeedbackAttempt(SQLModel, table=True):
             "feedback_attempt_id",
             name="uq_authority_feedback_project_attempt",
         ),
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_authority_feedback_project_idempotency",
+        ),
         Index("ix_authority_feedback_project_status", "project_id", "status"),
         Index("ix_authority_feedback_source_authority", "source_authority_id"),
     )
@@ -63,6 +68,11 @@ class AuthorityCurationAttempt(SQLModel, table=True):
             "project_id",
             "curation_attempt_id",
             name="uq_authority_curation_project_attempt",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_authority_curation_project_idempotency",
         ),
         Index("ix_authority_curation_project_status", "project_id", "status"),
         Index("ix_authority_curation_source_authority", "source_authority_id"),
