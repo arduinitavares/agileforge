@@ -15,6 +15,7 @@ class WorkflowSessionRepository:
         self.db_target = db_target or get_session_db_target()
         self.db_path = self.db_target.sqlite_connect_target
         self.db_url = self.db_target.sqlite_url
+        self.adk_db_url = _adk_async_sqlite_url(self.db_url)
 
     def has_sessions_table(self) -> bool:
         """Return whether the ADK session schema has been initialized."""
@@ -146,3 +147,12 @@ class WorkflowSessionRepository:
         if deleted:
             logger.info("Session %s deleted successfully from DB", session_id)
         return deleted
+
+
+def _adk_async_sqlite_url(db_url: str) -> str:
+    """Return an ADK 2-compatible async SQLite database URL."""
+    if db_url.startswith("sqlite+aiosqlite://"):
+        return db_url
+    if db_url.startswith("sqlite://"):
+        return db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return db_url

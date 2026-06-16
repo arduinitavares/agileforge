@@ -283,6 +283,22 @@ agileforge authority curate \
 `authority curate` must stop at `authority_pending_review`. It must not call
 `authority accept`.
 
+The host invocation payload to the ADK workflow must include both the source
+authority artifact and the structured feedback:
+
+- `project_id`
+- `spec_version_id`
+- `source_authority_id`
+- `source_authority_fingerprint`
+- `source_authority_json`
+- `feedback_json`
+- `max_iterations`
+
+Feedback alone is not enough for repair. The ADK workflow may propose repairs
+only from the source authority JSON and targeted feedback. Host diff validation
+still rejects untargeted authority changes before any curated candidate is
+published.
+
 ### Regenerate Compatibility
 
 `authority regenerate` remains available for unsupported schema recovery and

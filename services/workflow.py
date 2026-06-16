@@ -49,13 +49,16 @@ class WorkflowService:
             datetime.now(UTC).isoformat().replace("+00:00", "Z")
         )
 
-        session_service: Any = DatabaseSessionService(self.session_repo.db_url)
-        await session_service.create_session(
-            app_name=self.app_name,
-            user_id=self.user_id,
-            session_id=session_id,
-            state=initial_state,
-        )
+        session_service: Any = DatabaseSessionService(self.session_repo.adk_db_url)
+        try:
+            await session_service.create_session(
+                app_name=self.app_name,
+                user_id=self.user_id,
+                session_id=session_id,
+                state=initial_state,
+            )
+        finally:
+            await session_service.close()
         logger.info("Initialized new UI Workflow Session: %s", session_id)
         return session_id
 
@@ -188,86 +191,91 @@ class WorkflowService:
 
         from orchestrator_agent.agent import root_agent  # noqa: PLC0415
 
-        session_service = DatabaseSessionService(self.session_repo.db_url)
-        runner = Runner(
-            agent=root_agent,
-            app_name=self.app_name,
-            session_service=session_service,
-        )
-
-        full_state: dict[str, Any] = self.get_session_status(session_id)
-        current_state_key: Any = full_state.get(
-            "fsm_state", OrchestratorState.SETUP_REQUIRED.value
-        )
+        session_service = DatabaseSessionService(self.session_repo.adk_db_url)
         try:
-            current_state = OrchestratorState(current_state_key)
-        except ValueError:
-            current_state: Literal[OrchestratorState.SETUP_REQUIRED] = (
-                OrchestratorState.SETUP_REQUIRED
+            runner = Runner(
+                agent=root_agent,
+                app_name=self.app_name,
+                session_service=session_service,
             )
 
-        state_def: StateDefinition = self.fsm.get_state_definition(current_state)
+            full_state: dict[str, Any] = self.get_session_status(session_id)
+            current_state_key: Any = full_state.get(
+                "fsm_state", OrchestratorState.SETUP_REQUIRED.value
+            )
+            try:
+                current_state = OrchestratorState(current_state_key)
+            except ValueError:
+                current_state: Literal[OrchestratorState.SETUP_REQUIRED] = (
+                    OrchestratorState.SETUP_REQUIRED
+                )
 
-        inner_agent: Any = getattr(runner.agent, "agent", None)
-        if inner_agent:
-            inner_agent.instruction = state_def.instruction
-            inner_agent.tools = state_def.tools
+            state_def: StateDefinition = self.fsm.get_state_definition(current_state)
 
-        vision_draft = full_state.get("vision_components", "NO_HISTORY")
-        prompt_with_state = (
-            f"<prior_vision_state>\n{vision_draft}\n</prior_vision_state>\n\n"
-            f"<user_raw_text>\n{user_input}\n</user_raw_text>"
-        )
+            inner_agent: Any = getattr(runner.agent, "agent", None)
+            if inner_agent:
+                inner_agent.instruction = state_def.instruction
+                inner_agent.tools = state_def.tools
 
-        new_message = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=prompt_with_state)],
-        )
-
-        full_response_text = ""
-        latest_tool_data: dict[str, Any] = {}
-        last_tool_name = None
-
-        logger.info(
-            "Triggering background agent for session %s in state %s",
-            session_id,
-            current_state.value,
-        )
-
-        async for event in runner.run_async(
-            user_id=self.user_id,
-            session_id=session_id,
-            new_message=new_message,
-        ):
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    if part.function_response:
-                        last_tool_name: str | None = part.function_response.name
-                        latest_tool_data = part.function_response.response or {}
-                    if part.text:
-                        full_response_text += part.text
-
-        next_state: OrchestratorState = self.fsm.determine_next_state(
-            current_state=current_state,
-            tool_name=last_tool_name,
-            tool_output=latest_tool_data,
-            user_input=user_input,
-        )
-
-        update_payload: dict[str, Any] = {"fsm_state": next_state.value}
-        if next_state != current_state:
-            update_payload["fsm_state_entered_at"] = (
-                datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            vision_draft = full_state.get("vision_components", "NO_HISTORY")
+            prompt_with_state = (
+                f"<prior_vision_state>\n{vision_draft}\n</prior_vision_state>\n\n"
+                f"<user_raw_text>\n{user_input}\n</user_raw_text>"
             )
 
-        if latest_tool_data and "updated_components" in latest_tool_data:
-            update_payload["vision_components"] = latest_tool_data["updated_components"]
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt_with_state)],
+            )
 
-        self.update_session_status(session_id, update_payload)
+            full_response_text = ""
+            latest_tool_data: dict[str, Any] = {}
+            last_tool_name = None
 
-        return {
-            "previous_state": current_state.value,
-            "new_state": next_state.value,
-            "tool_executed": last_tool_name,
-            "response_text": full_response_text,
-        }
+            logger.info(
+                "Triggering background agent for session %s in state %s",
+                session_id,
+                current_state.value,
+            )
+
+            async for event in runner.run_async(
+                user_id=self.user_id,
+                session_id=session_id,
+                new_message=new_message,
+            ):
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.function_response:
+                            last_tool_name: str | None = part.function_response.name
+                            latest_tool_data = part.function_response.response or {}
+                        if part.text:
+                            full_response_text += part.text
+
+            next_state: OrchestratorState = self.fsm.determine_next_state(
+                current_state=current_state,
+                tool_name=last_tool_name,
+                tool_output=latest_tool_data,
+                user_input=user_input,
+            )
+
+            update_payload: dict[str, Any] = {"fsm_state": next_state.value}
+            if next_state != current_state:
+                update_payload["fsm_state_entered_at"] = (
+                    datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                )
+
+            if latest_tool_data and "updated_components" in latest_tool_data:
+                update_payload["vision_components"] = latest_tool_data[
+                    "updated_components"
+                ]
+
+            self.update_session_status(session_id, update_payload)
+
+            return {
+                "previous_state": current_state.value,
+                "new_state": next_state.value,
+                "tool_executed": last_tool_name,
+                "response_text": full_response_text,
+            }
+        finally:
+            await session_service.close()

@@ -117,7 +117,8 @@ def _invariants_by_id(
                 }
             )
             continue
-        item_id = item.get("id")
+        item_payload = {str(key): value for key, value in item.items()}
+        item_id = item_payload.get("id")
         if not isinstance(item_id, str) or not item_id:
             validation_errors.append(
                 {
@@ -139,7 +140,7 @@ def _invariants_by_id(
             )
             continue
         first_indexes[item_id] = index
-        result[item_id] = dict(item)
+        result[item_id] = item_payload
     if validation_errors:
         raise AuthorityDiffValidationError(validation_errors)
     return result
@@ -156,8 +157,8 @@ def _canonical_json_value(value: object) -> object:
     """Normalize JSON-like values for deterministic equality checks."""
     if isinstance(value, dict):
         return {
-            str(key): _canonical_json_value(value[key])
-            for key in sorted(value, key=str)
+            str(key): _canonical_json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
     if isinstance(value, list):
         return [_canonical_json_value(item) for item in value]

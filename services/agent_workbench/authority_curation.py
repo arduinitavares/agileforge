@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -13,10 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
-from google.adk.models.lite_llm import LiteLlm
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -28,10 +26,6 @@ from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
     SpecRegistry,
-)
-from orchestrator_agent.agent_tools.authority_curation import (
-    build_authority_curation_workflow,
-    validate_workflow_input,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
@@ -62,12 +56,12 @@ from utils.adk_runner import (
     parse_json_payload,
 )
 from utils.failure_artifacts import write_failure_artifact
-from utils.model_config import get_model_id, get_openrouter_extra_body
-from utils.runtime_config import get_openrouter_api_key
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
+    from google.adk.models.base_llm import BaseLlm
+    from google.genai import types
     from sqlalchemy.engine import Engine
 
 AUTHORITY_FEEDBACK_RECORD_COMMAND = "agileforge authority feedback record"
@@ -823,6 +817,7 @@ class AuthorityCurationRunner:
                 attempt=attempt,
                 reason="missing_or_invalid_candidate_authority_json",
             )
+        candidate_authority_json = cast("dict[str, Any]", candidate_authority_json)
 
         loaded = self._load_source_authority_and_feedback(
             request=request,
@@ -995,6 +990,7 @@ class AuthorityCurationRunner:
                     attempt=attempt,
                     reason="missing_or_invalid_source_authority_inputs",
                 )
+            source_authority_json = cast("dict[str, Any]", source_authority_json)
             return _LoadedCurationInputs(
                 source_authority_json=source_authority_json,
                 feedback_json=feedback.feedback_json,
@@ -1226,9 +1222,9 @@ def _json_object_from_value(value: object) -> dict[str, Any] | None:
         except TypeError:
             dumped = model_dump()
         if isinstance(dumped, dict):
-            return dict(dumped)
+            return {str(key): item for key, item in dumped.items()}
     if isinstance(value, dict):
-        return dict(value)
+        return {str(key): item for key, item in value.items()}
     if not isinstance(value, str) or not value:
         return None
     try:
@@ -1236,7 +1232,7 @@ def _json_object_from_value(value: object) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     if isinstance(loaded, dict):
-        return loaded
+        return {str(key): item for key, item in loaded.items()}
     return None
 
 
@@ -1244,7 +1240,8 @@ def _is_authority_json(value: object) -> bool:
     """Return whether a value has the minimal authority JSON shape."""
     if not isinstance(value, dict):
         return False
-    invariants = value.get("invariants")
+    parsed = {str(key): item for key, item in value.items()}
+    invariants = parsed.get("invariants")
     return isinstance(invariants, list) and all(
         isinstance(item, dict) for item in invariants
     )
@@ -1767,13 +1764,20 @@ def _run_async_task[T](coro: Coroutine[Any, Any, T]) -> T:
         return cast("T", future.result())
 
 
-def _curation_model(model_id: str) -> LiteLlm:
+def _curation_model(model_id: str) -> BaseLlm:
     """Build the LiteLLM model wrapper used by authority curation."""
-    return LiteLlm(
-        model=model_id,
-        api_key=get_openrouter_api_key(),
-        drop_params=True,
-        extra_body=get_openrouter_extra_body(),
+    lite_llm_module = importlib.import_module("google.adk.models.lite_llm")
+    model_config_module = importlib.import_module("utils.model_config")
+    runtime_config_module = importlib.import_module("utils.runtime_config")
+    lite_llm = lite_llm_module.LiteLlm
+    return cast(
+        "BaseLlm",
+        lite_llm(
+            model=model_id,
+            api_key=runtime_config_module.get_openrouter_api_key(),
+            drop_params=True,
+            extra_body=model_config_module.get_openrouter_extra_body(),
+        ),
     )
 
 
@@ -1781,8 +1785,9 @@ def _authority_curation_model_id(request: AuthorityCurationRequest) -> str:
     """Return the requested curation model or the compiler default."""
     if request.compiler_model:
         return request.compiler_model
+    model_config_module = importlib.import_module("utils.model_config")
 
-    return get_model_id("spec_authority_compiler")
+    return str(model_config_module.get_model_id("spec_authority_compiler"))
 
 
 async def _invoke_authority_curation_workflow_async(
@@ -1791,66 +1796,83 @@ async def _invoke_authority_curation_workflow_async(
     model_id: str,
 ) -> dict[str, Any]:
     """Invoke the ADK authority curation workflow and return final state."""
+    curation_module = importlib.import_module(
+        "orchestrator_agent.agent_tools.authority_curation"
+    )
+    runners_module = importlib.import_module("google.adk.runners")
+    sessions_module = importlib.import_module("google.adk.sessions")
+    genai_types_module = importlib.import_module("google.genai.types")
+    validate_workflow_input = curation_module.validate_workflow_input
+    build_authority_curation_workflow = (
+        curation_module.build_authority_curation_workflow
+    )
     validated_payload = validate_workflow_input(payload).model_dump(mode="json")
-    agent = build_authority_curation_workflow(model=_curation_model(model_id))
+    workflow = build_authority_curation_workflow(model=_curation_model(model_id))
     app_name = "authority_curation"
     user_id = f"authority-curation-project-{validated_payload['project_id']}"
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(
-        app_name=app_name,
-        user_id=user_id,
-        state={AUTHORITY_CURATION_STATE_INPUT: validated_payload},
-    )
-    runner = Runner(
-        agent=cast("Any", agent),
-        app_name=app_name,
-        session_service=session_service,
-    )
-    message = types.Content(
-        role="user",
-        parts=[
-            types.Part.from_text(
-                text=json.dumps(
-                    validated_payload,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
-        ],
-    )
-    events: list[Any] = []
+    session_service = sessions_module.InMemorySessionService()
     try:
-        events.extend(
-            [
-                event
-                async for event in runner.run_async(
-                    user_id=user_id,
-                    session_id=session.id,
-                    new_message=message,
-                )
-            ]
+        session = await session_service.create_session(
+            app_name=app_name,
+            user_id=user_id,
+            state={AUTHORITY_CURATION_STATE_INPUT: validated_payload},
         )
-    except Exception as exc:
-        partial_output = extract_partial_response_text(events) or None
-        raise AgentInvocationError(
-            str(exc),
-            partial_output=partial_output,
-            event_count=len(events),
-            validation_errors=_validation_errors_from_exception(exc),
-        ) from exc
+        runner = runners_module.Runner(
+            node=workflow,
+            app_name=app_name,
+            session_service=session_service,
+        )
+        message: types.Content = genai_types_module.Content(
+            role="user",
+            parts=[
+                genai_types_module.Part.from_text(
+                    text=json.dumps(
+                        validated_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            ],
+        )
+        events: list[Any] = []
+        try:
+            events.extend(
+                [
+                    event
+                    async for event in runner.run_async(
+                        user_id=user_id,
+                        session_id=session.id,
+                        new_message=message,
+                    )
+                ]
+            )
+        except Exception as exc:
+            partial_output = extract_partial_response_text(events) or None
+            raise AgentInvocationError(
+                str(exc),
+                partial_output=partial_output,
+                event_count=len(events),
+                validation_errors=_validation_errors_from_exception(exc),
+            ) from exc
 
-    updated_session = await session_service.get_session(
-        app_name=app_name,
-        user_id=user_id,
-        session_id=session.id,
-    )
-    state = dict(getattr(updated_session, "state", {}) or {})
-    return {
-        "final_text": extract_final_response_text(events),
-        "state": state,
-        "event_count": len(events),
-        "model_info": get_agent_model_info(agent),
-    }
+        updated_session = await session_service.get_session(
+            app_name=app_name,
+            user_id=user_id,
+            session_id=session.id,
+        )
+        state = dict(getattr(updated_session, "state", {}) or {})
+        return {
+            "final_text": extract_final_response_text(events),
+            "state": state,
+            "event_count": len(events),
+            "model_info": get_agent_model_info(workflow),
+        }
+    finally:
+        close = getattr(session_service, "close", None)
+        if callable(close):
+            close_result = close()
+            if inspect.isawaitable(close_result):
+                await close_result
 
 
 def _invoke_authority_curation_workflow(
@@ -2281,10 +2303,13 @@ def _feedback_schema_invalid(
 
 def _validation_error_details(exc: ValidationError) -> list[dict[str, Any]]:
     """Return Pydantic validation errors without raw input values."""
-    return exc.errors(
-        include_input=False,
-        include_context=False,
-        include_url=False,
+    return cast(
+        "list[dict[str, Any]]",
+        exc.errors(
+            include_input=False,
+            include_context=False,
+            include_url=False,
+        ),
     )
 
 
@@ -2390,7 +2415,8 @@ def _json_from_column(raw_value: object) -> object:
 def _dict_value(value: object, key: str) -> object:
     """Return a dictionary value when the parsed JSON is an object."""
     if isinstance(value, dict):
-        return value.get(key)
+        parsed = {str(item_key): item for item_key, item in value.items()}
+        return parsed.get(key)
     return None
 
 
@@ -2437,11 +2463,12 @@ def _collect_ids(value: object, *, keys: tuple[str, ...]) -> set[str]:
     """Collect id-like strings from nested JSON."""
     found: set[str] = set()
     if isinstance(value, dict):
+        parsed = {str(item_key): item for item_key, item in value.items()}
         for key in keys:
-            item_id = value.get(key)
+            item_id = parsed.get(key)
             if isinstance(item_id, str) and item_id:
                 found.add(item_id)
-        for child in value.values():
+        for child in parsed.values():
             found.update(_collect_ids(child, keys=keys))
     elif isinstance(value, list):
         for child in value:
@@ -2453,12 +2480,13 @@ def _collect_source_item_ids(value: object) -> set[str]:
     """Collect source item ids from nested authority JSON."""
     found: set[str] = set()
     if isinstance(value, dict):
-        found.update(_collect_direct_source_ids(value))
-        source_map = value.get("source_map")
+        parsed = {str(item_key): item for item_key, item in value.items()}
+        found.update(_collect_direct_source_ids(parsed))
+        source_map = parsed.get("source_map")
         if isinstance(source_map, list):
             for source_entry in source_map:
                 found.update(_collect_source_map_ids(source_entry))
-        found.update(_collect_child_source_ids(value))
+        found.update(_collect_child_source_ids(parsed))
     elif isinstance(value, list):
         for child in value:
             found.update(_collect_source_item_ids(child))
@@ -2490,12 +2518,13 @@ def _collect_source_map_ids(value: object) -> set[str]:
     """Collect source item ids from source_map entries."""
     found: set[str] = set()
     if isinstance(value, dict):
+        parsed = {str(item_key): item for item_key, item in value.items()}
         for key in ("source_item_id", "spec_item_id", "item_id", "source_id", "id"):
-            item_id = value.get(key)
+            item_id = parsed.get(key)
             if isinstance(item_id, str) and _looks_like_source_item_id(item_id):
                 found.add(item_id)
         for key in ("location", "locations", "source_ref"):
-            found.update(_collect_source_location_ids(value.get(key)))
+            found.update(_collect_source_location_ids(parsed.get(key)))
     return found
 
 

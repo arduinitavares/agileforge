@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
-from google.adk.agents import LlmAgent, LoopAgent
+from google.adk.agents import LlmAgent
+from google.adk.workflow import START, Workflow
 
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationCriticOutput,
@@ -13,6 +14,9 @@ from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationRepairPlan,
     AuthorityCurationWorkflowInput,
 )
+
+if TYPE_CHECKING:
+    from google.adk.models.base_llm import BaseLlm
 
 AUTHORITY_CURATION_STATE_INPUT = "authority_curation_input"
 AUTHORITY_CURATION_STATE_SEMANTIC_FINDINGS = "authority_curation_semantic_findings"
@@ -46,7 +50,7 @@ _LOOP_CONTRACT = (
 )
 
 
-def build_authority_curation_workflow(*, model: str) -> Any:  # noqa: ANN401
+def build_authority_curation_workflow(*, model: str | BaseLlm) -> Workflow:
     """Build an ADK 2.0 workflow preserving Loop template semantics."""
     semantic_critic = LlmAgent(
         name="AuthoritySemanticFidelityCritic",
@@ -145,23 +149,46 @@ def build_authority_curation_workflow(*, model: str) -> Any:  # noqa: ANN401
         disallow_transfer_to_peers=True,
     )
 
-    return LoopAgent(
+    return Workflow(
         name="AuthorityCurationWorkflow",
-        sub_agents=[
-            semantic_critic,
-            quality_critic,
-            repair_planner,
-            repair_compiler,
-            gate_decision,
+        edges=[
+            (
+                START,
+                semantic_critic,
+                quality_critic,
+                repair_planner,
+                repair_compiler,
+                gate_decision,
+            ),
         ],
-        max_iterations=AUTHORITY_CURATION_MAX_ITERATIONS,
+        max_concurrency=1,
         input_schema=AuthorityCurationWorkflowInput,
         output_schema=AuthorityCurationGateDecision,
         description=(
-            "ADK 2.0 authority curation workflow using ordered Loop template "
-            "semantics for targeted repair and explicit gate decisions."
+            "ADK 2.0 authority curation workflow using graph execution and "
+            "ordered Loop template semantics for targeted repair and explicit "
+            "gate decisions."
         ),
     )
+
+
+def workflow_sub_agents(workflow: Workflow) -> list[LlmAgent]:
+    """Return ordered LLM graph nodes for tests and diagnostics."""
+    if workflow.graph is None:
+        return []
+    expected_names = [
+        "AuthoritySemanticFidelityCritic",
+        "AuthorityQualityCritic",
+        "AuthorityRepairPlanner",
+        "AuthorityTargetedRepairCompiler",
+        "AuthorityGateDecision",
+    ]
+    nodes_by_name = {
+        node.name: node
+        for node in workflow.graph.nodes
+        if isinstance(node, LlmAgent) and node.name in expected_names
+    }
+    return [nodes_by_name[name] for name in expected_names if name in nodes_by_name]
 
 
 def validate_workflow_input(

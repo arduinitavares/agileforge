@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -324,7 +324,7 @@ def _write_feedback(
     item_overrides: dict[str, object] | None = None,
     filename: str = "feedback.json",
 ) -> Path:
-    item = {
+    item: dict[str, Any] = {
         "feedback_id": "AFB-curation-1",
         "target_kind": "invariant",
         "target_id": "INV-curation-1",
@@ -390,11 +390,13 @@ def test_feedback_models_reject_unknown_fields() -> None:
 def test_feedback_record_requires_idempotency_key() -> None:
     """Feedback recording is a mutation and requires idempotency."""
     with pytest.raises(ValidationError):
-        AuthorityFeedbackRecordRequest(
-            project_id=1,
-            pending_authority_id=6,
-            expected_authority_fingerprint="sha256:abc",
-            feedback_file="feedback.json",
+        AuthorityFeedbackRecordRequest.model_validate(
+            {
+                "project_id": 1,
+                "pending_authority_id": 6,
+                "expected_authority_fingerprint": "sha256:abc",
+                "feedback_file": "feedback.json",
+            }
         )
 
 
@@ -1409,7 +1411,11 @@ def test_authority_curate_failure_returns_to_rejected(
         workflow_state["setup_curation_error_code"]
         == "AUTHORITY_CURATION_MAX_ITERATIONS"
     )
-    assert workflow_state["setup_next_actions"][0]["command"] == (
+    next_actions = cast(
+        "list[dict[str, object]]",
+        workflow_state["setup_next_actions"],
+    )
+    assert next_actions[0]["command"] == (
         "agileforge authority curate"
     )
     with Session(engine) as session:
@@ -1743,8 +1749,7 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
 
     assert result["ok"] is True
     assert captured["model_id"] == "test-curation-model"
-    payload = captured["payload"]
-    assert isinstance(payload, dict)
+    payload = cast("dict[str, object]", captured["payload"])
     assert payload["source_authority_id"] == fixture.authority_id
     assert payload["source_authority_json"] == json.loads(_compiled_artifact_json())
     assert payload["feedback_json"] == {

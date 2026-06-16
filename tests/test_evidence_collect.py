@@ -1,6 +1,7 @@
 """Tests for evidence-aware reconciliation collection models."""
 
 import json
+import os
 import socket
 import tempfile
 from collections.abc import Callable, Iterator
@@ -269,11 +270,23 @@ def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
         )
         socket_path = repo / "daemon.sock"
         af_unix = getattr(socket, "AF_UNIX", None)
+        mkfifo = getattr(os, "mkfifo", None)
+        sock: socket.socket | None = None
         if af_unix is None:
-            return
-        sock = socket.socket(af_unix)
+            if not callable(mkfifo):
+                return
+            mkfifo(socket_path)
+        else:
+            sock = socket.socket(af_unix)
+            try:
+                sock.bind(str(socket_path))
+            except PermissionError:
+                sock.close()
+                sock = None
+                if not callable(mkfifo):
+                    return
+                mkfifo(socket_path)
         try:
-            sock.bind(str(socket_path))
             runner = EvidenceCollectionRunner(
                 engine=engine,
                 product_repo=_ProductRepoStub(),
@@ -287,7 +300,8 @@ def test_runner_skips_non_regular_files_and_runtime_dirs() -> None:
                 idempotency_key="socket-repo",
             )
         finally:
-            sock.close()
+            if sock is not None:
+                sock.close()
 
     assert result["ok"] is True
     warnings = cast("list[dict[str, object]]", result["warnings"])

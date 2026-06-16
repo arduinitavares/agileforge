@@ -1733,6 +1733,8 @@ agileforge authority review --project-id 1
 agileforge authority review --project-id 1 --include-spec full
 agileforge authority accept --project-id 1
 agileforge authority reject --project-id 1 --review-token <review_token> --reason "..." --idempotency-key reject-001
+agileforge authority feedback record --project-id 1 --pending-authority-id 6 --expected-authority-fingerprint sha256:... --feedback-file authority-feedback.json --idempotency-key authority-feedback-001
+agileforge authority curate --project-id 1 --spec-version-id 3 --source-authority-id 6 --expected-source-authority-fingerprint sha256:... --feedback-attempt-id 1 --idempotency-key authority-curate-001
 agileforge authority regenerate --project-id 1 --spec-version-id 3 --idempotency-key authority-regenerate-001
 agileforge authority invariants --project-id 1
 agileforge authority invariants --project-id 1 --spec-version-id 3
@@ -2289,6 +2291,32 @@ print("status", data.get("status"))
 print("decision_id", data.get("decision_id"))
 PY
 ```
+
+### Authority Feedback And Curation
+
+When `authority review` finds a materially wrong invariant, do not edit the
+source spec unless the source spec is wrong. Record structured feedback against
+the authority candidate and run bounded curation.
+
+```bash
+agileforge authority feedback record \
+  --project-id "$PROJECT_ID" \
+  --pending-authority-id "$AUTHORITY_ID" \
+  --expected-authority-fingerprint "$AUTHORITY_FINGERPRINT" \
+  --feedback-file authority-feedback.json \
+  --idempotency-key "authority-feedback-$PROJECT_ID-001"
+
+agileforge authority curate \
+  --project-id "$PROJECT_ID" \
+  --spec-version-id "$SPEC_VERSION_ID" \
+  --source-authority-id "$AUTHORITY_ID" \
+  --expected-source-authority-fingerprint "$AUTHORITY_FINGERPRINT" \
+  --feedback-attempt-id "$FEEDBACK_ATTEMPT_ID" \
+  --idempotency-key "authority-curate-$PROJECT_ID-001"
+```
+
+Curation stops at `authority_pending_review`. Human review and explicit
+`authority accept` are still required.
 
 Regenerate when an approved spec version needs fresh v2 compiled authority,
 including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`:

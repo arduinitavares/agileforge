@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from google.adk.agents import LoopAgent
+from google.adk.workflow import Workflow
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.authority_curation import (
     build_authority_curation_workflow,
     validate_workflow_input,
+    workflow_sub_agents,
 )
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationGateDecision,
@@ -18,6 +19,11 @@ from orchestrator_agent.agent_tools.authority_curation.schemes import (
 )
 
 EXPECTED_MAX_ITERATIONS = 2
+
+
+def _instruction_text(value: object) -> str:
+    assert isinstance(value, str)
+    return value
 
 
 def _valid_workflow_payload() -> dict[str, object]:
@@ -63,9 +69,11 @@ def test_gate_decision_requires_reason_for_fail() -> None:
 def test_gate_decision_rejects_bool_coercion() -> None:
     """Strict gate validation must reject stringified boolean fields."""
     with pytest.raises(ValidationError):
-        AuthorityCurationGateDecision(
-            status="pass",
-            review_ready="false",
+        AuthorityCurationGateDecision.model_validate(
+            {
+                "status": "pass",
+                "review_ready": "false",
+            }
         )
 
 
@@ -94,38 +102,43 @@ def test_validate_workflow_input_returns_strict_model() -> None:
 
 
 def test_authority_curation_workflow_uses_loop_agent_contract() -> None:
-    """The factory builds the ordered ADK LoopAgent without invoking a model."""
+    """The factory builds an ordered ADK Workflow without invoking a model."""
     workflow = build_authority_curation_workflow(model="test-model")
 
-    assert isinstance(workflow, LoopAgent)
+    assert isinstance(workflow, Workflow)
     assert workflow.name == "AuthorityCurationWorkflow"
-    assert workflow.max_iterations == EXPECTED_MAX_ITERATIONS
-    assert [agent.name for agent in workflow.sub_agents] == [
+    assert workflow.max_concurrency == 1
+    agents = workflow_sub_agents(workflow)
+    assert [agent.name for agent in agents] == [
         "AuthoritySemanticFidelityCritic",
         "AuthorityQualityCritic",
         "AuthorityRepairPlanner",
         "AuthorityTargetedRepairCompiler",
         "AuthorityGateDecision",
     ]
-    assert {agent.include_contents for agent in workflow.sub_agents} == {"none"}
+    assert {agent.include_contents for agent in agents} == {"none"}
 
 
 def test_downstream_agents_reference_state_placeholders() -> None:
     """Bounded-context agents must explicitly read prior node outputs."""
     workflow = build_authority_curation_workflow(model="test-model")
-    agents = {agent.name: agent for agent in workflow.sub_agents}
+    agents = {agent.name: agent for agent in workflow_sub_agents(workflow)}
 
-    planner_instruction = agents["AuthorityRepairPlanner"].instruction
+    planner_instruction = _instruction_text(
+        agents["AuthorityRepairPlanner"].instruction
+    )
     assert "{authority_curation_input}" in planner_instruction
     assert "{authority_curation_semantic_findings}" in planner_instruction
     assert "{authority_curation_quality_findings}" in planner_instruction
 
-    compiler_instruction = agents["AuthorityTargetedRepairCompiler"].instruction
+    compiler_instruction = _instruction_text(
+        agents["AuthorityTargetedRepairCompiler"].instruction
+    )
     assert "{authority_curation_repair_plan}" in compiler_instruction
     assert "{authority_curation_semantic_findings}" in compiler_instruction
     assert "{authority_curation_quality_findings}" in compiler_instruction
 
-    gate_instruction = agents["AuthorityGateDecision"].instruction
+    gate_instruction = _instruction_text(agents["AuthorityGateDecision"].instruction)
     assert "{authority_curation_repair_output}" in gate_instruction
     assert "{authority_curation_repair_plan}" in gate_instruction
     assert "{authority_curation_semantic_findings}" in gate_instruction

@@ -440,8 +440,8 @@ def test_authority_status_defaults_when_curation_tables_are_missing(
     """Authority status remains available without optional curation tables."""
     product = _seed_product(session)
     product_id = require_id(product.product_id, "product_id")
-    session.exec(text("DROP TABLE authority_curation_attempts"))
-    session.exec(text("DROP TABLE authority_feedback_attempts"))
+    session.connection().execute(text("DROP TABLE authority_curation_attempts"))
+    session.connection().execute(text("DROP TABLE authority_feedback_attempts"))
     session.commit()
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
 
