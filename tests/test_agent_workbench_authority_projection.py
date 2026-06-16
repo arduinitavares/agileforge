@@ -11,13 +11,17 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from sqlalchemy import create_engine, text
 from sqlmodel import select
 
+from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Product
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
     SpecRegistry,
 )
-from services.agent_workbench.authority_projection import AuthorityProjectionService
+from services.agent_workbench.authority_projection import (
+    AuthorityProjectionService,
+    pending_authority_fingerprint,
+)
 from services.agent_workbench.error_codes import ErrorCode, error_metadata
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
@@ -271,6 +275,102 @@ def _accept_spec(
     return acceptance
 
 
+def _reject_spec(
+    session: Session,
+    *,
+    product_id: int,
+    spec: SpecRegistry,
+    authority: CompiledSpecAuthority,
+) -> SpecAuthorityAcceptance:
+    """Persist a rejected authority decision for a spec version."""
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    authority_id = require_id(authority.authority_id, "authority_id")
+    rejection = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="rejected",
+        policy="manual",
+        decided_by="reviewer",
+        decided_at=datetime(2026, 5, 14, 13, tzinfo=UTC),
+        rationale="Needs structured feedback repair.",
+        compiler_version=authority.compiler_version,
+        prompt_hash=authority.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=authority_id,
+        actor_mode="human_review_token",
+        review_completeness="complete",
+        terminal_decision_key=f"{product_id}:{spec_version_id}:{authority_id}",
+        provenance_source="test",
+    )
+    session.add(rejection)
+    session.commit()
+    session.refresh(rejection)
+    return rejection
+
+
+def _seed_feedback_attempt(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    authority: CompiledSpecAuthority,
+    feedback_attempt_id: str = "feedback-blocking",
+    has_blocking_feedback: bool = True,
+    created_at: datetime | None = None,
+) -> AuthorityFeedbackAttempt:
+    """Persist structured feedback for an authority candidate."""
+    authority_id = require_id(authority.authority_id, "authority_id")
+    timestamp = created_at or datetime(2026, 5, 14, 14, tzinfo=UTC)
+    row = AuthorityFeedbackAttempt(
+        project_id=project_id,
+        feedback_attempt_id=feedback_attempt_id,
+        source_authority_id=authority_id,
+        source_authority_fingerprint=pending_authority_fingerprint(authority),
+        feedback_fingerprint="sha256:feedback",
+        has_blocking_feedback=has_blocking_feedback,
+        feedback_json='{"feedback_items":[]}',
+        request_hash=f"sha256:{feedback_attempt_id}",
+        idempotency_key=f"idempotency-{feedback_attempt_id}",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def _seed_curation_attempt(  # noqa: PLR0913
+    session: Session,
+    *,
+    project_id: int,
+    authority: CompiledSpecAuthority,
+    feedback_attempt_id: str,
+    curation_attempt_id: str = "curation-old",
+    status: str = "succeeded",
+    created_at: datetime | None = None,
+) -> AuthorityCurationAttempt:
+    """Persist an authority curation attempt row."""
+    authority_id = require_id(authority.authority_id, "authority_id")
+    timestamp = created_at or datetime(2026, 5, 14, 15, tzinfo=UTC)
+    row = AuthorityCurationAttempt(
+        project_id=project_id,
+        curation_attempt_id=curation_attempt_id,
+        source_authority_id=authority_id,
+        source_authority_fingerprint=pending_authority_fingerprint(authority),
+        spec_version_id=authority.spec_version_id,
+        feedback_attempt_id=feedback_attempt_id,
+        status=status,
+        request_hash=f"sha256:{curation_attempt_id}",
+        idempotency_key=f"idempotency-{curation_attempt_id}",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
 def test_authority_status_reports_schema_not_ready_without_creating_database(
     tmp_path: Path,
 ) -> None:
@@ -323,7 +423,40 @@ def test_authority_status_distinguishes_missing_authority_without_specs(
     assert result["data"]["reason"] == "no_spec_versions"
     assert result["data"]["latest_spec_version_id"] is None
     assert result["data"]["accepted_spec_version_id"] is None
+    assert result["data"]["has_blocking_feedback"] is False
+    assert result["data"]["latest_feedback_attempt_id"] is None
+    assert result["data"]["latest_curation_attempt_id"] is None
+    assert result["data"]["latest_curation_status"] is None
+    assert result["data"]["latest_curation_failure_artifact_id"] is None
+    assert result["data"]["curation_available"] is False
+    assert result["data"]["curation_in_progress"] is False
     assert result["data"]["authority_fingerprint"] is None
+
+
+def test_authority_status_defaults_when_curation_tables_are_missing(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Authority status remains available without optional curation tables."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    session.exec(text("DROP TABLE authority_curation_attempts"))
+    session.exec(text("DROP TABLE authority_feedback_attempts"))
+    session.commit()
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "missing"
+    assert data["has_blocking_feedback"] is False
+    assert data["latest_feedback_attempt_id"] is None
+    assert data["latest_curation_attempt_id"] is None
+    assert data["latest_curation_status"] is None
+    assert data["latest_curation_failure_artifact_id"] is None
+    assert data["curation_available"] is False
+    assert data["curation_in_progress"] is False
 
 
 def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
@@ -358,6 +491,99 @@ def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
     assert result["data"]["pending_prompt_hash"] == "a" * 64
     assert result["data"]["pending_invariant_count"] == 1
     assert result["data"]["pending_authority_fingerprint"].startswith("sha256:")
+
+
+def test_authority_status_includes_curation_flags_for_rejected_authority(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Status projection exposes feedback and curation state."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=product_id,
+        authority=authority,
+    )
+    _reject_spec(
+        session,
+        product_id=product_id,
+        spec=spec,
+        authority=authority,
+    )
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "rejected"
+    assert data["has_blocking_feedback"] is True
+    assert data["latest_feedback_attempt_id"] == feedback.feedback_attempt_id
+    assert data["latest_curation_attempt_id"] is None
+    assert data["latest_curation_status"] is None
+    assert data["latest_curation_failure_artifact_id"] is None
+    assert data["curation_available"] is True
+    assert data["curation_in_progress"] is False
+
+
+def test_authority_status_scopes_curation_to_latest_feedback(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Old successful curation must not suppress newer blocking feedback."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    old_feedback = _seed_feedback_attempt(
+        session,
+        project_id=product_id,
+        authority=authority,
+        feedback_attempt_id="feedback-old",
+        created_at=datetime(2026, 5, 14, 14, tzinfo=UTC),
+    )
+    _seed_curation_attempt(
+        session,
+        project_id=product_id,
+        authority=authority,
+        feedback_attempt_id=old_feedback.feedback_attempt_id,
+        curation_attempt_id="curation-old",
+        status="succeeded",
+        created_at=datetime(2026, 5, 14, 15, tzinfo=UTC),
+    )
+    _seed_feedback_attempt(
+        session,
+        project_id=product_id,
+        authority=authority,
+        feedback_attempt_id="feedback-new",
+        created_at=datetime(2026, 5, 14, 16, tzinfo=UTC),
+    )
+    _reject_spec(
+        session,
+        product_id=product_id,
+        spec=spec,
+        authority=authority,
+    )
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    result = service.status(project_id=product_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["latest_feedback_attempt_id"] == "feedback-new"
+    assert data["latest_curation_attempt_id"] is None
+    assert data["latest_curation_status"] is None
+    assert data["curation_available"] is True
+    assert data["curation_in_progress"] is False
 
 
 def test_authority_status_treats_new_candidate_after_rejection_as_pending(

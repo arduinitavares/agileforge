@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from sqlmodel import Session, select
 
 from models import db as model_db
+from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Product
 from models.specs import (
     CompiledSpecAuthority,
@@ -26,6 +27,7 @@ from services.agent_workbench.envelope import (
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.schema_readiness import (
+    AUTHORITY_CURATION_REQUIREMENTS,
     SchemaReadiness,
     SchemaRequirement,
     check_schema_readiness,
@@ -132,6 +134,7 @@ class _StatusContext:
     disk_spec: JsonDict
     classification: _StatusClassification
     invariant_count: int
+    feedback_curation: JsonDict
 
 
 @dataclass(frozen=True)
@@ -508,6 +511,7 @@ def _spec_fingerprint_payload(spec: SpecRegistry | None) -> JsonDict | None:
 
 def _resolve_status(
     *,
+    session: Session,
     project_id: int,
     product: Product,
     selection: _AuthoritySelection,
@@ -515,6 +519,7 @@ def _resolve_status(
 ) -> JsonDict:
     """Classify status according to accepted, compiled, latest, and disk state."""
     data, warnings = _build_status_data(
+        session=session,
         project_id=project_id,
         product=product,
         selection=selection,
@@ -525,6 +530,7 @@ def _resolve_status(
 
 def _build_status_data(
     *,
+    session: Session,
     project_id: int,
     product: Product,
     selection: _AuthoritySelection,
@@ -536,6 +542,12 @@ def _build_status_data(
     disk_warning = _disk_spec_warning(disk_spec)
     if disk_warning is not None:
         warnings.append(disk_warning)
+    feedback_curation = _latest_feedback_and_curation(
+        session,
+        project_id=project_id,
+        authority_id=_feedback_curation_authority_id(selection),
+        curation_ready=_curation_projection_ready(session),
+    )
     context = _StatusContext(
         project_id=project_id,
         product=product,
@@ -543,8 +555,114 @@ def _build_status_data(
         disk_spec=disk_spec,
         classification=classification,
         invariant_count=invariant_count,
+        feedback_curation=feedback_curation,
     )
     return _status_data(context), warnings
+
+
+def _curation_projection_ready(session: Session) -> bool:
+    """Return whether optional curation projection tables can be queried."""
+    return check_schema_readiness(
+        cast("Engine", session.get_bind()),
+        AUTHORITY_CURATION_REQUIREMENTS,
+    ).ok
+
+
+def _feedback_curation_defaults() -> JsonDict:
+    """Return stable feedback and curation defaults."""
+    return {
+        "has_blocking_feedback": False,
+        "latest_feedback_attempt_id": None,
+        "latest_feedback_source_authority_fingerprint": None,
+        "latest_curation_attempt_id": None,
+        "latest_curation_status": None,
+        "latest_curation_failure_artifact_id": None,
+        "curation_available": False,
+        "curation_in_progress": False,
+    }
+
+
+def _feedback_curation_authority_id(
+    selection: _AuthoritySelection,
+) -> int | None:
+    """Return the current pending or rejected authority candidate id."""
+    pending_authority = selection.pending_authority
+    if pending_authority is not None and pending_authority.authority_id is not None:
+        return pending_authority.authority_id
+    rejected = selection.rejected
+    if rejected is not None:
+        return rejected.pending_authority_id
+    return None
+
+
+def _latest_feedback_and_curation(
+    session: Session,
+    *,
+    project_id: int,
+    authority_id: int | None,
+    curation_ready: bool,
+) -> JsonDict:
+    """Return bounded feedback and curation status for the authority status view."""
+    if authority_id is None or not curation_ready:
+        return _feedback_curation_defaults()
+
+    feedback = session.exec(
+        select(AuthorityFeedbackAttempt)
+        .where(AuthorityFeedbackAttempt.project_id == project_id)
+        .where(AuthorityFeedbackAttempt.source_authority_id == authority_id)
+        .order_by(
+            cast("Any", AuthorityFeedbackAttempt.created_at).desc(),
+            cast("Any", AuthorityFeedbackAttempt.feedback_row_id).desc(),
+        )
+    ).first()
+    running_curation = session.exec(
+        select(AuthorityCurationAttempt)
+        .where(AuthorityCurationAttempt.project_id == project_id)
+        .where(AuthorityCurationAttempt.source_authority_id == authority_id)
+        .where(AuthorityCurationAttempt.status == "running")
+        .order_by(
+            cast("Any", AuthorityCurationAttempt.created_at).desc(),
+            cast("Any", AuthorityCurationAttempt.curation_row_id).desc(),
+        )
+    ).first()
+    curation = running_curation
+    if feedback is not None and curation is None:
+        curation = session.exec(
+            select(AuthorityCurationAttempt)
+            .where(AuthorityCurationAttempt.project_id == project_id)
+            .where(AuthorityCurationAttempt.source_authority_id == authority_id)
+            .where(
+                AuthorityCurationAttempt.feedback_attempt_id
+                == feedback.feedback_attempt_id
+            )
+            .order_by(
+                cast("Any", AuthorityCurationAttempt.created_at).desc(),
+                cast("Any", AuthorityCurationAttempt.curation_row_id).desc(),
+            )
+        ).first()
+    has_blocking = bool(feedback and feedback.has_blocking_feedback)
+    curation_status = None if curation is None else curation.status
+    curation_in_progress = running_curation is not None
+    return {
+        "has_blocking_feedback": has_blocking,
+        "latest_feedback_attempt_id": (
+            None if feedback is None else feedback.feedback_attempt_id
+        ),
+        "latest_feedback_source_authority_fingerprint": (
+            None if feedback is None else feedback.source_authority_fingerprint
+        ),
+        "latest_curation_attempt_id": (
+            None if curation is None else curation.curation_attempt_id
+        ),
+        "latest_curation_status": curation_status,
+        "latest_curation_failure_artifact_id": (
+            None if curation is None else curation.failure_artifact_id
+        ),
+        "curation_available": has_blocking
+        and not curation_in_progress
+        and curation_status != "succeeded",
+        "curation_in_progress": curation_in_progress,
+    }
 
 
 def _classify_status(
@@ -648,7 +766,7 @@ def _status_data(context: _StatusContext) -> JsonDict:
     pending_authority = selection.pending_authority
     latest_spec = selection.latest_spec
     pending_invariant_count, _pending_warnings = _invariant_count(pending_authority)
-    return {
+    data = {
         "project_id": context.project_id,
         "status": context.classification.status,
         "reason": context.classification.reason,
@@ -715,6 +833,8 @@ def _status_data(context: _StatusContext) -> JsonDict:
         "disk_spec": context.disk_spec,
         "authority_fingerprint": _authority_status_fingerprint(context),
     }
+    data.update(context.feedback_curation)
+    return data
 
 
 def _first_unsupported_status_authority(
@@ -924,6 +1044,7 @@ class AuthorityProjectionService:
                 ),
             )
             data, warnings = _build_status_data(
+                session=session,
                 project_id=project_id,
                 product=product,
                 selection=selection,

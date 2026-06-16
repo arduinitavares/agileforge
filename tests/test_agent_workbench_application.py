@@ -1168,6 +1168,25 @@ class _RejectedWithPendingAuthorityProjection(_RejectedAuthorityProjection):
         return result
 
 
+class _RejectedWithBlockingFeedbackProjection(_RejectedAuthorityProjection):
+    """Fake rejected authority projection with structured blocking feedback."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return rejected authority with curation available."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "latest_feedback_attempt_id": "feedback-123",
+                "has_blocking_feedback": True,
+                "curation_available": True,
+                "curation_in_progress": False,
+                "rejected_pending_authority_id": 6,
+                "pending_authority_fingerprint": "sha256:abc",
+            }
+        )
+        return result
+
+
 class _FalseyAuthorityProjection(_FakeAuthorityProjection):
     """Falsey authority projection used to verify explicit dependency checks."""
 
@@ -5387,6 +5406,47 @@ def test_workflow_next_routes_rejected_authority_to_installed_regenerate() -> No
     ]
     assert result["data"]["blocked_future_commands"] == []
     assert result["data"]["manual_remediation"] == []
+
+
+def test_workflow_next_prefers_authority_curate_after_feedback() -> None:
+    """Rejected authority with feedback previews curate without lying about install."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_rejected",
+                "setup_spec_version_id": 4,
+            }
+        ),
+        authority_projection=_RejectedWithBlockingFeedbackProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == []
+    command = result["data"]["next_actions"][0]["command"]
+    assert command == (
+        f"agileforge authority curate --project-id {PROJECT_ID} "
+        "--spec-version-id 4 "
+        "--source-authority-id 6 "
+        "--expected-source-authority-fingerprint sha256:abc "
+        "--feedback-attempt-id feedback-123 "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert "authority regenerate" not in command
+    assert result["data"]["next_actions"][0]["installed"] is False
+    assert result["data"]["next_actions"][0]["requires_cli_installation"] is True
+    assert result["data"]["blocked_future_commands"] == [
+        {
+            "command": command,
+            "installed": False,
+            "reason": (
+                "Authority curation is the preferred repair path, but the CLI "
+                "command is not installed yet."
+            ),
+        }
+    ]
 
 
 def test_workflow_next_routes_regenerated_rejected_authority_to_review() -> None:

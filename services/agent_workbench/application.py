@@ -61,6 +61,7 @@ from services.specs.profile_content import SpecContentNormalizationError
 
 STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
+AUTHORITY_CURATE_COMMAND: Final[str] = "agileforge authority curate"
 AUTHORITY_REGENERATE_COMMAND: Final[str] = "agileforge authority regenerate"
 
 
@@ -2516,6 +2517,7 @@ def _setup_workflow_next(
             data=data,
             project_id=project_id,
             authority=authority,
+            workflow=workflow,
         )
     elif setup_status == "failed":
         _apply_failed_setup_routing(
@@ -2714,8 +2716,54 @@ def _apply_authority_rejected_routing(
     data: dict[str, Any],
     project_id: int,
     authority: dict[str, Any] | None,
+    workflow: dict[str, Any],
 ) -> None:
     """Publish regeneration commands for rejected setup authority."""
+    authority_data = _envelope_data(authority) if authority is not None else {}
+    if authority_data.get("curation_in_progress") is True:
+        _apply_authority_curation_in_progress_routing(
+            data=data,
+            project_id=project_id,
+        )
+        return
+    if authority_data.get("curation_available") is True:
+        curation_action = _authority_curate_next_action_from_state(
+            project_id=project_id,
+            workflow=workflow,
+            authority_data=authority_data,
+        )
+        if curation_action is not None:
+            if curation_action["installed"] is True:
+                data["next_valid_commands"] = [curation_action["command"]]
+            else:
+                data["next_valid_commands"] = []
+                data["blocked_future_commands"] = [
+                    {
+                        "command": curation_action["command"],
+                        "installed": False,
+                        "reason": (
+                            "Authority curation is the preferred repair path, but "
+                            "the CLI command is not installed yet."
+                        ),
+                    }
+                ]
+            data["next_actions"] = [curation_action]
+            data["manual_remediation"] = []
+            return
+        data["next_actions"] = []
+        data["blocked_commands"] = [
+            {
+                "command": AUTHORITY_CURATE_COMMAND,
+                "installed": command_is_available(AUTHORITY_CURATE_COMMAND),
+                "reason": (
+                    "Authority curation is available, but required curation "
+                    "guard fields are missing from authority status."
+                ),
+            }
+        ]
+        data["manual_remediation"] = ["Inspect authority status curation fields."]
+        return
+
     spec_version_id = _rejected_spec_version_id(authority)
     if spec_version_id is not None:
         command = _authority_regenerate_command(
@@ -2741,6 +2789,29 @@ def _apply_authority_rejected_routing(
     data["manual_remediation"] = [
         "Inspect authority status for rejected_spec_version_id.",
     ]
+
+
+def _apply_authority_curation_in_progress_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+) -> None:
+    """Publish mutation/status inspection commands for active authority curation."""
+    commands = [
+        f"agileforge mutation list --project-id {project_id} --status pending",
+        f"agileforge authority status --project-id {project_id}",
+    ]
+    data["next_valid_commands"] = commands
+    data["next_actions"] = [
+        {
+            "command": command,
+            "installed": True,
+            "requires_cli_installation": False,
+            "reason": "Inspect the active authority curation attempt.",
+        }
+        for command in commands
+    ]
+    data["manual_remediation"] = []
 
 
 def _apply_failed_setup_routing(
@@ -5382,6 +5453,90 @@ def _rejected_spec_version_id(authority: dict[str, Any] | None) -> int | None:
     ):
         value = authority_data.get(key)
         if isinstance(value, int):
+            return value
+    return None
+
+
+def _authority_curate_next_action_from_state(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    authority_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return next action for structured authority curation when guards exist."""
+    spec_version_id = _workflow_setup_spec_version_id(workflow)
+    if spec_version_id is None:
+        spec_version_id = _spec_version_id_from_authority_data(authority_data)
+    source_authority_id = _source_authority_id(authority_data)
+    source_authority_fingerprint = _source_authority_fingerprint(authority_data)
+    feedback_attempt_id = authority_data.get("latest_feedback_attempt_id")
+    if (
+        spec_version_id is None
+        or source_authority_id is None
+        or source_authority_fingerprint is None
+        or not isinstance(feedback_attempt_id, str)
+    ):
+        return None
+    installed = command_is_available(AUTHORITY_CURATE_COMMAND)
+    command = (
+        f"{AUTHORITY_CURATE_COMMAND} --project-id {project_id} "
+        f"--spec-version-id {spec_version_id} "
+        f"--source-authority-id {source_authority_id} "
+        "--expected-source-authority-fingerprint "
+        f"{source_authority_fingerprint} "
+        f"--feedback-attempt-id {feedback_attempt_id} "
+        "--idempotency-key <idempotency_key>"
+    )
+    return {
+        "command": command,
+        "installed": installed,
+        "requires_cli_installation": not installed,
+        "reason": "Structured authority feedback exists for the rejected authority.",
+        "requires": ["idempotency_key"],
+    }
+
+
+def _workflow_setup_spec_version_id(workflow: dict[str, Any]) -> int | None:
+    """Return setup_spec_version_id from workflow state when concrete."""
+    state = _envelope_data(workflow).get("state")
+    workflow_state = state if isinstance(state, dict) else {}
+    value = workflow_state.get("setup_spec_version_id")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _spec_version_id_from_authority_data(authority_data: dict[str, Any]) -> int | None:
+    """Return a concrete rejected or pending authority spec version."""
+    for key in (
+        "rejected_spec_version_id",
+        "pending_compiled_spec_version_id",
+        "latest_spec_version_id",
+    ):
+        value = authority_data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _source_authority_id(authority_data: dict[str, Any]) -> int | None:
+    """Return the source authority id for curation."""
+    for key in ("rejected_pending_authority_id", "pending_authority_id"):
+        value = authority_data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _source_authority_fingerprint(authority_data: dict[str, Any]) -> str | None:
+    """Return the source authority fingerprint for curation."""
+    for key in (
+        "pending_authority_fingerprint",
+        "latest_feedback_source_authority_fingerprint",
+        "source_authority_fingerprint",
+    ):
+        value = authority_data.get(key)
+        if isinstance(value, str) and value:
             return value
     return None
 
