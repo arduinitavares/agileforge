@@ -1270,6 +1270,313 @@ def test_authority_curate_persists_diff_summary_and_lineage(
     assert json.loads(attempt.quality_report_json) == {"status": "passed"}
 
 
+def test_authority_curate_publishes_pending_review_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing curation publishes a new pending authority for review."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-publish-candidate",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "authority_pending_review"
+    pending_authority_id = result["data"]["pending_authority_id"]
+    pending_fingerprint = result["data"]["pending_authority_fingerprint"]
+    assert pending_authority_id != fixture.authority_id
+
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["fsm_state"] == "SETUP_REQUIRED"
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert workflow_state["pending_authority_id"] == pending_authority_id
+    assert workflow_state["pending_authority_fingerprint"] == pending_fingerprint
+    assert workflow_state["setup_next_actions"] == [
+        {
+            "command": "agileforge authority review",
+            "args": {"project_id": fixture.project_id},
+            "reason": "Review the curated authority candidate.",
+        }
+    ]
+
+    with Session(engine) as session:
+        authorities = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == fixture.spec_version_id
+            )
+        ).all()
+        acceptances = session.exec(select(SpecAuthorityAcceptance)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        pending_authority = session.get(CompiledSpecAuthority, pending_authority_id)
+
+    expected_authority_count = 2
+    assert len(authorities) == expected_authority_count
+    assert len(acceptances) == 1
+    assert acceptances[0].status == "rejected"
+    assert pending_authority is not None
+    assert pending_authority.spec_version_id == fixture.spec_version_id
+    assert pending_authority.compiler_version == "2.0.0"
+    assert pending_authority.prompt_hash == "a" * 64
+    assert json.loads(pending_authority.compiled_artifact_json or "{}") == (
+        _targeted_repair_curation_result(fixture)["candidate_authority_json"]
+    )
+    assert json.loads(pending_authority.scope_themes) == []
+    assert json.loads(pending_authority.invariants)[0]["id"] == (
+        "INV-curation-1-repaired"
+    )
+    assert json.loads(pending_authority.eligible_feature_ids) == []
+    assert json.loads(pending_authority.rejected_features or "[]") == []
+    assert json.loads(pending_authority.spec_gaps or "[]") == [
+        {"gap_id": "GAP-curation-1"}
+    ]
+    assert pending_authority_id == attempt.candidate_authority_id
+    assert pending_fingerprint == attempt.candidate_authority_fingerprint
+    assert pending_fingerprint == pending_authority_fingerprint(pending_authority)
+
+
+def test_authority_curate_failure_returns_to_rejected(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed curation leaves project recoverable at authority_rejected."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "status": "failed",
+            "error_code": "AUTHORITY_CURATION_MAX_ITERATIONS",
+            "failure_artifact_id": "authority-curation-failed-001",
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-fail-001",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATION_MAX_ITERATIONS"
+    assert result["errors"][0]["details"] == {
+        "project_id": fixture.project_id,
+        "curation_attempt_id": result["errors"][0]["details"]["curation_attempt_id"],
+        "failure_artifact_id": "authority-curation-failed-001",
+    }
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_rejected"
+    assert (
+        workflow_state["setup_curation_failure_artifact_id"]
+        == "authority-curation-failed-001"
+    )
+    assert (
+        workflow_state["setup_curation_error_code"]
+        == "AUTHORITY_CURATION_MAX_ITERATIONS"
+    )
+    assert workflow_state["setup_next_actions"][0]["command"] == (
+        "agileforge authority curate"
+    )
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+
+    assert attempt.status == "failed"
+    assert attempt.failure_artifact_id == "authority-curation-failed-001"
+
+
+def test_authority_curate_pending_review_failure_requires_recovery(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workflow failure after candidate publication must not be retried blindly."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            """Fail only after the candidate should move to pending review."""
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "raw-workflow-secret-after-publish"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    fake_workflow = FailsPendingReviewWorkflow()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-pending-review-write-failure",
+    )
+
+    first = runner.curate(request)
+    second = runner.curate(request)
+
+    assert first["ok"] is False
+    assert second == first
+    assert first["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    serialized = json.dumps(first, sort_keys=True)
+    assert "raw-workflow-secret-after-publish" not in serialized
+    details = first["errors"][0]["details"]
+    assert details["project_id"] == fixture.project_id
+    assert details["curation_attempt_id"]
+    assert details["candidate_authority_id"] != fixture.authority_id
+    assert details["candidate_authority_fingerprint"].startswith("sha256:")
+    assert details["failure_stage"] == "workflow_update_failed_after_publish"
+
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_curating"
+
+    with Session(engine) as session:
+        authorities = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == fixture.spec_version_id
+            )
+        ).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+
+    expected_authority_count = 2
+    assert len(authorities) == expected_authority_count
+    assert attempt.status == "succeeded"
+    assert attempt.candidate_authority_id == details["candidate_authority_id"]
+    assert (
+        attempt.candidate_authority_fingerprint
+        == details["candidate_authority_fingerprint"]
+    )
+    assert ledger.status == "recovery_required"
+    assert ledger.status != "domain_failed_no_side_effects"
+
+
+def test_authority_curate_finalize_success_false_requires_recovery(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger finalize failure after publication must not return success."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+
+    def fail_finalize_success(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return False
+
+    monkeypatch.setattr(
+        curation_mod.MutationLedgerRepository,
+        "finalize_success",
+        fail_finalize_success,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-finalize-success-false",
+    )
+
+    first = runner.curate(request)
+    second = runner.curate(request)
+
+    assert first["ok"] is False
+    assert second == first
+    assert first["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    details = first["errors"][0]["details"]
+    assert details["project_id"] == fixture.project_id
+    assert details["curation_attempt_id"]
+    assert details["mutation_event_id"]
+    assert details["candidate_authority_id"] != fixture.authority_id
+    assert details["candidate_authority_fingerprint"].startswith("sha256:")
+    assert details["failure_stage"] == "ledger_finalize_failed_after_publish"
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert workflow_state["pending_authority_id"] == details["candidate_authority_id"]
+
+    with Session(engine) as session:
+        authorities = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == fixture.spec_version_id
+            )
+        ).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+
+    expected_authority_count = 2
+    assert len(authorities) == expected_authority_count
+    assert attempt.status == "succeeded"
+    assert attempt.candidate_authority_id == details["candidate_authority_id"]
+    assert (
+        attempt.candidate_authority_fingerprint
+        == details["candidate_authority_fingerprint"]
+    )
+    assert ledger.status == "recovery_required"
+    assert ledger.status != "pending"
+
+
 def test_authority_curate_rejects_when_already_curating(
     engine: Engine,
 ) -> None:

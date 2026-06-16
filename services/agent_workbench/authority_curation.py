@@ -38,6 +38,7 @@ from services.agent_workbench.mutation_ledger import (
     MUTATION_RESUME_CONFLICT,
     MutationLedgerRepository,
     MutationStatus,
+    RecoveryAction,
 )
 from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
@@ -50,6 +51,13 @@ if TYPE_CHECKING:
 AUTHORITY_FEEDBACK_RECORD_COMMAND = "agileforge authority feedback record"
 AUTHORITY_CURATE_COMMAND = "agileforge authority curate"
 AUTHORITY_CURATION_LEASE_SECONDS = 600
+AUTHORITY_CURATION_COMPILER_VERSION = "authority-curation.v1"
+AUTHORITY_CURATION_PROMPT_HASH = canonical_hash(
+    {
+        "command": AUTHORITY_CURATE_COMMAND,
+        "schema_version": "agileforge.authority_curation.v1",
+    }
+)
 
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
@@ -202,9 +210,18 @@ class _ActiveMutation:
 class _ValidatedCurationCandidate:
     """Host-validated authority curation candidate metadata."""
 
+    candidate_authority_json: dict[str, Any]
     diff: dict[str, Any]
     quality_report: object
     candidate_lineage: object
+
+
+@dataclass(frozen=True)
+class _PublishedCurationCandidate:
+    """New pending authority published from a validated curation candidate."""
+
+    authority_id: int
+    authority_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -340,6 +357,12 @@ class AuthorityCurationRunner:
         )
         if loaded.response is not None:
             return loaded.response
+        if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
+            stored_response = _stored_ledger_response(
+                loaded.ledger.response_json
+            )
+            if stored_response is not None:
+                return stored_response
         if loaded.error_code is not None:
             return _curation_ledger_error_response(
                 error_code=loaded.error_code,
@@ -570,7 +593,7 @@ class AuthorityCurationRunner:
             },
         )
 
-    def _run_curation_after_status_update(
+    def _run_curation_after_status_update(  # noqa: PLR0911
         self,
         *,
         request: AuthorityCurationRequest,
@@ -622,33 +645,88 @@ class AuthorityCurationRunner:
                 )
                 return validated
 
+            published = self._publish_validated_curation_candidate(
+                request=request,
+                attempt=attempt,
+                validated=validated,
+            )
+            if not isinstance(published, _PublishedCurationCandidate):
+                if _response_error_code(published) == (
+                    ErrorCode.MUTATION_RECOVERY_REQUIRED.value
+                ):
+                    self._finalize_recovery_required_curation(
+                        active_mutation=active_mutation,
+                        response=published,
+                    )
+                else:
+                    self._finalize_failed_curation(
+                        request=request,
+                        active_mutation=active_mutation,
+                        attempt=attempt,
+                        response=published,
+                        status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+                    )
+                return published
+
             response = success_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
                 data={
-                    "status": "authority_curation_succeeded",
+                    "status": "authority_pending_review",
                     "project_id": request.project_id,
                     "curation_attempt_id": attempt.curation_attempt_id,
                     "mutation_event_id": active_mutation.mutation_event_id,
+                    "pending_authority_id": published.authority_id,
+                    "pending_authority_fingerprint": (
+                        published.authority_fingerprint
+                    ),
                     "diff_summary": validated.diff["summary"],
                     "lineage": validated.diff["lineage_json"],
                 },
                 correlation_id=request.correlation_id,
             )
-            self._update_succeeded_curation_attempt(
-                attempt.curation_attempt_id,
-                diff=validated.diff,
-                quality_report=validated.quality_report,
-                candidate_lineage=validated.candidate_lineage,
-            )
-            active_mutation.ledger.finalize_success(
+            finalized = active_mutation.ledger.finalize_success(
                 mutation_event_id=active_mutation.mutation_event_id,
                 lease_owner=active_mutation.lease_owner,
                 after={
                     "curation_attempt_id": attempt.curation_attempt_id,
+                    "candidate_authority_id": published.authority_id,
+                    "candidate_authority_fingerprint": (
+                        published.authority_fingerprint
+                    ),
                     "diff_summary": validated.diff["summary"],
                 },
                 response=response,
                 now=datetime.now(UTC),
+            )
+            if not finalized:
+                recovery_response = _published_curation_recovery_response(
+                    request=request,
+                    attempt=attempt,
+                    published=published,
+                    failure_stage="ledger_finalize_failed_after_publish",
+                    metadata={
+                        "mutation_event_id": active_mutation.mutation_event_id,
+                    },
+                )
+                self._finalize_recovery_required_curation(
+                    active_mutation=active_mutation,
+                    response=recovery_response,
+                )
+                return recovery_response
+            return response
+
+        if workflow_result.get("status") == "failed":
+            response = _failed_curation_workflow_response(
+                request=request,
+                attempt=attempt,
+                workflow_result=workflow_result,
+            )
+            self._finalize_failed_curation(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+                response=response,
+                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
             )
             return response
 
@@ -737,12 +815,93 @@ class AuthorityCurationRunner:
             )
 
         return _ValidatedCurationCandidate(
+            candidate_authority_json=candidate_authority_json,
             diff=diff,
             quality_report=_json_like_or_empty(workflow_result.get("quality_report")),
             candidate_lineage=_json_like_or_empty(
                 workflow_result.get("candidate_lineage_json"),
                 default=diff["lineage_json"],
             ),
+        )
+
+    def _publish_validated_curation_candidate(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        attempt: AuthorityCurationAttempt,
+        validated: _ValidatedCurationCandidate,
+    ) -> _PublishedCurationCandidate | dict[str, Any]:
+        """Publish a validated candidate as a new pending authority row."""
+        candidate_authority_json = validated.candidate_authority_json
+        try:
+            authority = _authority_from_candidate_json(
+                spec_version_id=request.spec_version_id,
+                candidate_authority_json=candidate_authority_json,
+            )
+            with Session(self._engine) as session:
+                session.add(authority)
+                session.commit()
+                session.refresh(authority)
+                published = _published_curation_candidate(authority)
+        except Exception as exc:  # noqa: BLE001
+            return error_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                error=workbench_error(
+                    ErrorCode.MUTATION_FAILED,
+                    message="Authority curation candidate publication failed.",
+                    details={
+                        "project_id": request.project_id,
+                        "curation_attempt_id": attempt.curation_attempt_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                ),
+                correlation_id=request.correlation_id,
+            )
+        try:
+            self._update_succeeded_curation_attempt(
+                attempt.curation_attempt_id,
+                published=published,
+                validated=validated,
+            )
+            self._mark_workflow_pending_review(
+                request=request,
+                pending_authority_id=published.authority_id,
+                pending_authority_fingerprint=published.authority_fingerprint,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _published_curation_recovery_response(
+                request=request,
+                attempt=attempt,
+                published=published,
+                failure_stage="workflow_update_failed_after_publish",
+                metadata={"exception_type": type(exc).__name__},
+            )
+        return published
+
+    def _mark_workflow_pending_review(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        pending_authority_id: int,
+        pending_authority_fingerprint: str,
+    ) -> None:
+        """Move setup workflow to review the newly published curation candidate."""
+        self._workflow.update_session_status(
+            str(request.project_id),
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_pending_review",
+                "setup_curation_mutation_event_id": None,
+                "pending_authority_id": pending_authority_id,
+                "pending_authority_fingerprint": pending_authority_fingerprint,
+                "setup_next_actions": [
+                    {
+                        "command": "agileforge authority review",
+                        "args": {"project_id": request.project_id},
+                        "reason": "Review the curated authority candidate.",
+                    }
+                ],
+            },
         )
 
     def _load_source_authority_and_feedback(
@@ -793,9 +952,11 @@ class AuthorityCurationRunner:
         status: MutationStatus,
     ) -> None:
         """Finalize failed curation and restore rejected workflow state."""
-        self._update_curation_attempt_status(
+        failure_artifact_id = _response_failure_artifact_id(response)
+        error_code = _response_error_code(response)
+        self._update_failed_curation_attempt(
             attempt.curation_attempt_id,
-            status="failed",
+            failure_artifact_id=failure_artifact_id,
         )
         _finalize_mutation_status(
             engine=self._engine,
@@ -804,12 +965,32 @@ class AuthorityCurationRunner:
             status=status,
             response=response,
         )
-        self._restore_authority_rejected_workflow(request=request)
+        self._restore_authority_rejected_workflow(
+            request=request,
+            failure_artifact_id=failure_artifact_id,
+            error_code=error_code,
+        )
+
+    def _finalize_recovery_required_curation(
+        self,
+        *,
+        active_mutation: _ActiveMutation,
+        response: dict[str, Any],
+    ) -> None:
+        """Persist recovery-required mutation state after publish side effects."""
+        _finalize_mutation_recovery_required(
+            engine=self._engine,
+            mutation_event_id=active_mutation.mutation_event_id,
+            lease_owner=active_mutation.lease_owner,
+            response=response,
+        )
 
     def _restore_authority_rejected_workflow(
         self,
         *,
         request: AuthorityCurationRequest,
+        failure_artifact_id: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         """Restore setup workflow after curation fails before publication."""
         try:
@@ -819,8 +1000,11 @@ class AuthorityCurationRunner:
                     "fsm_state": "SETUP_REQUIRED",
                     "setup_status": "authority_rejected",
                     "setup_curation_mutation_event_id": None,
+                    "setup_curation_failure_artifact_id": failure_artifact_id,
+                    "setup_curation_error_code": error_code
+                    or ErrorCode.MUTATION_FAILED.value,
                     "setup_error": {
-                        "code": ErrorCode.MUTATION_FAILED.value,
+                        "code": error_code or ErrorCode.MUTATION_FAILED.value,
                         "message": "Authority curation failed before publication.",
                     },
                     "setup_next_actions": [
@@ -847,13 +1031,13 @@ class AuthorityCurationRunner:
         except Exception:  # noqa: BLE001
             return
 
-    def _update_curation_attempt_status(
+    def _update_failed_curation_attempt(
         self,
         curation_attempt_id: str,
         *,
-        status: str,
+        failure_artifact_id: str | None = None,
     ) -> None:
-        """Update curation attempt status by stable attempt id."""
+        """Mark a curation attempt failed by stable attempt id."""
         with Session(self._engine) as session:
             row = session.exec(
                 select(AuthorityCurationAttempt).where(
@@ -863,7 +1047,8 @@ class AuthorityCurationRunner:
             ).first()
             if row is None:
                 return
-            row.status = status
+            row.status = "failed"
+            row.failure_artifact_id = failure_artifact_id
             row.updated_at = datetime.now(UTC)
             session.add(row)
             session.commit()
@@ -872,9 +1057,8 @@ class AuthorityCurationRunner:
         self,
         curation_attempt_id: str,
         *,
-        diff: dict[str, Any],
-        quality_report: object,
-        candidate_lineage: object,
+        published: _PublishedCurationCandidate,
+        validated: _ValidatedCurationCandidate,
     ) -> None:
         """Persist successful curation audit metadata."""
         with Session(self._engine) as session:
@@ -887,10 +1071,14 @@ class AuthorityCurationRunner:
             if row is None:
                 return
             row.status = "succeeded"
-            row.diff_summary_json = _canonical_json(diff["summary"])
-            row.lineage_json = _canonical_json(diff["lineage_json"])
-            row.quality_report_json = _canonical_json(quality_report)
-            row.candidate_lineage_json = _canonical_json(candidate_lineage)
+            row.candidate_authority_id = published.authority_id
+            row.candidate_authority_fingerprint = published.authority_fingerprint
+            row.diff_summary_json = _canonical_json(validated.diff["summary"])
+            row.lineage_json = _canonical_json(validated.diff["lineage_json"])
+            row.quality_report_json = _canonical_json(validated.quality_report)
+            row.candidate_lineage_json = _canonical_json(
+                validated.candidate_lineage
+            )
             row.updated_at = datetime.now(UTC)
             session.add(row)
             session.commit()
@@ -996,6 +1184,91 @@ def _is_authority_json(value: object) -> bool:
     )
 
 
+def _authority_from_candidate_json(
+    *,
+    spec_version_id: int,
+    candidate_authority_json: dict[str, Any],
+) -> CompiledSpecAuthority:
+    """Build a pending compiled authority row from candidate JSON."""
+    compiler_version = _candidate_text_field(
+        candidate_authority_json,
+        "compiler_version",
+        default=AUTHORITY_CURATION_COMPILER_VERSION,
+    )
+    prompt_hash = _candidate_text_field(
+        candidate_authority_json,
+        "prompt_hash",
+        default=AUTHORITY_CURATION_PROMPT_HASH,
+    )
+    return CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version=compiler_version,
+        prompt_hash=prompt_hash,
+        compiled_artifact_json=_canonical_json(candidate_authority_json),
+        scope_themes=_canonical_json(
+            _candidate_json_field(candidate_authority_json, "scope_themes")
+        ),
+        invariants=_canonical_json(
+            _candidate_json_field(candidate_authority_json, "invariants")
+        ),
+        eligible_feature_ids=_canonical_json(
+            _candidate_json_field(
+                candidate_authority_json,
+                "eligible_feature_ids",
+                "eligible_feature_rules",
+            )
+        ),
+        rejected_features=_canonical_json(
+            _candidate_json_field(candidate_authority_json, "rejected_features")
+        ),
+        spec_gaps=_canonical_json(
+            _candidate_json_field(candidate_authority_json, "spec_gaps", "gaps")
+        ),
+    )
+
+
+def _published_curation_candidate(
+    authority: CompiledSpecAuthority,
+) -> _PublishedCurationCandidate:
+    """Return required identity metadata for a published authority."""
+    authority_id = authority.authority_id
+    authority_fingerprint = pending_authority_fingerprint(authority)
+    if authority_id is None or authority_fingerprint is None:
+        message = "Published authority is missing identity metadata."
+        raise RuntimeError(message)
+    return _PublishedCurationCandidate(
+        authority_id=authority_id,
+        authority_fingerprint=authority_fingerprint,
+    )
+
+
+def _candidate_text_field(
+    candidate_authority_json: dict[str, Any],
+    field_name: str,
+    *,
+    default: str,
+) -> str:
+    """Return a stable text field from candidate JSON with deterministic fallback."""
+    value = candidate_authority_json.get(field_name)
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
+def _candidate_json_field(
+    candidate_authority_json: dict[str, Any],
+    field_name: str,
+    fallback_field_name: str | None = None,
+) -> object:
+    """Return candidate JSON field with optional equivalent fallback."""
+    value = candidate_authority_json.get(field_name)
+    if value is None and fallback_field_name is not None:
+        value = candidate_authority_json.get(fallback_field_name)
+    if value is None:
+        return []
+    return value
+
+
 def _invalid_curation_candidate_response(
     *,
     request: AuthorityCurationRequest,
@@ -1072,6 +1345,130 @@ def _json_like_or_empty(value: object, *, default: object | None = None) -> obje
     if isinstance(value, dict | list):
         return value
     return default if default is not None else {}
+
+
+def _string_or_none(value: object) -> str | None:
+    """Return a simple string value without coercing nested workflow content."""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _error_code_from_workflow(value: object) -> ErrorCode:
+    """Map workflow error code strings onto registered workbench errors."""
+    if not isinstance(value, str):
+        return ErrorCode.MUTATION_FAILED
+    try:
+        return ErrorCode(value)
+    except ValueError:
+        return ErrorCode.MUTATION_FAILED
+
+
+def _failed_curation_workflow_response(
+    *,
+    request: AuthorityCurationRequest,
+    attempt: AuthorityCurationAttempt,
+    workflow_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a bounded envelope for a failed workflow result."""
+    code = _error_code_from_workflow(workflow_result.get("error_code"))
+    failure_artifact_id = _string_or_none(workflow_result.get("failure_artifact_id"))
+    details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "curation_attempt_id": attempt.curation_attempt_id,
+    }
+    if failure_artifact_id is not None:
+        details["failure_artifact_id"] = failure_artifact_id
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            code,
+            message="Authority curation workflow failed.",
+            details=details,
+            remediation=[
+                "Inspect the failure artifact when failure_artifact_id is present.",
+                "Retry authority curation after addressing the failure.",
+            ],
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _published_curation_recovery_response(
+    *,
+    request: AuthorityCurationRequest,
+    attempt: AuthorityCurationAttempt,
+    published: _PublishedCurationCandidate,
+    failure_stage: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return recovery-required response after candidate publication."""
+    details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "curation_attempt_id": attempt.curation_attempt_id,
+        "candidate_authority_id": published.authority_id,
+        "candidate_authority_fingerprint": published.authority_fingerprint,
+        "failure_stage": failure_stage,
+    }
+    details.update(metadata or {})
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_RECOVERY_REQUIRED,
+            message=(
+                "Authority curation published a candidate but workflow recovery "
+                "is required."
+            ),
+            details=details,
+            remediation=[
+                "Inspect the mutation ledger before retrying curation.",
+                (
+                    "Use the candidate_authority_id and fingerprint to recover "
+                    "the pending authority review state."
+                ),
+            ],
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _response_error_code(response: dict[str, Any]) -> str | None:
+    """Extract the first response error code without coercing nested content."""
+    errors = response.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return None
+    first_error = errors[0]
+    if not isinstance(first_error, dict):
+        return None
+    return _string_or_none(first_error.get("code"))
+
+
+def _response_failure_artifact_id(response: dict[str, Any]) -> str | None:
+    """Extract a bounded failure artifact id from a response envelope."""
+    errors = response.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return None
+    first_error = errors[0]
+    if not isinstance(first_error, dict):
+        return None
+    details = first_error.get("details")
+    if not isinstance(details, dict):
+        return None
+    return _string_or_none(details.get("failure_artifact_id"))
+
+
+def _response_error_details(response: dict[str, Any]) -> dict[str, Any]:
+    """Extract first error details from an envelope as a plain dictionary."""
+    errors = response.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return {}
+    first_error = errors[0]
+    if not isinstance(first_error, dict):
+        return {}
+    details = first_error.get("details")
+    if isinstance(details, dict):
+        return dict(details)
+    return {}
 
 
 def _canonical_json(value: object) -> str:
@@ -1216,6 +1613,73 @@ def _finalize_mutation_status(
         )
         session.commit()
         return result.rowcount == 1
+
+
+def _finalize_mutation_recovery_required(
+    *,
+    engine: Engine,
+    mutation_event_id: int | None,
+    lease_owner: str,
+    response: dict[str, Any],
+) -> bool:
+    """Persist a recovery-required response while lease is active."""
+    if mutation_event_id is None:
+        return False
+    now = datetime.now(UTC).replace(tzinfo=None)
+    details = _response_error_details(response)
+    with Session(engine) as session:
+        result = session.exec(
+            update(CliMutationLedger)
+            .where(_LEDGER_MUTATION_EVENT_ID == mutation_event_id)
+            .where(_LEDGER_STATUS == MutationStatus.PENDING.value)
+            .where(_LEDGER_LEASE_OWNER == lease_owner)
+            .where(_LEDGER_LEASE_EXPIRES_AT > now)
+            .values(
+                status=MutationStatus.RECOVERY_REQUIRED.value,
+                after_json=_canonical_json(
+                    {
+                        "candidate_authority_id": details.get(
+                            "candidate_authority_id"
+                        ),
+                        "candidate_authority_fingerprint": details.get(
+                            "candidate_authority_fingerprint"
+                        ),
+                        "curation_attempt_id": details.get(
+                            "curation_attempt_id"
+                        ),
+                    }
+                ),
+                response_json=_canonical_json(response),
+                recovery_action=RecoveryAction.RECONCILE_THEN_RESUME.value,
+                recovery_safe_to_auto_resume=False,
+                last_error_json=_canonical_json(
+                    {
+                        "code": _response_error_code(response),
+                        "details": details,
+                    }
+                ),
+                lease_owner=None,
+                lease_acquired_at=None,
+                last_heartbeat_at=None,
+                lease_expires_at=None,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def _stored_ledger_response(value: str | None) -> dict[str, Any] | None:
+    """Return stored ledger response JSON for deterministic recovery replay."""
+    if not value:
+        return None
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(loaded, dict):
+        return loaded
+    return None
 
 
 def _required_mutation_event_id(value: int | None) -> int:
