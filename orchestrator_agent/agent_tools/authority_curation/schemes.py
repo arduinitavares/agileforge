@@ -20,6 +20,7 @@ class AuthorityCurationWorkflowInput(_StrictModel):
     spec_version_id: int
     source_authority_id: int
     source_authority_fingerprint: str = Field(min_length=1)
+    source_authority_json: dict[str, object]
     feedback_json: dict[str, object]
     max_iterations: int = Field(default=2, ge=1, le=2)
 

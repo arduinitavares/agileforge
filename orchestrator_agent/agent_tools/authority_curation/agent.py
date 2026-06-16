@@ -38,8 +38,10 @@ AUTHORITY_CURATION_REPAIR_OUTPUT_PLACEHOLDER = (
 _LOOP_CONTRACT = (
     "This workflow runs as a bounded curation loop with max_iterations="
     f"{AUTHORITY_CURATION_MAX_ITERATIONS}. Prefer targeted repair. Preserve "
-    "untouched accepted authority invariants and source mappings exactly. If a "
-    "gap cannot be repaired from the provided candidate and feedback, return an "
+    "untouched accepted authority invariants and source mappings exactly. Use "
+    "the source authority JSON and structured feedback from "
+    f"{AUTHORITY_CURATION_INPUT_PLACEHOLDER} as the only repair source. If a gap "
+    "cannot be repaired from the provided candidate and feedback, return an "
     "explicit fail or unresolved gap reason."
 )
 

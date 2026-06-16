@@ -26,6 +26,7 @@ def _valid_workflow_payload() -> dict[str, object]:
         "spec_version_id": 4,
         "source_authority_id": 6,
         "source_authority_fingerprint": "sha256:abc",
+        "source_authority_json": {"invariants": []},
         "feedback_json": {"feedback_items": []},
         "max_iterations": EXPECTED_MAX_ITERATIONS,
     }

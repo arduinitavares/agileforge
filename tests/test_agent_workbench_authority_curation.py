@@ -1676,10 +1676,11 @@ def test_authority_curate_rejects_existing_running_attempt(
     assert len(running_rows) == 1
 
 
-def test_authority_curate_default_failure_restores_rejected_workflow(
+def test_authority_curate_default_workflow_invocation_publishes_candidate(
     engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default unimplemented workflow must fail closed without a stuck mutex."""
+    """Default curate path must invoke ADK adapter instead of dead command stub."""
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -1690,6 +1691,42 @@ def test_authority_curate_default_failure_restores_rejected_workflow(
             "setup_status": "authority_rejected",
         },
     )
+    captured: dict[str, object] = {}
+    candidate = _targeted_repair_curation_result(fixture)["candidate_authority_json"]
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        captured["payload"] = payload
+        captured["model_id"] = model_id
+        return {
+            "final_text": (
+                '{"status":"pass","review_ready":true,'
+                '"unresolved_feedback_ids":[]}'
+            ),
+            "event_count": 5,
+            "model_info": {"requested_model_id": model_id},
+            "state": {
+                "authority_curation_repair_output": {
+                    "mode": "targeted",
+                    "candidate_authority_json": candidate,
+                    "resolved_feedback_ids": ["AFB-curation-1"],
+                    "unresolved_feedback_ids": [],
+                },
+                "authority_curation_gate_decision": {
+                    "status": "pass",
+                    "review_ready": True,
+                    "unresolved_feedback_ids": [],
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
     runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
 
     result = runner.curate(
@@ -1699,19 +1736,36 @@ def test_authority_curate_default_failure_restores_rejected_workflow(
             source_authority_id=fixture.authority_id,
             expected_source_authority_fingerprint=fixture.authority_fingerprint,
             feedback_attempt_id=fixture.feedback_attempt_id,
-            idempotency_key="curate-default-failure",
+            compiler_model="test-curation-model",
+            idempotency_key="curate-default-workflow",
         )
     )
 
-    assert result["ok"] is False
+    assert result["ok"] is True
+    assert captured["model_id"] == "test-curation-model"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["source_authority_id"] == fixture.authority_id
+    assert payload["source_authority_json"] == json.loads(_compiled_artifact_json())
+    assert payload["feedback_json"] == {
+        "feedback_items": [
+            {
+                "feedback_id": "AFB-curation-1",
+                "instruction": "Repair the targeted invariant.",
+                "issue_type": "overstrong_invariant",
+                "severity": "blocking",
+                "target_id": "INV-curation-1",
+                "target_kind": "invariant",
+            }
+        ]
+    }
     workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
-    assert workflow_state["setup_status"] == "authority_rejected"
-    assert workflow_state["setup_curation_mutation_event_id"] is None
+    assert workflow_state["setup_status"] == "authority_pending_review"
     with Session(engine) as session:
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
         ledger = session.exec(select(CliMutationLedger)).one()
-    assert attempt.status == "failed"
-    assert ledger.status != "pending"
+    assert attempt.status == "succeeded"
+    assert ledger.status == "succeeded"
 
 
 def test_authority_curate_exception_sanitizes_and_restores_state(

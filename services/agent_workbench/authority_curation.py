@@ -4,13 +4,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +28,10 @@ from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
     SpecRegistry,
+)
+from orchestrator_agent.agent_tools.authority_curation import (
+    build_authority_curation_workflow,
+    validate_workflow_input,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
@@ -44,8 +54,20 @@ from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
 )
+from utils.adk_runner import (
+    AgentInvocationError,
+    extract_final_response_text,
+    extract_partial_response_text,
+    get_agent_model_info,
+    parse_json_payload,
+)
+from utils.failure_artifacts import write_failure_artifact
+from utils.model_config import get_model_id, get_openrouter_extra_body
+from utils.runtime_config import get_openrouter_api_key
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from sqlalchemy.engine import Engine
 
 AUTHORITY_FEEDBACK_RECORD_COMMAND = "agileforge authority feedback record"
@@ -58,6 +80,13 @@ AUTHORITY_CURATION_PROMPT_HASH = canonical_hash(
         "schema_version": "agileforge.authority_curation.v1",
     }
 )
+AUTHORITY_CURATION_STATE_INPUT = "authority_curation_input"
+AUTHORITY_CURATION_STATE_SEMANTIC_FINDINGS = "authority_curation_semantic_findings"
+AUTHORITY_CURATION_STATE_QUALITY_FINDINGS = "authority_curation_quality_findings"
+AUTHORITY_CURATION_STATE_REPAIR_PLAN = "authority_curation_repair_plan"
+AUTHORITY_CURATION_STATE_REPAIR_OUTPUT = "authority_curation_repair_output"
+AUTHORITY_CURATION_STATE_GATE = "authority_curation_gate_decision"
+AUTHORITY_CURATION_FAILURE_PHASE = "authority_curation"
 
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
@@ -230,6 +259,19 @@ class _LoadedCurationInputs:
 
     source_authority_json: dict[str, Any]
     feedback_json: str
+
+
+@dataclass(frozen=True)
+class _CurationWorkflowFailure:
+    """Host-visible failure metadata from the ADK curation workflow."""
+
+    error_code: ErrorCode
+    failure_stage: str
+    failure_summary: str
+    raw_output: str | None = None
+    model_info: dict[str, Any] | None = None
+    validation_errors: object | None = None
+    extra: dict[str, object] | None = None
 
 
 class AuthorityCurationRunner:
@@ -600,11 +642,27 @@ class AuthorityCurationRunner:
         active_mutation: _ActiveMutation,
         attempt: AuthorityCurationAttempt,
     ) -> dict[str, Any]:
-        """Run workflow placeholder and finalize minimal attempt state."""
+        """Run the ADK workflow and finalize minimal attempt state."""
+        loaded_inputs = self._load_source_authority_and_feedback(
+            request=request,
+            attempt=attempt,
+        )
+        if not isinstance(loaded_inputs, _LoadedCurationInputs):
+            self._finalize_failed_curation(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+                response=loaded_inputs,
+                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+            )
+            return loaded_inputs
+
         try:
             workflow_result = run_authority_curation_workflow(
                 request=request,
                 curation_attempt_id=attempt.curation_attempt_id,
+                source_authority_json=loaded_inputs.source_authority_json,
+                feedback_json=loaded_inputs.feedback_json,
             )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
@@ -1161,6 +1219,14 @@ def _curation_request_hash(request: AuthorityCurationRequest) -> str:
 
 def _json_object_from_value(value: object) -> dict[str, Any] | None:
     """Return a JSON object from an existing dict or encoded string."""
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json")
+        except TypeError:
+            dumped = model_dump()
+        if isinstance(dumped, dict):
+            return dict(dumped)
     if isinstance(value, dict):
         return dict(value)
     if not isinstance(value, str) or not value:
@@ -1690,17 +1756,336 @@ def _required_mutation_event_id(value: int | None) -> int:
     return value
 
 
+def _run_async_task[T](coro: Coroutine[Any, Any, T]) -> T:
+    """Run an async coroutine from sync command code."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(asyncio.run, coro)
+        return cast("T", future.result())
+
+
+def _curation_model(model_id: str) -> LiteLlm:
+    """Build the LiteLLM model wrapper used by authority curation."""
+    return LiteLlm(
+        model=model_id,
+        api_key=get_openrouter_api_key(),
+        drop_params=True,
+        extra_body=get_openrouter_extra_body(),
+    )
+
+
+def _authority_curation_model_id(request: AuthorityCurationRequest) -> str:
+    """Return the requested curation model or the compiler default."""
+    if request.compiler_model:
+        return request.compiler_model
+
+    return get_model_id("spec_authority_compiler")
+
+
+async def _invoke_authority_curation_workflow_async(
+    *,
+    payload: dict[str, object],
+    model_id: str,
+) -> dict[str, Any]:
+    """Invoke the ADK authority curation workflow and return final state."""
+    validated_payload = validate_workflow_input(payload).model_dump(mode="json")
+    agent = build_authority_curation_workflow(model=_curation_model(model_id))
+    app_name = "authority_curation"
+    user_id = f"authority-curation-project-{validated_payload['project_id']}"
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(
+        app_name=app_name,
+        user_id=user_id,
+        state={AUTHORITY_CURATION_STATE_INPUT: validated_payload},
+    )
+    runner = Runner(
+        agent=cast("Any", agent),
+        app_name=app_name,
+        session_service=session_service,
+    )
+    message = types.Content(
+        role="user",
+        parts=[
+            types.Part.from_text(
+                text=json.dumps(
+                    validated_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        ],
+    )
+    events: list[Any] = []
+    try:
+        events.extend(
+            [
+                event
+                async for event in runner.run_async(
+                    user_id=user_id,
+                    session_id=session.id,
+                    new_message=message,
+                )
+            ]
+        )
+    except Exception as exc:
+        partial_output = extract_partial_response_text(events) or None
+        raise AgentInvocationError(
+            str(exc),
+            partial_output=partial_output,
+            event_count=len(events),
+            validation_errors=_validation_errors_from_exception(exc),
+        ) from exc
+
+    updated_session = await session_service.get_session(
+        app_name=app_name,
+        user_id=user_id,
+        session_id=session.id,
+    )
+    state = dict(getattr(updated_session, "state", {}) or {})
+    return {
+        "final_text": extract_final_response_text(events),
+        "state": state,
+        "event_count": len(events),
+        "model_info": get_agent_model_info(agent),
+    }
+
+
+def _invoke_authority_curation_workflow(
+    *,
+    payload: dict[str, object],
+    model_id: str,
+) -> dict[str, Any]:
+    """Invoke the ADK workflow from synchronous mutation code."""
+    return _run_async_task(
+        _invoke_authority_curation_workflow_async(
+            payload=payload,
+            model_id=model_id,
+        )
+    )
+
+
 def run_authority_curation_workflow(
     *,
     request: AuthorityCurationRequest,
     curation_attempt_id: str,
+    source_authority_json: dict[str, Any],
+    feedback_json: str,
 ) -> dict[str, Any]:
-    """Fail closed until the ADK curation workflow is implemented."""
-    del request, curation_attempt_id
+    """Run the ADK authority curation workflow and normalize its output."""
+    feedback_payload = _json_object_from_value(feedback_json)
+    if feedback_payload is None:
+        return _curation_workflow_failure_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            failure=_CurationWorkflowFailure(
+                error_code=ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID,
+                failure_stage="feedback_payload_parse",
+                failure_summary="Stored authority feedback JSON is invalid.",
+                raw_output=feedback_json,
+            ),
+        )
+
+    payload: dict[str, object] = {
+        "project_id": request.project_id,
+        "spec_version_id": request.spec_version_id,
+        "source_authority_id": request.source_authority_id,
+        "source_authority_fingerprint": (
+            request.expected_source_authority_fingerprint
+        ),
+        "source_authority_json": source_authority_json,
+        "feedback_json": feedback_payload,
+        "max_iterations": request.max_iterations,
+    }
+    model_id = _authority_curation_model_id(request)
+    try:
+        invocation = _invoke_authority_curation_workflow(
+            payload=payload,
+            model_id=model_id,
+        )
+    except AgentInvocationError as exc:
+        return _curation_workflow_failure_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            failure=_CurationWorkflowFailure(
+                error_code=ErrorCode.SPEC_COMPILE_FAILED,
+                failure_stage="adk_invocation_failed",
+                failure_summary="Authority curation ADK workflow failed.",
+                raw_output=exc.partial_output,
+                model_info={"model_id": model_id},
+                validation_errors=exc.validation_errors,
+            ),
+        )
+
+    state = _json_object_from_value(invocation.get("state")) or {}
+    repair_output = _json_object_from_value(
+        state.get(AUTHORITY_CURATION_STATE_REPAIR_OUTPUT)
+    )
+    gate = _json_object_from_value(state.get(AUTHORITY_CURATION_STATE_GATE))
+    if gate is None:
+        gate = parse_json_payload(str(invocation.get("final_text") or ""))
+    if gate is None:
+        return _curation_workflow_failure_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            failure=_CurationWorkflowFailure(
+                error_code=ErrorCode.SPEC_COMPILE_FAILED,
+                failure_stage="adk_gate_missing",
+                failure_summary=(
+                    "Authority curation workflow returned no gate decision."
+                ),
+                raw_output=str(invocation.get("final_text") or ""),
+                model_info=_model_info_with_requested_model(invocation, model_id),
+            ),
+        )
+
+    status = gate.get("status")
+    if status == "pass" and isinstance(repair_output, dict):
+        candidate = _json_object_from_value(
+            repair_output.get("candidate_authority_json")
+        )
+        if candidate is not None:
+            return {
+                "ok": True,
+                "curation_attempt_id": curation_attempt_id,
+                "project_id": request.project_id,
+                "candidate_authority_json": candidate,
+                "quality_report": _curation_quality_report(
+                    invocation=invocation,
+                    state=state,
+                    gate=gate,
+                    repair_output=repair_output,
+                ),
+                "candidate_lineage_json": {
+                    "source_authority_id": request.source_authority_id,
+                    "curation_attempt_id": curation_attempt_id,
+                    "resolved_feedback_ids": repair_output.get(
+                        "resolved_feedback_ids",
+                        [],
+                    ),
+                    "unresolved_feedback_ids": repair_output.get(
+                        "unresolved_feedback_ids",
+                        [],
+                    ),
+                },
+            }
+
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=_curation_failure_code(gate=gate),
+            failure_stage="adk_gate_failed",
+            failure_summary=_curation_failure_summary(gate=gate),
+            raw_output=str(invocation.get("final_text") or ""),
+            model_info=_model_info_with_requested_model(invocation, model_id),
+            extra={
+                "gate": gate,
+                "repair_output": repair_output,
+                "event_count": invocation.get("event_count"),
+            },
+        ),
+    )
+
+
+def _validation_errors_from_exception(
+    exc: BaseException,
+) -> list[dict[str, Any]] | None:
+    """Return Pydantic-style validation errors from an exception chain."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        errors = getattr(current, "errors", None)
+        if callable(errors):
+            try:
+                raw_errors = errors()
+            except TypeError:
+                raw_errors = None
+            if isinstance(raw_errors, list):
+                return cast("list[dict[str, Any]]", raw_errors)
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _model_info_with_requested_model(
+    invocation: dict[str, Any],
+    model_id: str,
+) -> dict[str, Any]:
+    """Return invocation model info with the requested model id preserved."""
+    raw = invocation.get("model_info")
+    model_info = dict(raw) if isinstance(raw, dict) else {}
+    model_info["requested_model_id"] = model_id
+    return model_info
+
+
+def _curation_quality_report(
+    *,
+    invocation: dict[str, Any],
+    state: dict[str, Any],
+    gate: dict[str, Any],
+    repair_output: dict[str, Any],
+) -> dict[str, Any]:
+    """Return compact audit metadata from ADK curation state."""
     return {
-        "ok": False,
-        "error_code": ErrorCode.COMMAND_NOT_IMPLEMENTED.value,
-        "message": "Authority curation workflow is not implemented.",
+        "status": "passed",
+        "event_count": invocation.get("event_count"),
+        "semantic_findings": state.get(AUTHORITY_CURATION_STATE_SEMANTIC_FINDINGS),
+        "quality_findings": state.get(AUTHORITY_CURATION_STATE_QUALITY_FINDINGS),
+        "repair_plan": state.get(AUTHORITY_CURATION_STATE_REPAIR_PLAN),
+        "repair_output": repair_output,
+        "gate": gate,
+    }
+
+
+def _curation_failure_code(*, gate: dict[str, Any]) -> ErrorCode:
+    """Return a registered error code for a failed gate result."""
+    if gate.get("status") == "retry":
+        return ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS
+    return ErrorCode.SPEC_COMPILE_FAILED
+
+
+def _curation_failure_summary(*, gate: dict[str, Any]) -> str:
+    """Return a bounded failure summary for curation gate failures."""
+    reason = gate.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if gate.get("status") == "retry":
+        return "Authority curation reached the maximum iteration count."
+    return "Authority curation did not produce an acceptable candidate."
+
+
+def _curation_workflow_failure_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    failure: _CurationWorkflowFailure,
+) -> dict[str, Any]:
+    """Persist an authority curation failure artifact and return workflow failure."""
+    artifact = write_failure_artifact(
+        phase=AUTHORITY_CURATION_FAILURE_PHASE,
+        project_id=request.project_id,
+        failure_stage=failure.failure_stage,
+        failure_summary=failure.failure_summary,
+        raw_output=failure.raw_output,
+        context={
+            "curation_attempt_id": curation_attempt_id,
+            "spec_version_id": request.spec_version_id,
+            "source_authority_id": request.source_authority_id,
+            "feedback_attempt_id": request.feedback_attempt_id,
+        },
+        model_info=failure.model_info,
+        validation_errors=failure.validation_errors,
+        extra=failure.extra,
+    )
+    metadata = artifact["metadata"]
+    return {
+        "status": "failed",
+        "error_code": failure.error_code.value,
+        "failure_artifact_id": metadata["failure_artifact_id"],
+        "failure_summary": metadata["failure_summary"],
     }
 
 
