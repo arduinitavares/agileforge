@@ -39,6 +39,10 @@ from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
 )
+from services.specs.authority_curation_diff import (
+    AuthorityDiffValidationError,
+    build_authority_diff,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -192,6 +196,23 @@ class _ActiveMutation:
     ledger: MutationLedgerRepository
     lease_owner: str
     mutation_event_id: int
+
+
+@dataclass(frozen=True)
+class _ValidatedCurationCandidate:
+    """Host-validated authority curation candidate metadata."""
+
+    diff: dict[str, Any]
+    quality_report: object
+    candidate_lineage: object
+
+
+@dataclass(frozen=True)
+class _LoadedCurationInputs:
+    """Source artifact and feedback inputs needed for curation validation."""
+
+    source_authority_json: dict[str, Any]
+    feedback_json: str
 
 
 class AuthorityCurationRunner:
@@ -586,6 +607,21 @@ class AuthorityCurationRunner:
             return response
 
         if workflow_result.get("ok") is True:
+            validated = self._validate_successful_curation_candidate(
+                request=request,
+                attempt=attempt,
+                workflow_result=workflow_result,
+            )
+            if not isinstance(validated, _ValidatedCurationCandidate):
+                self._finalize_failed_curation(
+                    request=request,
+                    active_mutation=active_mutation,
+                    attempt=attempt,
+                    response=validated,
+                    status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+                )
+                return validated
+
             response = success_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
                 data={
@@ -593,18 +629,24 @@ class AuthorityCurationRunner:
                     "project_id": request.project_id,
                     "curation_attempt_id": attempt.curation_attempt_id,
                     "mutation_event_id": active_mutation.mutation_event_id,
-                    "workflow_result": workflow_result,
+                    "diff_summary": validated.diff["summary"],
+                    "lineage": validated.diff["lineage_json"],
                 },
                 correlation_id=request.correlation_id,
             )
-            self._update_curation_attempt_status(
+            self._update_succeeded_curation_attempt(
                 attempt.curation_attempt_id,
-                status="succeeded",
+                diff=validated.diff,
+                quality_report=validated.quality_report,
+                candidate_lineage=validated.candidate_lineage,
             )
             active_mutation.ledger.finalize_success(
                 mutation_event_id=active_mutation.mutation_event_id,
                 lease_owner=active_mutation.lease_owner,
-                after={"curation_attempt_id": attempt.curation_attempt_id},
+                after={
+                    "curation_attempt_id": attempt.curation_attempt_id,
+                    "diff_summary": validated.diff["summary"],
+                },
                 response=response,
                 now=datetime.now(UTC),
             )
@@ -627,6 +669,119 @@ class AuthorityCurationRunner:
             status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
         )
         return response
+
+    def _validate_successful_curation_candidate(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        attempt: AuthorityCurationAttempt,
+        workflow_result: dict[str, Any],
+    ) -> _ValidatedCurationCandidate | dict[str, Any]:
+        """Validate workflow candidate JSON before marking curation succeeded."""
+        candidate_authority_json = _json_object_from_value(
+            workflow_result.get("candidate_authority_json")
+        )
+        if not _is_authority_json(candidate_authority_json):
+            return _invalid_curation_candidate_response(
+                request=request,
+                attempt=attempt,
+                reason="missing_or_invalid_candidate_authority_json",
+            )
+
+        loaded = self._load_source_authority_and_feedback(
+            request=request,
+            attempt=attempt,
+        )
+        if not isinstance(loaded, _LoadedCurationInputs):
+            return loaded
+
+        targeted_source_item_ids = _targeted_source_item_ids(
+            feedback_json=loaded.feedback_json,
+            source_authority_json=loaded.source_authority_json,
+        )
+        try:
+            diff = build_authority_diff(
+                source_authority_json=loaded.source_authority_json,
+                candidate_authority_json=candidate_authority_json,
+                targeted_source_item_ids=targeted_source_item_ids,
+            )
+        except AuthorityDiffValidationError as exc:
+            return error_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                error=workbench_error(
+                    ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED,
+                    message="Authority curation produced an unsafe authority diff.",
+                    details={
+                        "curation_attempt_id": attempt.curation_attempt_id,
+                        "validation_error_count": len(exc.validation_errors),
+                        "validation_errors": exc.validation_errors,
+                    },
+                ),
+                correlation_id=request.correlation_id,
+            )
+        if diff["summary"]["untargeted_change_count"] > 0:
+            return error_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                error=workbench_error(
+                    ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED,
+                    message="Authority curation changed untargeted authority items.",
+                    details={
+                        "curation_attempt_id": attempt.curation_attempt_id,
+                        "untargeted_change_count": diff["summary"][
+                            "untargeted_change_count"
+                        ],
+                        "untargeted_changes": diff["untargeted_changes"],
+                    },
+                ),
+                correlation_id=request.correlation_id,
+            )
+
+        return _ValidatedCurationCandidate(
+            diff=diff,
+            quality_report=_json_like_or_empty(workflow_result.get("quality_report")),
+            candidate_lineage=_json_like_or_empty(
+                workflow_result.get("candidate_lineage_json"),
+                default=diff["lineage_json"],
+            ),
+        )
+
+    def _load_source_authority_and_feedback(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        attempt: AuthorityCurationAttempt,
+    ) -> _LoadedCurationInputs | dict[str, Any]:
+        """Load source authority artifact and feedback row for host validation."""
+        with Session(self._engine) as session:
+            authority = session.get(
+                CompiledSpecAuthority,
+                request.source_authority_id,
+            )
+            feedback = session.exec(
+                select(AuthorityFeedbackAttempt)
+                .where(AuthorityFeedbackAttempt.project_id == request.project_id)
+                .where(
+                    AuthorityFeedbackAttempt.source_authority_id
+                    == request.source_authority_id
+                )
+                .where(
+                    AuthorityFeedbackAttempt.feedback_attempt_id
+                    == request.feedback_attempt_id
+                )
+            ).first()
+            source_authority_json = _json_object_from_value(
+                authority.compiled_artifact_json if authority is not None else None
+            )
+            if not _is_authority_json(source_authority_json) or feedback is None:
+                return _invalid_curation_candidate_response(
+                    request=request,
+                    attempt=attempt,
+                    reason="missing_or_invalid_source_authority_inputs",
+                )
+            return _LoadedCurationInputs(
+                source_authority_json=source_authority_json,
+                feedback_json=feedback.feedback_json,
+            )
 
     def _finalize_failed_curation(
         self,
@@ -713,6 +868,33 @@ class AuthorityCurationRunner:
             session.add(row)
             session.commit()
 
+    def _update_succeeded_curation_attempt(
+        self,
+        curation_attempt_id: str,
+        *,
+        diff: dict[str, Any],
+        quality_report: object,
+        candidate_lineage: object,
+    ) -> None:
+        """Persist successful curation audit metadata."""
+        with Session(self._engine) as session:
+            row = session.exec(
+                select(AuthorityCurationAttempt).where(
+                    AuthorityCurationAttempt.curation_attempt_id
+                    == curation_attempt_id
+                )
+            ).first()
+            if row is None:
+                return
+            row.status = "succeeded"
+            row.diff_summary_json = _canonical_json(diff["summary"])
+            row.lineage_json = _canonical_json(diff["lineage_json"])
+            row.quality_report_json = _canonical_json(quality_report)
+            row.candidate_lineage_json = _canonical_json(candidate_lineage)
+            row.updated_at = datetime.now(UTC)
+            session.add(row)
+            session.commit()
+
 
 def _record_feedback_in_session(
     *,
@@ -786,6 +968,119 @@ def _curation_request_hash(request: AuthorityCurationRequest) -> str:
             "max_iterations": request.max_iterations,
             "compiler_model": request.compiler_model,
         }
+    )
+
+
+def _json_object_from_value(value: object) -> dict[str, Any] | None:
+    """Return a JSON object from an existing dict or encoded string."""
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(loaded, dict):
+        return loaded
+    return None
+
+
+def _is_authority_json(value: object) -> bool:
+    """Return whether a value has the minimal authority JSON shape."""
+    if not isinstance(value, dict):
+        return False
+    invariants = value.get("invariants")
+    return isinstance(invariants, list) and all(
+        isinstance(item, dict) for item in invariants
+    )
+
+
+def _invalid_curation_candidate_response(
+    *,
+    request: AuthorityCurationRequest,
+    attempt: AuthorityCurationAttempt,
+    reason: str,
+) -> dict[str, Any]:
+    """Return a structured fail-closed curation validation error."""
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_FAILED,
+            message="Authority curation did not produce a valid candidate.",
+            details={
+                "project_id": request.project_id,
+                "curation_attempt_id": attempt.curation_attempt_id,
+                "reason": reason,
+            },
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _targeted_source_item_ids(
+    *,
+    feedback_json: str,
+    source_authority_json: dict[str, Any],
+) -> set[str]:
+    """Derive feedback-targeted source item ids for host diff validation."""
+    feedback = _json_object_from_value(feedback_json)
+    if feedback is None:
+        return set()
+    invariant_source_items = _source_item_ids_by_invariant_id(source_authority_json)
+    targeted: set[str] = set()
+    feedback_items = feedback.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        return targeted
+    for item in feedback_items:
+        if not isinstance(item, dict):
+            continue
+        source_item_id = item.get("source_item_id")
+        if isinstance(source_item_id, str):
+            targeted.add(source_item_id)
+        target_id = item.get("target_id")
+        if not isinstance(target_id, str):
+            continue
+        if item.get("target_kind") == "source_item":
+            targeted.add(target_id)
+        mapped_source_item_id = invariant_source_items.get(target_id)
+        if item.get("target_kind") == "invariant" and mapped_source_item_id is not None:
+            targeted.add(mapped_source_item_id)
+    return targeted
+
+
+def _source_item_ids_by_invariant_id(
+    source_authority_json: dict[str, Any],
+) -> dict[str, str]:
+    """Map source invariant ids to source item ids where available."""
+    invariants = source_authority_json.get("invariants")
+    if not isinstance(invariants, list):
+        return {}
+    result: dict[str, str] = {}
+    for item in invariants:
+        if not isinstance(item, dict):
+            continue
+        invariant_id = item.get("id")
+        source_item_id = item.get("source_item_id")
+        if isinstance(invariant_id, str) and isinstance(source_item_id, str):
+            result[invariant_id] = source_item_id
+    return result
+
+
+def _json_like_or_empty(value: object, *, default: object | None = None) -> object:
+    """Return JSON-like workflow metadata without failing on malformed values."""
+    if isinstance(value, dict | list):
+        return value
+    return default if default is not None else {}
+
+
+def _canonical_json(value: object) -> str:
+    """Serialize JSON audit fields deterministically."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
 
 

@@ -25,6 +25,10 @@ from services.agent_workbench.authority_curation import (
     AuthorityFeedbackRecordRequest,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from services.specs.authority_curation_diff import (
+    AuthorityDiffValidationError,
+    build_authority_diff,
+)
 from tests.typing_helpers import require_id
 
 if TYPE_CHECKING:
@@ -77,6 +81,11 @@ def _compiled_artifact_json() -> str:
                     "id": "INV-curation-1",
                     "source_item_id": "SRC-curation-1",
                     "text": "Review packets include guard evidence.",
+                },
+                {
+                    "id": "INV-curation-untargeted",
+                    "source_item_id": "SRC-curation-untargeted",
+                    "text": "Unrelated review packets remain stable.",
                 }
             ],
             "eligible_feature_rules": [],
@@ -84,7 +93,10 @@ def _compiled_artifact_json() -> str:
             "gaps": [{"gap_id": "GAP-curation-1"}],
             "assumptions": [{"assumption_id": "ASM-curation-1"}],
             "quality_groups": [{"group_id": "QG-curation-1"}],
-            "source_map": [{"id": "SRC-curation-1"}],
+            "source_map": [
+                {"id": "SRC-curation-1"},
+                {"id": "SRC-curation-untargeted"},
+            ],
             "compiler_version": "2.0.0",
             "prompt_hash": "a" * 64,
             "ir_schema_version": None,
@@ -135,7 +147,13 @@ def _seed_pending_authority(
                 [
                     {
                         "id": "INV-curation-1",
+                        "source_item_id": "SRC-curation-1",
                         "text": "Review packets include guard evidence.",
+                    },
+                    {
+                        "id": "INV-curation-untargeted",
+                        "source_item_id": "SRC-curation-untargeted",
+                        "text": "Unrelated review packets remain stable.",
                     }
                 ]
             ),
@@ -190,7 +208,21 @@ def _insert_rejected_authority_with_feedback(
             source_authority_fingerprint=fingerprint,
             feedback_fingerprint="sha256:" + ("c" * 64),
             has_blocking_feedback=True,
-            feedback_json='{"feedback_items":[]}',
+            feedback_json=json.dumps(
+                {
+                    "feedback_items": [
+                        {
+                            "feedback_id": "AFB-curation-1",
+                            "target_kind": "invariant",
+                            "target_id": "INV-curation-1",
+                            "issue_type": "overstrong_invariant",
+                            "severity": "blocking",
+                            "instruction": "Repair the targeted invariant.",
+                        }
+                    ],
+                },
+                sort_keys=True,
+            ),
             request_hash="sha256:" + ("d" * 64),
             idempotency_key="feedback-curation-1",
             created_at=now,
@@ -216,6 +248,72 @@ def _successful_curation_result(
         "ok": True,
         "curation_attempt_id": "curation-fake-result",
         "project_id": fixture.project_id,
+        "candidate_authority_json": json.loads(_compiled_artifact_json()),
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _targeted_repair_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a candidate with one targeted invariant replacement."""
+    candidate = json.loads(_compiled_artifact_json())
+    candidate["invariants"] = [
+        {
+            "id": "INV-curation-1-repaired",
+            "source_item_id": "SRC-curation-1",
+            "text": "Review packets include concrete guard evidence.",
+        },
+        {
+            "id": "INV-curation-untargeted",
+            "source_item_id": "SRC-curation-untargeted",
+            "text": "Unrelated review packets remain stable.",
+        },
+    ]
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "candidate_authority_json": candidate,
+        "candidate_lineage_json": {"source": "workflow"},
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _untargeted_change_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a candidate that changes an untargeted invariant."""
+    candidate = json.loads(_compiled_artifact_json())
+    for invariant in candidate["invariants"]:
+        if invariant["id"] == "INV-curation-untargeted":
+            invariant["text"] = "Unrelated review packets changed."
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "candidate_authority_json": candidate,
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _candidate_with_missing_invariant_id_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a candidate with a malformed invariant id."""
+    candidate = json.loads(_compiled_artifact_json())
+    candidate["invariants"].append(
+        {
+            "source_item_id": "SRC-curation-1",
+            "text": "Malformed invariant without id.",
+        }
+    )
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "candidate_authority_json": candidate,
+        "quality_report": {"status": "passed"},
     }
 
 
@@ -706,6 +804,173 @@ def test_feedback_record_replays_after_idempotency_integrity_error(
     assert len(rows) == 1
 
 
+def test_authority_diff_maps_targeted_replacement_lineage() -> None:
+    """Diff helper maps targeted replacement by source item id."""
+    source = {
+        "invariants": [
+            {
+                "id": "INV-oldoldoldoldold1",
+                "type": "relation_constraint",
+                "parameters": {"expression": "learned_model_score >= max_baseline"},
+                "source_item_id": "REQ.delayed-outcome-predictor",
+                "source_level": "MUST",
+            },
+            {
+                "id": "INV-keepkeepkeepkeep",
+                "type": "required_field",
+                "parameters": {"field_name": "report_id"},
+                "source_item_id": "DATA.operational-learning-report",
+                "source_level": "MUST",
+            },
+        ]
+    }
+    candidate = {
+        "invariants": [
+            {
+                "id": "INV-newnewnewnewnew1",
+                "type": "required_field",
+                "parameters": {"field_name": "baseline_comparison_summary"},
+                "source_item_id": "REQ.delayed-outcome-predictor",
+                "source_level": "MUST",
+            },
+            {
+                "id": "INV-keepkeepkeepkeep",
+                "type": "required_field",
+                "parameters": {"field_name": "report_id"},
+                "source_item_id": "DATA.operational-learning-report",
+                "source_level": "MUST",
+            },
+        ]
+    }
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids={"REQ.delayed-outcome-predictor"},
+    )
+
+    assert diff["lineage_json"]["INV-oldoldoldoldold1"]["new_id"] == (
+        "INV-newnewnewnewnew1"
+    )
+    assert diff["summary"]["unchanged_count"] == 1
+    assert diff["summary"]["changed_count"] == 1
+    assert diff["summary"]["untargeted_change_count"] == 0
+
+
+def test_authority_diff_treats_same_id_payload_change_as_changed() -> None:
+    """Same id is not unchanged when canonical payload changes."""
+    source = {
+        "invariants": [
+            {
+                "id": "INV-stable-id",
+                "type": "required_field",
+                "parameters": {"field_name": "report_id"},
+                "source_item_id": "SRC-untargeted",
+            }
+        ]
+    }
+    candidate = {
+        "invariants": [
+            {
+                "id": "INV-stable-id",
+                "type": "required_field",
+                "parameters": {"field_name": "changed_report_id"},
+                "source_item_id": "SRC-untargeted",
+            }
+        ]
+    }
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids={"SRC-targeted"},
+    )
+
+    assert diff["unchanged_ids"] == []
+    assert diff["changed_ids"] == ["INV-stable-id"]
+    assert diff["summary"]["untargeted_change_count"] == 1
+
+
+def test_authority_diff_rejects_missing_invariant_id() -> None:
+    """Malformed invariant ids fail before diff calculations."""
+    source = {
+        "invariants": [
+            {
+                "id": "INV-source-1",
+                "source_item_id": "SRC-source-1",
+                "text": "Stable source invariant.",
+            }
+        ]
+    }
+    candidate = {
+        "invariants": [
+            {
+                "source_item_id": "SRC-source-1",
+                "text": "Malformed candidate invariant.",
+            }
+        ]
+    }
+
+    with pytest.raises(AuthorityDiffValidationError) as exc_info:
+        build_authority_diff(
+            source_authority_json=source,
+            candidate_authority_json=candidate,
+            targeted_source_item_ids={"SRC-source-1"},
+        )
+
+    assert exc_info.value.validation_errors == [
+        {
+            "authority": "candidate",
+            "index": 0,
+            "reason": "missing_or_invalid_id",
+        }
+    ]
+
+
+def test_authority_diff_rejects_duplicate_invariant_id() -> None:
+    """Duplicate invariant ids fail before one item can overwrite another."""
+    source = {
+        "invariants": [
+            {
+                "id": "INV-source-1",
+                "source_item_id": "SRC-source-1",
+                "text": "Stable source invariant.",
+            }
+        ]
+    }
+    candidate = {
+        "invariants": [
+            {
+                "id": "INV-duplicate",
+                "source_item_id": "SRC-source-1",
+                "text": "First candidate invariant.",
+            },
+            {
+                "id": "INV-duplicate",
+                "source_item_id": "SRC-source-1",
+                "text": "Second candidate invariant.",
+            },
+        ]
+    }
+
+    with pytest.raises(AuthorityDiffValidationError) as exc_info:
+        build_authority_diff(
+            source_authority_json=source,
+            candidate_authority_json=candidate,
+            targeted_source_item_ids={"SRC-source-1"},
+        )
+
+    assert exc_info.value.validation_errors == [
+        {
+            "authority": "candidate",
+            "duplicate_id": "INV-duplicate",
+            "first_index": 0,
+            "index": 1,
+            "reason": "duplicate_id",
+        }
+    ]
+
+
 def test_authority_curate_sets_curating_before_workflow(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -751,6 +1016,258 @@ def test_authority_curate_sets_curating_before_workflow(
         rows = session.exec(select(AuthorityCurationAttempt)).all()
     assert len(rows) == 1
     assert rows[0].status == "succeeded"
+
+
+def test_authority_curate_fails_closed_for_untargeted_diff(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host gate rejects candidate changes outside recorded feedback targets."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _untargeted_change_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-untargeted-diff",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert (
+        fake_workflow.get_session_status(str(fixture.project_id))["setup_status"]
+        == "authority_rejected"
+    )
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.status == "failed"
+    assert ledger.status != "pending"
+
+
+def test_authority_curate_fails_closed_without_candidate_json(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host gate rejects ok workflow results without candidate authority JSON."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {"ok": True, "project_id": fixture.project_id},
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-missing-candidate-json",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["details"]["reason"] == (
+        "missing_or_invalid_candidate_authority_json"
+    )
+    assert (
+        fake_workflow.get_session_status(str(fixture.project_id))["setup_status"]
+        == "authority_rejected"
+    )
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.status == "failed"
+
+
+def test_authority_curate_fails_closed_for_malformed_candidate_invariant(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host gate rejects malformed candidate invariant ids."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _candidate_with_missing_invariant_id_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-malformed-candidate-id",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    details = result["errors"][0]["details"]
+    assert details["validation_error_count"] == 1
+    assert details["validation_errors"] == [
+        {
+            "authority": "candidate",
+            "index": 2,
+            "reason": "missing_or_invalid_id",
+        }
+    ]
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.status == "failed"
+
+
+def test_authority_curate_gap_target_id_collision_does_not_authorize_invariant(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only invariant feedback target ids map to invariant source item ids."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-gap-collision",
+                        "target_kind": "gap",
+                        "target_id": "INV-curation-1",
+                        "issue_type": "invalid_gap",
+                        "severity": "blocking",
+                        "instruction": "This gap target id collides with invariant id.",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-gap-id-collision",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.status == "failed"
+
+
+def test_authority_curate_persists_diff_summary_and_lineage(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Targeted repair stores bounded diff and lineage for audit."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-targeted-lineage",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["diff_summary"]["changed_count"] == 1
+    assert result["data"]["lineage"]["INV-curation-1"]["new_id"] == (
+        "INV-curation-1-repaired"
+    )
+    assert "candidate_authority_json" not in json.dumps(result, sort_keys=True)
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+
+    assert attempt.status == "succeeded"
+    assert json.loads(attempt.diff_summary_json)["changed_count"] == 1
+    assert json.loads(attempt.lineage_json)["INV-curation-1"]["new_id"] == (
+        "INV-curation-1-repaired"
+    )
+    assert json.loads(attempt.candidate_lineage_json) == {"source": "workflow"}
+    assert json.loads(attempt.quality_report_json) == {"status": "passed"}
 
 
 def test_authority_curate_rejects_when_already_curating(
