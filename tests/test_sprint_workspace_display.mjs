@@ -17,6 +17,17 @@ function loadSprintFunction(name, patterns) {
     return new Function(`${source}; return ${name};`)();
 }
 
+const createNextActionPatterns = [
+    /const SCOPE_EXTENSION_WORKFLOW_STATUSES = new Set\([\s\S]*?\n\]\);/,
+    /function safeArray\(value\) \{[\s\S]*?\n\}/,
+    /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
+    /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
+    /function getScopeExtensionWorkflowStatus\(\) \{[\s\S]*?\n\}/,
+    /function isScopeExtensionWorkflowNextStatus\(status = getScopeExtensionWorkflowStatus\(\)\) \{[\s\S]*?\n\}/,
+    /function getScopeExtensionPrimaryAction\(\) \{[\s\S]*?\n\}/,
+    /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+];
+
 test('getSprintMode uses canonical status instead of started_at inference', () => {
     const getSprintMode = loadSprintFunction(
         'getSprintMode',
@@ -104,9 +115,7 @@ test('openSprintPlanner resets planner working state for create-next mode', asyn
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
-            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
-            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
-            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+            ...createNextActionPatterns,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -171,9 +180,7 @@ test('openSprintPlanner preserves reviewable sprint draft even if summary is sta
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
-            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
-            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
-            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+            ...createNextActionPatterns,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -226,9 +233,7 @@ test('openSprintPlanner preserves planner working state for modify-planned mode'
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
-            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
-            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
-            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+            ...createNextActionPatterns,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
@@ -280,11 +285,7 @@ test('openSprintPlanner preserves planner working state for modify-planned mode'
 test('create-next helpers expose backend blocker reason and commands', () => {
     const getCreateNextSprintActionState = loadSprintFunction(
         'getCreateNextSprintActionState',
-        [
-            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
-            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
-            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
-        ],
+        createNextActionPatterns,
     );
 
     globalThis.sprintRuntimeSummary = {
@@ -311,9 +312,7 @@ test('openSprintPlanner does not enter planner when create-next is blocked', asy
     const openSprintPlanner = loadSprintFunction(
         'openSprintPlanner',
         [
-            /function hasReviewableSprintDraft\(stateKey = activeFsmState\) \{[\s\S]*?\n\}/,
-            /const escapeHtml = \(str\) => \{[\s\S]*?\n\};/,
-            /function getCreateNextSprintActionState\(\) \{[\s\S]*?\n\}/,
+            ...createNextActionPatterns,
             /function shouldStartFreshSprintCycle\(\) \{[\s\S]*?\n\}/,
             /function resetSprintPlannerWorkingSet\(\) \{[\s\S]*?\n\}/,
             /async function openSprintPlanner\(\) \{[\s\S]*?\n\}/,
