@@ -80,6 +80,7 @@
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
 - Modify: `orchestrator_agent/agent_tools/utils/resilience.py`
+- Modify: `services/workflow.py`
 - Modify: `tests/test_agent_tool_runtime_import_boundary.py`
 - Modify: `tests/test_workflow_session_bootstrap.py`
 
@@ -125,7 +126,11 @@ uv lock --upgrade-package google-adk
 
 Expected: `uv.lock` resolves `google-adk` with major version `2`.
 
-- [ ] **Step 4: Add ADK 2.0 event-shape session smoke test**
+- [ ] **Step 4: Migrate ADK session-service import**
+
+In `services/workflow.py`, import `DatabaseSessionService` from `google.adk.sessions.database_session_service`. Do not use the ADK 1.x top-level `google.adk.sessions` export lookup.
+
+- [ ] **Step 5: Add ADK 2.0 event-shape session smoke test**
 
 Add to `tests/test_workflow_session_bootstrap.py`:
 
@@ -145,7 +150,7 @@ def test_workflow_session_events_accept_adk2_fields() -> None:
 
 This test is intentionally narrow. If AgileForge uses serialized JSON event blobs, it documents compatibility. If a custom session table has rigid event columns, replace this assertion with the concrete table read/write path and keep the same payload.
 
-- [ ] **Step 5: Remove curation dependence on legacy loop override**
+- [ ] **Step 6: Remove curation dependence on legacy loop override**
 
 In `orchestrator_agent/agent_tools/utils/resilience.py`, leave `ConditionalLoopAgent` for legacy agents only. Add this comment above the class:
 
@@ -156,7 +161,7 @@ In `orchestrator_agent/agent_tools/utils/resilience.py`, leave `ConditionalLoopA
 
 Do not use `ConditionalLoopAgent` in authority curation code.
 
-- [ ] **Step 6: Run ADK migration tests**
+- [ ] **Step 7: Run ADK migration tests**
 
 Run:
 
@@ -166,10 +171,10 @@ uv run --frozen pytest tests/test_agent_tool_runtime_import_boundary.py tests/te
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit ADK migration gate**
+- [ ] **Step 8: Commit ADK migration gate**
 
 ```bash
-git add pyproject.toml uv.lock orchestrator_agent/agent_tools/utils/resilience.py tests/test_agent_tool_runtime_import_boundary.py tests/test_workflow_session_bootstrap.py
+git add pyproject.toml uv.lock orchestrator_agent/agent_tools/utils/resilience.py services/workflow.py tests/test_agent_tool_runtime_import_boundary.py tests/test_workflow_session_bootstrap.py docs/superpowers/plans/2026-06-16-authority-candidate-curation-loop.md
 git commit -m "chore: migrate agent runtime to adk 2"
 ```
 

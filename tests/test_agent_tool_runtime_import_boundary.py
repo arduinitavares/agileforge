@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from importlib import metadata
 from pathlib import Path
 
 ROOT: Path = Path(__file__).resolve().parents[1]
@@ -51,6 +52,14 @@ def _attribute_references_from_import(
             referenced.add(node.attr)
 
     return referenced
+
+
+def test_google_adk_major_version_is_2() -> None:
+    """New agentic workflow work must run on ADK 2.0."""
+    version = metadata.version("google-adk")
+    major = int(version.split(".", maxsplit=1)[0])
+
+    assert major == 2
 
 
 def test_product_vision_tool_imports_runtime_surfaces_from_models_packages() -> None:

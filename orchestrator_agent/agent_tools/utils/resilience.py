@@ -269,6 +269,8 @@ class SelfHealingAgent(BaseAgent):
                 raise
 
 
+# Legacy ADK 1.x helper. New ADK 2.0 workflows must use graph or dynamic
+# workflow nodes and must not depend on _run_async_impl for curation control.
 class ConditionalLoopAgent(BaseAgent):
     """
     Executes an inner agent in a loop until a condition is met or max_iterations reached.

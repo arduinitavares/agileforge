@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.119.0",
-    "google-adk>=1.16.0",
+    "google-adk>=2.0.0,<3.0.0",
     "icecream>=2.1.8",
     "ipykernel>=7.0.1",
     "litellm>=1.78.3",

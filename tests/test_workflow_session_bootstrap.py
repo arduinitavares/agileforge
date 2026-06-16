@@ -108,6 +108,32 @@ def test_get_session_state_returns_existing_row(tmp_path: Path) -> None:
     assert state == {"fsm_state": "VISION_INTERVIEW"}
 
 
+def test_workflow_session_events_accept_adk2_fields(tmp_path: Path) -> None:
+    """Session serialization must tolerate ADK 2.0 workflow event fields."""
+    db_path = tmp_path / "adk2_event_sessions.db"
+    repo = _session_repo(db_path)
+    _create_sessions_table(db_path)
+    _insert_session_row(
+        db_path,
+        app_name="app",
+        user_id="user",
+        session_id="session",
+        state_payload=json.dumps({}),
+    )
+    event_payload = {
+        "author": "AuthorityCurationWorkflow",
+        "content": {"parts": [{"text": "gate passed"}]},
+        "node_info": {"node_id": "GateDecision", "iteration": 1},
+        "output": {"status": "pass", "review_ready": True},
+    }
+
+    repo.update_session_state("app", "user", "session", {"events": [event_payload]})
+
+    stored_event = repo.get_session_state("app", "user", "session")["events"][0]
+    assert stored_event["node_info"]["node_id"] == "GateDecision"
+    assert stored_event["output"]["status"] == "pass"
+
+
 def test_get_session_states_batch_returns_matching_rows(tmp_path: Path) -> None:
     """Verify get session states batch returns matching rows."""
     db_path = tmp_path / "batch_sessions.db"
