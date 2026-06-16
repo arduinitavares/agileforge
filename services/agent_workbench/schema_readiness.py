@@ -12,6 +12,8 @@ from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 TERMINAL_DECISION_INDEX = "uq_spec_authority_terminal_decision_key"
 TERMINAL_DECISION_INDEX_PREDICATE = "terminal_decision_key IS NOT NULL"
+AUTHORITY_CURATION_RUNNING_INDEX = "uq_authority_curation_running_authority"
+AUTHORITY_CURATION_RUNNING_INDEX_PREDICATE = "status = 'running'"
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,7 @@ AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
         indexes=(
             "ix_authority_curation_project_status",
             "ix_authority_curation_source_authority",
+            AUTHORITY_CURATION_RUNNING_INDEX,
         ),
         unique_columns=(
             ("project_id", "curation_attempt_id"),
@@ -302,6 +305,11 @@ def _index_contract_ready(engine: Engine, table_name: str, index_name: str) -> b
         and index_name == TERMINAL_DECISION_INDEX
     ):
         return _terminal_decision_index_ready(engine)
+    if (
+        table_name == "authority_curation_attempts"
+        and index_name == AUTHORITY_CURATION_RUNNING_INDEX
+    ):
+        return _authority_curation_running_index_ready(engine)
 
     with engine.connect() as conn:
         rows = conn.execute(text(f"PRAGMA index_list('{table_name}')")).mappings()
@@ -379,6 +387,52 @@ def _terminal_decision_index_ready(engine: Engine) -> bool:
         return _has_terminal_decision_partial_predicate(index_sql)
 
 
+def _authority_curation_running_index_ready(engine: Engine) -> bool:
+    """Return whether running curation rows are unique per authority."""
+    with engine.connect() as conn:
+        index_rows = (
+            conn.execute(text("PRAGMA index_list('authority_curation_attempts')"))
+            .mappings()
+            .all()
+        )
+        index_row = next(
+            (
+                row
+                for row in index_rows
+                if row["name"] == AUTHORITY_CURATION_RUNNING_INDEX
+            ),
+            None,
+        )
+        if index_row is None:
+            return False
+        if int(index_row["unique"]) != 1 or int(index_row["partial"]) != 1:
+            return False
+
+        indexed_columns = [
+            row["name"]
+            for row in conn.execute(
+                text(f"PRAGMA index_info('{AUTHORITY_CURATION_RUNNING_INDEX}')")
+            )
+            .mappings()
+            .all()
+        ]
+        if indexed_columns != ["project_id", "source_authority_id"]:
+            return False
+
+        sql_row = conn.execute(
+            text(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'index' AND name = :index_name
+                """
+            ),
+            {"index_name": AUTHORITY_CURATION_RUNNING_INDEX},
+        ).first()
+        index_sql = "" if sql_row is None else str(sql_row._mapping["sql"] or "")
+        return _has_authority_curation_running_partial_predicate(index_sql)
+
+
 def _authority_decision_terminal_data_checkable(
     requirement: SchemaRequirement,
     existing_columns: set[str],
@@ -431,6 +485,16 @@ def _has_terminal_decision_partial_predicate(index_sql: str) -> bool:
     if not separator:
         return False
     expected = _normalize_index_sql(TERMINAL_DECISION_INDEX_PREDICATE)
+    return where_clause == expected
+
+
+def _has_authority_curation_running_partial_predicate(index_sql: str) -> bool:
+    """Return whether index SQL contains the running curation predicate."""
+    normalized_sql = _normalize_index_sql(index_sql)
+    _, separator, where_clause = normalized_sql.partition(" where ")
+    if not separator:
+        return False
+    expected = _normalize_index_sql(AUTHORITY_CURATION_RUNNING_INDEX_PREDICATE)
     return where_clause == expected
 
 

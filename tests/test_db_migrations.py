@@ -243,10 +243,21 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     }
     assert "ix_authority_curation_project_status" in curation_indexes
     assert "ix_authority_curation_source_authority" in curation_indexes
+    assert "uq_authority_curation_running_authority" in curation_indexes
     assert _has_unique_columns(
         inspector,
         table_name="authority_curation_attempts",
         columns=("project_id", "idempotency_key"),
+    )
+    running_index = next(
+        index
+        for index in inspector.get_indexes("authority_curation_attempts")
+        if index["name"] == "uq_authority_curation_running_authority"
+    )
+    assert bool(running_index["unique"]) is True
+    assert tuple(running_index["column_names"]) == (
+        "project_id",
+        "source_authority_id",
     )
 
 

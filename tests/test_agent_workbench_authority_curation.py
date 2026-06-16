@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -12,10 +13,12 @@ from sqlmodel import Session, select
 
 import services.agent_workbench.authority_curation as curation_mod
 from db.migrations import ensure_schema_current
-from models.authority_curation import AuthorityFeedbackAttempt
+from models.agent_workbench import CliMutationLedger
+from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Product
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.authority_curation import (
+    AuthorityCurationRequest,
     AuthorityCurationRunner,
     AuthorityFeedbackFile,
     AuthorityFeedbackItem,
@@ -28,6 +31,39 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+
+
+@dataclass(frozen=True)
+class RejectedAuthorityFixture:
+    """Rejected authority with blocking feedback ready for curation."""
+
+    project_id: int
+    spec_version_id: int
+    authority_id: int
+    authority_fingerprint: str
+    feedback_attempt_id: str
+
+
+class FakeWorkflowPort:
+    """In-memory workflow port for curation runner tests."""
+
+    def __init__(self) -> None:
+        """Initialize empty workflow state."""
+        self.state: dict[str, dict[str, object]] = {}
+
+    def get_session_status(self, session_id: str) -> dict[str, object]:
+        """Return workflow state for a session."""
+        return dict(self.state.get(session_id, {}))
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, object],
+    ) -> None:
+        """Merge partial workflow state for a session."""
+        current = dict(self.state.get(session_id, {}))
+        current.update(partial_update)
+        self.state[session_id] = current
 
 
 def _compiled_artifact_json() -> str:
@@ -114,6 +150,73 @@ def _seed_pending_authority(
         fingerprint = pending_authority_fingerprint(authority)
         assert fingerprint is not None
         return project_id, authority_id, fingerprint
+
+
+def _insert_rejected_authority_with_feedback(
+    engine: Engine,
+) -> RejectedAuthorityFixture:
+    """Seed a rejected authority and matching feedback attempt."""
+    project_id, authority_id, fingerprint = _seed_pending_authority(engine)
+    now = datetime(2026, 6, 16, 14, tzinfo=UTC)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, authority_id)
+        assert authority is not None
+        spec_version_id = authority.spec_version_id
+        spec = session.get(SpecRegistry, spec_version_id)
+        assert spec is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=project_id,
+                spec_version_id=spec_version_id,
+                status="rejected",
+                policy="manual",
+                decided_by="reviewer",
+                decided_at=now,
+                rationale="Needs structured feedback repair.",
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority_id,
+                actor_mode="human_review_token",
+                review_completeness="complete",
+                terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_id}",
+                provenance_source="test",
+            )
+        )
+        feedback = AuthorityFeedbackAttempt(
+            project_id=project_id,
+            feedback_attempt_id="feedback-curation-1",
+            source_authority_id=authority_id,
+            source_authority_fingerprint=fingerprint,
+            feedback_fingerprint="sha256:" + ("c" * 64),
+            has_blocking_feedback=True,
+            feedback_json='{"feedback_items":[]}',
+            request_hash="sha256:" + ("d" * 64),
+            idempotency_key="feedback-curation-1",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(feedback)
+        session.commit()
+
+    return RejectedAuthorityFixture(
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_id=authority_id,
+        authority_fingerprint=fingerprint,
+        feedback_attempt_id="feedback-curation-1",
+    )
+
+
+def _successful_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a deterministic placeholder successful workflow result."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+    }
 
 
 def _write_feedback(
@@ -600,4 +703,337 @@ def test_feedback_record_replays_after_idempotency_integrity_error(
     assert second["data"] == first["data"]
     with Session(engine) as session:
         rows = session.exec(select(AuthorityFeedbackAttempt)).all()
+    assert len(rows) == 1
+
+
+def test_authority_curate_sets_curating_before_workflow(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long curation work must be fenced by authority_curating status."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    captured_state: dict[str, object] = {}
+
+    def fake_run_curation(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        captured_state.update(fake_workflow.get_session_status(str(fixture.project_id)))
+        return _successful_curation_result(fixture)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_run_curation,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-001",
+        )
+    )
+
+    assert result["ok"] is True
+    assert captured_state["setup_status"] == "authority_curating"
+    with Session(engine) as session:
+        rows = session.exec(select(AuthorityCurationAttempt)).all()
+    assert len(rows) == 1
+    assert rows[0].status == "succeeded"
+
+
+def test_authority_curate_rejects_when_already_curating(
+    engine: Engine,
+) -> None:
+    """Concurrent curation must be blocked by setup status."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    active_mutation_event_id = 777
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_curating",
+            "setup_curation_mutation_event_id": active_mutation_event_id,
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-concurrent-001",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] in {"STALE_SETUP_STATUS", "MUTATION_IN_PROGRESS"}
+    assert (
+        result["errors"][0]["details"]["setup_curation_mutation_event_id"]
+        == active_mutation_event_id
+    )
+
+
+def test_authority_curate_rejects_existing_running_attempt(
+    engine: Engine,
+) -> None:
+    """A running curation row is the durable mutex for an authority."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    with Session(engine) as session:
+        session.add(
+            AuthorityCurationAttempt(
+                project_id=fixture.project_id,
+                curation_attempt_id="curation-existing-running",
+                source_authority_id=fixture.authority_id,
+                source_authority_fingerprint=fixture.authority_fingerprint,
+                spec_version_id=fixture.spec_version_id,
+                feedback_attempt_id=fixture.feedback_attempt_id,
+                status="running",
+                request_hash="sha256:" + ("e" * 64),
+                idempotency_key="curate-existing-running",
+            )
+        )
+        session.commit()
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-concurrent-002",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_IN_PROGRESS"
+    assert (
+        result["errors"][0]["details"]["curation_attempt_id"]
+        == "curation-existing-running"
+    )
+    assert (
+        fake_workflow.get_session_status(str(fixture.project_id))["setup_status"]
+        == "authority_rejected"
+    )
+    with Session(engine) as session:
+        running_rows = session.exec(
+            select(AuthorityCurationAttempt)
+            .where(AuthorityCurationAttempt.project_id == fixture.project_id)
+            .where(AuthorityCurationAttempt.source_authority_id == fixture.authority_id)
+            .where(AuthorityCurationAttempt.status == "running")
+        ).all()
+    assert len(running_rows) == 1
+
+
+def test_authority_curate_default_failure_restores_rejected_workflow(
+    engine: Engine,
+) -> None:
+    """Default unimplemented workflow must fail closed without a stuck mutex."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-default-failure",
+        )
+    )
+
+    assert result["ok"] is False
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_rejected"
+    assert workflow_state["setup_curation_mutation_event_id"] is None
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.status == "failed"
+    assert ledger.status != "pending"
+
+
+def test_authority_curate_exception_sanitizes_and_restores_state(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workflow exceptions must not leak raw provider content or leave locks."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def raise_secret(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        message = "raw-provider-secret-token"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        raise_secret,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-exception-failure",
+        )
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert "raw-provider-secret-token" not in serialized
+    assert result["errors"][0]["details"]["exception_type"] == "RuntimeError"
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_rejected"
+    assert workflow_state["setup_curation_mutation_event_id"] is None
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.status == "failed"
+    assert ledger.status != "pending"
+
+
+def test_authority_curate_curating_status_write_failure_is_sanitized(
+    engine: Engine,
+) -> None:
+    """Workflow write failures after mutex acquisition must not leave locks."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailingWorkflowPort(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            """Fail all workflow writes."""
+            del session_id, partial_update
+            message = "workflow-write-secret"
+            raise RuntimeError(message)
+
+    fake_workflow = FailingWorkflowPort()
+    fake_workflow.state[str(fixture.project_id)] = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "authority_rejected",
+    }
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-workflow-write-failure",
+        )
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert "workflow-write-secret" not in serialized
+    assert result["errors"][0]["details"]["exception_type"] == "RuntimeError"
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.status == "failed"
+    assert ledger.status != "pending"
+
+
+def test_authority_curate_replays_same_idempotency_key(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same curation request replays the finalized mutation response."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    calls = 0
+
+    def fake_run_curation(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        nonlocal calls
+        calls += 1
+        return _successful_curation_result(fixture)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_run_curation,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-replay-001",
+    )
+
+    first = runner.curate(request)
+    second = runner.curate(request)
+
+    assert first["ok"] is True
+    assert second == first
+    assert calls == 1
+    with Session(engine) as session:
+        rows = session.exec(select(AuthorityCurationAttempt)).all()
     assert len(rows) == 1

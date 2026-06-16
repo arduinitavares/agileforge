@@ -124,6 +124,49 @@ def test_authority_curation_idempotency_key_is_unique_per_project(
         session.rollback()
 
 
+def test_authority_curation_allows_one_running_attempt_per_authority(
+    engine: Engine,
+) -> None:
+    """Only one running curation may exist for one project/source authority."""
+    ensure_schema_current(engine)
+    project_id = _seed_product(engine)
+
+    with Session(engine) as session:
+        session.add(
+            _curation_attempt(
+                project_id=project_id,
+                curation_attempt_id="curation-running-a",
+                idempotency_key="running-a",
+            )
+        )
+        session.add(
+            _curation_attempt(
+                project_id=project_id,
+                curation_attempt_id="curation-running-b",
+                idempotency_key="running-b",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+    with Session(engine) as session:
+        failed = _curation_attempt(
+            project_id=project_id,
+            curation_attempt_id="curation-failed",
+            idempotency_key="failed-a",
+        )
+        failed.status = "failed"
+        session.add(failed)
+        running = _curation_attempt(
+            project_id=project_id,
+            curation_attempt_id="curation-running-c",
+            idempotency_key="running-c",
+        )
+        session.add(running)
+        session.commit()
+
+
 def _column_defaults(engine: Engine, table_name: str) -> dict[str, str | None]:
     """Return SQLite column defaults keyed by column name."""
     return {

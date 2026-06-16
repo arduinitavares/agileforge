@@ -1,20 +1,28 @@
 """Authority feedback and curation mutation service."""
 
+# ruff: noqa: SIM300
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from models.authority_curation import AuthorityFeedbackAttempt
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.agent_workbench import CliMutationLedger
+from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
+from models.specs import (
+    CompiledSpecAuthority,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
     WorkbenchError,
@@ -23,11 +31,26 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
+from services.agent_workbench.mutation_ledger import (
+    IDEMPOTENCY_KEY_REUSED,
+    MUTATION_IN_PROGRESS,
+    MUTATION_RECOVERY_REQUIRED,
+    MUTATION_RESUME_CONFLICT,
+    MutationLedgerRepository,
+    MutationStatus,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 AUTHORITY_FEEDBACK_RECORD_COMMAND = "agileforge authority feedback record"
+AUTHORITY_CURATE_COMMAND = "agileforge authority curate"
+AUTHORITY_CURATION_LEASE_SECONDS = 600
+
+_LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
+_LEDGER_STATUS: Any = CliMutationLedger.status
+_LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
+_LEDGER_LEASE_EXPIRES_AT: Any = CliMutationLedger.lease_expires_at
 
 FeedbackTargetKind = Literal[
     "invariant",
@@ -109,13 +132,145 @@ class AuthorityFeedbackRecordRequest(_StrictModel):
     correlation_id: str | None = None
 
 
+class AuthorityCurationRequest(_StrictModel):
+    """Guarded request for authority curation."""
+
+    project_id: int
+    spec_version_id: int
+    source_authority_id: int
+    expected_source_authority_fingerprint: str = Field(min_length=1)
+    feedback_attempt_id: str = Field(min_length=1)
+    max_iterations: int = Field(default=2, ge=1, le=2)
+    compiler_model: str | None = Field(default=None, min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+    correlation_id: str | None = None
+
+
+class AuthorityCurationWorkflowPort(Protocol):
+    """Workflow state operations needed by curation."""
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        """Return current workflow state."""
+        raise NotImplementedError
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        """Merge workflow state update."""
+        raise NotImplementedError
+
+
+class SyncAuthorityCurationWorkflowAdapter:
+    """Synchronous adapter over the default workflow service."""
+
+    def __init__(self) -> None:
+        """Initialize the adapter lazily to avoid workflow import at module load."""
+        from services.workflow import WorkflowService  # noqa: PLC0415
+
+        self._workflow = WorkflowService()
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        """Return current workflow state."""
+        return self._workflow.get_session_status(session_id)
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        """Merge workflow state update."""
+        self._workflow.update_session_status(session_id, partial_update)
+
+
+@dataclass(frozen=True)
+class _ActiveMutation:
+    """Owned mutation ledger lease for curation."""
+
+    ledger: MutationLedgerRepository
+    lease_owner: str
+    mutation_event_id: int
+
+
 class AuthorityCurationRunner:
     """Run authority feedback and curation commands."""
 
-    def __init__(self, *, engine: Engine, workflow: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        workflow: AuthorityCurationWorkflowPort | None = None,
+    ) -> None:
         """Initialize the curation runner."""
         self._engine = engine
-        self._workflow = workflow
+        self._workflow = workflow or SyncAuthorityCurationWorkflowAdapter()
+
+    def curate(self, request: AuthorityCurationRequest) -> dict[str, Any]:
+        """Run bounded authority curation behind the authority_curating mutex."""
+        active_mutation = self._start_curation_mutation(request)
+        if not isinstance(active_mutation, _ActiveMutation):
+            return active_mutation
+
+        guard_error = self._validate_curation_guards(request)
+        if guard_error is not None:
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=active_mutation.mutation_event_id,
+                lease_owner=active_mutation.lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=guard_error,
+            )
+            return guard_error
+
+        attempt = self._create_running_curation_attempt(
+            request=request,
+            request_hash=_curation_request_hash(request),
+        )
+        if not isinstance(attempt, AuthorityCurationAttempt):
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=active_mutation.mutation_event_id,
+                lease_owner=active_mutation.lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=attempt,
+            )
+            return attempt
+
+        try:
+            self._mark_workflow_curating(
+                request=request,
+                mutation_event_id=active_mutation.mutation_event_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            response = error_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                error=workbench_error(
+                    ErrorCode.MUTATION_FAILED,
+                    message="Authority curation workflow state update failed.",
+                    details={
+                        "project_id": request.project_id,
+                        "curation_attempt_id": attempt.curation_attempt_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                ),
+                correlation_id=request.correlation_id,
+            )
+            self._finalize_failed_curation(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+                response=response,
+                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+            )
+            return response
+
+        return self._run_curation_after_status_update(
+            request=request,
+            active_mutation=active_mutation,
+            attempt=attempt,
+        )
 
     def feedback_record(
         self,
@@ -140,6 +295,423 @@ class AuthorityCurationRunner:
                 request=request,
                 feedback=feedback,
             )
+
+    def _start_curation_mutation(
+        self,
+        request: AuthorityCurationRequest,
+    ) -> _ActiveMutation | dict[str, Any]:
+        """Acquire the curation mutation lease or return deterministic replay."""
+        now = datetime.now(UTC)
+        lease_owner = (
+            f"agileforge-cli:authority-curate:{request.idempotency_key}:{uuid4()}"
+        )
+        ledger = MutationLedgerRepository(engine=self._engine)
+        loaded = ledger.create_or_load(
+            command=AUTHORITY_CURATE_COMMAND,
+            idempotency_key=request.idempotency_key,
+            request_hash=_curation_request_hash(request),
+            project_id=request.project_id,
+            correlation_id=request.correlation_id or str(uuid4()),
+            changed_by=request.changed_by,
+            lease_owner=lease_owner,
+            now=now,
+            lease_seconds=AUTHORITY_CURATION_LEASE_SECONDS,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        if loaded.error_code is not None:
+            return _curation_ledger_error_response(
+                error_code=loaded.error_code,
+                mutation_event_id=loaded.ledger.mutation_event_id,
+                correlation_id=request.correlation_id,
+            )
+        return _ActiveMutation(
+            ledger=ledger,
+            lease_owner=lease_owner,
+            mutation_event_id=_required_mutation_event_id(
+                loaded.ledger.mutation_event_id
+            ),
+        )
+
+    def _validate_curation_guards(  # noqa: PLR0911
+        self,
+        request: AuthorityCurationRequest,
+    ) -> dict[str, Any] | None:
+        """Validate ownership, feedback, fingerprint, and workflow mutex guards."""
+        with Session(self._engine) as session:
+            spec = session.get(SpecRegistry, request.spec_version_id)
+            if spec is None or spec.product_id != request.project_id:
+                return error_envelope(
+                    command=AUTHORITY_CURATE_COMMAND,
+                    error=workbench_error(
+                        ErrorCode.SPEC_VERSION_NOT_FOUND,
+                        message="Spec version was not found for project.",
+                        details={
+                            "project_id": request.project_id,
+                            "spec_version_id": request.spec_version_id,
+                        },
+                    ),
+                    correlation_id=request.correlation_id,
+                )
+
+            authority = session.get(
+                CompiledSpecAuthority,
+                request.source_authority_id,
+            )
+            if (
+                authority is None
+                or authority.spec_version_id != request.spec_version_id
+            ):
+                return error_envelope(
+                    command=AUTHORITY_CURATE_COMMAND,
+                    error=workbench_error(
+                        ErrorCode.AUTHORITY_NOT_PENDING,
+                        message="Source authority was not found for spec version.",
+                        details={
+                            "source_authority_id": request.source_authority_id,
+                            "spec_version_id": request.spec_version_id,
+                        },
+                    ),
+                    correlation_id=request.correlation_id,
+                )
+
+            actual_fingerprint = pending_authority_fingerprint(authority)
+            if actual_fingerprint != request.expected_source_authority_fingerprint:
+                return error_envelope(
+                    command=AUTHORITY_CURATE_COMMAND,
+                    error=workbench_error(
+                        ErrorCode.STALE_AUTHORITY_VERSION,
+                        message="Source authority fingerprint changed.",
+                        details={
+                            "expected": request.expected_source_authority_fingerprint,
+                            "actual": actual_fingerprint,
+                        },
+                    ),
+                    correlation_id=request.correlation_id,
+                )
+
+            feedback = session.exec(
+                select(AuthorityFeedbackAttempt)
+                .where(AuthorityFeedbackAttempt.project_id == request.project_id)
+                .where(
+                    AuthorityFeedbackAttempt.source_authority_id
+                    == request.source_authority_id
+                )
+                .where(
+                    AuthorityFeedbackAttempt.feedback_attempt_id
+                    == request.feedback_attempt_id
+                )
+            ).first()
+            if feedback is None:
+                return error_envelope(
+                    command=AUTHORITY_CURATE_COMMAND,
+                    error=workbench_error(
+                        ErrorCode.AUTHORITY_GUARD_INCOMPLETE,
+                        message="Feedback attempt was not found for source authority.",
+                        details={
+                            "project_id": request.project_id,
+                            "source_authority_id": request.source_authority_id,
+                            "feedback_attempt_id": request.feedback_attempt_id,
+                        },
+                    ),
+                    correlation_id=request.correlation_id,
+                )
+
+            rejected = session.exec(
+                select(SpecAuthorityAcceptance)
+                .where(SpecAuthorityAcceptance.product_id == request.project_id)
+                .where(
+                    SpecAuthorityAcceptance.spec_version_id
+                    == request.spec_version_id
+                )
+                .where(
+                    SpecAuthorityAcceptance.pending_authority_id
+                    == request.source_authority_id
+                )
+                .where(SpecAuthorityAcceptance.status == "rejected")
+            ).first()
+            if rejected is None:
+                return error_envelope(
+                    command=AUTHORITY_CURATE_COMMAND,
+                    error=workbench_error(
+                        ErrorCode.AUTHORITY_REVIEW_REQUIRED,
+                        message="Source authority must be rejected before curation.",
+                        details={
+                            "project_id": request.project_id,
+                            "spec_version_id": request.spec_version_id,
+                            "source_authority_id": request.source_authority_id,
+                        },
+                    ),
+                    correlation_id=request.correlation_id,
+                )
+
+        workflow_error = self._validate_curation_workflow_guard(request)
+        if workflow_error is not None:
+            return workflow_error
+        return None
+
+    def _validate_curation_workflow_guard(
+        self,
+        request: AuthorityCurationRequest,
+    ) -> dict[str, Any] | None:
+        """Validate setup state and curation mutex before long-running work."""
+        state = self._workflow.get_session_status(str(request.project_id))
+        setup_status = state.get("setup_status")
+        if setup_status == "authority_curating":
+            return _stale_setup_status_error(
+                request=request,
+                message="Authority curation is already running.",
+                actual_fsm_state=state.get("fsm_state"),
+                actual_setup_status=setup_status,
+                setup_curation_mutation_event_id=state.get(
+                    "setup_curation_mutation_event_id"
+                ),
+            )
+        if state.get("fsm_state") != "SETUP_REQUIRED" or setup_status != (
+            "authority_rejected"
+        ):
+            return _stale_setup_status_error(
+                request=request,
+                message="Authority curation requires rejected setup authority.",
+                actual_fsm_state=state.get("fsm_state"),
+                actual_setup_status=setup_status,
+                setup_curation_mutation_event_id=state.get(
+                    "setup_curation_mutation_event_id"
+                ),
+            )
+        return None
+
+    def _create_running_curation_attempt(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        request_hash: str,
+    ) -> AuthorityCurationAttempt | dict[str, Any]:
+        """Persist the in-progress curation attempt before workflow work."""
+        now = datetime.now(UTC)
+        row = AuthorityCurationAttempt(
+            project_id=request.project_id,
+            curation_attempt_id=f"curation-{uuid4()}",
+            source_authority_id=request.source_authority_id,
+            source_authority_fingerprint=(
+                request.expected_source_authority_fingerprint
+            ),
+            spec_version_id=request.spec_version_id,
+            feedback_attempt_id=request.feedback_attempt_id,
+            status="running",
+            max_iterations=request.max_iterations,
+            compiler_model=request.compiler_model,
+            request_json=json.dumps(
+                request.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            changed_by=request.changed_by,
+            created_at=now,
+            updated_at=now,
+        )
+        with Session(self._engine) as session:
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return _running_curation_conflict_response(
+                    session=session,
+                    request=request,
+                )
+            session.refresh(row)
+            return row
+
+    def _mark_workflow_curating(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        mutation_event_id: int,
+    ) -> None:
+        """Mark workflow state as curating after durable mutex acquisition."""
+        self._workflow.update_session_status(
+            str(request.project_id),
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_curating",
+                "setup_curation_mutation_event_id": mutation_event_id,
+                "setup_next_actions": [
+                    {
+                        "command": "agileforge mutation show",
+                        "args": {"mutation_event_id": mutation_event_id},
+                        "reason": "Inspect the active authority curation mutation.",
+                    }
+                ],
+            },
+        )
+
+    def _run_curation_after_status_update(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        active_mutation: _ActiveMutation,
+        attempt: AuthorityCurationAttempt,
+    ) -> dict[str, Any]:
+        """Run workflow placeholder and finalize minimal attempt state."""
+        try:
+            workflow_result = run_authority_curation_workflow(
+                request=request,
+                curation_attempt_id=attempt.curation_attempt_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            response = error_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                error=workbench_error(
+                    ErrorCode.MUTATION_FAILED,
+                    message="Authority curation workflow failed.",
+                    details={
+                        "project_id": request.project_id,
+                        "curation_attempt_id": attempt.curation_attempt_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                ),
+                correlation_id=request.correlation_id,
+            )
+            self._finalize_failed_curation(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+                response=response,
+                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+            )
+            return response
+
+        if workflow_result.get("ok") is True:
+            response = success_envelope(
+                command=AUTHORITY_CURATE_COMMAND,
+                data={
+                    "status": "authority_curation_succeeded",
+                    "project_id": request.project_id,
+                    "curation_attempt_id": attempt.curation_attempt_id,
+                    "mutation_event_id": active_mutation.mutation_event_id,
+                    "workflow_result": workflow_result,
+                },
+                correlation_id=request.correlation_id,
+            )
+            self._update_curation_attempt_status(
+                attempt.curation_attempt_id,
+                status="succeeded",
+            )
+            active_mutation.ledger.finalize_success(
+                mutation_event_id=active_mutation.mutation_event_id,
+                lease_owner=active_mutation.lease_owner,
+                after={"curation_attempt_id": attempt.curation_attempt_id},
+                response=response,
+                now=datetime.now(UTC),
+            )
+            return response
+
+        response = error_envelope(
+            command=AUTHORITY_CURATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.COMMAND_NOT_IMPLEMENTED,
+                message="Authority curation workflow is not implemented.",
+                details={"curation_attempt_id": attempt.curation_attempt_id},
+            ),
+            correlation_id=request.correlation_id,
+        )
+        self._finalize_failed_curation(
+            request=request,
+            active_mutation=active_mutation,
+            attempt=attempt,
+            response=response,
+            status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+        )
+        return response
+
+    def _finalize_failed_curation(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        active_mutation: _ActiveMutation,
+        attempt: AuthorityCurationAttempt,
+        response: dict[str, Any],
+        status: MutationStatus,
+    ) -> None:
+        """Finalize failed curation and restore rejected workflow state."""
+        self._update_curation_attempt_status(
+            attempt.curation_attempt_id,
+            status="failed",
+        )
+        _finalize_mutation_status(
+            engine=self._engine,
+            mutation_event_id=active_mutation.mutation_event_id,
+            lease_owner=active_mutation.lease_owner,
+            status=status,
+            response=response,
+        )
+        self._restore_authority_rejected_workflow(request=request)
+
+    def _restore_authority_rejected_workflow(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+    ) -> None:
+        """Restore setup workflow after curation fails before publication."""
+        try:
+            self._workflow.update_session_status(
+                str(request.project_id),
+                {
+                    "fsm_state": "SETUP_REQUIRED",
+                    "setup_status": "authority_rejected",
+                    "setup_curation_mutation_event_id": None,
+                    "setup_error": {
+                        "code": ErrorCode.MUTATION_FAILED.value,
+                        "message": "Authority curation failed before publication.",
+                    },
+                    "setup_next_actions": [
+                        {
+                            "command": AUTHORITY_CURATE_COMMAND,
+                            "args": {
+                                "project_id": request.project_id,
+                                "spec_version_id": request.spec_version_id,
+                                "source_authority_id": request.source_authority_id,
+                                "expected_source_authority_fingerprint": (
+                                    request.expected_source_authority_fingerprint
+                                ),
+                                "feedback_attempt_id": request.feedback_attempt_id,
+                                "idempotency_key": "<idempotency_key>",
+                            },
+                            "reason": (
+                                "Retry authority curation with a fresh "
+                                "idempotency key."
+                            ),
+                        }
+                    ],
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return
+
+    def _update_curation_attempt_status(
+        self,
+        curation_attempt_id: str,
+        *,
+        status: str,
+    ) -> None:
+        """Update curation attempt status by stable attempt id."""
+        with Session(self._engine) as session:
+            row = session.exec(
+                select(AuthorityCurationAttempt).where(
+                    AuthorityCurationAttempt.curation_attempt_id
+                    == curation_attempt_id
+                )
+            ).first()
+            if row is None:
+                return
+            row.status = status
+            row.updated_at = datetime.now(UTC)
+            session.add(row)
+            session.commit()
 
 
 def _record_feedback_in_session(
@@ -197,6 +769,180 @@ def _record_feedback_in_session(
         data=_feedback_attempt_response(row),
         correlation_id=request.correlation_id,
     )
+
+
+def _curation_request_hash(request: AuthorityCurationRequest) -> str:
+    """Return deterministic request hash for curation idempotency."""
+    return canonical_hash(
+        {
+            "command": AUTHORITY_CURATE_COMMAND,
+            "project_id": request.project_id,
+            "spec_version_id": request.spec_version_id,
+            "source_authority_id": request.source_authority_id,
+            "expected_source_authority_fingerprint": (
+                request.expected_source_authority_fingerprint
+            ),
+            "feedback_attempt_id": request.feedback_attempt_id,
+            "max_iterations": request.max_iterations,
+            "compiler_model": request.compiler_model,
+        }
+    )
+
+
+def _curation_ledger_error_response(
+    *,
+    error_code: str,
+    mutation_event_id: int | None,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Map ledger startup errors into curation command envelopes."""
+    mapped_code = {
+        IDEMPOTENCY_KEY_REUSED: ErrorCode.IDEMPOTENCY_KEY_REUSED,
+        MUTATION_IN_PROGRESS: ErrorCode.MUTATION_IN_PROGRESS,
+        MUTATION_RECOVERY_REQUIRED: ErrorCode.MUTATION_RECOVERY_REQUIRED,
+        MUTATION_RESUME_CONFLICT: ErrorCode.MUTATION_RESUME_CONFLICT,
+    }.get(error_code, ErrorCode.MUTATION_FAILED)
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            mapped_code,
+            message="Authority curation mutation cannot start.",
+            details={"mutation_event_id": mutation_event_id},
+            remediation=["Inspect the mutation ledger before retrying curation."],
+        ),
+        correlation_id=correlation_id,
+    )
+
+
+def _running_curation_conflict_response(
+    *,
+    session: Session,
+    request: AuthorityCurationRequest,
+) -> dict[str, Any]:
+    """Return structured active-curation conflict after mutex insert failure."""
+    existing = session.exec(
+        select(AuthorityCurationAttempt)
+        .where(AuthorityCurationAttempt.project_id == request.project_id)
+        .where(
+            AuthorityCurationAttempt.source_authority_id
+            == request.source_authority_id
+        )
+        .where(AuthorityCurationAttempt.status == "running")
+        .order_by(
+            cast("Any", AuthorityCurationAttempt.created_at).desc(),
+            cast("Any", AuthorityCurationAttempt.curation_row_id).desc(),
+        )
+    ).first()
+    details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "source_authority_id": request.source_authority_id,
+    }
+    if existing is not None:
+        details.update(
+            {
+                "curation_attempt_id": existing.curation_attempt_id,
+                "feedback_attempt_id": existing.feedback_attempt_id,
+            }
+        )
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_IN_PROGRESS,
+            message="Authority curation is already running.",
+            details=details,
+            remediation=["Inspect authority status or the mutation ledger."],
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _stale_setup_status_error(
+    *,
+    request: AuthorityCurationRequest,
+    message: str,
+    actual_fsm_state: object,
+    actual_setup_status: object,
+    setup_curation_mutation_event_id: object,
+) -> dict[str, Any]:
+    """Return stale setup status error for curation guards."""
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.STALE_SETUP_STATUS,
+            message=message,
+            details={
+                "project_id": request.project_id,
+                "expected_fsm_state": "SETUP_REQUIRED",
+                "expected_setup_status": "authority_rejected",
+                "actual_fsm_state": actual_fsm_state,
+                "actual_setup_status": actual_setup_status,
+                "setup_curation_mutation_event_id": (
+                    setup_curation_mutation_event_id
+                ),
+            },
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _finalize_mutation_status(
+    *,
+    engine: Engine,
+    mutation_event_id: int | None,
+    lease_owner: str,
+    status: MutationStatus,
+    response: dict[str, Any],
+) -> bool:
+    """Persist a terminal non-success ledger response while lease is active."""
+    if mutation_event_id is None:
+        return False
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with Session(engine) as session:
+        result = session.exec(
+            update(CliMutationLedger)
+            .where(_LEDGER_MUTATION_EVENT_ID == mutation_event_id)
+            .where(_LEDGER_STATUS == MutationStatus.PENDING.value)
+            .where(_LEDGER_LEASE_OWNER == lease_owner)
+            .where(_LEDGER_LEASE_EXPIRES_AT > now)
+            .values(
+                status=status.value,
+                response_json=json.dumps(
+                    response,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ),
+                lease_owner=None,
+                lease_acquired_at=None,
+                last_heartbeat_at=None,
+                lease_expires_at=None,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return result.rowcount == 1
+
+
+def _required_mutation_event_id(value: int | None) -> int:
+    """Return a non-null mutation event id after ledger creation."""
+    if value is None:
+        message = "Mutation ledger row is missing mutation_event_id."
+        raise RuntimeError(message)
+    return value
+
+
+def run_authority_curation_workflow(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+) -> dict[str, Any]:
+    """Fail closed until the ADK curation workflow is implemented."""
+    del request, curation_attempt_id
+    return {
+        "ok": False,
+        "error_code": ErrorCode.COMMAND_NOT_IMPLEMENTED.value,
+        "message": "Authority curation workflow is not implemented.",
+    }
 
 
 def _commit_feedback_attempt(

@@ -130,6 +130,10 @@ def test_authority_curation_readiness_requires_idempotency_uniqueness() -> None:
         "project_id",
         "idempotency_key",
     ) in requirements_by_table["authority_curation_attempts"].unique_columns
+    assert (
+        "uq_authority_curation_running_authority"
+        in requirements_by_table["authority_curation_attempts"].indexes
+    )
 
 
 def test_schema_requirement_rejects_bare_string_columns() -> None:

@@ -76,6 +76,13 @@ class AuthorityCurationAttempt(SQLModel, table=True):
         ),
         Index("ix_authority_curation_project_status", "project_id", "status"),
         Index("ix_authority_curation_source_authority", "source_authority_id"),
+        Index(
+            "uq_authority_curation_running_authority",
+            "project_id",
+            "source_authority_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+        ),
     )
 
     curation_row_id: int | None = Field(default=None, primary_key=True)

@@ -179,6 +179,35 @@ def _ensure_unique_index_exists(
     return True
 
 
+def _ensure_partial_unique_index_exists(
+    engine: Engine,
+    table_name: str,
+    index_name: str,
+    column_names: list[str],
+    where_sql: str,
+) -> bool:
+    """Ensure a partial unique index exists on a table."""
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names():
+        return False
+
+    if index_name in _get_existing_indexes(engine, table_name):
+        return False
+
+    columns_str = ", ".join(column_names)
+    create_index_sql = (
+        f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({columns_str}) "
+        f"WHERE {where_sql}"
+    )
+    logger.info(
+        "db.migration.create_partial_unique_index",
+        extra={"table_name": table_name, "index_name": index_name},
+    )
+    with engine.begin() as conn:
+        conn.execute(text(create_index_sql))
+    return True
+
+
 # =============================================================================
 # SPEC AUTHORITY TABLES MIGRATION
 # =============================================================================
@@ -1737,6 +1766,18 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
     ):
         actions.append(
             "created unique index: uq_authority_curation_project_idempotency"
+        )
+
+    if _ensure_partial_unique_index_exists(
+        engine,
+        "authority_curation_attempts",
+        "uq_authority_curation_running_authority",
+        ["project_id", "source_authority_id"],
+        "status = 'running'",
+    ):
+        actions.append(
+            "created partial unique index: "
+            "uq_authority_curation_running_authority"
         )
 
     return actions
