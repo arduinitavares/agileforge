@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from importlib import import_module
 
-__all__ = ["agent_workbench", "brownfield", "core", "db", "enums", "events", "specs"]
+__all__ = [
+    "agent_workbench",
+    "authority_curation",
+    "brownfield",
+    "core",
+    "db",
+    "enums",
+    "events",
+    "specs",
+]
 
 
 def __getattr__(name: str) -> object:

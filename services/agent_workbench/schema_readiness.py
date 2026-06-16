@@ -21,6 +21,7 @@ class SchemaRequirement:
     table: str
     columns: Sequence[str]
     indexes: Sequence[str] = ()
+    unique_columns: Sequence[Sequence[str]] = ()
     storage_schema_version: str | None = None
 
     def __post_init__(self) -> None:
@@ -31,8 +32,22 @@ class SchemaRequirement:
         if isinstance(self.indexes, str):
             message = "indexes must be a sequence of index names"
             raise TypeError(message)
+        if isinstance(self.unique_columns, str):
+            message = "unique_columns must be a sequence of column-name sequences"
+            raise TypeError(message)
+        normalized_unique_columns: list[tuple[str, ...]] = []
+        for unique_columns in self.unique_columns:
+            if isinstance(unique_columns, str):
+                message = "unique_columns entries must be sequences of column names"
+                raise TypeError(message)
+            normalized_unique_columns.append(tuple(unique_columns))
         object.__setattr__(self, "columns", tuple(self.columns))
         object.__setattr__(self, "indexes", tuple(self.indexes))
+        object.__setattr__(
+            self,
+            "unique_columns",
+            tuple(normalized_unique_columns),
+        )
 
 
 MUTATION_LEDGER_TABLE = "cli_mutation_ledger"
@@ -94,6 +109,67 @@ AUTHORITY_DECISION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
     ),
 )
 
+AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
+    SchemaRequirement(
+        table="authority_feedback_attempts",
+        columns=(
+            "feedback_row_id",
+            "project_id",
+            "feedback_attempt_id",
+            "source_authority_id",
+            "source_authority_fingerprint",
+            "feedback_fingerprint",
+            "status",
+            "has_blocking_feedback",
+            "feedback_json",
+            "request_hash",
+            "idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+        indexes=(
+            "ix_authority_feedback_project_status",
+            "ix_authority_feedback_source_authority",
+        ),
+        unique_columns=(("project_id", "feedback_attempt_id"),),
+    ),
+    SchemaRequirement(
+        table="authority_curation_attempts",
+        columns=(
+            "curation_row_id",
+            "project_id",
+            "curation_attempt_id",
+            "source_authority_id",
+            "source_authority_fingerprint",
+            "spec_version_id",
+            "feedback_attempt_id",
+            "status",
+            "max_iterations",
+            "iteration_count",
+            "compiler_model",
+            "candidate_authority_id",
+            "candidate_authority_fingerprint",
+            "request_json",
+            "candidate_lineage_json",
+            "diff_summary_json",
+            "lineage_json",
+            "quality_report_json",
+            "failure_artifact_id",
+            "request_hash",
+            "idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+        indexes=(
+            "ix_authority_curation_project_status",
+            "ix_authority_curation_source_authority",
+        ),
+        unique_columns=(("project_id", "curation_attempt_id"),),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class SchemaReadiness:
@@ -135,6 +211,13 @@ def check_schema_readiness(
                 if not _index_contract_ready(engine, requirement.table, index)
             )
 
+        if requirement.unique_columns:
+            missing_elements.extend(
+                _format_unique_columns(unique_columns)
+                for unique_columns in requirement.unique_columns
+                if not _unique_contract_ready(engine, requirement.table, unique_columns)
+            )
+
         if requirement.storage_schema_version is not None:
             actual_version = _storage_schema_version(engine)
             if actual_version != requirement.storage_schema_version:
@@ -164,6 +247,11 @@ def check_authority_decision_readiness(engine: Engine) -> SchemaReadiness:
     return check_schema_readiness(engine, AUTHORITY_DECISION_REQUIREMENTS)
 
 
+def check_authority_curation_readiness(engine: Engine) -> SchemaReadiness:
+    """Return readiness for authority feedback and curation storage."""
+    return check_schema_readiness(engine, AUTHORITY_CURATION_REQUIREMENTS)
+
+
 def _is_missing_sqlite_file(engine: Engine) -> bool:
     """Return whether a SQLite file URL targets an absent database file."""
     if not engine.url.drivername.startswith("sqlite"):
@@ -190,6 +278,10 @@ def _missing_requirement(requirement: SchemaRequirement) -> list[str]:
         *requirement.columns,
         *requirement.indexes,
         *(
+            _format_unique_columns(unique_columns)
+            for unique_columns in requirement.unique_columns
+        ),
+        *(
             [f"storage_schema_version:{requirement.storage_schema_version}"]
             if requirement.storage_schema_version is not None
             else []
@@ -208,6 +300,35 @@ def _index_contract_ready(engine: Engine, table_name: str, index_name: str) -> b
     with engine.connect() as conn:
         rows = conn.execute(text(f"PRAGMA index_list('{table_name}')")).mappings()
         return any(str(row["name"]) == index_name for row in rows)
+
+
+def _format_unique_columns(unique_columns: Sequence[str]) -> str:
+    """Return the missing-element label for a required unique column set."""
+    return f"unique({', '.join(unique_columns)})"
+
+
+def _unique_contract_ready(
+    engine: Engine,
+    table_name: str,
+    unique_columns: Sequence[str],
+) -> bool:
+    """Return whether the table enforces uniqueness for the exact column tuple."""
+    inspector = inspect(engine)
+    expected_columns = tuple(unique_columns)
+
+    for constraint in inspector.get_unique_constraints(table_name):
+        constrained_columns = tuple(constraint.get("column_names") or ())
+        if constrained_columns == expected_columns:
+            return True
+
+    for index in inspector.get_indexes(table_name):
+        if not index.get("unique"):
+            continue
+        indexed_columns = tuple(index.get("column_names") or ())
+        if indexed_columns == expected_columns:
+            return True
+
+    return False
 
 
 def _terminal_decision_index_ready(engine: Engine) -> bool:

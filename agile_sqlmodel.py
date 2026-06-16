@@ -23,6 +23,10 @@ if __name__ == "__main__":
 
 # Re-export model symbols from their new package locations and ensure SQLModel
 # metadata is populated when this compatibility shim is imported or executed.
+from models.authority_curation import (
+    AuthorityCurationAttempt,
+    AuthorityFeedbackAttempt,
+)
 from models.brownfield import (
     BrownfieldScanAttempt,
     BrownfieldSourceArtifact,
@@ -68,6 +72,8 @@ from models.specs import (
 )
 
 __all__ = [
+    "AuthorityCurationAttempt",
+    "AuthorityFeedbackAttempt",
     "BrownfieldScanAttempt",
     "BrownfieldSourceArtifact",
     "BrownfieldSpecApproval",

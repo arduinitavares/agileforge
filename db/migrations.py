@@ -1510,6 +1510,58 @@ CREATE TABLE IF NOT EXISTS cli_mutation_ledger (
 )
 """
 
+AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
+    feedback_row_id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES products(product_id),
+    feedback_attempt_id VARCHAR NOT NULL,
+    source_authority_id INTEGER NOT NULL,
+    source_authority_fingerprint VARCHAR NOT NULL,
+    feedback_fingerprint VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'recorded',
+    has_blocking_feedback BOOLEAN NOT NULL DEFAULT 0,
+    feedback_json TEXT NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_authority_feedback_project_attempt
+        UNIQUE (project_id, feedback_attempt_id)
+)
+"""
+
+AUTHORITY_CURATION_ATTEMPTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS authority_curation_attempts (
+    curation_row_id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES products(product_id),
+    curation_attempt_id VARCHAR NOT NULL,
+    source_authority_id INTEGER NOT NULL,
+    source_authority_fingerprint VARCHAR NOT NULL,
+    spec_version_id INTEGER NOT NULL,
+    feedback_attempt_id VARCHAR NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'running',
+    max_iterations INTEGER NOT NULL DEFAULT 2,
+    iteration_count INTEGER NOT NULL DEFAULT 0,
+    compiler_model VARCHAR,
+    candidate_authority_id INTEGER,
+    candidate_authority_fingerprint VARCHAR,
+    request_json TEXT NOT NULL DEFAULT '{}',
+    candidate_lineage_json TEXT NOT NULL DEFAULT '{}',
+    diff_summary_json TEXT NOT NULL DEFAULT '{}',
+    lineage_json TEXT NOT NULL DEFAULT '{}',
+    quality_report_json TEXT NOT NULL DEFAULT '{}',
+    failure_artifact_id VARCHAR,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_authority_curation_project_attempt
+        UNIQUE (project_id, curation_attempt_id)
+)
+"""
+
 
 def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     """Ensure CLI contract hardening persistence tables exist."""
@@ -1579,6 +1631,59 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     return actions
 
 
+def migrate_authority_curation_tables(engine: Engine) -> list[str]:
+    """Ensure authority curation feedback and attempt tables exist."""
+    actions: list[str] = []
+
+    if _ensure_table_exists(
+        engine,
+        "authority_feedback_attempts",
+        AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL,
+    ):
+        actions.append("created table: authority_feedback_attempts")
+
+    if _ensure_index_exists(
+        engine,
+        "authority_feedback_attempts",
+        "ix_authority_feedback_project_status",
+        ["project_id", "status"],
+    ):
+        actions.append("created index: ix_authority_feedback_project_status")
+
+    if _ensure_index_exists(
+        engine,
+        "authority_feedback_attempts",
+        "ix_authority_feedback_source_authority",
+        ["source_authority_id"],
+    ):
+        actions.append("created index: ix_authority_feedback_source_authority")
+
+    if _ensure_table_exists(
+        engine,
+        "authority_curation_attempts",
+        AUTHORITY_CURATION_ATTEMPTS_CREATE_SQL,
+    ):
+        actions.append("created table: authority_curation_attempts")
+
+    if _ensure_index_exists(
+        engine,
+        "authority_curation_attempts",
+        "ix_authority_curation_project_status",
+        ["project_id", "status"],
+    ):
+        actions.append("created index: ix_authority_curation_project_status")
+
+    if _ensure_index_exists(
+        engine,
+        "authority_curation_attempts",
+        "ix_authority_curation_source_authority",
+        ["source_authority_id"],
+    ):
+        actions.append("created index: ix_authority_curation_source_authority")
+
+    return actions
+
+
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
@@ -1610,6 +1715,7 @@ def ensure_schema_current(engine: Engine) -> None:
         actions.extend(migrate_task_metadata(engine))
         actions.extend(migrate_task_execution_logs(engine))
         actions.extend(migrate_agent_workbench_contract_tables(engine))
+        actions.extend(migrate_authority_curation_tables(engine))
         actions.extend(migrate_performance_indexes(engine))
 
         if actions:

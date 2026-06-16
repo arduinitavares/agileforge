@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlmodel import SQLModel
 
 from models.core import Product
@@ -70,6 +70,48 @@ def test_check_schema_readiness_accepts_existing_columns() -> None:
 
     assert result.ok is True
     assert result.missing == {}
+
+
+def test_check_schema_readiness_reports_missing_unique_constraint() -> None:
+    """Report missing unique contracts even when columns and indexes exist."""
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE curation_probe (
+                    project_id INTEGER NOT NULL,
+                    feedback_attempt_id VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX ix_curation_probe_project_status
+                ON curation_probe (project_id, status)
+                """
+            )
+        )
+
+    result = check_schema_readiness(
+        engine,
+        [
+            SchemaRequirement(
+                table="curation_probe",
+                columns=("project_id", "feedback_attempt_id", "status"),
+                indexes=("ix_curation_probe_project_status",),
+                unique_columns=(("project_id", "feedback_attempt_id"),),
+            )
+        ],
+    )
+
+    assert result.ok is False
+    assert result.missing == {
+        "curation_probe": ["unique(project_id, feedback_attempt_id)"]
+    }
 
 
 def test_schema_requirement_rejects_bare_string_columns() -> None:

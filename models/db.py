@@ -14,6 +14,7 @@ from sqlmodel import SQLModel, create_engine
 
 from db.migrations import ensure_schema_current
 from models import agent_workbench as _agent_workbench_models  # noqa: F401
+from models import authority_curation as _authority_curation_models  # noqa: F401
 from models import brownfield as _brownfield_models  # noqa: F401
 from utils.runtime_config import get_business_db_target, get_database_echo
 

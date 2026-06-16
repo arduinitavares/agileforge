@@ -156,3 +156,84 @@ def test_raw_mutation_ledger_create_sql_includes_recovery_linkage_columns(
     }
     assert "recovers_mutation_event_id" in columns
     assert "superseded_by_mutation_event_id" in columns
+
+
+def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
+    """Fresh and repeated migration creates curation storage once."""
+    engine = _create_min_runtime_schema(
+        f"sqlite:///{(tmp_path / 'authority-curation.sqlite3').as_posix()}"
+    )
+
+    ensure_schema_current(engine)
+    ensure_schema_current(engine)
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    assert "authority_feedback_attempts" in table_names
+    assert "authority_curation_attempts" in table_names
+
+    feedback_columns = {
+        column["name"]
+        for column in inspector.get_columns("authority_feedback_attempts")
+    }
+    assert {
+        "feedback_row_id",
+        "project_id",
+        "feedback_attempt_id",
+        "source_authority_id",
+        "source_authority_fingerprint",
+        "feedback_fingerprint",
+        "status",
+        "has_blocking_feedback",
+        "feedback_json",
+        "request_hash",
+        "idempotency_key",
+        "changed_by",
+        "created_at",
+        "updated_at",
+    }.issubset(feedback_columns)
+
+    curation_columns = {
+        column["name"]
+        for column in inspector.get_columns("authority_curation_attempts")
+    }
+    assert {
+        "curation_row_id",
+        "project_id",
+        "curation_attempt_id",
+        "source_authority_id",
+        "source_authority_fingerprint",
+        "spec_version_id",
+        "feedback_attempt_id",
+        "status",
+        "max_iterations",
+        "iteration_count",
+        "compiler_model",
+        "candidate_authority_id",
+        "candidate_authority_fingerprint",
+        "request_json",
+        "candidate_lineage_json",
+        "diff_summary_json",
+        "lineage_json",
+        "quality_report_json",
+        "failure_artifact_id",
+        "request_hash",
+        "idempotency_key",
+        "changed_by",
+        "created_at",
+        "updated_at",
+    }.issubset(curation_columns)
+
+    feedback_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("authority_feedback_attempts")
+    }
+    assert "ix_authority_feedback_project_status" in feedback_indexes
+    assert "ix_authority_feedback_source_authority" in feedback_indexes
+
+    curation_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("authority_curation_attempts")
+    }
+    assert "ix_authority_curation_project_status" in curation_indexes
+    assert "ix_authority_curation_source_authority" in curation_indexes
