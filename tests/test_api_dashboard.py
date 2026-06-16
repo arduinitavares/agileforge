@@ -567,6 +567,92 @@ class FakeAuthorityApplication:
             },
         )
 
+    def authority_feedback_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        pending_authority_id: int,
+        expected_authority_fingerprint: str,
+        feedback_file: str,
+        idempotency_key: str,
+        changed_by: str = "dashboard-ui",
+        correlation_id: str | None = None,
+    ) -> dict[str, object]:
+        """Mock authority feedback recording."""
+        self.calls.append(
+            (
+                "authority_feedback_record",
+                {
+                    "project_id": project_id,
+                    "pending_authority_id": pending_authority_id,
+                    "expected_authority_fingerprint": expected_authority_fingerprint,
+                    "feedback_file": feedback_file,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "correlation_id": correlation_id,
+                },
+            )
+        )
+        return self.results.get(
+            "authority_feedback_record",
+            {
+                "ok": True,
+                "data": {
+                    "project_id": project_id,
+                    "feedback_attempt_id": "feedback-1",
+                },
+                "warnings": [],
+                "errors": [],
+            },
+        )
+
+    def authority_curate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        source_authority_id: int,
+        expected_source_authority_fingerprint: str,
+        feedback_attempt_id: str,
+        idempotency_key: str,
+        max_iterations: int = 2,
+        compiler_model: str | None = None,
+        changed_by: str = "dashboard-ui",
+        correlation_id: str | None = None,
+    ) -> dict[str, object]:
+        """Mock authority curation."""
+        self.calls.append(
+            (
+                "authority_curate",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "source_authority_id": source_authority_id,
+                    "expected_source_authority_fingerprint": (
+                        expected_source_authority_fingerprint
+                    ),
+                    "feedback_attempt_id": feedback_attempt_id,
+                    "idempotency_key": idempotency_key,
+                    "max_iterations": max_iterations,
+                    "compiler_model": compiler_model,
+                    "changed_by": changed_by,
+                    "correlation_id": correlation_id,
+                },
+            )
+        )
+        return self.results.get(
+            "authority_curate",
+            {
+                "ok": True,
+                "data": {
+                    "project_id": project_id,
+                    "status": "authority_pending_review",
+                },
+                "warnings": [],
+                "errors": [],
+            },
+        )
+
     def scope_extension_validate(
         self,
         *,
@@ -1291,6 +1377,90 @@ def test_authority_compile_api_routes_guarded_request(
             "compiler_model": "openrouter/openai/gpt-5.2",
             "idempotency_key": "authority-compile-api-001",
             "changed_by": "dashboard-ui",
+        },
+    )
+
+
+def test_authority_feedback_record_api_routes_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority feedback API should mirror the CLI facade contract."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    repo.products.append(DummyProduct(product_id=10, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        "/api/projects/10/authority/feedback",
+        json={
+            "pending_authority_id": 99,
+            "expected_authority_fingerprint": "sha256:abc",
+            "feedback_file": "authority-feedback.json",
+            "idempotency_key": "feedback-api-001",
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-feedback",
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["feedback_attempt_id"] == "feedback-1"
+    assert fake_app.calls[-1] == (
+        "authority_feedback_record",
+        {
+            "project_id": 10,
+            "pending_authority_id": 99,
+            "expected_authority_fingerprint": "sha256:abc",
+            "feedback_file": "authority-feedback.json",
+            "idempotency_key": "feedback-api-001",
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-feedback",
+        },
+    )
+
+
+def test_authority_curate_api_routes_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority curation API should mirror the CLI facade contract."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    repo.products.append(DummyProduct(product_id=10, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        "/api/projects/10/authority/curate",
+        json={
+            "spec_version_id": 3,
+            "source_authority_id": 99,
+            "expected_source_authority_fingerprint": "sha256:abc",
+            "feedback_attempt_id": "feedback-1",
+            "max_iterations": 2,
+            "compiler_model": "openrouter/openai/gpt-5.2",
+            "idempotency_key": "curate-api-001",
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-curate",
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["data"]["status"] == "authority_pending_review"
+    assert fake_app.calls[-1] == (
+        "authority_curate",
+        {
+            "project_id": 10,
+            "spec_version_id": 3,
+            "source_authority_id": 99,
+            "expected_source_authority_fingerprint": "sha256:abc",
+            "feedback_attempt_id": "feedback-1",
+            "idempotency_key": "curate-api-001",
+            "max_iterations": 2,
+            "compiler_model": "openrouter/openai/gpt-5.2",
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-curate",
         },
     )
 

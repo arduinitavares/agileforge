@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Engine
 
+    from services.agent_workbench.authority_curation import (
+        AuthorityCurationRequest,
+        AuthorityFeedbackRecordRequest,
+    )
     from services.agent_workbench.authority_decision import (
         AuthorityAcceptRequest,
         AuthorityRejectRequest,
@@ -160,6 +164,21 @@ class _AuthorityRegenerateRunner(Protocol):
 
     def regenerate(self, request: AuthorityRegenerateRequest) -> dict[str, Any]:
         """Regenerate authority for an approved spec version."""
+        ...
+
+
+class _AuthorityCurationRunner(Protocol):
+    """Authority curation methods exposed through the facade."""
+
+    def feedback_record(
+        self,
+        request: AuthorityFeedbackRecordRequest,
+    ) -> dict[str, Any]:
+        """Record structured feedback for pending authority."""
+        ...
+
+    def curate(self, request: AuthorityCurationRequest) -> dict[str, Any]:
+        """Run bounded authority curation."""
         ...
 
 
@@ -833,6 +852,7 @@ class AgentWorkbenchApplication:
         authority_review: _AuthorityReview | None = None,
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
         authority_regenerate_runner: _AuthorityRegenerateRunner | None = None,
+        authority_curation_runner: _AuthorityCurationRunner | None = None,
         scope_extension_runner: _ScopeExtensionRunner | None = None,
         vision_runner: _VisionPhaseRunner | None = None,
         backlog_runner: _BacklogPhaseRunner | None = None,
@@ -850,6 +870,7 @@ class AgentWorkbenchApplication:
         self._authority_review = authority_review
         self._authority_decision_runner = authority_decision_runner
         self._authority_regenerate_runner = authority_regenerate_runner
+        self._authority_curation_runner = authority_curation_runner
         self._scope_extension_runner = scope_extension_runner
         self._vision_runner = vision_runner
         self._backlog_runner = backlog_runner
@@ -1296,6 +1317,70 @@ class AgentWorkbenchApplication:
                 idempotency_key=idempotency_key,
                 changed_by=changed_by,
                 dry_run=dry_run,
+            )
+        )
+
+    def authority_feedback_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        pending_authority_id: int,
+        expected_authority_fingerprint: str,
+        feedback_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record structured feedback for pending authority."""
+        from services.agent_workbench.authority_curation import (  # noqa: PLC0415
+            AuthorityFeedbackRecordRequest,
+        )
+
+        return self._get_authority_curation_runner().feedback_record(
+            AuthorityFeedbackRecordRequest(
+                project_id=project_id,
+                pending_authority_id=pending_authority_id,
+                expected_authority_fingerprint=expected_authority_fingerprint,
+                feedback_file=feedback_file,
+                idempotency_key=idempotency_key,
+                changed_by=changed_by,
+                correlation_id=correlation_id,
+            )
+        )
+
+    def authority_curate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        source_authority_id: int,
+        expected_source_authority_fingerprint: str,
+        feedback_attempt_id: str,
+        idempotency_key: str,
+        max_iterations: int = 2,
+        compiler_model: str | None = None,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run bounded authority curation."""
+        from services.agent_workbench.authority_curation import (  # noqa: PLC0415
+            AuthorityCurationRequest,
+        )
+
+        return self._get_authority_curation_runner().curate(
+            AuthorityCurationRequest(
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                source_authority_id=source_authority_id,
+                expected_source_authority_fingerprint=(
+                    expected_source_authority_fingerprint
+                ),
+                feedback_attempt_id=feedback_attempt_id,
+                max_iterations=max_iterations,
+                compiler_model=compiler_model,
+                idempotency_key=idempotency_key,
+                changed_by=changed_by,
+                correlation_id=correlation_id,
             )
         )
 
@@ -2221,6 +2306,18 @@ class AgentWorkbenchApplication:
 
             self._authority_regenerate_runner = default_authority_regenerate_runner()
         return self._authority_regenerate_runner
+
+    def _get_authority_curation_runner(self) -> _AuthorityCurationRunner:
+        """Return the authority curation runner, constructing it lazily."""
+        if self._authority_curation_runner is None:
+            from services.agent_workbench.authority_curation import (  # noqa: PLC0415
+                AuthorityCurationRunner,
+            )
+
+            self._authority_curation_runner = AuthorityCurationRunner(
+                engine=get_engine()
+            )
+        return self._authority_curation_runner
 
     def _get_scope_extension_runner(self) -> _ScopeExtensionRunner:
         """Return the scope-extension runner, constructing the default lazily."""

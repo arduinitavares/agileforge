@@ -2,6 +2,7 @@
 
 from services.agent_workbench.command_registry import (
     CommandMetadata,
+    command_contracts,
     command_is_available,
     installed_command_names,
     installed_commands,
@@ -88,6 +89,8 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
 }
 
 EXPECTED_PHASE_2E_COMMAND_NAMES = {
+    "agileforge authority feedback record",
+    "agileforge authority curate",
     "agileforge spec profile schema",
     "agileforge spec profile validate",
 }
@@ -402,6 +405,60 @@ def test_authority_compile_is_registered_as_guarded_mutation() -> None:
     assert ErrorCode.WORKFLOW_SESSION_FAILED.value in schema["errors"]
     assert ErrorCode.STALE_STATE.value in schema["errors"]
     assert ErrorCode.MUTATION_IN_PROGRESS.value in schema["errors"]
+
+
+def test_authority_feedback_record_command_is_registered() -> None:
+    """Publish the authority feedback recording mutation contract."""
+    schema = command_schema_payload("agileforge authority feedback record")
+    metadata = {
+        command.name: command for command in command_contracts()
+    }["agileforge authority feedback record"]
+
+    assert schema["mutates"] is True
+    assert metadata.phase == "phase_2e"
+    assert schema["idempotency_required"] is True
+    assert schema["idempotency_policy"]["non_dry_run"] == "required"
+    assert schema["input"]["required"] == [
+        "project_id",
+        "pending_authority_id",
+        "expected_authority_fingerprint",
+        "feedback_file",
+        "idempotency_key",
+    ]
+    assert schema["input"]["optional"] == ["changed_by", "correlation_id"]
+    assert ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID.value in schema["errors"]
+    assert ErrorCode.AUTHORITY_FEEDBACK_TARGET_NOT_FOUND.value in schema["errors"]
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in schema["errors"]
+
+
+def test_authority_curate_command_is_registered() -> None:
+    """Publish the authority curation mutation contract."""
+    schema = command_schema_payload("agileforge authority curate")
+    metadata = {
+        command.name: command for command in command_contracts()
+    }["agileforge authority curate"]
+
+    assert schema["mutates"] is True
+    assert metadata.phase == "phase_2e"
+    assert schema["idempotency_required"] is True
+    assert schema["idempotency_policy"]["non_dry_run"] == "required"
+    assert schema["input"]["required"] == [
+        "project_id",
+        "spec_version_id",
+        "source_authority_id",
+        "expected_source_authority_fingerprint",
+        "feedback_attempt_id",
+        "idempotency_key",
+    ]
+    assert schema["input"]["optional"] == [
+        "max_iterations",
+        "compiler_model",
+        "changed_by",
+        "correlation_id",
+    ]
+    assert ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED.value in schema["errors"]
+    assert ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS.value in schema["errors"]
+    assert ErrorCode.MUTATION_RECOVERY_REQUIRED.value in schema["errors"]
 
 
 def test_authority_accept_is_registered_as_guarded_mutation() -> None:

@@ -218,6 +218,80 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def authority_feedback_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        pending_authority_id: int,
+        expected_authority_fingerprint: str,
+        feedback_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> JsonObject:
+        """Return an authority feedback record payload."""
+        self.calls.append(
+            (
+                "authority_feedback_record",
+                {
+                    "project_id": project_id,
+                    "pending_authority_id": pending_authority_id,
+                    "expected_authority_fingerprint": expected_authority_fingerprint,
+                    "feedback_file": feedback_file,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "correlation_id": correlation_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "feedback_attempt_id": "feedback-1"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def authority_curate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        source_authority_id: int,
+        expected_source_authority_fingerprint: str,
+        feedback_attempt_id: str,
+        idempotency_key: str,
+        max_iterations: int = 2,
+        compiler_model: str | None = None,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> JsonObject:
+        """Return an authority curate payload."""
+        self.calls.append(
+            (
+                "authority_curate",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "source_authority_id": source_authority_id,
+                    "expected_source_authority_fingerprint": (
+                        expected_source_authority_fingerprint
+                    ),
+                    "feedback_attempt_id": feedback_attempt_id,
+                    "idempotency_key": idempotency_key,
+                    "max_iterations": max_iterations,
+                    "compiler_model": compiler_model,
+                    "changed_by": changed_by,
+                    "correlation_id": correlation_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "authority_pending_review"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def workflow_state(self, *, project_id: int) -> JsonObject:
         """Return a workflow state payload."""
         self.calls.append(("workflow_state", {"project_id": project_id}))
@@ -2467,6 +2541,165 @@ def test_cli_rejects_authority_compile_dry_run_with_idempotency_key(
     assert _mapping(payload["meta"])["command"] == "agileforge authority compile"
     assert _first_mapping(payload["errors"])["code"] == "INVALID_COMMAND"
     assert app.calls == []
+
+
+def test_authority_feedback_record_requires_feedback_file(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify argparse rejects authority feedback record without feedback file."""
+    result = main(
+        [
+            "authority",
+            "feedback",
+            "record",
+            "--project-id",
+            "1",
+            "--pending-authority-id",
+            "6",
+            "--expected-authority-fingerprint",
+            "sha256:abc",
+            "--idempotency-key",
+            "feedback-001",
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    assert result == INVALID_COMMAND_EXIT_CODE
+    assert "--feedback-file" in str(_first_mapping(payload["errors"])["message"])
+
+
+def test_authority_curate_requires_feedback_attempt_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify argparse rejects authority curate without feedback attempt id."""
+    result = main(
+        [
+            "authority",
+            "curate",
+            "--project-id",
+            "1",
+            "--spec-version-id",
+            "4",
+            "--source-authority-id",
+            "6",
+            "--expected-source-authority-fingerprint",
+            "sha256:abc",
+            "--idempotency-key",
+            "curate-001",
+        ],
+        application=_FakeApplication(),
+    )
+
+    payload = _stdout_payload(capsys)
+    assert result == INVALID_COMMAND_EXIT_CODE
+    assert "--feedback-attempt-id" in str(_first_mapping(payload["errors"])["message"])
+
+
+def test_cli_routes_authority_feedback_record_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority feedback record routes all args to the application."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "feedback",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--pending-authority-id",
+            "99",
+            "--expected-authority-fingerprint",
+            "sha256:abc",
+            "--feedback-file",
+            "authority-feedback.json",
+            "--idempotency-key",
+            "feedback-cli-001",
+            "--changed-by",
+            "test-agent",
+            "--correlation-id",
+            "corr-feedback",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge authority feedback record"
+    )
+    assert app.calls == [
+        (
+            "authority_feedback_record",
+            {
+                "project_id": PROJECT_ID,
+                "pending_authority_id": 99,
+                "expected_authority_fingerprint": "sha256:abc",
+                "feedback_file": "authority-feedback.json",
+                "idempotency_key": "feedback-cli-001",
+                "changed_by": "test-agent",
+                "correlation_id": "corr-feedback",
+            },
+        )
+    ]
+
+
+def test_cli_routes_authority_curate_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify authority curate routes all args to the application."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "curate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            str(SPEC_VERSION_ID),
+            "--source-authority-id",
+            "99",
+            "--expected-source-authority-fingerprint",
+            "sha256:abc",
+            "--feedback-attempt-id",
+            "feedback-1",
+            "--max-iterations",
+            "2",
+            "--compiler-model",
+            "openrouter/openai/gpt-5.2",
+            "--idempotency-key",
+            "curate-cli-001",
+            "--changed-by",
+            "test-agent",
+            "--correlation-id",
+            "corr-curate",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge authority curate"
+    assert app.calls == [
+        (
+            "authority_curate",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": SPEC_VERSION_ID,
+                "source_authority_id": 99,
+                "expected_source_authority_fingerprint": "sha256:abc",
+                "feedback_attempt_id": "feedback-1",
+                "idempotency_key": "curate-cli-001",
+                "max_iterations": 2,
+                "compiler_model": "openrouter/openai/gpt-5.2",
+                "changed_by": "test-agent",
+                "correlation_id": "corr-curate",
+            },
+        )
+    ]
 
 
 def test_cli_routes_authority_status(

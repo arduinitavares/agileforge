@@ -348,6 +348,35 @@ class AuthorityCompileApiRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128)
 
 
+class AuthorityFeedbackRecordApiRequest(BaseModel):
+    """Request body for structured authority feedback recording."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pending_authority_id: int
+    expected_authority_fingerprint: str = Field(min_length=1)
+    feedback_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = Field(default="dashboard-ui", min_length=1)
+    correlation_id: str | None = Field(default=None, min_length=1)
+
+
+class AuthorityCurateApiRequest(BaseModel):
+    """Request body for bounded authority curation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec_version_id: int
+    source_authority_id: int
+    expected_source_authority_fingerprint: str = Field(min_length=1)
+    feedback_attempt_id: str = Field(min_length=1)
+    max_iterations: int = Field(default=2, ge=1, le=2)
+    compiler_model: str | None = Field(default=None, min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = Field(default="dashboard-ui", min_length=1)
+    correlation_id: str | None = Field(default=None, min_length=1)
+
+
 class ScopeExtensionValidateApiRequest(BaseModel):
     """Request body for validating an amended project-scope spec."""
 
@@ -2705,6 +2734,55 @@ async def compile_project_authority(
         changed_by="dashboard-ui",
     )
 
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/authority/feedback")
+async def record_project_authority_feedback(
+    project_id: int,
+    req: AuthorityFeedbackRecordApiRequest,
+) -> dict[str, Any]:
+    """Record structured authority feedback through the application service."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().authority_feedback_record(
+        project_id=project_id,
+        pending_authority_id=req.pending_authority_id,
+        expected_authority_fingerprint=req.expected_authority_fingerprint,
+        feedback_file=req.feedback_file,
+        idempotency_key=req.idempotency_key,
+        changed_by=req.changed_by,
+        correlation_id=req.correlation_id,
+    )
+    return _dashboard_authority_response(result)
+
+
+@app.post("/api/projects/{project_id}/authority/curate")
+async def curate_project_authority(
+    project_id: int,
+    req: AuthorityCurateApiRequest,
+) -> dict[str, Any]:
+    """Run bounded authority curation through the application service."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = _workbench_application().authority_curate(
+        project_id=project_id,
+        spec_version_id=req.spec_version_id,
+        source_authority_id=req.source_authority_id,
+        expected_source_authority_fingerprint=(
+            req.expected_source_authority_fingerprint
+        ),
+        feedback_attempt_id=req.feedback_attempt_id,
+        max_iterations=req.max_iterations,
+        compiler_model=req.compiler_model,
+        idempotency_key=req.idempotency_key,
+        changed_by=req.changed_by,
+        correlation_id=req.correlation_id,
+    )
     return _dashboard_authority_response(result)
 
 

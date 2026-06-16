@@ -315,6 +315,37 @@ class _Application(Protocol):
         """Regenerate compiled authority for an approved spec version."""
         ...
 
+    def authority_feedback_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        pending_authority_id: int,
+        expected_authority_fingerprint: str,
+        feedback_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> JsonObject:
+        """Record structured feedback for pending authority."""
+        ...
+
+    def authority_curate(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        source_authority_id: int,
+        expected_source_authority_fingerprint: str,
+        feedback_attempt_id: str,
+        idempotency_key: str,
+        max_iterations: int = 2,
+        compiler_model: str | None = None,
+        changed_by: str = "cli-agent",
+        correlation_id: str | None = None,
+    ) -> JsonObject:
+        """Run bounded authority curation."""
+        ...
+
     def vision_generate(
         self,
         *,
@@ -1407,6 +1438,54 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_regenerate.add_argument("--changed-by", default="cli-agent")
     authority_regenerate.add_argument("--dry-run", action="store_true")
     authority_regenerate.set_defaults(command_handler=_authority_regenerate)
+    authority_feedback = authority_sub.add_parser(
+        "feedback",
+        help="Record structured feedback for pending authority.",
+    )
+    authority_feedback_sub = authority_feedback.add_subparsers(
+        dest="feedback_command",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    authority_feedback_record = authority_feedback_sub.add_parser(
+        "record",
+        help="Record structured feedback for pending authority.",
+    )
+    authority_feedback_record.add_argument("--project-id", type=int, required=True)
+    authority_feedback_record.add_argument(
+        "--pending-authority-id",
+        type=int,
+        required=True,
+    )
+    authority_feedback_record.add_argument(
+        "--expected-authority-fingerprint",
+        required=True,
+    )
+    authority_feedback_record.add_argument("--feedback-file", required=True)
+    authority_feedback_record.add_argument("--idempotency-key", required=True)
+    authority_feedback_record.add_argument("--changed-by", default="cli-agent")
+    authority_feedback_record.add_argument("--correlation-id")
+    authority_feedback_record.set_defaults(
+        command_handler=_authority_feedback_record
+    )
+    authority_curate = authority_sub.add_parser(
+        "curate",
+        help="Run bounded authority curation.",
+    )
+    authority_curate.add_argument("--project-id", type=int, required=True)
+    authority_curate.add_argument("--spec-version-id", type=int, required=True)
+    authority_curate.add_argument("--source-authority-id", type=int, required=True)
+    authority_curate.add_argument(
+        "--expected-source-authority-fingerprint",
+        required=True,
+    )
+    authority_curate.add_argument("--feedback-attempt-id", required=True)
+    authority_curate.add_argument("--max-iterations", type=int, default=2)
+    authority_curate.add_argument("--compiler-model")
+    authority_curate.add_argument("--idempotency-key", required=True)
+    authority_curate.add_argument("--changed-by", default="cli-agent")
+    authority_curate.add_argument("--correlation-id")
+    authority_curate.set_defaults(command_handler=_authority_curate)
 
     vision = subparsers.add_parser("vision", help="Run Vision phase commands.")
     vision_sub = vision.add_subparsers(
@@ -2479,6 +2558,49 @@ def _authority_regenerate(
         idempotency_key=args.idempotency_key,
         changed_by=args.changed_by,
         dry_run=args.dry_run,
+    )
+
+
+def _authority_feedback_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority feedback recording to the application facade."""
+    return (
+        "agileforge authority feedback record",
+        application.authority_feedback_record(
+            project_id=args.project_id,
+            pending_authority_id=args.pending_authority_id,
+            expected_authority_fingerprint=args.expected_authority_fingerprint,
+            feedback_file=args.feedback_file,
+            idempotency_key=args.idempotency_key,
+            changed_by=args.changed_by,
+            correlation_id=args.correlation_id,
+        ),
+    )
+
+
+def _authority_curate(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority curation to the application facade."""
+    return (
+        "agileforge authority curate",
+        application.authority_curate(
+            project_id=args.project_id,
+            spec_version_id=args.spec_version_id,
+            source_authority_id=args.source_authority_id,
+            expected_source_authority_fingerprint=(
+                args.expected_source_authority_fingerprint
+            ),
+            feedback_attempt_id=args.feedback_attempt_id,
+            max_iterations=args.max_iterations,
+            compiler_model=args.compiler_model,
+            idempotency_key=args.idempotency_key,
+            changed_by=args.changed_by,
+            correlation_id=args.correlation_id,
+        ),
     )
 
 

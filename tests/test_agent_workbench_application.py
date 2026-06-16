@@ -18,6 +18,10 @@ from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
 from services.agent_workbench.application import AgentWorkbenchApplication
+from services.agent_workbench.authority_curation import (
+    AuthorityCurationRequest,
+    AuthorityFeedbackRecordRequest,
+)
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
@@ -1319,6 +1323,42 @@ class _FakeAuthorityRegenerateRunner:
         }
 
 
+class _FakeAuthorityCurationRunner:
+    """Fake authority curation runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def feedback_record(
+        self,
+        request: AuthorityFeedbackRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a feedback request."""
+        self.calls.append(("feedback_record", request))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "feedback_attempt_id": "feedback-1",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def curate(self, request: AuthorityCurationRequest) -> dict[str, Any]:
+        """Record a curation request."""
+        self.calls.append(("curate", request))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "status": "authority_pending_review",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
 class _FakeScopeExtensionRunner:
     """Fake scope-extension runner used to verify facade delegation and routing."""
 
@@ -2540,6 +2580,76 @@ def test_application_authority_regenerate_delegates_to_runner() -> None:
             changed_by="test",
             dry_run=True,
             compiler_model="openrouter/openai/gpt-5.2",
+        )
+    ]
+
+
+def test_application_authority_feedback_record_delegates_to_runner() -> None:
+    """Verify authority feedback recording builds the runner request model."""
+    runner = _FakeAuthorityCurationRunner()
+    app = AgentWorkbenchApplication(authority_curation_runner=runner)
+
+    result = app.authority_feedback_record(
+        project_id=PROJECT_ID,
+        pending_authority_id=99,
+        expected_authority_fingerprint=AUTHORITY_FINGERPRINT,
+        feedback_file="authority-feedback.json",
+        idempotency_key="feedback-app-001",
+        changed_by="test",
+        correlation_id="corr-feedback",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls == [
+        (
+            "feedback_record",
+            AuthorityFeedbackRecordRequest(
+                project_id=PROJECT_ID,
+                pending_authority_id=99,
+                expected_authority_fingerprint=AUTHORITY_FINGERPRINT,
+                feedback_file="authority-feedback.json",
+                idempotency_key="feedback-app-001",
+                changed_by="test",
+                correlation_id="corr-feedback",
+            ),
+        )
+    ]
+
+
+def test_application_authority_curate_delegates_to_runner() -> None:
+    """Verify authority curation builds the runner request model."""
+    runner = _FakeAuthorityCurationRunner()
+    app = AgentWorkbenchApplication(authority_curation_runner=runner)
+
+    result = app.authority_curate(
+        project_id=PROJECT_ID,
+        spec_version_id=SPEC_VERSION_ID,
+        source_authority_id=99,
+        expected_source_authority_fingerprint=AUTHORITY_FINGERPRINT,
+        feedback_attempt_id="feedback-1",
+        idempotency_key="curate-app-001",
+        max_iterations=2,
+        compiler_model="openrouter/openai/gpt-5.2",
+        changed_by="test",
+        correlation_id="corr-curate",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls == [
+        (
+            "curate",
+            AuthorityCurationRequest(
+                project_id=PROJECT_ID,
+                spec_version_id=SPEC_VERSION_ID,
+                source_authority_id=99,
+                expected_source_authority_fingerprint=AUTHORITY_FINGERPRINT,
+                feedback_attempt_id="feedback-1",
+                max_iterations=2,
+                compiler_model="openrouter/openai/gpt-5.2",
+                idempotency_key="curate-app-001",
+                changed_by="test",
+                correlation_id="corr-curate",
+            ),
         )
     ]
 
@@ -5424,7 +5534,6 @@ def test_workflow_next_prefers_authority_curate_after_feedback() -> None:
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == []
     command = result["data"]["next_actions"][0]["command"]
     assert command == (
         f"agileforge authority curate --project-id {PROJECT_ID} "
@@ -5434,19 +5543,11 @@ def test_workflow_next_prefers_authority_curate_after_feedback() -> None:
         "--feedback-attempt-id feedback-123 "
         "--idempotency-key <idempotency_key>"
     )
+    assert result["data"]["next_valid_commands"] == [command]
     assert "authority regenerate" not in command
-    assert result["data"]["next_actions"][0]["installed"] is False
-    assert result["data"]["next_actions"][0]["requires_cli_installation"] is True
-    assert result["data"]["blocked_future_commands"] == [
-        {
-            "command": command,
-            "installed": False,
-            "reason": (
-                "Authority curation is the preferred repair path, but the CLI "
-                "command is not installed yet."
-            ),
-        }
-    ]
+    assert result["data"]["next_actions"][0]["installed"] is True
+    assert result["data"]["next_actions"][0]["requires_cli_installation"] is False
+    assert result["data"]["blocked_future_commands"] == []
 
 
 def test_workflow_next_routes_regenerated_rejected_authority_to_review() -> None:
