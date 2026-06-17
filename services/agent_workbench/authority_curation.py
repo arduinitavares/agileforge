@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from models.agent_workbench import CliMutationLedger
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
+from models.db import ensure_business_db_ready
 from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
@@ -298,6 +299,7 @@ class AuthorityCurationRunner:
     ) -> None:
         """Initialize the curation runner."""
         self._engine = engine
+        ensure_business_db_ready(engine_override=engine)
         self._workflow = workflow or SyncAuthorityCurationWorkflowAdapter()
 
     def curate(self, request: AuthorityCurationRequest) -> dict[str, Any]:
