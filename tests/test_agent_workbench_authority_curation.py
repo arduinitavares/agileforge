@@ -4333,6 +4333,105 @@ def test_authority_curate_v2_passes_repair_menu_to_workflow(
     assert "patches" not in repair_menu[0]
 
 
+def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broad authority feedback should mint handles for named ASM/INV targets."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-authority-asm",
+                        "target_kind": "authority_candidate",
+                        "target_id": f"authority:{fixture.authority_id}",
+                        "issue_type": "invalid_assumption",
+                        "severity": "blocking",
+                        "instruction": "Fix only ASM-curation-1.",
+                    },
+                    {
+                        "feedback_id": "AFB-authority-inv",
+                        "target_kind": "authority_candidate",
+                        "target_id": f"authority:{fixture.authority_id}",
+                        "issue_type": "brittle_wording",
+                        "severity": "blocking",
+                        "instruction": "Fix only INV-curation-1.",
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    captured: dict[str, object] = {}
+
+    def fake_workflow(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {
+                "repairs": [
+                    {
+                        "feedback_id": "AFB-authority-asm",
+                        "target_handle": "R1",
+                        "repair_kind": "replace_text",
+                        "replacement_text": (
+                            "Report contexts are required examples, not "
+                            "exhaustive."
+                        ),
+                    },
+                    {
+                        "feedback_id": "AFB-authority-inv",
+                        "target_handle": "R2",
+                        "repair_kind": "replace_text",
+                        "replacement_text": (
+                            "Review packets include qualified guard evidence."
+                        ),
+                    },
+                ]
+            },
+            "quality_report": {"status": "passed"},
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_workflow,
+    )
+    fake_workflow_port = FakeWorkflowPort()
+    fake_workflow_port.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow_port)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-authority-candidate-menu",
+        )
+    )
+
+    assert result["ok"] is True
+    inputs = cast("curation_mod._CurationWorkflowInputs", captured["inputs"])
+    repair_menu = cast("list[dict[str, object]]", inputs.repair_menu)
+    assert [
+        (item["handle"], item["feedback_id"], item["target_kind"], item["target_id"])
+        for item in repair_menu
+    ] == [
+        ("R1", "AFB-authority-asm", "assumption", "ASM-curation-1"),
+        ("R2", "AFB-authority-inv", "invariant", "INV-curation-1"),
+    ]
+
+
 def test_authority_curate_kill_switch_returns_fail_no_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,

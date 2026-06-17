@@ -3712,14 +3712,47 @@ def _build_repair_menu(
 
     menu: list[dict[str, Any]] = []
     for item in feedback_items:
-        menu_item = _repair_menu_item_from_feedback(
+        menu_items = _repair_menu_items_from_feedback(
             source_authority_json=source_authority_json,
             feedback_item=item,
-            handle=f"R{len(menu) + 1}",
+            first_handle_index=len(menu) + 1,
         )
-        if menu_item is not None:
-            menu.append(menu_item)
+        menu.extend(menu_items)
     return menu
+
+
+def _repair_menu_items_from_feedback(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_item: object,
+    first_handle_index: int,
+) -> list[dict[str, Any]]:
+    """Return host-minted repair menu entries for direct or derived targets."""
+    menu_item = _repair_menu_item_from_feedback(
+        source_authority_json=source_authority_json,
+        feedback_item=feedback_item,
+        handle=f"R{first_handle_index}",
+    )
+    if menu_item is not None:
+        return [menu_item]
+    if not isinstance(feedback_item, dict):
+        return []
+
+    menu_items: list[dict[str, Any]] = []
+    for target_kind, target_id in sorted(
+        _concrete_patch_targets_from_feedback_item(feedback_item)
+    ):
+        derived_feedback_item = dict(feedback_item)
+        derived_feedback_item["target_kind"] = target_kind
+        derived_feedback_item["target_id"] = target_id
+        derived_menu_item = _repair_menu_item_from_feedback(
+            source_authority_json=source_authority_json,
+            feedback_item=derived_feedback_item,
+            handle=f"R{first_handle_index + len(menu_items)}",
+        )
+        if derived_menu_item is not None:
+            menu_items.append(derived_menu_item)
+    return menu_items
 
 
 def _repair_menu_item_from_feedback(
@@ -4129,18 +4162,58 @@ def _targeted_source_item_ids(
     for item in feedback_items:
         if not isinstance(item, dict):
             continue
-        source_item_id = item.get("source_item_id")
-        if isinstance(source_item_id, str):
-            targeted.add(source_item_id)
-        target_id = item.get("target_id")
-        if not isinstance(target_id, str):
-            continue
-        if item.get("target_kind") == "source_item":
-            targeted.add(target_id)
-        mapped_source_item_id = invariant_source_items.get(target_id)
-        if item.get("target_kind") == "invariant" and mapped_source_item_id is not None:
-            targeted.add(mapped_source_item_id)
+        _add_targeted_source_item_ids_from_feedback_item(
+            targeted=targeted,
+            invariant_source_items=invariant_source_items,
+            feedback_item=item,
+        )
     return targeted
+
+
+def _add_targeted_source_item_ids_from_feedback_item(
+    *,
+    targeted: set[str],
+    invariant_source_items: dict[str, str],
+    feedback_item: dict[Any, Any],
+) -> None:
+    """Add source item ids implied by one structured feedback item."""
+    source_item_id = feedback_item.get("source_item_id")
+    if isinstance(source_item_id, str):
+        targeted.add(source_item_id)
+    target_id = feedback_item.get("target_id")
+    if isinstance(target_id, str):
+        if feedback_item.get("target_kind") == "source_item":
+            targeted.add(target_id)
+        _add_mapped_invariant_source_item(
+            targeted=targeted,
+            invariant_source_items=invariant_source_items,
+            target_kind=_string_or_none(feedback_item.get("target_kind")),
+            target_id=target_id,
+        )
+    for concrete_kind, concrete_id in _concrete_patch_targets_from_feedback_item(
+        feedback_item
+    ):
+        _add_mapped_invariant_source_item(
+            targeted=targeted,
+            invariant_source_items=invariant_source_items,
+            target_kind=concrete_kind,
+            target_id=concrete_id,
+        )
+
+
+def _add_mapped_invariant_source_item(
+    *,
+    targeted: set[str],
+    invariant_source_items: dict[str, str],
+    target_kind: str | None,
+    target_id: str,
+) -> None:
+    """Add an invariant's source item id when feedback targets the invariant."""
+    if target_kind != "invariant":
+        return
+    mapped_source_item_id = invariant_source_items.get(target_id)
+    if mapped_source_item_id is not None:
+        targeted.add(mapped_source_item_id)
 
 
 def _targeted_collection_keys(*, feedback_json: str) -> dict[str, set[str]]:
