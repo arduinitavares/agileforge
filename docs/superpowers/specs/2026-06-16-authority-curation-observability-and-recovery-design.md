@@ -11,6 +11,9 @@
 - 2026-06-16: Drafted after a real ASA `authority curate` run returned
   `MUTATION_RECOVERY_REQUIRED` with `STALE_PENDING`, no curation attempt id, no
   model information, no diff, and no durable step timeline.
+- 2026-06-16: Amended after design review to pin the recovery command,
+  attempt-to-mutation linkage, trace step names, trace error schema, and trace
+  inspection guard behavior.
 
 ## Summary
 
@@ -223,6 +226,57 @@ Each event has this bounded schema:
 }
 ```
 
+### Step Names
+
+Trace step names are a fixed string enum. Implementations must use these exact
+values:
+
+```text
+mutation_lease_acquired
+guard_validation_started
+guard_validation_completed
+guard_validation_failed
+curation_attempt_create_started
+curation_attempt_create_completed
+curation_attempt_create_failed
+workflow_curating_status_started
+workflow_curating_status_completed
+workflow_curating_status_failed
+input_load_started
+input_load_completed
+input_load_failed
+adk_invocation_started
+adk_invocation_completed
+adk_invocation_failed
+adk_gate_parse_started
+adk_gate_parse_completed
+adk_gate_parse_failed
+diff_validation_started
+diff_validation_completed
+diff_validation_failed
+candidate_publication_started
+candidate_publication_completed
+candidate_publication_failed
+workflow_pending_review_started
+workflow_pending_review_completed
+workflow_pending_review_failed
+mutation_finalize_started
+mutation_finalize_completed
+mutation_finalize_failed
+recovery_classification_started
+recovery_classification_completed
+recovery_classification_failed
+```
+
+`status` is also constrained:
+
+```text
+started
+completed
+failed
+skipped
+```
+
 Rules:
 
 - `schema_version`, `trace_artifact_id`, `mutation_event_id`, `project_id`,
@@ -234,6 +288,33 @@ Rules:
 - No raw prompt, full source authority JSON, full feedback JSON, full candidate
   JSON, API keys, tokens, or personal contact data may appear in default traces.
 - Large values are represented by fingerprints, counts, ids, and artifact ids.
+
+### Error Object
+
+`error` is either null or this object:
+
+```json
+{
+  "code": "SPEC_COMPILE_FAILED",
+  "message": "Authority curation ADK workflow failed.",
+  "retryable": false,
+  "failure_artifact_id": "authority_curation-...",
+  "details": {
+    "failure_stage": "adk_invocation_failed",
+    "validation_error_count": 2
+  }
+}
+```
+
+Rules:
+
+- `code` and `message` are required strings.
+- `retryable` is a required boolean.
+- `failure_artifact_id` is optional and null when no failure artifact exists.
+- `details` is optional, bounded, and allowlisted. It may contain ids, counts,
+  hashes, step names, and short enum-like reasons. It must not contain raw
+  prompt, feedback, source authority, candidate authority, request headers, API
+  keys, or full model output.
 
 ## ADK Activity Logging Contract
 
@@ -317,9 +398,14 @@ Add a read-only command:
 
 ```bash
 agileforge authority curation trace \
-  --project-id 3 \
-  --mutation-event-id 647
+  --mutation-event-id 647 \
+  --project-id 3
 ```
+
+`--mutation-event-id` is required and globally identifies the mutation.
+`--project-id` is optional. When supplied, the command validates that the
+mutation ledger row belongs to that project before reading the trace. When
+omitted, the command reads by mutation id alone.
 
 Default output is bounded:
 
@@ -352,6 +438,46 @@ evidence:
 If the trace and DB prove no candidate was published, the user should not be
 stuck with an unrecoverable expired lease.
 
+### Recovery Command
+
+When curation published a candidate authority row but failed before workflow or
+ledger finalization, the next command must be explicit and must not rerun ADK:
+
+```bash
+agileforge authority curate \
+  --project-id 3 \
+  --recovery-mutation-event-id 647 \
+  --expected-candidate-authority-id 7 \
+  --expected-candidate-authority-fingerprint sha256:... \
+  --idempotency-key recover-authority-curation-647-001
+```
+
+Recovery mode is mutually exclusive with normal curation inputs such as
+`--spec-version-id`, `--source-authority-id`,
+`--expected-source-authority-fingerprint`, and `--feedback-attempt-id`. The
+runner loads those values from the original mutation/attempt records.
+
+Recovery behavior:
+
+1. Create a new mutation ledger row with `recovers_mutation_event_id=647`.
+2. Verify the original ledger row exists, belongs to the project, has
+   `command="agileforge authority curate"`, and is `recovery_required`.
+3. Verify the original curation attempt and trace artifact agree on the recovery
+   stage.
+4. Verify the candidate authority row exists and its fingerprint matches the
+   expected candidate fingerprint.
+5. Update any missing curation attempt success metadata that can be recovered
+   from persisted candidate, trace, and failure-response metadata.
+6. Set workflow state to `authority_pending_review` with the recovered candidate
+   id and fingerprint.
+7. Finalize the recovery mutation as successful.
+8. Mark the original ledger row superseded by the recovery mutation.
+
+Recovery mode must fail closed if the candidate row is missing, the fingerprint
+does not match, the original command is not `authority curate`, the original
+row is not `recovery_required`, or the trace proves the failure happened before
+candidate publication.
+
 ## Storage And Files
 
 Add one small utility module:
@@ -373,6 +499,19 @@ No new SQL table is needed in v1. Existing ids are sufficient:
 - `AuthorityCurationAttempt.curation_attempt_id`;
 - `AuthorityCurationAttempt.failure_artifact_id`;
 - deterministic trace artifact path.
+
+Add one direct link to the existing curation attempt table:
+
+```text
+AuthorityCurationAttempt.mutation_event_id
+```
+
+This is not a new table. The runner already knows the mutation event id before
+creating the attempt row, so new attempts must store it directly. Projection
+code should use this column to resolve `trace_artifact_id`. For historical rows
+created before the column exists or before it is populated, projection may
+fallback to `CliMutationLedger` lookup by
+`command="agileforge authority curate"` plus the attempt's `idempotency_key`.
 
 If later dashboards need queryable per-step history, add a table then. Do not
 add one speculatively.
