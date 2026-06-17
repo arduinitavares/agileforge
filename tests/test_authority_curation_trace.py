@@ -151,6 +151,49 @@ def test_trace_drops_arbitrary_hash_like_attributes(
     assert "model output" not in payload
 
 
+def test_authority_curation_trace_records_rejected_selection_vector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejected v2 repair selections keep debug vectors without raw text."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+
+    append_trace_event(
+        mutation_event_id=660,
+        project_id=3,
+        step="repair_selection_rejected",
+        status="failed",
+        curation_attempt_id="curation-1",
+        attributes={
+            "feedback_id": "AFB-1",
+            "target_handle": "R1",
+            "target_kind": "assumption",
+            "target_id": "ASM-11",
+            "target_field": "text",
+            "repair_kind": "replace_text",
+            "reject_reason": "target_handle_unknown",
+            "requested_model_id": "openrouter/deepseek/deepseek-v4-pro",
+            "selection_fingerprint": "sha256:" + ("a" * 64),
+            "replacement_text": "must-not-appear",
+        },
+    )
+
+    payload = trace_artifact_path(660).read_text(encoding="utf-8")
+    event = json.loads(payload)
+    assert event["attributes"] == {
+        "feedback_id": "AFB-1",
+        "target_handle": "R1",
+        "target_kind": "assumption",
+        "target_id": "ASM-11",
+        "target_field": "text",
+        "repair_kind": "replace_text",
+        "reject_reason": "target_handle_unknown",
+        "requested_model_id": "openrouter/deepseek/deepseek-v4-pro",
+        "selection_fingerprint": "sha256:" + ("a" * 64),
+    }
+    assert "must-not-appear" not in payload
+
+
 def test_trace_step_records_completed_and_failed_events(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2147,6 +2147,16 @@ def test_authority_curate_applies_v2_repair_selection_deterministically(
     )
     with Session(engine) as session:
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.contract_version == "authority_curation.v2"
+    assert attempt.menu_fingerprint is not None
+    assert attempt.menu_fingerprint.startswith("sha256:")
+    assert attempt.selection_fingerprint is not None
+    assert attempt.selection_fingerprint.startswith("sha256:")
+    assert json.loads(attempt.rejected_selection_json) == {}
+    assert json.loads(attempt.overlay_json) == {
+        "target_handles": ["R1"],
+        "target_keys": ["SRC-curation-1:invariant:text:0"],
+    }
     assert json.loads(attempt.candidate_lineage_json)["contract_version"] == (
         "authority_curation.v2"
     )
@@ -2192,8 +2202,10 @@ def test_authority_curate_rejects_v2_full_candidate_output(
 def test_authority_curate_rejects_v2_unknown_repair_handle(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """V2 curation can select only handles minted in the host repair menu."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -2225,6 +2237,19 @@ def test_authority_curate_rejects_v2_unknown_repair_handle(
     assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
     assert result["errors"][0]["details"]["reason"] == "unknown_repair_handle"
     assert result["errors"][0]["details"]["repair_index"] == 0
+    with Session(engine) as session:
+        ledger = session.exec(select(CliMutationLedger)).one()
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    rejected_events = [
+        event for event in events if event["step"] == "repair_selection_rejected"
+    ]
+    assert len(rejected_events) == 1
+    assert rejected_events[0]["attributes"]["reject_reason"] == (
+        "unknown_repair_handle"
+    )
+    assert "Unknown handles must fail." not in json.dumps(rejected_events[0])
 
 
 def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedback(

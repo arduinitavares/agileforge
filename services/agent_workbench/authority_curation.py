@@ -291,6 +291,7 @@ class _ValidatedCurationCandidate:
     diff: dict[str, Any]
     quality_report: object
     candidate_lineage: object
+    attempt_metadata: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -1483,6 +1484,9 @@ class AuthorityCurationRunner:
                 workflow_result=workflow_result,
                 diff=diff,
             ),
+            attempt_metadata=_curation_attempt_metadata_from_workflow_result(
+                workflow_result
+            ),
         )
 
     def _publish_validated_curation_candidate(
@@ -2134,7 +2138,30 @@ def _apply_succeeded_curation_attempt(
     row.lineage_json = _canonical_json(validated.diff["lineage_json"])
     row.quality_report_json = _canonical_json(validated.quality_report)
     row.candidate_lineage_json = _canonical_json(validated.candidate_lineage)
+    _apply_curation_attempt_metadata(row, validated.attempt_metadata)
     row.updated_at = datetime.now(UTC)
+
+
+def _apply_curation_attempt_metadata(
+    row: AuthorityCurationAttempt,
+    metadata: dict[str, object],
+) -> None:
+    """Persist allowlisted curation metadata on an attempt row."""
+    contract_version = _string_or_none(metadata.get("contract_version"))
+    if contract_version is not None:
+        row.contract_version = contract_version
+    menu_fingerprint = _string_or_none(metadata.get("menu_fingerprint"))
+    if menu_fingerprint is not None:
+        row.menu_fingerprint = menu_fingerprint
+    selection_fingerprint = _string_or_none(metadata.get("selection_fingerprint"))
+    if selection_fingerprint is not None:
+        row.selection_fingerprint = selection_fingerprint
+    rejected_selection_json = metadata.get("rejected_selection_json")
+    if isinstance(rejected_selection_json, dict):
+        row.rejected_selection_json = _canonical_json(rejected_selection_json)
+    overlay_json = metadata.get("overlay_json")
+    if isinstance(overlay_json, dict):
+        row.overlay_json = _canonical_json(overlay_json)
 
 
 def _required_curation_attempt_for_publication(
@@ -2878,6 +2905,12 @@ def _candidate_authority_from_v2_selection(
             context=context,
             reason="selection_payload_missing",
         )
+    workflow_result["_repair_menu_fingerprint"] = _fingerprint_json(repair_menu)
+    workflow_result["_selection_fingerprint"] = _fingerprint_json(selection_payload)
+    workflow_result["_overlay_json"] = _overlay_json_from_selection_payload(
+        repair_menu=repair_menu,
+        selection_payload=selection_payload,
+    )
     return _apply_repair_selections(
         context=context,
         source_authority_json=loaded.source_authority_json,
@@ -2952,6 +2985,11 @@ def _authority_repair_intent_invalid_response(
     details: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Return fail-closed response for invalid v2 repair-menu output."""
+    _append_repair_selection_rejected_trace(
+        context=context,
+        reason=reason,
+        details=details,
+    )
     response_details: dict[str, object] = {
         "project_id": context.request.project_id,
         "curation_attempt_id": context.attempt.curation_attempt_id,
@@ -3000,6 +3038,37 @@ def _authority_repair_target_not_found_response(
     )
 
 
+def _append_repair_selection_rejected_trace(
+    *,
+    context: _PatchApplicationContext,
+    reason: str,
+    details: dict[str, object] | None,
+) -> None:
+    """Append sanitized trace data for rejected v2 repair selections."""
+    attributes = _curation_trace_attributes(context.request)
+    attributes["reject_reason"] = reason
+    for key in (
+        "feedback_id",
+        "target_handle",
+        "target_kind",
+        "target_id",
+        "target_field",
+        "repair_kind",
+        "selection_fingerprint",
+    ):
+        if details is not None and key in details:
+            attributes[key] = details[key]
+    _append_trace_event_safely(
+        mutation_event_id=context.mutation_event_id,
+        project_id=context.request.project_id,
+        step="repair_selection_rejected",
+        status="failed",
+        curation_attempt_id=context.attempt.curation_attempt_id,
+        correlation_id=context.request.correlation_id,
+        attributes=attributes,
+    )
+
+
 def _apply_repair_selections(
     *,
     context: _PatchApplicationContext,
@@ -3037,6 +3106,43 @@ def _apply_repair_selections(
         if error is not None:
             return error
     return candidate
+
+
+def _fingerprint_json(value: object) -> str:
+    """Return a canonical fingerprint for curation menu/selection metadata."""
+    return canonical_hash(value)
+
+
+def _overlay_json_from_selection_payload(
+    *,
+    repair_menu: list[dict[str, Any]],
+    selection_payload: dict[str, Any],
+) -> dict[str, object]:
+    """Return replay metadata from selected handles without raw replacement text."""
+    menu_by_handle = {
+        str(item["handle"]): item
+        for item in repair_menu
+        if isinstance(item.get("handle"), str)
+    }
+    target_handles: list[str] = []
+    target_keys: list[str] = []
+    repairs = selection_payload.get("repairs")
+    if not isinstance(repairs, list):
+        return {"target_handles": target_handles, "target_keys": target_keys}
+    for repair in repairs:
+        if not isinstance(repair, dict):
+            continue
+        handle = _string_or_none(repair.get("target_handle"))
+        if handle is None:
+            continue
+        menu_item = menu_by_handle.get(handle)
+        target_handles.append(handle)
+        if menu_item is None:
+            continue
+        overlay_target_key = _string_or_none(menu_item.get("overlay_target_key"))
+        if overlay_target_key is not None:
+            target_keys.append(overlay_target_key)
+    return {"target_handles": target_handles, "target_keys": target_keys}
 
 
 def _apply_one_repair_selection(
@@ -3079,7 +3185,7 @@ def _apply_one_repair_selection(
             context=context,
             reason="unknown_repair_handle",
             repair_index=repair_index,
-            details={"target_handle": handle},
+            details={"feedback_id": feedback_id, "target_handle": handle},
         )
     if menu_item.get("feedback_id") != feedback_id:
         return _authority_repair_intent_invalid_response(
@@ -3872,6 +3978,30 @@ def _candidate_lineage_from_workflow_result(
             "lineage_json": diff["lineage_json"],
         }
     return diff["lineage_json"]
+
+
+def _curation_attempt_metadata_from_workflow_result(
+    workflow_result: dict[str, Any],
+) -> dict[str, object]:
+    """Return allowlisted attempt metadata from one workflow result."""
+    if workflow_result.get("contract_version") != AUTHORITY_CURATION_CONTRACT_V2:
+        return {}
+    metadata: dict[str, object] = {
+        "contract_version": AUTHORITY_CURATION_CONTRACT_V2,
+        "rejected_selection_json": {},
+    }
+    menu_fingerprint = _string_or_none(workflow_result.get("_repair_menu_fingerprint"))
+    if menu_fingerprint is not None:
+        metadata["menu_fingerprint"] = menu_fingerprint
+    selection_fingerprint = _string_or_none(
+        workflow_result.get("_selection_fingerprint")
+    )
+    if selection_fingerprint is not None:
+        metadata["selection_fingerprint"] = selection_fingerprint
+    overlay_json = workflow_result.get("_overlay_json")
+    if isinstance(overlay_json, dict):
+        metadata["overlay_json"] = overlay_json
+    return metadata
 
 
 def _string_or_none(value: object) -> str | None:

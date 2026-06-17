@@ -44,6 +44,7 @@ APPROVED_TRACE_STEPS: frozenset[str] = frozenset(
         "adk_gate_parse_started",
         "adk_gate_parse_completed",
         "adk_gate_parse_failed",
+        "repair_selection_rejected",
         "diff_validation_started",
         "diff_validation_completed",
         "diff_validation_failed",
@@ -80,6 +81,15 @@ TRACE_ATTRIBUTE_KEYS: frozenset[str] = frozenset(
         "validation_error_count",
         "untargeted_change_count",
         "curation_attempt_id",
+        "feedback_id",
+        "target_handle",
+        "target_kind",
+        "target_id",
+        "target_field",
+        "repair_kind",
+        "reject_reason",
+        "menu_fingerprint",
+        "selection_fingerprint",
     }
 )
 ERROR_KEYS: frozenset[str] = frozenset(
@@ -100,6 +110,8 @@ HASH_LIKE_ATTRIBUTE_KEYS: frozenset[str] = frozenset(
         "source_authority_fingerprint",
         "candidate_authority_fingerprint",
         "prompt_hash",
+        "menu_fingerprint",
+        "selection_fingerprint",
     }
 )
 
