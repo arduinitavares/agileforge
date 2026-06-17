@@ -4989,18 +4989,22 @@ def _curation_workflow_success_result(
     output: _CurationWorkflowOutput,
 ) -> dict[str, Any] | None:
     """Normalize successful ADK repair output into host validation input."""
-    if not isinstance(output.repair_output, dict) or not (
-        _curation_gate_allows_candidate(
-            gate=output.gate,
-            repair_output=output.repair_output,
-            feedback_payload=output.feedback_payload,
+    if not isinstance(output.repair_output, dict):
+        return None
+    if inputs.contract_version == AUTHORITY_CURATION_CONTRACT_V2:
+        invalid_v2_result = _curation_workflow_v2_invalid_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            output=output,
         )
+        if invalid_v2_result is not None:
+            return invalid_v2_result
+    if not _curation_gate_allows_candidate(
+        gate=output.gate,
+        repair_output=output.repair_output,
+        feedback_payload=output.feedback_payload,
     ):
         return None
-    candidate = _json_object_from_value(
-        output.repair_output.get("candidate_authority_json")
-    )
-    patches = output.repair_output.get("patches")
     selection_payload = _json_object_from_value(
         output.repair_output.get("selection_payload")
     )
@@ -5011,14 +5015,66 @@ def _curation_workflow_success_result(
             selection_payload=selection_payload,
             output=output,
         )
-    if candidate is None and not isinstance(patches, list):
-        return None
-    return _curation_workflow_legacy_success_result(
+
+    return _curation_workflow_legacy_forbidden_result(
         request=request,
         curation_attempt_id=curation_attempt_id,
-        candidate=candidate,
-        patches=patches,
         output=output,
+    )
+
+
+def _curation_workflow_v2_invalid_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    output: _CurationWorkflowOutput,
+) -> dict[str, Any] | None:
+    """Return an explicit v2 contract failure for legacy repair shapes."""
+    repair_output = output.repair_output or {}
+    reason: str | None = None
+    if "patches" in repair_output:
+        reason = "legacy_patch_forbidden"
+    elif "candidate_authority_json" in repair_output:
+        reason = "full_candidate_forbidden"
+    elif (
+        _curation_gate_allows_candidate(
+            gate=output.gate,
+            repair_output=repair_output,
+            feedback_payload=output.feedback_payload,
+        )
+        and _json_object_from_value(repair_output.get("selection_payload")) is None
+    ):
+        reason = "selection_payload_missing"
+
+    if reason is None:
+        return None
+
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID,
+            failure_stage="adk_repair_output_invalid",
+            failure_summary=reason,
+            raw_output=str(output.invocation.get("final_text") or ""),
+            model_info=_model_info_with_requested_model(
+                output.invocation,
+                _authority_curation_model_id(request),
+            ),
+            extra={
+                "gate": output.gate,
+                "event_count": output.invocation.get("event_count"),
+                "repair_output_keys": sorted(repair_output),
+                "resolved_feedback_ids": repair_output.get(
+                    "resolved_feedback_ids",
+                    [],
+                ),
+                "unresolved_feedback_ids": repair_output.get(
+                    "unresolved_feedback_ids",
+                    [],
+                ),
+            },
+        ),
     )
 
 
@@ -5052,33 +5108,32 @@ def _curation_workflow_v2_success_result(
     }
 
 
-def _curation_workflow_legacy_success_result(
+def _curation_workflow_legacy_forbidden_result(
     *,
     request: AuthorityCurationRequest,
     curation_attempt_id: str,
-    candidate: dict[str, Any] | None,
-    patches: object,
     output: _CurationWorkflowOutput,
 ) -> dict[str, Any]:
-    """Return normalized legacy workflow success for historical compatibility."""
-    return {
-        "ok": True,
-        "curation_attempt_id": curation_attempt_id,
-        "project_id": request.project_id,
-        "candidate_authority_json": candidate,
-        "patches": patches if isinstance(patches, list) else [],
-        "quality_report": _curation_quality_report(
-            invocation=output.invocation,
-            state=output.state,
-            gate=output.gate,
-            repair_output=output.repair_output or {},
+    """Fail closed when a caller attempts the removed legacy contract."""
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID,
+            failure_stage="legacy_authority_curation_contract_forbidden",
+            failure_summary="legacy_contract_forbidden",
+            raw_output=str(output.invocation.get("final_text") or ""),
+            model_info=_model_info_with_requested_model(
+                output.invocation,
+                _authority_curation_model_id(request),
+            ),
+            extra={
+                "gate": output.gate,
+                "event_count": output.invocation.get("event_count"),
+                "repair_output_keys": sorted(output.repair_output or {}),
+            },
         ),
-        "candidate_lineage_json": _curation_candidate_lineage(
-            request=request,
-            curation_attempt_id=curation_attempt_id,
-            repair_output=output.repair_output or {},
-        ),
-    }
+    )
 
 
 def _curation_candidate_lineage(
@@ -5271,6 +5326,7 @@ def _curation_workflow_failure_result(
         "error_code": failure.error_code.value,
         "failure_artifact_id": metadata["failure_artifact_id"],
         "failure_summary": metadata["failure_summary"],
+        "failure_reason": failure.failure_summary,
     }
 
 

@@ -4115,6 +4115,82 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
     )
 
 
+def test_authority_curate_rejects_legacy_adk_patch_output(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ASA-shaped legacy ADK output must fail as invalid v2 repair intent."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        del payload
+        return {
+            "final_text": (
+                '{"status":"pass","review_ready":true,'
+                '"unresolved_feedback_ids":[]}'
+            ),
+            "event_count": 14,
+            "model_info": {"requested_model_id": model_id},
+            "state": {
+                "authority_curation_repair_output": {
+                    "mode": "targeted",
+                    "patches": [
+                        {
+                            "target_kind": "assumption",
+                            "target_id": "ASM-curation-1",
+                            "op": "replace_text",
+                            "new_text": "Report contexts are examples.",
+                        }
+                    ],
+                    "resolved_feedback_ids": ["AFB-curation-1"],
+                    "unresolved_feedback_ids": [],
+                },
+                "authority_curation_gate_decision": {
+                    "status": "pass",
+                    "review_ready": True,
+                    "unresolved_feedback_ids": [],
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            compiler_model="test-curation-model",
+            idempotency_key="curate-rejects-legacy-adk-patches",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
+    assert result["errors"][0]["details"]["failure_reason"] == (
+        "legacy_patch_forbidden"
+    )
+
+
 def test_authority_curate_ignores_gate_unresolved_ids_outside_feedback(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -4432,7 +4508,7 @@ def test_authority_curate_honors_gate_unresolved_feedback_id(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Gate failures remain blocking when they name recorded feedback ids."""
+    """Legacy patch output remains invalid even when the gate names feedback ids."""
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -4493,7 +4569,10 @@ def test_authority_curate_honors_gate_unresolved_feedback_id(
     )
 
     assert result["ok"] is False
-    assert result["errors"][0]["code"] == "SPEC_COMPILE_FAILED"
+    assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
+    assert result["errors"][0]["details"]["failure_reason"] == (
+        "legacy_patch_forbidden"
+    )
 
 
 def test_authority_curate_invocation_failure_artifact_keeps_adk_diagnostics(

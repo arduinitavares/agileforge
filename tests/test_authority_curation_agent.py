@@ -13,7 +13,6 @@ from orchestrator_agent.agent_tools.authority_curation import (
 )
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationGateDecision,
-    AuthorityCurationPatch,
     AuthorityCurationRepairOutput,
     AuthorityCurationRepairPlan,
     AuthorityCurationRepairSelectionPayload,
@@ -95,70 +94,21 @@ def test_no_candidate_repair_mode_validates_across_plan_and_output() -> None:
     assert output.mode == plan.mode
 
 
-def test_repair_output_accepts_targeted_patch_without_full_authority() -> None:
-    """ADK repair output should describe patches, not copy full authority JSON."""
-    output = AuthorityCurationRepairOutput(
-        mode="targeted",
-        patches=[
-            AuthorityCurationPatch(
-                target_kind="assumption",
-                target_id="ASM-39",
-                op="replace_text",
-                new_text=(
-                    "Report contexts are required baseline examples, not "
-                    "an exhaustive list."
-                ),
-            )
-        ],
-        resolved_feedback_ids=["AFB-ASM-39"],
-    )
-
-    dumped = output.model_dump(mode="json")
-
-    assert dumped["patches"][0]["target_id"] == "ASM-39"
-    assert dumped["candidate_authority_json"] is None
-
-
-def test_repair_patch_rejects_unknown_fields() -> None:
-    """Patch schema must stay strict so model output cannot smuggle rewrites."""
+@pytest.mark.parametrize(
+    "legacy_field",
+    ["patches", "candidate_authority_json"],
+)
+def test_repair_output_rejects_legacy_fields(legacy_field: str) -> None:
+    """V2 ADK repair output must not expose legacy mutation channels."""
     with pytest.raises(ValidationError):
-        AuthorityCurationPatch.model_validate(
+        AuthorityCurationRepairOutput.model_validate(
             {
-                "target_kind": "invariant",
-                "target_id": "INV-943d18f5ecffcd3c",
-                "op": "replace_text",
-                "new_text": "Use qualified observational language.",
-                "candidate_authority_json": {"invariants": []},
+                "mode": "targeted",
+                legacy_field: [],
+                "resolved_feedback_ids": [],
+                "unresolved_feedback_ids": [],
             }
         )
-
-
-def test_repair_patch_accepts_structured_parameter_replacement() -> None:
-    """Typed invariants should be repairable through bounded JSON paths."""
-    patch = AuthorityCurationPatch(
-        target_kind="invariant",
-        target_id="INV-943d18f5ecffcd3c",
-        op="replace_value",
-        path="/parameters/rule",
-        value=(
-            "Use qualified observational language instead of literal token "
-            "whitelists."
-        ),
-    )
-
-    dumped = patch.model_dump(mode="json")
-
-    assert dumped["path"] == "/parameters/rule"
-    assert dumped["value"].startswith("Use qualified")
-
-
-def test_repair_patch_value_schema_has_explicit_json_types() -> None:
-    """OpenAI/Azure response_format rejects schema nodes without a type."""
-    schema = AuthorityCurationPatch.model_json_schema()
-    value_schema = schema["properties"]["value"]
-
-    assert "anyOf" in value_schema
-    assert all("type" in option for option in value_schema["anyOf"])
 
 
 def test_repair_selection_payload_rejects_model_authored_targets() -> None:
@@ -214,17 +164,14 @@ def test_repair_selection_payload_rejects_replace_text_without_text() -> None:
         )
 
 
-def test_repair_output_schema_does_not_request_open_candidate_json() -> None:
-    """Strict providers reject arbitrary object fields in response_format."""
+def test_repair_output_schema_exposes_only_v2_selection_channel() -> None:
+    """Response schema must leave no legacy patch/full-candidate escape hatch."""
     schema = AuthorityCurationRepairOutput.model_json_schema()
-    candidate_schema = schema["properties"]["candidate_authority_json"]
-    branches = candidate_schema.get("anyOf", [candidate_schema])
+    properties = schema["properties"]
 
-    assert not any(
-        option.get("type") == "object"
-        and option.get("additionalProperties") is not False
-        for option in branches
-    )
+    assert "selection_payload" in properties
+    assert "patches" not in properties
+    assert "candidate_authority_json" not in properties
 
 
 def test_validate_workflow_input_returns_strict_model() -> None:
