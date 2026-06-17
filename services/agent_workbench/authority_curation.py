@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -108,6 +109,15 @@ _PATCH_TEXT_FIELDS = (
     "assumption",
     "reason",
 )
+_REVIEW_TARGET_RE: re.Pattern[str] = re.compile(
+    r"\b(?P<prefix>ASM|GAP|INV)-[A-Za-z0-9][A-Za-z0-9_-]*\b"
+)
+_PATCHABLE_TARGET_KINDS: set[str] = {"invariant", "gap", "assumption"}
+_REVIEW_TARGET_KIND_BY_PREFIX: dict[str, str] = {
+    "ASM": "assumption",
+    "GAP": "gap",
+    "INV": "invariant",
+}
 
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
@@ -2964,8 +2974,26 @@ def _feedback_target_keys(feedback_json: str) -> set[tuple[str, str]]:
             continue
         target_kind = _string_or_none(item.get("target_kind"))
         target_id = _string_or_none(item.get("target_id"))
-        if target_kind is not None and target_id is not None:
+        if target_kind in _PATCHABLE_TARGET_KINDS and target_id is not None:
             targets.add((target_kind, target_id))
+        targets.update(_concrete_patch_targets_from_feedback_item(item))
+    return targets
+
+
+def _concrete_patch_targets_from_feedback_item(
+    item: dict[Any, Any],
+) -> set[tuple[str, str]]:
+    """Extract concrete patch targets from broad authority-candidate feedback."""
+    if item.get("target_kind") != "authority_candidate":
+        return set()
+    instruction = _string_or_none(item.get("instruction"))
+    if instruction is None:
+        return set()
+    targets: set[tuple[str, str]] = set()
+    for match in _REVIEW_TARGET_RE.finditer(instruction):
+        target_kind = _REVIEW_TARGET_KIND_BY_PREFIX.get(match.group("prefix"))
+        if target_kind is not None:
+            targets.add((target_kind, match.group(0)))
     return targets
 
 

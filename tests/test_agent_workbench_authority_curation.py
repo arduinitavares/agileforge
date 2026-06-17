@@ -1869,6 +1869,84 @@ def test_authority_curate_applies_targeted_patches_deterministically(
     assert json.loads(attempt.candidate_lineage_json) == {"source": "patches"}
 
 
+def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedback(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broad authority feedback may name a concrete assumption repair target."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-authority-assumption-1",
+                        "target_kind": "authority_candidate",
+                        "target_id": f"authority:{fixture.authority_id}",
+                        "issue_type": "invalid_assumption",
+                        "severity": "blocking",
+                        "instruction": (
+                            "Repair authority assumption ASM-curation-1 only. "
+                            "The report contexts are required examples, not "
+                            "an exhaustive closed list."
+                        ),
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "curation_attempt_id": "curation-fake-result",
+            "project_id": fixture.project_id,
+            "patches": [
+                {
+                    "target_kind": "assumption",
+                    "target_id": "ASM-curation-1",
+                    "op": "replace_text",
+                    "new_text": (
+                        "Report contexts are required examples, not exhaustive."
+                    ),
+                },
+            ],
+            "quality_report": {"status": "passed"},
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-authority-candidate-derived-assumption",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    assumptions = {item["assumption_id"]: item for item in candidate["assumptions"]}
+    assert assumptions["ASM-curation-1"]["text"] == (
+        "Report contexts are required examples, not exhaustive."
+    )
+
+
 def test_authority_curate_rejects_untargeted_patch(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
