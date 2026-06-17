@@ -147,9 +147,15 @@ def build_authority_curation_workflow(*, model: str | BaseLlm) -> Workflow:
             f"{AUTHORITY_CURATION_QUALITY_FINDINGS_PLACEHOLDER}. Pass only "
             "when all blocking feedback is resolved and host-validatable "
             "repaired authority exists. Retry only when another bounded "
-            "iteration can close explicit unresolved feedback. Fail with "
-            "reason when gaps remain, evidence is missing, or max loop "
-            f"semantics prevent another safe repair.\n\n{_LOOP_CONTRACT}"
+            "iteration can close explicit unresolved feedback. The "
+            "unresolved_feedback_ids list may contain only original feedback "
+            "ids or unresolved ids reported by the repair output; do not "
+            "invent ids for compiler gaps, assumptions, or unrelated review "
+            "notes. Compiler gaps not named by structured feedback are "
+            "non-blocking curation context. Fail with reason when recorded "
+            "feedback remains unresolved, evidence is missing for a recorded "
+            f"target, or max loop semantics prevent another safe repair.\n\n"
+            f"{_LOOP_CONTRACT}"
         ),
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,

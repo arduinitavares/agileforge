@@ -225,3 +225,9 @@ def test_downstream_agents_reference_state_placeholders() -> None:
     assert "{authority_curation_repair_plan}" in gate_instruction
     assert "{authority_curation_semantic_findings}" in gate_instruction
     assert "{authority_curation_quality_findings}" in gate_instruction
+    assert "unresolved_feedback_ids list may contain only original feedback ids" in (
+        gate_instruction
+    )
+    assert "Compiler gaps not named by structured feedback are non-blocking" in (
+        gate_instruction
+    )
