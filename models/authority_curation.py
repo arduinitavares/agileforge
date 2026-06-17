@@ -134,6 +134,22 @@ class AuthorityCurationAttempt(SQLModel, table=True):
         sa_type=Text,
         sa_column_kwargs={"server_default": text("'{}'")},
     )
+    contract_version: str = Field(
+        default="authority_curation.v1",
+        sa_column_kwargs={"server_default": text("'authority_curation.v1'")},
+    )
+    menu_fingerprint: str | None = Field(default=None)
+    selection_fingerprint: str | None = Field(default=None)
+    rejected_selection_json: str = Field(
+        default="{}",
+        sa_type=Text,
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
+    overlay_json: str = Field(
+        default="{}",
+        sa_type=Text,
+        sa_column_kwargs={"server_default": text("'{}'")},
+    )
     failure_artifact_id: str | None = Field(default=None)
     request_hash: str
     idempotency_key: str

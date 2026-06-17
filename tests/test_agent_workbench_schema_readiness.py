@@ -137,6 +137,21 @@ def test_authority_curation_readiness_requires_idempotency_uniqueness() -> None:
     )
 
 
+def test_authority_curation_readiness_requires_v2_columns() -> None:
+    """Curation readiness must guard repair-menu metadata columns."""
+    requirements_by_table = {
+        requirement.table: requirement
+        for requirement in AUTHORITY_CURATION_REQUIREMENTS
+    }
+    columns = set(requirements_by_table["authority_curation_attempts"].columns)
+
+    assert "contract_version" in columns
+    assert "menu_fingerprint" in columns
+    assert "selection_fingerprint" in columns
+    assert "rejected_selection_json" in columns
+    assert "overlay_json" in columns
+
+
 def test_authority_curation_readiness_requires_mutation_event_id(
     engine: Engine,
 ) -> None:

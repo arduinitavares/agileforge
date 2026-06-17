@@ -67,7 +67,27 @@ def test_authority_curation_create_all_defaults_match_migration(
     assert curation_defaults["diff_summary_json"] == "'{}'"
     assert curation_defaults["lineage_json"] == "'{}'"
     assert curation_defaults["quality_report_json"] == "'{}'"
+    assert curation_defaults["contract_version"] == "'authority_curation.v1'"
+    assert curation_defaults["rejected_selection_json"] == "'{}'"
+    assert curation_defaults["overlay_json"] == "'{}'"
     assert curation_defaults["changed_by"] == "'cli-agent'"
+
+
+def test_authority_curation_attempt_v2_columns_exist(engine: Engine) -> None:
+    """Curation attempts must persist v2 repair-menu metadata."""
+    SQLModel.metadata.create_all(engine)
+
+    inspector = inspect(engine)
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("authority_curation_attempts")
+    }
+
+    assert "contract_version" in columns
+    assert "menu_fingerprint" in columns
+    assert "selection_fingerprint" in columns
+    assert "rejected_selection_json" in columns
+    assert "overlay_json" in columns
 
 
 def test_authority_feedback_idempotency_key_is_unique_per_project(

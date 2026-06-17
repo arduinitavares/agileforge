@@ -1629,6 +1629,11 @@ CREATE TABLE IF NOT EXISTS authority_curation_attempts (
     diff_summary_json TEXT NOT NULL DEFAULT '{}',
     lineage_json TEXT NOT NULL DEFAULT '{}',
     quality_report_json TEXT NOT NULL DEFAULT '{}',
+    contract_version VARCHAR NOT NULL DEFAULT 'authority_curation.v1',
+    menu_fingerprint VARCHAR,
+    selection_fingerprint VARCHAR,
+    rejected_selection_json TEXT NOT NULL DEFAULT '{}',
+    overlay_json TEXT NOT NULL DEFAULT '{}',
     failure_artifact_id VARCHAR,
     request_hash VARCHAR NOT NULL,
     idempotency_key VARCHAR NOT NULL,
@@ -1800,6 +1805,21 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
         "INTEGER",
     ):
         actions.append("added column: authority_curation_attempts.mutation_event_id")
+
+    for column_name, ddl_type in (
+        ("contract_version", "VARCHAR DEFAULT 'authority_curation.v1' NOT NULL"),
+        ("menu_fingerprint", "VARCHAR"),
+        ("selection_fingerprint", "VARCHAR"),
+        ("rejected_selection_json", "TEXT DEFAULT '{}' NOT NULL"),
+        ("overlay_json", "TEXT DEFAULT '{}' NOT NULL"),
+    ):
+        if _ensure_column_exists(
+            engine,
+            "authority_curation_attempts",
+            column_name,
+            ddl_type,
+        ):
+            actions.append(f"added column: authority_curation_attempts.{column_name}")
 
     actions.extend(
         _ensure_authority_curation_indexes(

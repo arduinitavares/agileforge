@@ -48,6 +48,8 @@ class ErrorCode(StrEnum):
     AUTHORITY_FEEDBACK_SCHEMA_INVALID = "AUTHORITY_FEEDBACK_SCHEMA_INVALID"
     AUTHORITY_CURATED_DIFF_UNBOUNDED = "AUTHORITY_CURATED_DIFF_UNBOUNDED"
     AUTHORITY_CURATION_MAX_ITERATIONS = "AUTHORITY_CURATION_MAX_ITERATIONS"
+    AUTHORITY_REPAIR_INTENT_INVALID = "AUTHORITY_REPAIR_INTENT_INVALID"
+    AUTHORITY_REPAIR_TARGET_NOT_FOUND = "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
     STALE_STATE = "STALE_STATE"
     STALE_SETUP_STATUS = "STALE_SETUP_STATUS"
     STALE_SPEC_HASH = "STALE_SPEC_HASH"
@@ -265,6 +267,18 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=1,
         retryable=True,
         description="Authority curation reached its maximum iteration count.",
+    ),
+    ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID.value,
+        default_exit_code=1,
+        retryable=False,
+        description="Authority repair selection violates the repair menu contract.",
+    ),
+    ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND.value,
+        default_exit_code=1,
+        retryable=False,
+        description="Authority repair menu handle resolves to a missing source target.",
     ),
     ErrorCode.STALE_STATE: ErrorMetadata(
         code=ErrorCode.STALE_STATE.value,
