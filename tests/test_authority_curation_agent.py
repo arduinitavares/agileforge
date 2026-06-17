@@ -151,6 +151,15 @@ def test_repair_patch_accepts_structured_parameter_replacement() -> None:
     assert dumped["value"].startswith("Use qualified")
 
 
+def test_repair_patch_value_schema_has_explicit_json_types() -> None:
+    """OpenAI/Azure response_format rejects schema nodes without a type."""
+    schema = AuthorityCurationPatch.model_json_schema()
+    value_schema = schema["properties"]["value"]
+
+    assert "anyOf" in value_schema
+    assert all("type" in option for option in value_schema["anyOf"])
+
+
 def test_validate_workflow_input_returns_strict_model() -> None:
     """The public validator returns the strict workflow input model."""
     validated = validate_workflow_input(_valid_workflow_payload())
