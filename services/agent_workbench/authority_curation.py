@@ -112,6 +112,9 @@ _PATCH_TEXT_FIELDS = (
 _REVIEW_TARGET_RE: re.Pattern[str] = re.compile(
     r"\b(?P<prefix>ASM|GAP|INV)-[A-Za-z0-9][A-Za-z0-9_-]*\b"
 )
+_ASSUMPTION_INDEX_TARGET_RE: re.Pattern[str] = re.compile(
+    r"^assumptions\[(?P<index>\d+)\]$"
+)
 _PATCHABLE_TARGET_KINDS: set[str] = {"invariant", "gap", "assumption"}
 _REVIEW_TARGET_KIND_BY_PREFIX: dict[str, str] = {
     "ASM": "assumption",
@@ -2922,7 +2925,12 @@ def _apply_candidate_patch(
             reason="invalid_patch",
             patch_index=patch_index,
         )
-    if (target_kind, target_id) not in feedback_targets:
+    authorized_target_id = _authorized_patch_target_id(
+        target_kind=target_kind,
+        target_id=target_id,
+        feedback_targets=feedback_targets,
+    )
+    if authorized_target_id is None:
         return _unsafe_curation_patch_response(
             context=context,
             reason="untargeted_patch_target",
@@ -2933,7 +2941,7 @@ def _apply_candidate_patch(
     target = _find_patch_target(
         candidate,
         target_kind=target_kind,
-        target_id=target_id,
+        target_id=authorized_target_id,
     )
     if target is None:
         return _unsafe_curation_patch_response(
@@ -2941,7 +2949,7 @@ def _apply_candidate_patch(
             reason="patch_target_not_found",
             patch_index=patch_index,
             target_kind=target_kind,
-            target_id=target_id,
+            target_id=authorized_target_id,
         )
     applied = _apply_single_patch(
         target=target,
@@ -2956,8 +2964,35 @@ def _apply_candidate_patch(
         reason=applied,
         patch_index=patch_index,
         target_kind=target_kind,
+        target_id=authorized_target_id,
+    )
+
+
+def _authorized_patch_target_id(
+    *,
+    target_kind: str,
+    target_id: str,
+    feedback_targets: set[tuple[str, str]],
+) -> str | None:
+    """Return feedback-authorized target id, accepting narrow review aliases."""
+    if (target_kind, target_id) in feedback_targets:
+        return target_id
+    alias = _review_visible_target_alias(
+        target_kind=target_kind,
         target_id=target_id,
     )
+    if alias is not None and (target_kind, alias) in feedback_targets:
+        return alias
+    return None
+
+
+def _review_visible_target_alias(*, target_kind: str, target_id: str) -> str | None:
+    """Map model-emitted collection index aliases to review-visible ids."""
+    if target_kind == "assumption":
+        match = _ASSUMPTION_INDEX_TARGET_RE.fullmatch(target_id)
+        if match is not None:
+            return f"ASM-{int(match.group('index')) + 1}"
+    return None
 
 
 def _feedback_target_keys(feedback_json: str) -> set[tuple[str, str]]:
