@@ -1822,6 +1822,170 @@ def test_authority_curate_finalize_success_false_requires_recovery(
     assert steps[-2:] == ["mutation_finalize_started", "mutation_finalize_completed"]
 
 
+def test_authority_curate_reconciles_expired_start_without_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Expired curation before publication returns replayable no-side-effect failure."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-expired-start",
+    )
+
+    def fake_run_curation(**_: object) -> dict[str, object]:
+        with Session(engine) as session:
+            ledger = session.exec(select(CliMutationLedger)).one()
+            ledger.lease_expires_at = datetime(
+                2020,
+                1,
+                1,
+                tzinfo=UTC,
+            ).replace(tzinfo=None)
+            session.add(ledger)
+            session.commit()
+        message = "worker died"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_run_curation,
+    )
+
+    first = runner.curate(request)
+    with Session(engine) as session:
+        recovery_ledger = session.exec(select(CliMutationLedger)).one()
+        recovery_mutation_event_id = require_id(
+            recovery_ledger.mutation_event_id,
+            "mutation_event_id",
+        )
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_curating",
+            "setup_curation_mutation_event_id": recovery_mutation_event_id,
+        },
+    )
+    second = runner.curate(request)
+
+    assert first["ok"] is False
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "MUTATION_FAILED"
+    details = second["errors"][0]["details"]
+    assert details["project_id"] == fixture.project_id
+    assert details["mutation_event_id"]
+    assert details["trace_artifact_id"].startswith("authority_curation_trace-")
+    assert details["last_trace_step"]
+    assert details["last_trace_status"]
+    with Session(engine) as session:
+        ledger = session.exec(select(CliMutationLedger)).one()
+        attempts = session.exec(select(AuthorityCurationAttempt)).all()
+    assert ledger.status == "domain_failed_no_side_effects"
+    assert ledger.recovery_action == "none"
+    assert ledger.recovery_safe_to_auto_resume is False
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_rejected"
+    assert workflow_state["setup_curation_mutation_event_id"] is None
+    assert len(attempts) == 1
+    assert attempts[0].candidate_authority_id is None
+
+
+def test_authority_curate_no_side_effect_replay_preserves_advanced_workflow(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Old no-side-effect replay must not clobber a newer pending review state."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-expired-start-advanced-workflow",
+    )
+
+    def fake_run_curation(**_: object) -> dict[str, object]:
+        with Session(engine) as session:
+            ledger = session.exec(select(CliMutationLedger)).one()
+            ledger.lease_expires_at = datetime(
+                2020,
+                1,
+                1,
+                tzinfo=UTC,
+            ).replace(tzinfo=None)
+            session.add(ledger)
+            session.commit()
+        message = "worker died"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_run_curation,
+    )
+
+    first = runner.curate(request)
+    assert first["ok"] is False
+    active_mutation_event_id = 999_999
+    pending_authority_id = 321
+    pending_authority_fingerprint = "sha256:" + ("b" * 64)
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_pending_review",
+            "setup_curation_mutation_event_id": active_mutation_event_id,
+            "pending_authority_id": pending_authority_id,
+            "pending_authority_fingerprint": pending_authority_fingerprint,
+        },
+    )
+
+    second = runner.curate(request)
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "MUTATION_FAILED"
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert (
+        workflow_state["setup_curation_mutation_event_id"]
+        == active_mutation_event_id
+    )
+    assert workflow_state["pending_authority_id"] == pending_authority_id
+    assert (
+        workflow_state["pending_authority_fingerprint"]
+        == pending_authority_fingerprint
+    )
+
+
 def test_authority_curate_rejects_when_already_curating(
     engine: Engine,
 ) -> None:

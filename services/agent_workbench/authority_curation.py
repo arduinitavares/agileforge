@@ -490,6 +490,14 @@ class AuthorityCurationRunner:
             )
             if stored_response is not None:
                 return stored_response
+            reconciled = self._reconcile_no_side_effect_curation_recovery(
+                request=request,
+                mutation_event_id=_required_mutation_event_id(
+                    loaded.ledger.mutation_event_id
+                ),
+            )
+            if reconciled is not None:
+                return reconciled
         if loaded.error_code is not None:
             return _curation_ledger_error_response(
                 error_code=loaded.error_code,
@@ -502,6 +510,104 @@ class AuthorityCurationRunner:
             mutation_event_id=_required_mutation_event_id(
                 loaded.ledger.mutation_event_id
             ),
+        )
+
+    def _reconcile_no_side_effect_curation_recovery(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        mutation_event_id: int,
+    ) -> dict[str, Any] | None:
+        """Recover expired curation if trace/DB prove no candidate was published."""
+        summary = summarize_trace(mutation_event_id=mutation_event_id)
+        if bool(summary.get("candidate_published")):
+            return None
+
+        attempt: AuthorityCurationAttempt | None
+        with Session(self._engine) as session:
+            attempt = session.exec(
+                select(AuthorityCurationAttempt).where(
+                    AuthorityCurationAttempt.mutation_event_id
+                    == mutation_event_id
+                )
+            ).first()
+            if (
+                attempt is not None
+                and attempt.candidate_authority_id is not None
+            ):
+                return None
+
+        response = error_envelope(
+            command=AUTHORITY_CURATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.MUTATION_FAILED,
+                message=(
+                    "Authority curation mutation expired before candidate "
+                    "publication."
+                ),
+                details={
+                    "project_id": request.project_id,
+                    "mutation_event_id": mutation_event_id,
+                    "trace_artifact_id": summary.get("trace_artifact_id"),
+                    "last_trace_step": summary.get("last_trace_step"),
+                    "last_trace_status": summary.get("last_trace_status"),
+                },
+                remediation=[
+                    "Retry authority curation with a fresh idempotency key.",
+                    "Inspect the trace with agileforge authority curation trace.",
+                ],
+            ),
+            correlation_id=request.correlation_id,
+        )
+        if attempt is not None:
+            self._update_failed_curation_attempt(
+                attempt.curation_attempt_id,
+                failure_artifact_id=cast(
+                    "str | None",
+                    summary.get("failure_artifact_id"),
+                ),
+            )
+        finalized = MutationLedgerRepository(
+            engine=self._engine
+        ).finalize_recovery_as_no_side_effect_failure(
+            mutation_event_id=mutation_event_id,
+            response=response,
+            now=datetime.now(UTC),
+        )
+        if finalized:
+            self._restore_recovered_no_side_effect_workflow(
+                request=request,
+                mutation_event_id=mutation_event_id,
+                failure_artifact_id=_response_failure_artifact_id(response),
+                error_code=_response_error_code(response),
+            )
+            return response
+        return None
+
+    def _restore_recovered_no_side_effect_workflow(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        mutation_event_id: int,
+        failure_artifact_id: str | None,
+        error_code: str | None,
+    ) -> None:
+        """Restore only the workflow mutex owned by the recovered mutation."""
+        try:
+            state = self._workflow.get_session_status(str(request.project_id))
+        except Exception:  # noqa: BLE001
+            return
+        if state.get("fsm_state") != "SETUP_REQUIRED":
+            return
+        if state.get("setup_status") != "authority_curating":
+            return
+        state_mutation_event_id = state.get("setup_curation_mutation_event_id")
+        if str(state_mutation_event_id) != str(mutation_event_id):
+            return
+        self._restore_authority_rejected_workflow(
+            request=request,
+            failure_artifact_id=failure_artifact_id,
+            error_code=error_code,
         )
 
     def _validate_curation_guards(  # noqa: PLR0911

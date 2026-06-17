@@ -745,6 +745,35 @@ class MutationLedgerRepository:
             session.commit()
             return result.rowcount == 1
 
+    def finalize_recovery_as_no_side_effect_failure(
+        self,
+        *,
+        mutation_event_id: int,
+        response: dict[str, Any],
+        now: datetime,
+    ) -> bool:
+        """Convert recovery-required row to replayable no-side-effect failure."""
+        db_now = _db_datetime(now)
+        with Session(self._engine) as session:
+            result = session.exec(
+                update(CliMutationLedger)
+                .where(_MUTATION_EVENT_ID == mutation_event_id)
+                .where(_STATUS == MutationStatus.RECOVERY_REQUIRED.value)
+                .values(
+                    status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS.value,
+                    response_json=_json_dump(response),
+                    recovery_action=RecoveryAction.NONE.value,
+                    recovery_safe_to_auto_resume=False,
+                    lease_owner=None,
+                    lease_acquired_at=None,
+                    last_heartbeat_at=None,
+                    lease_expires_at=None,
+                    updated_at=db_now,
+                )
+            )
+            session.commit()
+            return result.rowcount == 1
+
     def supersede_recovered_event(
         self,
         *,

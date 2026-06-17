@@ -1547,3 +1547,63 @@ def test_finalize_success_requires_pending_active_owner_and_stores_result(
     assert stored.lease_owner is None
     assert stored.lease_expires_at is None
     assert stored.recovery_action == RecoveryAction.NONE.value
+
+
+def test_finalize_recovery_as_no_side_effect_failure(
+    engine: Engine,
+) -> None:
+    """A recovery-required row can become a replayable no-side-effect failure."""
+    repo = _repo(engine)
+    now = datetime(2026, 6, 16, 12, tzinfo=UTC)
+    loaded = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-stale-no-side-effect",
+        request_hash="sha256:stale",
+        project_id=3,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=now,
+    )
+    mutation_event_id = require_id(
+        loaded.ledger.mutation_event_id,
+        "mutation_event_id",
+    )
+    assert repo.mark_recovery_required(
+        mutation_event_id=mutation_event_id,
+        lease_owner="lease",
+        recovery_action=RecoveryAction.RECONCILE_THEN_RESUME,
+        safe_to_auto_resume=False,
+        last_error={
+            "code": "STALE_PENDING",
+            "message": "Pending mutation lease expired.",
+        },
+        now=now,
+    )
+    response = {
+        "ok": False,
+        "data": {},
+        "warnings": [],
+        "errors": [
+            {
+                "code": "MUTATION_FAILED",
+                "details": {
+                    "trace_artifact_id": "authority_curation_trace-1",
+                },
+            }
+        ],
+    }
+
+    assert repo.finalize_recovery_as_no_side_effect_failure(
+        mutation_event_id=mutation_event_id,
+        response=response,
+        now=now,
+    )
+
+    shown = repo.show_event(mutation_event_id=mutation_event_id)
+    assert shown["data"]["status"] == MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS.value
+    assert shown["data"]["response"] == response
+    assert shown["data"]["recovery_action"] == RecoveryAction.NONE.value
+    assert shown["data"]["recovery_safe_to_auto_resume"] is False
+    assert shown["data"]["lease_owner"] is None
+    assert shown["data"]["lease_expires_at"] is None
