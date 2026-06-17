@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -60,7 +60,15 @@ class AuthorityCurationPatch(_StrictModel):
     op: Literal["replace_text", "replace_value"]
     new_text: str | None = Field(default=None, min_length=1)
     path: str | None = Field(default=None, min_length=1)
-    value: Any = None
+    value: (
+        str
+        | int
+        | float
+        | bool
+        | None
+        | list[str | int | float | bool | None]
+        | dict[str, str | int | float | bool | None]
+    ) = None
 
     @model_validator(mode="after")
     def _require_operation_payload(self) -> Self:
