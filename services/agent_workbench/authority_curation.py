@@ -3832,8 +3832,11 @@ def run_authority_curation_workflow(
             ),
         )
 
-    status = gate.get("status")
-    if status == "pass" and isinstance(repair_output, dict):
+    if isinstance(repair_output, dict) and _curation_gate_allows_candidate(
+        gate=gate,
+        repair_output=repair_output,
+        feedback_payload=feedback_payload,
+    ):
         candidate = _json_object_from_value(
             repair_output.get("candidate_authority_json")
         )
@@ -3881,6 +3884,81 @@ def run_authority_curation_workflow(
             },
         ),
     )
+
+
+def _curation_gate_allows_candidate(
+    *,
+    gate: dict[str, Any],
+    repair_output: dict[str, Any],
+    feedback_payload: dict[str, Any],
+) -> bool:
+    """Return whether ADK gate output allows host validation to proceed."""
+    status = gate.get("status")
+    if status == "pass":
+        return True
+    if status != "fail":
+        return False
+    if not _repair_output_resolves_blocking_feedback(
+        repair_output=repair_output,
+        feedback_payload=feedback_payload,
+    ):
+        return False
+    gate_unresolved = _string_set(gate.get("unresolved_feedback_ids"))
+    feedback_ids = _feedback_ids_from_payload(feedback_payload)
+    return bool(gate_unresolved) and gate_unresolved.isdisjoint(feedback_ids)
+
+
+def _repair_output_resolves_blocking_feedback(
+    *,
+    repair_output: dict[str, Any],
+    feedback_payload: dict[str, Any],
+) -> bool:
+    """Return whether repair output resolved every blocking feedback item."""
+    blocking_ids = _blocking_feedback_ids_from_payload(feedback_payload)
+    if not blocking_ids:
+        return False
+    resolved_ids = _string_set(repair_output.get("resolved_feedback_ids"))
+    unresolved_ids = _string_set(repair_output.get("unresolved_feedback_ids"))
+    return blocking_ids.issubset(resolved_ids) and unresolved_ids.isdisjoint(
+        blocking_ids
+    )
+
+
+def _feedback_ids_from_payload(feedback_payload: dict[str, Any]) -> set[str]:
+    """Return all feedback ids from a validated feedback payload."""
+    feedback_ids: set[str] = set()
+    for item in _feedback_items_from_payload(feedback_payload):
+        feedback_id = item.get("feedback_id")
+        if isinstance(feedback_id, str):
+            feedback_ids.add(feedback_id)
+    return feedback_ids
+
+
+def _blocking_feedback_ids_from_payload(feedback_payload: dict[str, Any]) -> set[str]:
+    """Return blocking feedback ids from a validated feedback payload."""
+    feedback_ids: set[str] = set()
+    for item in _feedback_items_from_payload(feedback_payload):
+        feedback_id = item.get("feedback_id")
+        if item.get("severity") == "blocking" and isinstance(feedback_id, str):
+            feedback_ids.add(feedback_id)
+    return feedback_ids
+
+
+def _feedback_items_from_payload(
+    feedback_payload: dict[str, Any],
+) -> list[dict[Any, Any]]:
+    """Return dictionary feedback items from a feedback payload."""
+    feedback_items = feedback_payload.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        return []
+    return [item for item in feedback_items if isinstance(item, dict)]
+
+
+def _string_set(value: object) -> set[str]:
+    """Return simple string values from list-like model output."""
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str)}
 
 
 def _validation_errors_from_exception(

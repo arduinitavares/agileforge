@@ -3461,6 +3461,153 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
     )
 
 
+def test_authority_curate_ignores_gate_unresolved_ids_outside_feedback(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate must not turn unrelated compiler gaps into curation blockers."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        del payload
+        return {
+            "final_text": (
+                '{"status":"fail","review_ready":false,'
+                '"unresolved_feedback_ids":["unresolved_gaps_authority_7"],'
+                '"reason":"Unrelated compiler gaps remain."}'
+            ),
+            "event_count": 5,
+            "model_info": {"requested_model_id": model_id},
+            "state": {
+                "authority_curation_repair_output": {
+                    "mode": "targeted",
+                    "patches": [
+                        {
+                            "target_kind": "invariant",
+                            "target_id": "INV-curation-1",
+                            "op": "replace_text",
+                            "new_text": (
+                                "Review packets include qualified guard evidence."
+                            ),
+                        }
+                    ],
+                    "resolved_feedback_ids": ["AFB-curation-1"],
+                    "unresolved_feedback_ids": [],
+                },
+                "authority_curation_gate_decision": {
+                    "status": "fail",
+                    "review_ready": False,
+                    "unresolved_feedback_ids": ["unresolved_gaps_authority_7"],
+                    "reason": "Unrelated compiler gaps remain.",
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            compiler_model="test-curation-model",
+            idempotency_key="curate-ignores-out-of-scope-gate-gap",
+        )
+    )
+
+    assert result["ok"] is True
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.status == "succeeded"
+
+
+def test_authority_curate_honors_gate_unresolved_feedback_id(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate failures remain blocking when they name recorded feedback ids."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        del payload
+        return {
+            "final_text": (
+                '{"status":"fail","review_ready":false,'
+                '"unresolved_feedback_ids":["AFB-curation-1"],'
+                '"reason":"Target feedback remains unresolved."}'
+            ),
+            "event_count": 5,
+            "model_info": {"requested_model_id": model_id},
+            "state": {
+                "authority_curation_repair_output": {
+                    "mode": "targeted",
+                    "patches": [],
+                    "resolved_feedback_ids": [],
+                    "unresolved_feedback_ids": ["AFB-curation-1"],
+                },
+                "authority_curation_gate_decision": {
+                    "status": "fail",
+                    "review_ready": False,
+                    "unresolved_feedback_ids": ["AFB-curation-1"],
+                    "reason": "Target feedback remains unresolved.",
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            compiler_model="test-curation-model",
+            idempotency_key="curate-honors-real-unresolved-feedback",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SPEC_COMPILE_FAILED"
+
+
 def test_authority_curate_invocation_failure_artifact_keeps_adk_diagnostics(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
