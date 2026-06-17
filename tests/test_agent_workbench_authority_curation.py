@@ -1372,6 +1372,50 @@ def test_authority_diff_rejects_duplicate_invariant_id() -> None:
     ]
 
 
+def test_authority_diff_detects_untargeted_assumption_change() -> None:
+    """Assumption edits outside targeted feedback must count as untargeted."""
+    source = json.loads(_compiled_artifact_json())
+    candidate = json.loads(_compiled_artifact_json())
+    candidate["assumptions"][1]["text"] = "Unrelated assumption changed."
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids=set(),
+        targeted_collection_keys={
+            "invariants": set(),
+            "assumptions": {"ASM-curation-1"},
+            "gaps": set(),
+        },
+    )
+
+    assert diff["summary"]["untargeted_change_count"] == 1
+    assert diff["untargeted_changes"][0]["collection"] == "assumptions"
+
+
+def test_authority_diff_allows_targeted_assumption_change() -> None:
+    """Assumption edits named by targeted feedback are allowed."""
+    source = json.loads(_compiled_artifact_json())
+    candidate = json.loads(_compiled_artifact_json())
+    candidate["assumptions"][0]["text"] = "Report contexts are examples."
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids=set(),
+        targeted_collection_keys={
+            "invariants": set(),
+            "assumptions": {"ASM-curation-1"},
+            "gaps": set(),
+        },
+    )
+
+    assert diff["summary"]["untargeted_change_count"] == 0
+    assert diff["collections"]["assumptions"]["changed_ids"] == [
+        "ASM-curation-1"
+    ]
+
+
 def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:
     """Blocking feedback becomes host-minted exact-field repair handles."""
     source_authority_json = json.loads(_compiled_artifact_json())

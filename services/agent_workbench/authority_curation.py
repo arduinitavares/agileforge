@@ -1432,11 +1432,15 @@ class AuthorityCurationRunner:
             feedback_json=loaded.feedback_json,
             source_authority_json=loaded.source_authority_json,
         )
+        targeted_collection_keys = _targeted_collection_keys(
+            feedback_json=loaded.feedback_json,
+        )
         try:
             diff = build_authority_diff(
                 source_authority_json=loaded.source_authority_json,
                 candidate_authority_json=candidate_authority_json,
                 targeted_source_item_ids=targeted_source_item_ids,
+                targeted_collection_keys=targeted_collection_keys,
             )
         except AuthorityDiffValidationError as exc:
             return error_envelope(
@@ -3775,6 +3779,47 @@ def _targeted_source_item_ids(
         if item.get("target_kind") == "invariant" and mapped_source_item_id is not None:
             targeted.add(mapped_source_item_id)
     return targeted
+
+
+def _targeted_collection_keys(*, feedback_json: str) -> dict[str, set[str]]:
+    """Derive feedback-targeted authority collection ids for diff validation."""
+    keys: dict[str, set[str]] = {
+        "invariants": set(),
+        "assumptions": set(),
+        "gaps": set(),
+    }
+    feedback = _json_object_from_value(feedback_json)
+    if feedback is None:
+        return keys
+    feedback_items = feedback.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        return keys
+    for item in feedback_items:
+        if not isinstance(item, dict):
+            continue
+        target_kind = _string_or_none(item.get("target_kind"))
+        target_id = _string_or_none(item.get("target_id"))
+        collection = _collection_name_for_target_kind(target_kind)
+        if collection is not None and target_id is not None:
+            keys[collection].add(target_id)
+        for concrete_kind, concrete_id in _concrete_patch_targets_from_feedback_item(
+            item
+        ):
+            concrete_collection = _collection_name_for_target_kind(concrete_kind)
+            if concrete_collection is not None:
+                keys[concrete_collection].add(concrete_id)
+    return keys
+
+
+def _collection_name_for_target_kind(target_kind: str | None) -> str | None:
+    """Map authority feedback target kind to compiled artifact collection."""
+    if target_kind == "invariant":
+        return "invariants"
+    if target_kind == "assumption":
+        return "assumptions"
+    if target_kind == "gap":
+        return "gaps"
+    return None
 
 
 def _source_item_ids_by_invariant_id(
