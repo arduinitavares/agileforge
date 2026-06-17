@@ -14,6 +14,7 @@ from orchestrator_agent.agent_tools.authority_curation import (
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationGateDecision,
     AuthorityCurationPatch,
+    AuthorityCurationRepairSelectionPayload,
     AuthorityCurationRepairOutput,
     AuthorityCurationRepairPlan,
     AuthorityCurationWorkflowInput,
@@ -160,6 +161,59 @@ def test_repair_patch_value_schema_has_explicit_json_types() -> None:
     assert all("type" in option for option in value_schema["anyOf"])
 
 
+def test_repair_selection_payload_rejects_model_authored_targets() -> None:
+    """V2 repair selections must not let the model address authority internals."""
+    payload = {
+        "repairs": [
+            {
+                "feedback_id": "AFB-1",
+                "target_handle": "R1",
+                "target_id": "INV-1",
+                "repair_kind": "replace_text",
+                "replacement_text": "Safer wording.",
+            }
+        ]
+    }
+
+    with pytest.raises(ValidationError):
+        AuthorityCurationRepairSelectionPayload.model_validate(payload)
+
+
+def test_repair_selection_payload_accepts_replace_text() -> None:
+    """V2 repair selections reference host handles and replacement text only."""
+    payload = AuthorityCurationRepairSelectionPayload.model_validate(
+        {
+            "repairs": [
+                {
+                    "feedback_id": "AFB-1",
+                    "target_handle": "R1",
+                    "repair_kind": "replace_text",
+                    "replacement_text": "Safer wording.",
+                }
+            ]
+        }
+    )
+
+    assert payload.repairs[0].target_handle == "R1"
+    assert payload.repairs[0].replacement_text == "Safer wording."
+
+
+def test_repair_selection_payload_rejects_replace_text_without_text() -> None:
+    """Replacement text is mandatory when a selected repair replaces text."""
+    with pytest.raises(ValidationError):
+        AuthorityCurationRepairSelectionPayload.model_validate(
+            {
+                "repairs": [
+                    {
+                        "feedback_id": "AFB-1",
+                        "target_handle": "R1",
+                        "repair_kind": "replace_text",
+                    }
+                ]
+            }
+        )
+
+
 def test_repair_output_schema_does_not_request_open_candidate_json() -> None:
     """Strict providers reject arbitrary object fields in response_format."""
     schema = AuthorityCurationRepairOutput.model_json_schema()
@@ -220,6 +274,15 @@ def test_downstream_agents_reference_state_placeholders() -> None:
     assert "Never use authority:* ids as patch targets" in compiler_instruction
     assert "ASM-*, GAP-*, or INV-*" in compiler_instruction
     assert "Do not use collection-index aliases" in compiler_instruction
+    assert "For authority_curation.v2 inputs" in compiler_instruction
+    assert "Pick target_handle values exactly from the repair_menu" in (
+        compiler_instruction
+    )
+    forbidden_output_clause = (
+        "Do not emit target_id, target_kind, op, path, value, patches, or "
+        "candidate_authority_json"
+    )
+    assert forbidden_output_clause in compiler_instruction
 
     gate_instruction = _instruction_text(agents["AuthorityGateDecision"].instruction)
     assert "{authority_curation_repair_output}" in gate_instruction

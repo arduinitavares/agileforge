@@ -127,7 +127,14 @@ def build_authority_curation_workflow(*, model: str | BaseLlm) -> Workflow:
             "collection-index aliases such as assumptions[N]. Mark unresolved "
             "feedback ids and "
             "failure_reason "
-            f"instead of inventing authority for missing evidence.\n\n"
+            "instead of inventing authority for missing evidence. For "
+            "authority_curation.v2 inputs, return only RepairSelectionPayload "
+            "selections. Pick target_handle values exactly from the "
+            "repair_menu. Do not emit target_id, target_kind, op, path, "
+            "value, patches, or candidate_authority_json. Use replace_text "
+            "only when a menu entry allows replace_text. Use "
+            "mark_unresolvable with a reason when feedback cannot be safely "
+            f"repaired from the menu.\n\n"
             f"{_LOOP_CONTRACT}"
         ),
         disallow_transfer_to_parent=True,
