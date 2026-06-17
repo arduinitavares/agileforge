@@ -346,6 +346,15 @@ class _Application(Protocol):
         """Run bounded authority curation."""
         ...
 
+    def authority_curation_trace(
+        self,
+        *,
+        mutation_event_id: int,
+        project_id: int | None = None,
+    ) -> JsonObject:
+        """Return bounded authority curation trace summary."""
+        raise NotImplementedError
+
     def vision_generate(
         self,
         *,
@@ -1486,6 +1495,26 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     authority_curate.add_argument("--changed-by", default="cli-agent")
     authority_curate.add_argument("--correlation-id")
     authority_curate.set_defaults(command_handler=_authority_curate)
+    authority_curation = authority_sub.add_parser(
+        "curation",
+        help="Inspect authority curation artifacts.",
+    )
+    authority_curation_sub = authority_curation.add_subparsers(
+        dest="curation_command",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    authority_curation_trace = authority_curation_sub.add_parser(
+        "trace",
+        help="Show bounded authority curation trace summary.",
+    )
+    authority_curation_trace.add_argument(
+        "--mutation-event-id",
+        type=int,
+        required=True,
+    )
+    authority_curation_trace.add_argument("--project-id", type=int)
+    authority_curation_trace.set_defaults(command_handler=_authority_curation_trace)
 
     vision = subparsers.add_parser("vision", help="Run Vision phase commands.")
     vision_sub = vision.add_subparsers(
@@ -2600,6 +2629,20 @@ def _authority_curate(
             idempotency_key=args.idempotency_key,
             changed_by=args.changed_by,
             correlation_id=args.correlation_id,
+        ),
+    )
+
+
+def _authority_curation_trace(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route authority curation trace inspection to the application facade."""
+    return (
+        "agileforge authority curation trace",
+        application.authority_curation_trace(
+            mutation_event_id=args.mutation_event_id,
+            project_id=args.project_id,
         ),
     )
 

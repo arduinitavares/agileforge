@@ -12,8 +12,10 @@ from sqlmodel import Session, SQLModel, select
 
 import services.agent_workbench.application as application_mod
 import services.workflow as workflow_mod
+import utils.authority_curation_trace as trace_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
+from models.agent_workbench import CliMutationLedger
 from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
@@ -28,6 +30,7 @@ from services.agent_workbench.authority_decision import (
 )
 from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
 from services.agent_workbench.command_registry import command_contracts
+from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.mutation_ledger import (
     MutationLedgerRepository,
     MutationStatus,
@@ -6145,6 +6148,132 @@ def test_application_mutation_facades_return_ledger_envelopes(
     assert resumed["ok"] is True
     assert resumed["data"]["status"] == MutationStatus.PENDING.value
     assert resumed["data"]["recovery"]["domain_resume_required"] is True
+
+
+def test_application_authority_curation_trace_returns_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Application reads bounded curation trace summaries by mutation id."""
+    db_path = tmp_path / "trace-ledger.db"
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    with Session(engine) as session:
+        session.add(
+            CliMutationLedger(
+                mutation_event_id=647,
+                command="agileforge authority curate",
+                idempotency_key="curation-trace-key",
+                request_hash="sha256:req",
+                project_id=3,
+                correlation_id="corr-trace",
+                changed_by="cli-agent",
+                status=MutationStatus.SUCCEEDED.value,
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    trace_mod.append_trace_event(
+        mutation_event_id=647,
+        project_id=3,
+        step="adk_invocation_started",
+        status="started",
+    )
+    app = AgentWorkbenchApplication()
+
+    result = app.authority_curation_trace(
+        mutation_event_id=647,
+        project_id=None,
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["trace_artifact_id"] == "authority_curation_trace-647"
+    assert result["data"]["event_count"] == 1
+
+
+def _raise_trace_summary_read(mutation_event_id: int) -> NoReturn:
+    """Fail if validation reads trace summary before rejecting."""
+    del mutation_event_id
+    raise AssertionError
+
+
+def test_application_authority_curation_trace_rejects_wrong_command_before_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong command returns not-found without reading trace summary."""
+    db_path = tmp_path / "trace-ledger.db"
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    with Session(engine) as session:
+        session.add(
+            CliMutationLedger(
+                mutation_event_id=648,
+                command="agileforge project create",
+                idempotency_key="wrong-command-trace-key",
+                request_hash="sha256:req",
+                project_id=3,
+                correlation_id="corr-trace",
+                changed_by="cli-agent",
+                status=MutationStatus.SUCCEEDED.value,
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(
+        trace_mod,
+        "summarize_trace",
+        _raise_trace_summary_read,
+    )
+    app = AgentWorkbenchApplication()
+
+    result = app.authority_curation_trace(
+        mutation_event_id=648,
+        project_id=None,
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ErrorCode.MUTATION_NOT_FOUND.value
+
+
+def test_application_authority_curation_trace_rejects_wrong_project_before_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong project returns not-found without reading trace summary."""
+    db_path = tmp_path / "trace-ledger.db"
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    with Session(engine) as session:
+        session.add(
+            CliMutationLedger(
+                mutation_event_id=649,
+                command="agileforge authority curate",
+                idempotency_key="wrong-project-trace-key",
+                request_hash="sha256:req",
+                project_id=3,
+                correlation_id="corr-trace",
+                changed_by="cli-agent",
+                status=MutationStatus.SUCCEEDED.value,
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(
+        trace_mod,
+        "summarize_trace",
+        _raise_trace_summary_read,
+    )
+    app = AgentWorkbenchApplication()
+
+    result = app.authority_curation_trace(
+        mutation_event_id=649,
+        project_id=4,
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ErrorCode.MUTATION_NOT_FOUND.value
 
 
 def test_mutation_ledger_repository_replays_superseded_responses(

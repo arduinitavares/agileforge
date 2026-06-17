@@ -1371,6 +1371,17 @@ _PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge authority curation trace",
+        mutates=False,
+        phase="phase_2e",
+        input_required=("mutation_event_id",),
+        input_optional=("project_id",),
+        errors=(
+            ErrorCode.SCHEMA_NOT_READY.value,
+            ErrorCode.MUTATION_NOT_FOUND.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge spec profile schema",
         mutates=False,
         phase="phase_2e",

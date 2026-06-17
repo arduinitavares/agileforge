@@ -34,6 +34,7 @@ from services.agent_workbench.command_schema import (
     command_schema_payload,
 )
 from services.agent_workbench.diagnostics import doctor_payload, schema_check_payload
+from services.agent_workbench.envelope import error_envelope, success_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import MutationLedgerRepository
@@ -1155,6 +1156,56 @@ class AgentWorkbenchApplication:
             return error
         repo = cast("MutationLedgerRepository", repo)
         return repo.show_event(mutation_event_id=mutation_event_id)
+
+    def authority_curation_trace(
+        self,
+        *,
+        mutation_event_id: int,
+        project_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded authority curation trace summary."""
+        repo, error = _mutation_ledger_repository()
+        if error is not None:
+            return error
+        repo = cast("MutationLedgerRepository", repo)
+        shown = repo.show_event(
+            mutation_event_id=mutation_event_id,
+            include_trace_metadata=False,
+        )
+        if shown.get("ok") is not True:
+            return shown
+        data = shown.get("data")
+        if not isinstance(data, dict):
+            return shown
+        if data.get("command") != AUTHORITY_CURATE_COMMAND:
+            return error_envelope(
+                command="agileforge authority curation trace",
+                error=workbench_error(
+                    ErrorCode.MUTATION_NOT_FOUND,
+                    message="Authority curation trace was not found for mutation.",
+                    details={"mutation_event_id": mutation_event_id},
+                    remediation=["agileforge mutation list"],
+                ),
+            )
+        if project_id is not None and data.get("project_id") != project_id:
+            return error_envelope(
+                command="agileforge authority curation trace",
+                error=workbench_error(
+                    ErrorCode.MUTATION_NOT_FOUND,
+                    message="Authority curation trace was not found for project.",
+                    details={
+                        "mutation_event_id": mutation_event_id,
+                        "project_id": project_id,
+                    },
+                    remediation=["agileforge mutation list"],
+                ),
+            )
+        from utils.authority_curation_trace import summarize_trace  # noqa: PLC0415
+
+        return success_envelope(
+            command="agileforge authority curation trace",
+            data=summarize_trace(mutation_event_id=mutation_event_id),
+        )
 
     def mutation_list(
         self,

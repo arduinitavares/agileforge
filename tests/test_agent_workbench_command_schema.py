@@ -461,6 +461,17 @@ def test_authority_curate_command_is_registered() -> None:
     assert ErrorCode.MUTATION_RECOVERY_REQUIRED.value in schema["errors"]
 
 
+def test_authority_curation_trace_command_is_registered() -> None:
+    """Publish read-only authority curation trace inspection contract."""
+    schema = command_schema_payload("agileforge authority curation trace")
+
+    assert schema["mutates"] is False
+    assert schema["input"]["required"] == ["mutation_event_id"]
+    assert schema["input"]["optional"] == ["project_id"]
+    assert ErrorCode.MUTATION_NOT_FOUND.value in schema["errors"]
+    assert ErrorCode.MUTATION_RESUME_CONFLICT.value not in schema["errors"]
+
+
 def test_authority_accept_is_registered_as_guarded_mutation() -> None:
     """Publish the authority accept mutation contract for agents."""
     accept_schema = command_schema_payload("agileforge authority accept")

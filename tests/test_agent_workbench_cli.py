@@ -292,6 +292,29 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def authority_curation_trace(
+        self,
+        *,
+        mutation_event_id: int,
+        project_id: int | None = None,
+    ) -> JsonObject:
+        """Return an authority curation trace payload."""
+        self.calls.append(
+            (
+                "authority_curation_trace",
+                {"mutation_event_id": mutation_event_id, "project_id": project_id},
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "trace_artifact_id": f"authority_curation_trace-{mutation_event_id}",
+                "event_count": 1,
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def workflow_state(self, *, project_id: int) -> JsonObject:
         """Return a workflow state payload."""
         self.calls.append(("workflow_state", {"project_id": project_id}))
@@ -2700,6 +2723,34 @@ def test_cli_routes_authority_curate_to_application(
             },
         )
     ]
+
+
+def test_authority_curation_trace_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Read-only trace inspection routes mutation and optional project id."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "authority",
+            "curation",
+            "trace",
+            "--mutation-event-id",
+            "647",
+            "--project-id",
+            "3",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["data"]["trace_artifact_id"] == "authority_curation_trace-647"
+    assert app.calls[-1] == (
+        "authority_curation_trace",
+        {"mutation_event_id": 647, "project_id": 3},
+    )
 
 
 def test_cli_routes_authority_status(
