@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,10 +52,32 @@ class AuthorityCurationRepairPlan(_StrictModel):
     reason: str = Field(min_length=1)
 
 
+class AuthorityCurationPatch(_StrictModel):
+    """One host-applied authority repair operation."""
+
+    target_kind: Literal["invariant", "assumption", "gap"]
+    target_id: str = Field(min_length=1)
+    op: Literal["replace_text", "replace_value"]
+    new_text: str | None = Field(default=None, min_length=1)
+    path: str | None = Field(default=None, min_length=1)
+    value: Any = None
+
+    @model_validator(mode="after")
+    def _require_operation_payload(self) -> Self:
+        if self.op == "replace_text" and not self.new_text:
+            msg = "new_text is required when op is replace_text"
+            raise ValueError(msg)
+        if self.op == "replace_value" and (not self.path or self.value is None):
+            msg = "path and value are required when op is replace_value"
+            raise ValueError(msg)
+        return self
+
+
 class AuthorityCurationRepairOutput(_StrictModel):
     """Repair output returned by the ADK workflow to the host."""
 
     mode: Literal["targeted", "full_recompile", "fail_no_candidate"]
+    patches: list[AuthorityCurationPatch] = Field(default_factory=list)
     candidate_authority_json: dict[str, object] | None = None
     resolved_feedback_ids: list[str] = Field(default_factory=list)
     unresolved_feedback_ids: list[str] = Field(default_factory=list)

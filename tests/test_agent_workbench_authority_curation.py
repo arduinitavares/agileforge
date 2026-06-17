@@ -34,6 +34,7 @@ from services.specs.authority_curation_diff import (
     build_authority_diff,
 )
 from tests.typing_helpers import require_id
+from utils import failure_artifacts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -166,7 +167,16 @@ def _compiled_artifact_json() -> str:
             "eligible_feature_rules": [],
             "rejected_features": [],
             "gaps": [{"gap_id": "GAP-curation-1"}],
-            "assumptions": [{"assumption_id": "ASM-curation-1"}],
+            "assumptions": [
+                {
+                    "assumption_id": "ASM-curation-1",
+                    "text": "Report contexts are exhaustive.",
+                },
+                {
+                    "assumption_id": "ASM-curation-untargeted",
+                    "text": "Unrelated assumption remains stable.",
+                },
+            ],
             "quality_groups": [{"group_id": "QG-curation-1"}],
             "source_map": [
                 {"id": "SRC-curation-1"},
@@ -315,6 +325,19 @@ def _insert_rejected_authority_with_feedback(
     )
 
 
+def _latest_authority_artifact(engine: Engine) -> dict[str, Any]:
+    """Return latest compiled authority artifact JSON for assertions."""
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+    latest = max(
+        authorities,
+        key=lambda authority: require_id(authority.authority_id, "authority_id"),
+    )
+    artifact_json = latest.compiled_artifact_json
+    assert artifact_json is not None
+    return cast("dict[str, Any]", json.loads(artifact_json))
+
+
 def _successful_curation_result(
     fixture: RejectedAuthorityFixture,
 ) -> dict[str, object]:
@@ -351,6 +374,98 @@ def _targeted_repair_curation_result(
         "project_id": fixture.project_id,
         "candidate_authority_json": candidate,
         "candidate_lineage_json": {"source": "workflow"},
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _patch_repair_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return targeted patches instead of a full authority copy."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "assumption",
+                "target_id": "ASM-curation-1",
+                "op": "replace_text",
+                "new_text": "Report contexts are required examples, not exhaustive.",
+            },
+            {
+                "target_kind": "invariant",
+                "target_id": "INV-curation-1",
+                "op": "replace_text",
+                "new_text": "Review packets include qualified guard evidence.",
+            },
+        ],
+        "candidate_lineage_json": {"source": "patches"},
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _untargeted_patch_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a patch for an item absent from feedback."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "assumption",
+                "target_id": "ASM-curation-untargeted",
+                "op": "replace_text",
+                "new_text": "Unrelated assumption changed.",
+            }
+        ],
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _missing_target_patch_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a patch for a target missing from source authority."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "assumption",
+                "target_id": "ASM-missing",
+                "op": "replace_text",
+                "new_text": "Missing target should fail.",
+            }
+        ],
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _structured_parameter_patch_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return patch for a typed invariant parameter."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "invariant",
+                "target_id": "INV-943d18f5ecffcd3c",
+                "op": "replace_value",
+                "path": "/parameters/rule",
+                "value": (
+                    "Use qualified observational language instead of literal "
+                    "token whitelists."
+                ),
+            }
+        ],
+        "candidate_lineage_json": {"source": "structured-patches"},
         "quality_report": {"status": "passed"},
     }
 
@@ -1672,6 +1787,274 @@ def test_authority_curate_persists_diff_summary_and_lineage(
     assert json.loads(attempt.quality_report_json) == {"status": "passed"}
 
 
+def test_authority_curate_applies_targeted_patches_deterministically(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host applies model patch output and preserves unrelated authority content."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-assumption-1",
+                        "target_kind": "assumption",
+                        "target_id": "ASM-curation-1",
+                        "issue_type": "exhaustive_assumption",
+                        "severity": "blocking",
+                        "instruction": "Make context list non-exhaustive.",
+                    },
+                    {
+                        "feedback_id": "AFB-invariant-1",
+                        "target_kind": "invariant",
+                        "target_id": "INV-curation-1",
+                        "issue_type": "overstrong_invariant",
+                        "severity": "blocking",
+                        "instruction": "Make guard evidence wording qualified.",
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _patch_repair_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-targeted-patches",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["diff_summary"]["changed_count"] == 1
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+
+    candidate = _latest_authority_artifact(engine)
+    invariants = {item["id"]: item for item in candidate["invariants"]}
+    assumptions = {item["assumption_id"]: item for item in candidate["assumptions"]}
+    assert invariants["INV-curation-1"]["text"] == (
+        "Review packets include qualified guard evidence."
+    )
+    assert invariants["INV-curation-untargeted"]["text"] == (
+        "Unrelated review packets remain stable."
+    )
+    assert assumptions["ASM-curation-1"]["text"] == (
+        "Report contexts are required examples, not exhaustive."
+    )
+    assert assumptions["ASM-curation-untargeted"]["text"] == (
+        "Unrelated assumption remains stable."
+    )
+    assert json.loads(attempt.candidate_lineage_json) == {"source": "patches"}
+
+
+def test_authority_curate_rejects_untargeted_patch(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch applier must reject model edits outside structured feedback."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _untargeted_patch_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-untargeted-patch",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert result["errors"][0]["details"]["reason"] == "untargeted_patch_target"
+
+
+def test_authority_curate_rejects_missing_patch_target(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch applier must fail closed when a feedback target is absent."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-missing",
+                        "target_kind": "assumption",
+                        "target_id": "ASM-missing",
+                        "issue_type": "missing_target",
+                        "severity": "blocking",
+                        "instruction": "This target does not exist.",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _missing_target_patch_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-missing-patch-target",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert result["errors"][0]["details"]["reason"] == "patch_target_not_found"
+
+
+def test_authority_curate_replaces_structured_invariant_parameter(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch applier updates typed invariant parameters and records id lineage."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        artifact_json = authority.compiled_artifact_json
+        assert artifact_json is not None
+        artifact = json.loads(artifact_json)
+        artifact["invariants"][0] = {
+            "id": "INV-943d18f5ecffcd3c",
+            "type": "DATA_CONTRACT",
+            "source_item_id": "CONSTRAINT.no-causal-or-optimal-control-claims",
+            "source_level": "MUST_NOT",
+            "parameters": {
+                "subject": "operational learning report language",
+                "fields": ["approved_language_tokens"],
+                "rule": "Only use approved language tokens.",
+            },
+        }
+        authority.compiled_artifact_json = json.dumps(artifact, sort_keys=True)
+        session.add(authority)
+        session.commit()
+        session.refresh(authority)
+        fingerprint = pending_authority_fingerprint(authority)
+        assert fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = fingerprint
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-structured-rule",
+                        "target_kind": "invariant",
+                        "target_id": "INV-943d18f5ecffcd3c",
+                        "issue_type": "brittle_token_whitelist",
+                        "severity": "blocking",
+                        "instruction": (
+                            "Replace literal token whitelist with category guidance."
+                        ),
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _structured_parameter_patch_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-structured-parameter-patch",
+        )
+    )
+
+    assert result["ok"] is True
+    lineage = result["data"]["lineage"]["INV-943d18f5ecffcd3c"]
+    assert lineage["old_id"] == "INV-943d18f5ecffcd3c"
+    assert lineage["new_id"].startswith("INV-")
+    assert lineage["new_id"] != "INV-943d18f5ecffcd3c"
+    candidate = _latest_authority_artifact(engine)
+    patched = next(
+        item
+        for item in candidate["invariants"]
+        if item["source_item_id"] == "CONSTRAINT.no-causal-or-optimal-control-claims"
+    )
+    assert patched["parameters"]["rule"] == (
+        "Use qualified observational language instead of literal token whitelists."
+    )
+    assert patched["id"] == lineage["new_id"]
+
+
 def test_authority_curate_publishes_pending_review_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -2919,6 +3302,157 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
         ledger = session.exec(select(CliMutationLedger)).one()
     assert attempt.status == "succeeded"
     assert ledger.status == "succeeded"
+
+
+def test_authority_curate_default_workflow_patch_output_publishes_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ADK adapter should pass patch output to host patch applier."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        del payload
+        return {
+            "final_text": (
+                '{"status":"pass","review_ready":true,'
+                '"unresolved_feedback_ids":[]}'
+            ),
+            "event_count": 5,
+            "model_info": {"requested_model_id": model_id},
+            "state": {
+                "authority_curation_repair_output": {
+                    "mode": "targeted",
+                    "patches": [
+                        {
+                            "target_kind": "invariant",
+                            "target_id": "INV-curation-1",
+                            "op": "replace_text",
+                            "new_text": (
+                                "Review packets include qualified guard evidence."
+                            ),
+                        }
+                    ],
+                    "resolved_feedback_ids": ["AFB-curation-1"],
+                    "unresolved_feedback_ids": [],
+                },
+                "authority_curation_gate_decision": {
+                    "status": "pass",
+                    "review_ready": True,
+                    "unresolved_feedback_ids": [],
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            compiler_model="test-curation-model",
+            idempotency_key="curate-default-workflow-patches",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    invariants = {item["id"]: item for item in candidate["invariants"]}
+    assert invariants["INV-curation-1"]["text"] == (
+        "Review packets include qualified guard evidence."
+    )
+
+
+def test_authority_curate_invocation_failure_artifact_keeps_adk_diagnostics(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ADK invocation failures must persist enough bounded diagnostics."""
+    monkeypatch.setattr(failure_artifacts, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(
+        failure_artifacts,
+        "FAILURES_DIR",
+        tmp_path / "logs" / "failures",
+    )
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+
+    def fake_invoke(
+        *,
+        payload: dict[str, object],
+        model_id: str,
+    ) -> dict[str, object]:
+        del payload, model_id
+        message = "provider stream ended before final event"
+        raise failure_artifacts.AgentInvocationError(message, event_count=7)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        fake_invoke,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            compiler_model="test-curation-model",
+            idempotency_key="curate-adk-diagnostics",
+        )
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    artifact = failure_artifacts.read_failure_artifact(
+        cast("str", details["failure_artifact_id"])
+    )
+    assert artifact is not None
+    assert artifact["model_info"] == {
+        "model_id": "test-curation-model",
+        "requested_model_id": "test-curation-model",
+    }
+    context = artifact["context"]
+    assert isinstance(context, dict)
+    trace_id = context["trace_artifact_id"]
+    assert isinstance(trace_id, str)
+    assert trace_id.startswith("authority_curation_trace-")
+    assert artifact["extra"] == {
+        "adk_event_count": 7,
+        "exception_message": "provider stream ended before final event",
+        "partial_output_present": False,
+    }
 
 
 def test_authority_curate_exception_sanitizes_and_restores_state(

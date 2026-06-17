@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -28,6 +35,9 @@ from models.specs import (
     CompiledSpecAuthority,
     SpecAuthorityAcceptance,
     SpecRegistry,
+)
+from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (
+    compiler_contract,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
@@ -63,6 +73,7 @@ from utils.authority_curation_trace import (
     trace_artifact_id,
 )
 from utils.failure_artifacts import write_failure_artifact
+from utils.spec_schemas import InvariantParameters, InvariantType
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterator, Mapping
@@ -88,6 +99,15 @@ AUTHORITY_CURATION_STATE_REPAIR_PLAN = "authority_curation_repair_plan"
 AUTHORITY_CURATION_STATE_REPAIR_OUTPUT = "authority_curation_repair_output"
 AUTHORITY_CURATION_STATE_GATE = "authority_curation_gate_decision"
 AUTHORITY_CURATION_FAILURE_PHASE = "authority_curation"
+_INVARIANT_PARAMETERS_ADAPTER = TypeAdapter(InvariantParameters)
+_PATCH_TEXT_FIELDS = (
+    "text",
+    "statement",
+    "description",
+    "summary",
+    "assumption",
+    "reason",
+)
 
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
@@ -286,6 +306,16 @@ class _CurationWorkflowFailure:
     model_info: dict[str, Any] | None = None
     validation_errors: object | None = None
     extra: dict[str, object] | None = None
+    trace_artifact_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _PatchApplicationContext:
+    """Metadata needed to return safe patch validation errors."""
+
+    request: AuthorityCurationRequest
+    attempt: AuthorityCurationAttempt
+    mutation_event_id: int
 
 
 class AuthorityCurationRunner:
@@ -1064,6 +1094,7 @@ class AuthorityCurationRunner:
                     curation_attempt_id=attempt.curation_attempt_id,
                     source_authority_json=loaded_inputs.source_authority_json,
                     feedback_json=loaded_inputs.feedback_json,
+                    mutation_event_id=active_mutation.mutation_event_id,
                 )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
@@ -1352,18 +1383,6 @@ class AuthorityCurationRunner:
         mutation_event_id: int,
     ) -> _ValidatedCurationCandidate | dict[str, Any]:
         """Validate workflow candidate JSON before marking curation succeeded."""
-        candidate_authority_json = _json_object_from_value(
-            workflow_result.get("candidate_authority_json")
-        )
-        if not _is_authority_json(candidate_authority_json):
-            return _invalid_curation_candidate_response(
-                request=request,
-                attempt=attempt,
-                reason="missing_or_invalid_candidate_authority_json",
-                mutation_event_id=mutation_event_id,
-            )
-        candidate_authority_json = cast("dict[str, Any]", candidate_authority_json)
-
         loaded = self._load_source_authority_and_feedback(
             request=request,
             attempt=attempt,
@@ -1371,6 +1390,29 @@ class AuthorityCurationRunner:
         )
         if not isinstance(loaded, _LoadedCurationInputs):
             return loaded
+
+        context = _PatchApplicationContext(
+            request=request,
+            attempt=attempt,
+            mutation_event_id=mutation_event_id,
+        )
+        candidate_authority_json = _candidate_authority_from_workflow_result(
+            context=context,
+            loaded=loaded,
+            workflow_result=workflow_result,
+        )
+        if not _is_authority_json(candidate_authority_json):
+            if (
+                isinstance(candidate_authority_json, dict)
+                and candidate_authority_json.get("ok") is False
+            ):
+                return candidate_authority_json
+            return _invalid_curation_candidate_response(
+                request=context.request,
+                attempt=attempt,
+                reason="missing_or_invalid_candidate_authority_json",
+                mutation_event_id=context.mutation_event_id,
+            )
 
         targeted_source_item_ids = _targeted_source_item_ids(
             feedback_json=loaded.feedback_json,
@@ -2758,6 +2800,381 @@ def _invalid_curation_candidate_response(
     )
 
 
+def _candidate_authority_from_workflow_result(
+    *,
+    context: _PatchApplicationContext,
+    loaded: _LoadedCurationInputs,
+    workflow_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return full candidate JSON from either full output or patch output."""
+    candidate = _json_object_from_value(workflow_result.get("candidate_authority_json"))
+    if candidate is not None:
+        return candidate
+    patched = _candidate_authority_from_patches(
+        context=context,
+        source_authority_json=loaded.source_authority_json,
+        feedback_json=loaded.feedback_json,
+        patches=workflow_result.get("patches"),
+    )
+    if isinstance(patched, dict):
+        return patched
+    return _invalid_curation_candidate_response(
+        request=context.request,
+        attempt=context.attempt,
+        reason="missing_or_invalid_candidate_authority_json",
+        mutation_event_id=context.mutation_event_id,
+    )
+
+
+def _candidate_authority_from_patches(
+    *,
+    context: _PatchApplicationContext,
+    source_authority_json: dict[str, Any],
+    feedback_json: str,
+    patches: object,
+) -> dict[str, Any]:
+    """Apply model-suggested patches with host-owned deterministic mutation."""
+    if not isinstance(patches, list) or not patches:
+        return _invalid_curation_candidate_response(
+            request=context.request,
+            attempt=context.attempt,
+            reason="missing_or_invalid_candidate_authority_json",
+            mutation_event_id=context.mutation_event_id,
+        )
+    candidate = json.loads(json.dumps(source_authority_json))
+    feedback_targets = _feedback_target_keys(feedback_json)
+    for index, patch in enumerate(patches):
+        error = _apply_candidate_patch(
+            context=context,
+            candidate=candidate,
+            feedback_targets=feedback_targets,
+            patch=patch,
+            patch_index=index,
+        )
+        if error is not None:
+            return error
+    return candidate
+
+
+def _unsafe_curation_patch_response(
+    *,
+    context: _PatchApplicationContext,
+    reason: str,
+    patch_index: int,
+    target_kind: str | None = None,
+    target_id: str | None = None,
+) -> dict[str, Any]:
+    """Return fail-closed response for unsafe model patch output."""
+    details: dict[str, Any] = {
+        "project_id": context.request.project_id,
+        "curation_attempt_id": context.attempt.curation_attempt_id,
+        "reason": reason,
+        "patch_index": patch_index,
+        "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+    }
+    if target_kind is not None:
+        details["target_kind"] = target_kind
+    if target_id is not None:
+        details["target_id"] = target_id
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_CURATED_DIFF_UNBOUNDED,
+            message="Authority curation produced an unsafe authority patch.",
+            details=details,
+        ),
+        correlation_id=context.request.correlation_id,
+    )
+
+
+def _apply_candidate_patch(
+    *,
+    context: _PatchApplicationContext,
+    candidate: dict[str, Any],
+    feedback_targets: set[tuple[str, str]],
+    patch: object,
+    patch_index: int,
+) -> dict[str, Any] | None:
+    """Validate and apply one candidate patch."""
+    if not isinstance(patch, dict):
+        return _unsafe_curation_patch_response(
+            context=context,
+            reason="invalid_patch",
+            patch_index=patch_index,
+        )
+    patch_payload = {str(key): value for key, value in patch.items()}
+    target_kind = _string_or_none(patch_payload.get("target_kind"))
+    target_id = _string_or_none(patch_payload.get("target_id"))
+    operation = _string_or_none(patch_payload.get("op"))
+    if target_kind is None or target_id is None or operation is None:
+        return _unsafe_curation_patch_response(
+            context=context,
+            reason="invalid_patch",
+            patch_index=patch_index,
+        )
+    if (target_kind, target_id) not in feedback_targets:
+        return _unsafe_curation_patch_response(
+            context=context,
+            reason="untargeted_patch_target",
+            patch_index=patch_index,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+    target = _find_patch_target(
+        candidate,
+        target_kind=target_kind,
+        target_id=target_id,
+    )
+    if target is None:
+        return _unsafe_curation_patch_response(
+            context=context,
+            reason="patch_target_not_found",
+            patch_index=patch_index,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+    applied = _apply_single_patch(
+        target=target,
+        patch=patch_payload,
+        operation=operation,
+        target_kind=target_kind,
+    )
+    if applied is None:
+        return None
+    return _unsafe_curation_patch_response(
+        context=context,
+        reason=applied,
+        patch_index=patch_index,
+        target_kind=target_kind,
+        target_id=target_id,
+    )
+
+
+def _feedback_target_keys(feedback_json: str) -> set[tuple[str, str]]:
+    """Return exact authority targets named by structured feedback."""
+    feedback = _json_object_from_value(feedback_json)
+    if feedback is None:
+        return set()
+    feedback_items = feedback.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        return set()
+    targets: set[tuple[str, str]] = set()
+    for item in feedback_items:
+        if not isinstance(item, dict):
+            continue
+        target_kind = _string_or_none(item.get("target_kind"))
+        target_id = _string_or_none(item.get("target_id"))
+        if target_kind is not None and target_id is not None:
+            targets.add((target_kind, target_id))
+    return targets
+
+
+def _find_patch_target(
+    authority_json: dict[str, Any],
+    *,
+    target_kind: str,
+    target_id: str,
+) -> tuple[list[Any], int, object] | None:
+    """Find a mutable target in an authority artifact."""
+    if target_kind == "invariant":
+        return _find_dict_list_target(
+            authority_json.get("invariants"),
+            target_id=target_id,
+            id_keys=("id",),
+        )
+    if target_kind == "assumption":
+        return _find_text_or_dict_target(
+            authority_json.get("assumptions"),
+            target_id=target_id,
+            review_prefix="ASM",
+            id_keys=("assumption_id", "id"),
+        )
+    if target_kind == "gap":
+        return _find_text_or_dict_target(
+            authority_json.get("gaps"),
+            target_id=target_id,
+            review_prefix="GAP",
+            id_keys=("gap_id", "id"),
+        )
+    return None
+
+
+def _find_dict_list_target(
+    value: object,
+    *,
+    target_id: str,
+    id_keys: tuple[str, ...],
+) -> tuple[list[Any], int, object] | None:
+    """Find a dict item by one of several id keys."""
+    if not isinstance(value, list):
+        return None
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        item_payload = cast("dict[str, Any]", item)
+        if any(item_payload.get(key) == target_id for key in id_keys):
+            return value, index, item_payload
+    return None
+
+
+def _find_text_or_dict_target(
+    value: object,
+    *,
+    target_id: str,
+    review_prefix: str,
+    id_keys: tuple[str, ...],
+) -> tuple[list[Any], int, object] | None:
+    """Find dict targets or review-visible string aliases like ASM-39."""
+    found = _find_dict_list_target(value, target_id=target_id, id_keys=id_keys)
+    if found is not None:
+        return found
+    if not isinstance(value, list):
+        return None
+    prefix = f"{review_prefix}-"
+    if not target_id.startswith(prefix):
+        return None
+    raw_index = target_id.removeprefix(prefix)
+    if not raw_index.isdigit():
+        return None
+    index = int(raw_index) - 1
+    if index < 0 or index >= len(value):
+        return None
+    return value, index, value[index]
+
+
+def _apply_single_patch(
+    *,
+    target: tuple[list[Any], int, object],
+    patch: dict[str, Any],
+    operation: str,
+    target_kind: str,
+) -> str | None:
+    """Apply one validated patch to a mutable authority target."""
+    if operation == "replace_text":
+        return _apply_replace_text_patch(
+            target=target,
+            patch=patch,
+            target_kind=target_kind,
+        )
+    if operation == "replace_value":
+        return _apply_replace_value_patch(
+            target=target,
+            patch=patch,
+            target_kind=target_kind,
+        )
+    return "unsupported_patch_operation"
+
+
+def _apply_replace_text_patch(
+    *,
+    target: tuple[list[Any], int, object],
+    patch: dict[str, Any],
+    target_kind: str,
+) -> str | None:
+    """Apply one textual replacement patch."""
+    container, index, item = target
+    new_text = _string_or_none(patch.get("new_text"))
+    if new_text is None:
+        return "invalid_patch"
+    if isinstance(item, str):
+        container[index] = new_text
+        return None
+    if not isinstance(item, dict):
+        return "patch_target_not_textual"
+    item_payload = cast("dict[str, Any]", item)
+    item_payload[_text_field_for_patch(item_payload)] = new_text
+    _recompute_invariant_id_if_possible(item_payload, target_kind=target_kind)
+    return None
+
+
+def _apply_replace_value_patch(
+    *,
+    target: tuple[list[Any], int, object],
+    patch: dict[str, Any],
+    target_kind: str,
+) -> str | None:
+    """Apply one structured JSON pointer replacement patch."""
+    _, _, item = target
+    path = _string_or_none(patch.get("path"))
+    if path is None or "value" not in patch:
+        return "invalid_patch"
+    if not isinstance(item, dict):
+        return "patch_target_not_structured"
+    item_payload = cast("dict[str, Any]", item)
+    path_error = _replace_json_pointer_value(
+        item_payload,
+        path=path,
+        value=patch["value"],
+        target_kind=target_kind,
+    )
+    if path_error is not None:
+        return path_error
+    _recompute_invariant_id_if_possible(item_payload, target_kind=target_kind)
+    return None
+
+
+def _text_field_for_patch(item: dict[str, Any]) -> str:
+    """Return existing text-like field for a textual patch."""
+    for field_name in _PATCH_TEXT_FIELDS:
+        if isinstance(item.get(field_name), str):
+            return field_name
+    return "text"
+
+
+def _replace_json_pointer_value(
+    item: dict[str, Any],
+    *,
+    path: str,
+    value: object,
+    target_kind: str,
+) -> str | None:
+    """Replace a bounded JSON pointer path inside a target object."""
+    if target_kind != "invariant" or not path.startswith("/parameters/"):
+        return "unsupported_patch_path"
+    parts = [_decode_json_pointer_part(part) for part in path.split("/")[1:]]
+    current: object = item
+    for part in parts[:-1]:
+        if not isinstance(current, dict):
+            return "patch_path_not_found"
+        current = current.get(part)
+    if not parts or not isinstance(current, dict) or parts[-1] not in current:
+        return "patch_path_not_found"
+    current[parts[-1]] = value
+    return None
+
+
+def _decode_json_pointer_part(value: str) -> str:
+    """Decode one JSON pointer segment."""
+    return value.replace("~1", "/").replace("~0", "~")
+
+
+def _recompute_invariant_id_if_possible(
+    item: dict[str, Any],
+    *,
+    target_kind: str,
+) -> None:
+    """Refresh deterministic invariant id after structured parameter edits."""
+    if target_kind != "invariant":
+        return
+    invariant_type_raw = item.get("type")
+    parameters_raw = item.get("parameters")
+    if not isinstance(invariant_type_raw, str) or not isinstance(parameters_raw, dict):
+        return
+    try:
+        invariant_type = InvariantType(invariant_type_raw)
+        parameters = _INVARIANT_PARAMETERS_ADAPTER.validate_python(parameters_raw)
+    except (TypeError, ValueError, ValidationError):
+        return
+    source_item_id = item.get("source_item_id")
+    source_level = item.get("source_level")
+    item["id"] = compiler_contract.compute_invariant_id_from_payload(
+        invariant_type,
+        parameters,
+        source_item_id=source_item_id if isinstance(source_item_id, str) else None,
+        source_level=source_level,
+    )
+
+
 def _targeted_source_item_ids(
     *,
     feedback_json: str,
@@ -3305,6 +3722,7 @@ def run_authority_curation_workflow(
     curation_attempt_id: str,
     source_authority_json: dict[str, Any],
     feedback_json: str,
+    mutation_event_id: int | None = None,
 ) -> dict[str, Any]:
     """Run the ADK authority curation workflow and normalize its output."""
     feedback_payload = _json_object_from_value(feedback_json)
@@ -3346,8 +3764,21 @@ def run_authority_curation_workflow(
                 failure_stage="adk_invocation_failed",
                 failure_summary="Authority curation ADK workflow failed.",
                 raw_output=exc.partial_output,
-                model_info={"model_id": model_id},
+                model_info={
+                    "model_id": model_id,
+                    "requested_model_id": model_id,
+                },
                 validation_errors=exc.validation_errors,
+                extra={
+                    "adk_event_count": exc.event_count,
+                    "exception_message": str(exc),
+                    "partial_output_present": exc.partial_output is not None,
+                },
+                trace_artifact_id=(
+                    trace_artifact_id(mutation_event_id)
+                    if mutation_event_id is not None
+                    else None
+                ),
             ),
         )
 
@@ -3378,12 +3809,14 @@ def run_authority_curation_workflow(
         candidate = _json_object_from_value(
             repair_output.get("candidate_authority_json")
         )
-        if candidate is not None:
+        patches = repair_output.get("patches")
+        if candidate is not None or isinstance(patches, list):
             return {
                 "ok": True,
                 "curation_attempt_id": curation_attempt_id,
                 "project_id": request.project_id,
                 "candidate_authority_json": candidate,
+                "patches": patches if isinstance(patches, list) else [],
                 "quality_report": _curation_quality_report(
                     invocation=invocation,
                     state=state,
@@ -3507,6 +3940,7 @@ def _curation_workflow_failure_result(
             "spec_version_id": request.spec_version_id,
             "source_authority_id": request.source_authority_id,
             "feedback_attempt_id": request.feedback_attempt_id,
+            "trace_artifact_id": failure.trace_artifact_id,
         },
         model_info=failure.model_info,
         validation_errors=failure.validation_errors,

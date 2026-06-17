@@ -13,6 +13,7 @@ from orchestrator_agent.agent_tools.authority_curation import (
 )
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationGateDecision,
+    AuthorityCurationPatch,
     AuthorityCurationRepairOutput,
     AuthorityCurationRepairPlan,
     AuthorityCurationWorkflowInput,
@@ -91,6 +92,63 @@ def test_no_candidate_repair_mode_validates_across_plan_and_output() -> None:
     )
 
     assert output.mode == plan.mode
+
+
+def test_repair_output_accepts_targeted_patch_without_full_authority() -> None:
+    """ADK repair output should describe patches, not copy full authority JSON."""
+    output = AuthorityCurationRepairOutput(
+        mode="targeted",
+        patches=[
+            AuthorityCurationPatch(
+                target_kind="assumption",
+                target_id="ASM-39",
+                op="replace_text",
+                new_text=(
+                    "Report contexts are required baseline examples, not "
+                    "an exhaustive list."
+                ),
+            )
+        ],
+        resolved_feedback_ids=["AFB-ASM-39"],
+    )
+
+    dumped = output.model_dump(mode="json")
+
+    assert dumped["patches"][0]["target_id"] == "ASM-39"
+    assert dumped["candidate_authority_json"] is None
+
+
+def test_repair_patch_rejects_unknown_fields() -> None:
+    """Patch schema must stay strict so model output cannot smuggle rewrites."""
+    with pytest.raises(ValidationError):
+        AuthorityCurationPatch.model_validate(
+            {
+                "target_kind": "invariant",
+                "target_id": "INV-943d18f5ecffcd3c",
+                "op": "replace_text",
+                "new_text": "Use qualified observational language.",
+                "candidate_authority_json": {"invariants": []},
+            }
+        )
+
+
+def test_repair_patch_accepts_structured_parameter_replacement() -> None:
+    """Typed invariants should be repairable through bounded JSON paths."""
+    patch = AuthorityCurationPatch(
+        target_kind="invariant",
+        target_id="INV-943d18f5ecffcd3c",
+        op="replace_value",
+        path="/parameters/rule",
+        value=(
+            "Use qualified observational language instead of literal token "
+            "whitelists."
+        ),
+    )
+
+    dumped = patch.model_dump(mode="json")
+
+    assert dumped["path"] == "/parameters/rule"
+    assert dumped["value"].startswith("Use qualified")
 
 
 def test_validate_workflow_input_returns_strict_model() -> None:
