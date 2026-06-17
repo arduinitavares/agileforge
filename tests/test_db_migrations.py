@@ -263,6 +263,58 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     )
 
 
+def test_authority_curation_migration_repairs_legacy_feedback_index(
+    tmp_path: Path,
+) -> None:
+    """Legacy SQLModel index names are replaced with canonical migration names."""
+    engine = _create_min_runtime_schema(
+        f"sqlite:///{(tmp_path / 'authority-feedback-index.sqlite3').as_posix()}"
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE authority_feedback_attempts (
+                    feedback_row_id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    feedback_attempt_id VARCHAR NOT NULL,
+                    source_authority_id INTEGER NOT NULL,
+                    source_authority_fingerprint VARCHAR NOT NULL,
+                    feedback_fingerprint VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'recorded',
+                    has_blocking_feedback BOOLEAN NOT NULL DEFAULT 0,
+                    feedback_json TEXT NOT NULL DEFAULT '{}',
+                    request_hash VARCHAR NOT NULL,
+                    idempotency_key VARCHAR NOT NULL,
+                    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX ix_authority_feedback_attempts_source_authority_id
+                ON authority_feedback_attempts (source_authority_id)
+                """
+            )
+        )
+
+    ensure_schema_current(engine)
+
+    inspector = inspect(engine)
+    feedback_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("authority_feedback_attempts")
+    }
+    assert "ix_authority_feedback_source_authority" in feedback_indexes
+    assert "ix_authority_feedback_attempts_source_authority_id" not in (
+        feedback_indexes
+    )
+
+
 def test_authority_curation_migration_updates_legacy_attempt_table(
     tmp_path: Path,
 ) -> None:
