@@ -124,10 +124,11 @@ def build_authority_curation_workflow(*, model: str | BaseLlm) -> Workflow:
             "authority:*, or collection-index ids as target_handle values. "
             "Do not emit target_id, target_kind, op, path, value, patches, or "
             "candidate_authority_json. Use replace_text only when a menu "
-            "entry allows replace_text. Use mark_unresolvable with a reason "
-            "when feedback cannot be safely repaired from the menu. Mark "
-            "unresolved_feedback_ids and failure_reason instead of inventing "
-            f"authority for missing evidence.\n\n"
+            "entry allows replace_text. Use replace_parameter_text only when "
+            "a menu entry allows replace_parameter_text. Use mark_unresolvable "
+            "with a reason when feedback cannot be safely repaired from the "
+            "menu. Mark unresolved_feedback_ids and failure_reason instead of "
+            f"inventing authority for missing evidence.\n\n"
             f"{_LOOP_CONTRACT}"
         ),
         disallow_transfer_to_parent=True,

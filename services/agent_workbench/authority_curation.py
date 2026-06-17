@@ -111,6 +111,7 @@ _PATCH_TEXT_FIELDS = (
     "assumption",
     "reason",
 )
+_INVARIANT_PARAMETER_TEXT_FIELDS = ("parameters.rule",)
 _REVIEW_TARGET_RE: re.Pattern[str] = re.compile(
     r"\b(?P<prefix>ASM|GAP|INV)-[A-Za-z0-9][A-Za-z0-9_-]*\b"
 )
@@ -3332,7 +3333,7 @@ def _apply_one_repair_selection(
             repair_index=repair_index,
             details={"target_handle": binding.handle},
         )
-    if binding.repair_kind != "replace_text":
+    if binding.repair_kind not in {"replace_text", "replace_parameter_text"}:
         return _authority_repair_intent_invalid_response(
             context=context,
             reason="unsupported_repair_kind",
@@ -3431,6 +3432,25 @@ def _apply_replace_text_selection(
         target.container[target.index] = replacement_text
         return None
     item_payload = cast("dict[str, Any]", target.item)
+    if target.target_field == "parameters.rule":
+        parameters = item_payload.get("parameters")
+        if not isinstance(parameters, dict):
+            return _repair_target_error(
+                context=context,
+                reason="repair_target_not_textual",
+                repair_index=repair_index,
+                details=_repair_selection_error_details(
+                    target_kind=target.target_kind,
+                    target_id=target.target_id,
+                    target_handle=target.target_handle,
+                ),
+            )
+        parameters["rule"] = replacement_text
+        _recompute_invariant_id_if_possible(
+            item_payload,
+            target_kind=target.target_kind,
+        )
+        return None
     item_payload[target.target_field] = replacement_text
     _recompute_invariant_id_if_possible(
         item_payload,
@@ -3769,7 +3789,8 @@ def _repair_menu_item_from_feedback(
     if target is None:
         return None
     repair_kinds = _allowed_repair_kinds_for_feedback(
-        cast("dict[str, Any]", feedback_item)
+        cast("dict[str, Any]", feedback_item),
+        target_field=target.target_field,
     )
     menu_item: dict[str, Any] = {
         "handle": handle,
@@ -3850,6 +3871,9 @@ def _repairable_text_field(target_item: object) -> str | None:
     for field_name in _PATCH_TEXT_FIELDS:
         if isinstance(item.get(field_name), str):
             return field_name
+    parameters = item.get("parameters")
+    if isinstance(parameters, dict) and isinstance(parameters.get("rule"), str):
+        return "parameters.rule"
     return None
 
 
@@ -3859,14 +3883,24 @@ def _target_text_value(target_item: object, *, target_field: str) -> str | None:
         return target_item
     if not isinstance(target_item, dict):
         return None
+    if target_field == "parameters.rule":
+        parameters = cast("dict[str, Any]", target_item).get("parameters")
+        if isinstance(parameters, dict):
+            value = parameters.get("rule")
+            return value if isinstance(value, str) else None
+        return None
     value = cast("dict[str, Any]", target_item).get(target_field)
     return value if isinstance(value, str) else None
 
 
 def _allowed_repair_kinds_for_feedback(
     feedback_item: dict[str, Any],
+    *,
+    target_field: str,
 ) -> list[str]:
     """Return bounded repair kinds allowed by one feedback item."""
+    if target_field in _INVARIANT_PARAMETER_TEXT_FIELDS:
+        return ["replace_parameter_text", "mark_unresolvable"]
     issue_type = _string_or_none(feedback_item.get("issue_type"))
     instruction = _string_or_none(feedback_item.get("instruction")) or ""
     if issue_type in {

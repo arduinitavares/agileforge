@@ -148,6 +148,24 @@ def test_repair_selection_payload_accepts_replace_text() -> None:
     assert payload.repairs[0].replacement_text == "Safer wording."
 
 
+def test_repair_selection_payload_accepts_parameter_text_replacement() -> None:
+    """V2 repair selections can repair host-bound typed invariant text fields."""
+    payload = AuthorityCurationRepairSelectionPayload.model_validate(
+        {
+            "repairs": [
+                {
+                    "feedback_id": "AFB-1",
+                    "target_handle": "R1",
+                    "repair_kind": "replace_parameter_text",
+                    "replacement_text": "Use category-level qualified language.",
+                }
+            ]
+        }
+    )
+
+    assert payload.repairs[0].repair_kind == "replace_parameter_text"
+
+
 def test_repair_selection_payload_rejects_replace_text_without_text() -> None:
     """Replacement text is mandatory when a selected repair replaces text."""
     with pytest.raises(ValidationError):
@@ -249,6 +267,9 @@ def test_downstream_agents_reference_state_placeholders() -> None:
         compiler_instruction
     )
     assert "Emit one repair selection for every repair_menu entry" in (
+        compiler_instruction
+    )
+    assert "Use replace_parameter_text only when a menu entry allows" in (
         compiler_instruction
     )
     assert "Never use ASM-*, GAP-*, INV-*, authority:*, or collection-index" in (

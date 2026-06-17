@@ -69,7 +69,9 @@ class AuthorityCurationRepairMenuEntry(_StrictModel):
     target_field: str = Field(min_length=1)
     target_review_label: str = Field(min_length=1)
     overlay_target_key: str = Field(min_length=1)
-    allowed_repair_kinds: list[Literal["replace_text", "mark_unresolvable"]]
+    allowed_repair_kinds: list[
+        Literal["replace_text", "replace_parameter_text", "mark_unresolvable"]
+    ]
     target_content_hash: str | None = Field(default=None, min_length=1)
     not_repairable_reason: str | None = Field(default=None, min_length=1)
 
@@ -79,14 +81,21 @@ class AuthorityCurationRepairSelection(_StrictModel):
 
     feedback_id: str = Field(min_length=1)
     target_handle: str = Field(min_length=1)
-    repair_kind: Literal["replace_text", "mark_unresolvable"]
+    repair_kind: Literal[
+        "replace_text",
+        "replace_parameter_text",
+        "mark_unresolvable",
+    ]
     replacement_text: str | None = Field(default=None, min_length=1)
     reason: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _require_payload_for_repair_kind(self) -> Self:
-        if self.repair_kind == "replace_text" and not self.replacement_text:
-            msg = "replacement_text is required when repair_kind is replace_text"
+        if (
+            self.repair_kind in {"replace_text", "replace_parameter_text"}
+            and not self.replacement_text
+        ):
+            msg = "replacement_text is required for text replacement repair kinds"
             raise ValueError(msg)
         if self.repair_kind == "mark_unresolvable" and not self.reason:
             msg = "reason is required when repair_kind is mark_unresolvable"

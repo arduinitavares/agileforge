@@ -4432,6 +4432,123 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
     ]
 
 
+def test_authority_curate_v2_repairs_typed_invariant_parameter_rule(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typed invariant wording repairs must bind to parameters.rule."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    invariant_id = "INV-typed-rule"
+    replacement_rule = (
+        "Use category-level qualified observational language and forbid "
+        "positive unsupported causal, guaranteed, optimal, or production-ready "
+        "claims."
+    )
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        compiled = json.loads(str(authority.compiled_artifact_json))
+        compiled["invariants"].append(
+            {
+                "id": invariant_id,
+                "type": "DATA_CONTRACT",
+                "source_item_id": "CONSTRAINT.language",
+                "source_level": "MUST_NOT",
+                "parameters": {
+                    "subject": "recommendation-packet-language",
+                    "fields": ["predicted", "supported", "abstained"],
+                    "rule": "Only use approved language tokens",
+                },
+            }
+        )
+        authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = authority_fingerprint
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-parameter-rule",
+                        "target_kind": "invariant",
+                        "target_id": invariant_id,
+                        "issue_type": "brittle_wording",
+                        "severity": "blocking",
+                        "instruction": (
+                            "Repair this invariant rule. Do not enforce a "
+                            "literal token whitelist."
+                        ),
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(authority)
+        session.add(feedback)
+        session.commit()
+    captured: dict[str, object] = {}
+
+    def fake_workflow(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {
+                "repairs": [
+                    {
+                        "feedback_id": "AFB-parameter-rule",
+                        "target_handle": "R1",
+                        "repair_kind": "replace_parameter_text",
+                        "replacement_text": replacement_rule,
+                    }
+                ]
+            },
+            "quality_report": {"status": "passed"},
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_workflow,
+    )
+    fake_workflow_port = FakeWorkflowPort()
+    fake_workflow_port.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow_port)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-parameter-rule",
+        )
+    )
+
+    assert result["ok"] is True
+    inputs = cast("curation_mod._CurationWorkflowInputs", captured["inputs"])
+    repair_menu = cast("list[dict[str, object]]", inputs.repair_menu)
+    assert repair_menu[0]["target_field"] == "parameters.rule"
+    assert repair_menu[0]["allowed_repair_kinds"] == [
+        "replace_parameter_text",
+        "mark_unresolvable",
+    ]
+    candidate = _latest_authority_artifact(engine)
+    repaired = [
+        item
+        for item in candidate["invariants"]
+        if item.get("source_item_id") == "CONSTRAINT.language"
+    ]
+    assert len(repaired) == 1
+    assert repaired[0]["id"] != invariant_id
+    assert repaired[0]["parameters"]["rule"] == replacement_rule
+
+
 def test_authority_curate_kill_switch_returns_fail_no_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
