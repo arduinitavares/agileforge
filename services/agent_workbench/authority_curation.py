@@ -3054,6 +3054,130 @@ def _concrete_patch_targets_from_feedback_item(
     return targets
 
 
+def _build_repair_menu(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_json: object,
+) -> list[dict[str, Any]]:
+    """Build host-minted repair handles for blocking feedback."""
+    feedback = _json_object_from_value(feedback_json)
+    if feedback is None:
+        return []
+    feedback_items = feedback.get("feedback_items")
+    if not isinstance(feedback_items, list):
+        return []
+
+    menu: list[dict[str, Any]] = []
+    for item in feedback_items:
+        if not isinstance(item, dict) or item.get("severity") != "blocking":
+            continue
+        feedback_item = cast("dict[str, Any]", item)
+        feedback_id = _string_or_none(feedback_item.get("feedback_id"))
+        target_kind = _string_or_none(feedback_item.get("target_kind"))
+        target_id = _string_or_none(feedback_item.get("target_id"))
+        if feedback_id is None or target_kind is None or target_id is None:
+            continue
+        if target_kind not in _PATCHABLE_TARGET_KINDS:
+            continue
+
+        target = _find_patch_target(
+            source_authority_json,
+            target_kind=target_kind,
+            target_id=target_id,
+        )
+        if target is None:
+            continue
+
+        _container, target_index, target_item = target
+        target_field = _repairable_text_field(target_item)
+        if target_field is None:
+            continue
+        target_text = _target_text_value(target_item, target_field=target_field)
+        if target_text is None:
+            continue
+        repair_kinds = _allowed_repair_kinds_for_feedback(feedback_item)
+        menu_item: dict[str, Any] = {
+            "handle": f"R{len(menu) + 1}",
+            "feedback_id": feedback_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "target_field": target_field,
+            "target_review_label": target_id,
+            "overlay_target_key": _overlay_target_key(
+                target_item=target_item,
+                target_kind=target_kind,
+                target_field=target_field,
+                target_index=target_index,
+            ),
+            "allowed_repair_kinds": repair_kinds,
+            "target_content_hash": _content_hash(target_text),
+        }
+        if "replace_text" not in repair_kinds:
+            menu_item["not_repairable_reason"] = "structural_repair_deferred"
+        menu.append(menu_item)
+    return menu
+
+
+def _repairable_text_field(target_item: object) -> str | None:
+    """Return the exact target text field bound by a repair menu handle."""
+    if isinstance(target_item, str):
+        return "text"
+    if not isinstance(target_item, dict):
+        return None
+    item = cast("dict[str, Any]", target_item)
+    for field_name in _PATCH_TEXT_FIELDS:
+        if isinstance(item.get(field_name), str):
+            return field_name
+    return None
+
+
+def _target_text_value(target_item: object, *, target_field: str) -> str | None:
+    """Return target text for hashing and stale-content guards."""
+    if isinstance(target_item, str) and target_field == "text":
+        return target_item
+    if not isinstance(target_item, dict):
+        return None
+    value = cast("dict[str, Any]", target_item).get(target_field)
+    return value if isinstance(value, str) else None
+
+
+def _allowed_repair_kinds_for_feedback(
+    feedback_item: dict[str, Any],
+) -> list[str]:
+    """Return bounded repair kinds allowed by one feedback item."""
+    issue_type = _string_or_none(feedback_item.get("issue_type"))
+    instruction = _string_or_none(feedback_item.get("instruction")) or ""
+    if issue_type in {
+        "parameter_correction",
+        "structural_correction",
+        "source_map_correction",
+    } or "/parameters/" in instruction:
+        return ["mark_unresolvable"]
+    return ["replace_text", "mark_unresolvable"]
+
+
+def _overlay_target_key(
+    *,
+    target_item: object,
+    target_kind: str,
+    target_field: str,
+    target_index: int,
+) -> str:
+    """Return stable overlay key for future replay after ID changes."""
+    source_item_id = None
+    if isinstance(target_item, dict):
+        raw_source_item_id = target_item.get("source_item_id")
+        if isinstance(raw_source_item_id, str) and raw_source_item_id:
+            source_item_id = raw_source_item_id
+    stable_source = source_item_id or f"{target_kind}:{target_index}"
+    return f"{stable_source}:{target_kind}:{target_field}:{target_index}"
+
+
+def _content_hash(value: str) -> str:
+    """Return stable fingerprint for target content bound into a menu handle."""
+    return canonical_hash({"text": value})
+
+
 def _find_patch_target(
     authority_json: dict[str, Any],
     *,

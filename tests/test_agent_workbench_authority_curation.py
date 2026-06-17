@@ -1310,6 +1310,92 @@ def test_authority_diff_rejects_duplicate_invariant_id() -> None:
     ]
 
 
+def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:
+    """Blocking feedback becomes host-minted exact-field repair handles."""
+    source_authority_json = json.loads(_compiled_artifact_json())
+    feedback_json = {
+        "feedback_items": [
+            {
+                "feedback_id": "AFB-curation-1",
+                "target_kind": "invariant",
+                "target_id": "INV-curation-1",
+                "issue_type": "overstrong_invariant",
+                "severity": "blocking",
+                "instruction": "Repair the targeted invariant.",
+            }
+        ]
+    }
+
+    menu = curation_mod._build_repair_menu(
+        source_authority_json=source_authority_json,
+        feedback_json=feedback_json,
+    )
+
+    assert menu == [
+        {
+            "handle": "R1",
+            "feedback_id": "AFB-curation-1",
+            "target_kind": "invariant",
+            "target_id": "INV-curation-1",
+            "target_field": "text",
+            "target_review_label": "INV-curation-1",
+            "overlay_target_key": "SRC-curation-1:invariant:text:0",
+            "allowed_repair_kinds": ["replace_text", "mark_unresolvable"],
+            "target_content_hash": curation_mod._content_hash(
+                "Review packets include guard evidence."
+            ),
+        }
+    ]
+
+
+def test_repair_menu_marks_parameter_feedback_not_repairable() -> None:
+    """Parameter/structural feedback must not grant text-replacement authority."""
+    source_authority_json = {
+        "invariants": [
+            {
+                "id": "INV-1",
+                "source_item_id": "REQ-1",
+                "text": "Old text.",
+                "parameters": {"rule": "old"},
+            }
+        ],
+        "assumptions": [],
+        "gaps": [],
+    }
+    feedback_json = {
+        "feedback_items": [
+            {
+                "feedback_id": "AFB-param",
+                "target_kind": "invariant",
+                "target_id": "INV-1",
+                "issue_type": "parameter_correction",
+                "severity": "blocking",
+                "instruction": "Change /parameters/rule.",
+            }
+        ]
+    }
+
+    menu = curation_mod._build_repair_menu(
+        source_authority_json=source_authority_json,
+        feedback_json=feedback_json,
+    )
+
+    assert menu == [
+        {
+            "handle": "R1",
+            "feedback_id": "AFB-param",
+            "target_kind": "invariant",
+            "target_id": "INV-1",
+            "target_field": "text",
+            "target_review_label": "INV-1",
+            "overlay_target_key": "REQ-1:invariant:text:0",
+            "allowed_repair_kinds": ["mark_unresolvable"],
+            "target_content_hash": curation_mod._content_hash("Old text."),
+            "not_repairable_reason": "structural_repair_deferred",
+        }
+    ]
+
+
 def test_authority_curate_sets_curating_before_workflow(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
