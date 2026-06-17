@@ -3814,11 +3814,17 @@ def _authority_targets_by_kind(authority: CompiledSpecAuthority) -> TargetIndex:
             keys=("id", "gap_id"),
         )
     )
+    targets["gap"].update(
+        _review_visible_plain_ids(_dict_value(compiled, "gaps"), "GAP")
+    )
     targets["assumption"].update(
         _collect_ids_from_paths(
             [_dict_value(compiled, "assumptions")],
             keys=("id", "assumption_id"),
         )
+    )
+    targets["assumption"].update(
+        _review_visible_plain_ids(_dict_value(compiled, "assumptions"), "ASM")
     )
     targets["quality_group"].update(
         _collect_ids_from_paths(
@@ -3906,6 +3912,17 @@ def _collect_ids(value: object, *, keys: tuple[str, ...]) -> set[str]:
         for child in value:
             found.update(_collect_ids(child, keys=keys))
     return found
+
+
+def _review_visible_plain_ids(value: object, prefix: str) -> set[str]:
+    """Return ids produced by authority review for plain text list items."""
+    if not isinstance(value, list):
+        return set()
+    return {
+        f"{prefix}-{index}"
+        for index, item in enumerate(value, start=1)
+        if isinstance(item, str) and item.strip()
+    }
 
 
 def _collect_source_item_ids(value: object) -> set[str]:

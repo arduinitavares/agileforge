@@ -581,6 +581,54 @@ def test_feedback_record_rejects_wrong_kind_target(
     }
 
 
+def test_feedback_record_accepts_review_visible_assumption_target(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Plain compiler assumptions can be targeted by their review-visible ids."""
+    project_id, authority_id, _fingerprint = _seed_pending_authority(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, authority_id)
+        assert authority is not None
+        artifact_json = authority.compiled_artifact_json
+        assert artifact_json is not None
+        compiled = json.loads(artifact_json)
+        compiled["assumptions"] = [
+            "First plain compiler assumption.",
+            "Second plain compiler assumption.",
+        ]
+        authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
+        session.add(authority)
+        session.commit()
+        session.refresh(authority)
+        fingerprint = pending_authority_fingerprint(authority)
+        assert fingerprint is not None
+
+    feedback_file = _write_feedback(
+        tmp_path,
+        authority_id=authority_id,
+        item_overrides={
+            "target_kind": "assumption",
+            "target_id": "ASM-2",
+            "issue_type": "invalid_assumption",
+            "instruction": "Repair the stale assumption.",
+        },
+    )
+
+    result = AuthorityCurationRunner(engine=engine).feedback_record(
+        AuthorityFeedbackRecordRequest(
+            project_id=project_id,
+            pending_authority_id=authority_id,
+            expected_authority_fingerprint=fingerprint,
+            feedback_file=str(feedback_file),
+            idempotency_key="feedback-record-review-visible-assumption",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["has_blocking_feedback"] is True
+
+
 def test_feedback_record_rejects_missing_source_item_id(
     engine: Engine,
     tmp_path: Path,
