@@ -22,7 +22,7 @@ class AuthorityCurationWorkflowInput(_StrictModel):
     source_authority_fingerprint: str = Field(min_length=1)
     source_authority_json: dict[str, object]
     feedback_json: dict[str, object]
-    repair_menu: list["AuthorityCurationRepairMenuEntry"] = Field(
+    repair_menu: list[AuthorityCurationRepairMenuEntry] = Field(
         default_factory=list
     )
     contract_version: Literal[

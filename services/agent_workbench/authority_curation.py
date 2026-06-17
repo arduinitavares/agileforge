@@ -312,6 +312,18 @@ class _LoadedCurationInputs:
 
 
 @dataclass(frozen=True)
+class _CurationWorkflowInputs:
+    """Runtime inputs passed to the ADK curation workflow adapter."""
+
+    source_authority_json: dict[str, Any]
+    feedback_json: str
+    mutation_event_id: int | None = None
+    contract_version: str = AUTHORITY_CURATION_CONTRACT_V2
+    repair_menu: list[dict[str, Any]] | None = None
+    menu_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
 class _CurationWorkflowFailure:
     """Host-visible failure metadata from the ADK curation workflow."""
 
@@ -332,6 +344,53 @@ class _PatchApplicationContext:
     request: AuthorityCurationRequest
     attempt: AuthorityCurationAttempt
     mutation_event_id: int
+
+
+@dataclass(frozen=True)
+class _RepairSelectionBinding:
+    """Validated v2 repair selection identity and menu binding."""
+
+    handle: str
+    feedback_id: str
+    repair_kind: str
+    menu_item: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _RepairTextTarget:
+    """Resolved exact text target for a v2 repair selection."""
+
+    target_kind: str
+    target_id: str
+    target_field: str
+    target_handle: str
+    container: list[Any]
+    index: int
+    item: object
+
+
+@dataclass(frozen=True)
+class _RepairMenuTarget:
+    """Resolved source target for one repair menu entry."""
+
+    feedback_id: str
+    target_kind: str
+    target_id: str
+    target_item: object
+    target_field: str
+    target_index: int
+    target_text: str
+
+
+@dataclass(frozen=True)
+class _CurationWorkflowOutput:
+    """Normalized pieces returned by ADK before host success/failure routing."""
+
+    invocation: dict[str, Any]
+    state: dict[str, Any]
+    gate: dict[str, Any]
+    repair_output: dict[str, Any] | None
+    feedback_payload: dict[str, Any]
 
 
 class AuthorityCurationRunner:
@@ -1120,12 +1179,14 @@ class AuthorityCurationRunner:
                 workflow_result = run_authority_curation_workflow(
                     request=request,
                     curation_attempt_id=attempt.curation_attempt_id,
-                    source_authority_json=loaded_inputs.source_authority_json,
-                    feedback_json=loaded_inputs.feedback_json,
-                    mutation_event_id=active_mutation.mutation_event_id,
-                    contract_version=AUTHORITY_CURATION_CONTRACT_V2,
-                    repair_menu=repair_menu,
-                    menu_fingerprint=menu_fingerprint,
+                    inputs=_CurationWorkflowInputs(
+                        source_authority_json=loaded_inputs.source_authority_json,
+                        feedback_json=loaded_inputs.feedback_json,
+                        mutation_event_id=active_mutation.mutation_event_id,
+                        contract_version=AUTHORITY_CURATION_CONTRACT_V2,
+                        repair_menu=repair_menu,
+                        menu_fingerprint=menu_fingerprint,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
@@ -2938,7 +2999,9 @@ def _candidate_authority_from_v2_selection(
         source_authority_json=loaded.source_authority_json,
         feedback_json=loaded.feedback_json,
     )
-    selection_payload = _json_object_from_value(workflow_result.get("selection_payload"))
+    selection_payload = _json_object_from_value(
+        workflow_result.get("selection_payload")
+    )
     if selection_payload is None:
         return _authority_repair_intent_invalid_response(
             context=context,
@@ -3254,6 +3317,56 @@ def _apply_one_repair_selection(
             repair_index=repair_index,
         )
 
+    binding = _repair_selection_binding_or_error(
+        context=context,
+        menu_by_handle=menu_by_handle,
+        repair=repair,
+        repair_index=repair_index,
+    )
+    if not isinstance(binding, _RepairSelectionBinding):
+        return binding
+    if binding.repair_kind == "mark_unresolvable":
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="feedback_marked_unresolvable",
+            repair_index=repair_index,
+            details={"target_handle": binding.handle},
+        )
+    if binding.repair_kind != "replace_text":
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="unsupported_repair_kind",
+            repair_index=repair_index,
+            details={
+                "target_handle": binding.handle,
+                "repair_kind": binding.repair_kind,
+            },
+        )
+    replacement_text = _string_or_none(repair.get("replacement_text"))
+    if replacement_text is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="replacement_text_missing",
+            repair_index=repair_index,
+            details={"target_handle": binding.handle},
+        )
+    return _apply_replace_text_selection(
+        context=context,
+        candidate=candidate,
+        menu_item=binding.menu_item,
+        replacement_text=replacement_text,
+        repair_index=repair_index,
+    )
+
+
+def _repair_selection_binding_or_error(
+    *,
+    context: _PatchApplicationContext,
+    menu_by_handle: dict[str, dict[str, Any]],
+    repair: dict[str, Any],
+    repair_index: int,
+) -> _RepairSelectionBinding | dict[str, Any]:
+    """Resolve a model selection to one host-minted repair menu entry."""
     handle = _string_or_none(repair.get("target_handle"))
     feedback_id = _string_or_none(repair.get("feedback_id"))
     repair_kind = _string_or_none(repair.get("repair_kind"))
@@ -3289,34 +3402,11 @@ def _apply_one_repair_selection(
             repair_index=repair_index,
             details={"target_handle": handle, "repair_kind": repair_kind},
         )
-    if repair_kind == "mark_unresolvable":
-        return _authority_repair_intent_invalid_response(
-            context=context,
-            reason="feedback_marked_unresolvable",
-            repair_index=repair_index,
-            details={"target_handle": handle},
-        )
-    if repair_kind != "replace_text":
-        return _authority_repair_intent_invalid_response(
-            context=context,
-            reason="unsupported_repair_kind",
-            repair_index=repair_index,
-            details={"target_handle": handle, "repair_kind": repair_kind},
-        )
-    replacement_text = _string_or_none(repair.get("replacement_text"))
-    if replacement_text is None:
-        return _authority_repair_intent_invalid_response(
-            context=context,
-            reason="replacement_text_missing",
-            repair_index=repair_index,
-            details={"target_handle": handle},
-        )
-    return _apply_replace_text_selection(
-        context=context,
-        candidate=candidate,
+    return _RepairSelectionBinding(
+        handle=handle,
+        feedback_id=feedback_id,
+        repair_kind=repair_kind,
         menu_item=menu_item,
-        replacement_text=replacement_text,
-        repair_index=repair_index,
     )
 
 
@@ -3329,6 +3419,34 @@ def _apply_replace_text_selection(
     repair_index: int,
 ) -> dict[str, Any] | None:
     """Apply one validated text repair to its exact host-bound field."""
+    target = _repair_text_target_or_error(
+        context=context,
+        candidate=candidate,
+        menu_item=menu_item,
+        repair_index=repair_index,
+    )
+    if not isinstance(target, _RepairTextTarget):
+        return target
+    if isinstance(target.item, str):
+        target.container[target.index] = replacement_text
+        return None
+    item_payload = cast("dict[str, Any]", target.item)
+    item_payload[target.target_field] = replacement_text
+    _recompute_invariant_id_if_possible(
+        item_payload,
+        target_kind=target.target_kind,
+    )
+    return None
+
+
+def _repair_text_target_or_error(
+    *,
+    context: _PatchApplicationContext,
+    candidate: dict[str, Any],
+    menu_item: dict[str, Any],
+    repair_index: int,
+) -> _RepairTextTarget | dict[str, Any]:
+    """Resolve and stale-check the exact text target for replacement."""
     target_kind = _string_or_none(menu_item.get("target_kind"))
     target_id = _string_or_none(menu_item.get("target_id"))
     target_field = _string_or_none(menu_item.get("target_field"))
@@ -3346,7 +3464,7 @@ def _apply_replace_text_selection(
         target_id=target_id,
     )
     if target is None:
-        return _authority_repair_target_not_found_response(
+        return _repair_target_error(
             context=context,
             reason="repair_target_not_found",
             repair_index=repair_index,
@@ -3358,9 +3476,8 @@ def _apply_replace_text_selection(
         )
     container, index, item = target
     current_text = _target_text_value(item, target_field=target_field)
-    expected_hash = _string_or_none(menu_item.get("target_content_hash"))
     if current_text is None:
-        return _authority_repair_target_not_found_response(
+        return _repair_target_error(
             context=context,
             reason="repair_target_not_textual",
             repair_index=repair_index,
@@ -3370,8 +3487,9 @@ def _apply_replace_text_selection(
                 target_handle=handle,
             ),
         )
+    expected_hash = _string_or_none(menu_item.get("target_content_hash"))
     if expected_hash is not None and _content_hash(current_text) != expected_hash:
-        return _authority_repair_target_not_found_response(
+        return _repair_target_error(
             context=context,
             reason="repair_target_content_changed",
             repair_index=repair_index,
@@ -3381,24 +3499,31 @@ def _apply_replace_text_selection(
                 target_handle=handle,
             ),
         )
-    if isinstance(item, str):
-        container[index] = replacement_text
-        return None
-    if not isinstance(item, dict):
-        return _authority_repair_target_not_found_response(
-            context=context,
-            reason="repair_target_not_structured",
-            repair_index=repair_index,
-            details=_repair_selection_error_details(
-                target_kind=target_kind,
-                target_id=target_id,
-                target_handle=handle,
-            ),
-        )
-    item_payload = cast("dict[str, Any]", item)
-    item_payload[target_field] = replacement_text
-    _recompute_invariant_id_if_possible(item_payload, target_kind=target_kind)
-    return None
+    return _RepairTextTarget(
+        target_kind=target_kind,
+        target_id=target_id,
+        target_field=target_field,
+        target_handle=handle,
+        container=container,
+        index=index,
+        item=item,
+    )
+
+
+def _repair_target_error(
+    *,
+    context: _PatchApplicationContext,
+    reason: str,
+    repair_index: int,
+    details: dict[str, object],
+) -> dict[str, Any]:
+    """Return a standard stale-target repair error."""
+    return _authority_repair_target_not_found_response(
+        context=context,
+        reason=reason,
+        repair_index=repair_index,
+        details=details,
+    )
 
 
 def _repair_selection_error_details(
@@ -3587,53 +3712,99 @@ def _build_repair_menu(
 
     menu: list[dict[str, Any]] = []
     for item in feedback_items:
-        if not isinstance(item, dict) or item.get("severity") != "blocking":
-            continue
-        feedback_item = cast("dict[str, Any]", item)
-        feedback_id = _string_or_none(feedback_item.get("feedback_id"))
-        target_kind = _string_or_none(feedback_item.get("target_kind"))
-        target_id = _string_or_none(feedback_item.get("target_id"))
-        if feedback_id is None or target_kind is None or target_id is None:
-            continue
-        if target_kind not in _PATCHABLE_TARGET_KINDS:
-            continue
-
-        target = _find_patch_target(
-            source_authority_json,
-            target_kind=target_kind,
-            target_id=target_id,
+        menu_item = _repair_menu_item_from_feedback(
+            source_authority_json=source_authority_json,
+            feedback_item=item,
+            handle=f"R{len(menu) + 1}",
         )
-        if target is None:
-            continue
-
-        _container, target_index, target_item = target
-        target_field = _repairable_text_field(target_item)
-        if target_field is None:
-            continue
-        target_text = _target_text_value(target_item, target_field=target_field)
-        if target_text is None:
-            continue
-        repair_kinds = _allowed_repair_kinds_for_feedback(feedback_item)
-        menu_item: dict[str, Any] = {
-            "handle": f"R{len(menu) + 1}",
-            "feedback_id": feedback_id,
-            "target_kind": target_kind,
-            "target_id": target_id,
-            "target_field": target_field,
-            "target_review_label": target_id,
-            "overlay_target_key": _overlay_target_key(
-                target_item=target_item,
-                target_kind=target_kind,
-                target_field=target_field,
-                target_index=target_index,
-            ),
-            "allowed_repair_kinds": repair_kinds,
-            "target_content_hash": _content_hash(target_text),
-        }
-        if "replace_text" not in repair_kinds:
-            menu_item["not_repairable_reason"] = "structural_repair_deferred"
-        menu.append(menu_item)
+        if menu_item is not None:
+            menu.append(menu_item)
     return menu
+
+
+def _repair_menu_item_from_feedback(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_item: object,
+    handle: str,
+) -> dict[str, Any] | None:
+    """Return one host-minted repair menu entry when feedback is text-repairable."""
+    target = _repair_menu_target_from_feedback(
+        source_authority_json=source_authority_json,
+        feedback_item=feedback_item,
+    )
+    if target is None:
+        return None
+    repair_kinds = _allowed_repair_kinds_for_feedback(
+        cast("dict[str, Any]", feedback_item)
+    )
+    menu_item: dict[str, Any] = {
+        "handle": handle,
+        "feedback_id": target.feedback_id,
+        "target_kind": target.target_kind,
+        "target_id": target.target_id,
+        "target_field": target.target_field,
+        "target_review_label": target.target_id,
+        "overlay_target_key": _overlay_target_key(
+            target_item=target.target_item,
+            target_kind=target.target_kind,
+            target_field=target.target_field,
+            target_index=target.target_index,
+        ),
+        "allowed_repair_kinds": repair_kinds,
+        "target_content_hash": _content_hash(target.target_text),
+    }
+    if "replace_text" not in repair_kinds:
+        menu_item["not_repairable_reason"] = "structural_repair_deferred"
+    return menu_item
+
+
+def _repair_menu_target_from_feedback(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_item: object,
+) -> _RepairMenuTarget | None:
+    """Resolve feedback into a text-bearing authority target."""
+    if not isinstance(feedback_item, dict):
+        return None
+    item = cast("Mapping[str, Any]", feedback_item)
+    if item.get("severity") != "blocking":
+        return None
+    feedback_id = _string_or_none(item.get("feedback_id"))
+    target_kind = _string_or_none(item.get("target_kind"))
+    target_id = _string_or_none(item.get("target_id"))
+    if (
+        feedback_id is None
+        or target_kind is None
+        or target_id is None
+        or target_kind not in _PATCHABLE_TARGET_KINDS
+    ):
+        return None
+    target = _find_patch_target(
+        source_authority_json,
+        target_kind=target_kind,
+        target_id=target_id,
+    )
+    if target is None:
+        return None
+    _container, target_index, target_item = target
+    target_field = _repairable_text_field(target_item)
+    target_text = (
+        None
+        if target_field is None
+        else _target_text_value(target_item, target_field=target_field)
+    )
+    if target_field is None or target_text is None:
+        return None
+    return _RepairMenuTarget(
+        feedback_id=feedback_id,
+        target_kind=target_kind,
+        target_id=target_id,
+        target_item=target_item,
+        target_field=target_field,
+        target_index=target_index,
+        target_text=target_text,
+    )
 
 
 def _repairable_text_field(target_item: object) -> str | None:
@@ -3684,7 +3855,8 @@ def _overlay_target_key(
     """Return stable overlay key for future replay after ID changes."""
     source_item_id = None
     if isinstance(target_item, dict):
-        raw_source_item_id = target_item.get("source_item_id")
+        target_payload = cast("Mapping[str, Any]", target_item)
+        raw_source_item_id = target_payload.get("source_item_id")
         if isinstance(raw_source_item_id, str) and raw_source_item_id:
             source_item_id = raw_source_item_id
     stable_source = source_item_id or f"{target_kind}:{target_index}"
@@ -4585,71 +4757,30 @@ def run_authority_curation_workflow(
     *,
     request: AuthorityCurationRequest,
     curation_attempt_id: str,
-    source_authority_json: dict[str, Any],
-    feedback_json: str,
-    mutation_event_id: int | None = None,
-    contract_version: str = AUTHORITY_CURATION_CONTRACT_V2,
-    repair_menu: list[dict[str, Any]] | None = None,
-    menu_fingerprint: str | None = None,
+    inputs: _CurationWorkflowInputs,
 ) -> dict[str, Any]:
     """Run the ADK authority curation workflow and normalize its output."""
-    feedback_payload = _json_object_from_value(feedback_json)
+    feedback_payload = _json_object_from_value(inputs.feedback_json)
     if feedback_payload is None:
-        return _curation_workflow_failure_result(
+        return _invalid_curation_feedback_result(
             request=request,
             curation_attempt_id=curation_attempt_id,
-            failure=_CurationWorkflowFailure(
-                error_code=ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID,
-                failure_stage="feedback_payload_parse",
-                failure_summary="Stored authority feedback JSON is invalid.",
-                raw_output=feedback_json,
-            ),
+            feedback_json=inputs.feedback_json,
         )
 
-    if _authority_curation_mode() == "fail_no_candidate":
-        result = _curation_workflow_failure_result(
-            request=request,
-            curation_attempt_id=curation_attempt_id,
-            failure=_CurationWorkflowFailure(
-                error_code=ErrorCode.SPEC_COMPILE_FAILED,
-                failure_stage="host_kill_switch",
-                failure_summary=(
-                    "Authority curation stopped before model invocation."
-                ),
-                model_info={"requested_model_id": "not_invoked"},
-                extra={
-                    "failure_reason": "fail_no_candidate",
-                    "menu_fingerprint": menu_fingerprint,
-                },
-                trace_artifact_id=(
-                    trace_artifact_id(mutation_event_id)
-                    if mutation_event_id is not None
-                    else None
-                ),
-            ),
-        )
-        result["failure_reason"] = "fail_no_candidate"
-        return result
+    kill_switch_result = _curation_kill_switch_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        inputs=inputs,
+    )
+    if kill_switch_result is not None:
+        return kill_switch_result
 
-    workflow_repair_menu = repair_menu
-    if workflow_repair_menu is None:
-        workflow_repair_menu = _build_repair_menu(
-            source_authority_json=source_authority_json,
-            feedback_json=feedback_json,
-        )
-    payload: dict[str, object] = {
-        "project_id": request.project_id,
-        "spec_version_id": request.spec_version_id,
-        "source_authority_id": request.source_authority_id,
-        "source_authority_fingerprint": (
-            request.expected_source_authority_fingerprint
-        ),
-        "source_authority_json": source_authority_json,
-        "feedback_json": feedback_payload,
-        "repair_menu": workflow_repair_menu,
-        "contract_version": contract_version,
-        "max_iterations": request.max_iterations,
-    }
+    payload = _curation_workflow_payload(
+        request=request,
+        inputs=inputs,
+        feedback_payload=feedback_payload,
+    )
     model_id = _authority_curation_model_id(request)
     try:
         invocation = _invoke_authority_curation_workflow(
@@ -4657,30 +4788,12 @@ def run_authority_curation_workflow(
             model_id=model_id,
         )
     except AgentInvocationError as exc:
-        return _curation_workflow_failure_result(
+        return _curation_invocation_failure_result(
             request=request,
             curation_attempt_id=curation_attempt_id,
-            failure=_CurationWorkflowFailure(
-                error_code=ErrorCode.SPEC_COMPILE_FAILED,
-                failure_stage="adk_invocation_failed",
-                failure_summary="Authority curation ADK workflow failed.",
-                raw_output=exc.partial_output,
-                model_info={
-                    "model_id": model_id,
-                    "requested_model_id": model_id,
-                },
-                validation_errors=exc.validation_errors,
-                extra={
-                    "adk_event_count": exc.event_count,
-                    "exception_message": str(exc),
-                    "partial_output_present": exc.partial_output is not None,
-                },
-                trace_artifact_id=(
-                    trace_artifact_id(mutation_event_id)
-                    if mutation_event_id is not None
-                    else None
-                ),
-            ),
+            model_id=model_id,
+            inputs=inputs,
+            exc=exc,
         )
 
     state = _json_object_from_value(invocation.get("state")) or {}
@@ -4691,85 +4804,27 @@ def run_authority_curation_workflow(
     if gate is None:
         gate = parse_json_payload(str(invocation.get("final_text") or ""))
     if gate is None:
-        return _curation_workflow_failure_result(
+        return _missing_curation_gate_result(
             request=request,
             curation_attempt_id=curation_attempt_id,
-            failure=_CurationWorkflowFailure(
-                error_code=ErrorCode.SPEC_COMPILE_FAILED,
-                failure_stage="adk_gate_missing",
-                failure_summary=(
-                    "Authority curation workflow returned no gate decision."
-                ),
-                raw_output=str(invocation.get("final_text") or ""),
-                model_info=_model_info_with_requested_model(invocation, model_id),
-            ),
+            invocation=invocation,
+            model_id=model_id,
         )
 
-    if isinstance(repair_output, dict) and _curation_gate_allows_candidate(
-        gate=gate,
-        repair_output=repair_output,
-        feedback_payload=feedback_payload,
-    ):
-        candidate = _json_object_from_value(
-            repair_output.get("candidate_authority_json")
-        )
-        patches = repair_output.get("patches")
-        selection_payload = _json_object_from_value(
-            repair_output.get("selection_payload")
-        )
-        if contract_version == AUTHORITY_CURATION_CONTRACT_V2:
-            if selection_payload is not None:
-                return {
-                    "ok": True,
-                    "contract_version": AUTHORITY_CURATION_CONTRACT_V2,
-                    "curation_attempt_id": curation_attempt_id,
-                    "project_id": request.project_id,
-                    "selection_payload": selection_payload,
-                    "quality_report": _curation_quality_report(
-                        invocation=invocation,
-                        state=state,
-                        gate=gate,
-                        repair_output=repair_output,
-                    ),
-                    "candidate_lineage_json": {
-                        "source_authority_id": request.source_authority_id,
-                        "curation_attempt_id": curation_attempt_id,
-                        "resolved_feedback_ids": repair_output.get(
-                            "resolved_feedback_ids",
-                            [],
-                        ),
-                        "unresolved_feedback_ids": repair_output.get(
-                            "unresolved_feedback_ids",
-                            [],
-                        ),
-                    },
-                }
-        elif candidate is not None or isinstance(patches, list):
-            return {
-                "ok": True,
-                "curation_attempt_id": curation_attempt_id,
-                "project_id": request.project_id,
-                "candidate_authority_json": candidate,
-                "patches": patches if isinstance(patches, list) else [],
-                "quality_report": _curation_quality_report(
-                    invocation=invocation,
-                    state=state,
-                    gate=gate,
-                    repair_output=repair_output,
-                ),
-                "candidate_lineage_json": {
-                    "source_authority_id": request.source_authority_id,
-                    "curation_attempt_id": curation_attempt_id,
-                    "resolved_feedback_ids": repair_output.get(
-                        "resolved_feedback_ids",
-                        [],
-                    ),
-                    "unresolved_feedback_ids": repair_output.get(
-                        "unresolved_feedback_ids",
-                        [],
-                    ),
-                },
-            }
+    success = _curation_workflow_success_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        inputs=inputs,
+        output=_CurationWorkflowOutput(
+            invocation=invocation,
+            state=state,
+            gate=gate,
+            repair_output=repair_output,
+            feedback_payload=feedback_payload,
+        ),
+    )
+    if success is not None:
+        return success
 
     return _curation_workflow_failure_result(
         request=request,
@@ -4787,6 +4842,261 @@ def run_authority_curation_workflow(
             },
         ),
     )
+
+
+def _curation_workflow_payload(
+    *,
+    request: AuthorityCurationRequest,
+    inputs: _CurationWorkflowInputs,
+    feedback_payload: dict[str, Any],
+) -> dict[str, object]:
+    """Build strict ADK workflow payload from host-loaded inputs."""
+    workflow_repair_menu = inputs.repair_menu
+    if workflow_repair_menu is None:
+        workflow_repair_menu = _build_repair_menu(
+            source_authority_json=inputs.source_authority_json,
+            feedback_json=inputs.feedback_json,
+        )
+    payload: dict[str, object] = {
+        "project_id": request.project_id,
+        "spec_version_id": request.spec_version_id,
+        "source_authority_id": request.source_authority_id,
+        "source_authority_fingerprint": (
+            request.expected_source_authority_fingerprint
+        ),
+        "source_authority_json": inputs.source_authority_json,
+        "feedback_json": feedback_payload,
+        "repair_menu": workflow_repair_menu,
+        "contract_version": inputs.contract_version,
+        "max_iterations": request.max_iterations,
+    }
+    return payload
+
+
+def _invalid_curation_feedback_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    feedback_json: str,
+) -> dict[str, Any]:
+    """Return failed workflow result for invalid stored feedback JSON."""
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.AUTHORITY_FEEDBACK_SCHEMA_INVALID,
+            failure_stage="feedback_payload_parse",
+            failure_summary="Stored authority feedback JSON is invalid.",
+            raw_output=feedback_json,
+        ),
+    )
+
+
+def _curation_kill_switch_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    inputs: _CurationWorkflowInputs,
+) -> dict[str, Any] | None:
+    """Return deterministic failure when curation test mode disables ADK."""
+    if _authority_curation_mode() != "fail_no_candidate":
+        return None
+    result = _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.SPEC_COMPILE_FAILED,
+            failure_stage="host_kill_switch",
+            failure_summary="Authority curation stopped before model invocation.",
+            model_info={"requested_model_id": "not_invoked"},
+            extra={
+                "failure_reason": "fail_no_candidate",
+                "menu_fingerprint": inputs.menu_fingerprint,
+            },
+            trace_artifact_id=(
+                trace_artifact_id(inputs.mutation_event_id)
+                if inputs.mutation_event_id is not None
+                else None
+            ),
+        ),
+    )
+    result["failure_reason"] = "fail_no_candidate"
+    return result
+
+
+def _curation_invocation_failure_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    model_id: str,
+    inputs: _CurationWorkflowInputs,
+    exc: AgentInvocationError,
+) -> dict[str, Any]:
+    """Return failed workflow result with bounded ADK invocation diagnostics."""
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.SPEC_COMPILE_FAILED,
+            failure_stage="adk_invocation_failed",
+            failure_summary="Authority curation ADK workflow failed.",
+            raw_output=exc.partial_output,
+            model_info={
+                "model_id": model_id,
+                "requested_model_id": model_id,
+            },
+            validation_errors=exc.validation_errors,
+            extra={
+                "adk_event_count": exc.event_count,
+                "exception_message": str(exc),
+                "partial_output_present": exc.partial_output is not None,
+            },
+            trace_artifact_id=(
+                trace_artifact_id(inputs.mutation_event_id)
+                if inputs.mutation_event_id is not None
+                else None
+            ),
+        ),
+    )
+
+
+def _missing_curation_gate_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    invocation: dict[str, Any],
+    model_id: str,
+) -> dict[str, Any]:
+    """Return failed workflow result when ADK returns no gate decision."""
+    return _curation_workflow_failure_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        failure=_CurationWorkflowFailure(
+            error_code=ErrorCode.SPEC_COMPILE_FAILED,
+            failure_stage="adk_gate_missing",
+            failure_summary="Authority curation workflow returned no gate decision.",
+            raw_output=str(invocation.get("final_text") or ""),
+            model_info=_model_info_with_requested_model(invocation, model_id),
+        ),
+    )
+
+
+def _curation_workflow_success_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    inputs: _CurationWorkflowInputs,
+    output: _CurationWorkflowOutput,
+) -> dict[str, Any] | None:
+    """Normalize successful ADK repair output into host validation input."""
+    if not isinstance(output.repair_output, dict) or not (
+        _curation_gate_allows_candidate(
+            gate=output.gate,
+            repair_output=output.repair_output,
+            feedback_payload=output.feedback_payload,
+        )
+    ):
+        return None
+    candidate = _json_object_from_value(
+        output.repair_output.get("candidate_authority_json")
+    )
+    patches = output.repair_output.get("patches")
+    selection_payload = _json_object_from_value(
+        output.repair_output.get("selection_payload")
+    )
+    if inputs.contract_version == AUTHORITY_CURATION_CONTRACT_V2:
+        return _curation_workflow_v2_success_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            selection_payload=selection_payload,
+            output=output,
+        )
+    if candidate is None and not isinstance(patches, list):
+        return None
+    return _curation_workflow_legacy_success_result(
+        request=request,
+        curation_attempt_id=curation_attempt_id,
+        candidate=candidate,
+        patches=patches,
+        output=output,
+    )
+
+
+def _curation_workflow_v2_success_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    selection_payload: dict[str, Any] | None,
+    output: _CurationWorkflowOutput,
+) -> dict[str, Any] | None:
+    """Return normalized v2 workflow success when a selection payload exists."""
+    if selection_payload is None:
+        return None
+    return {
+        "ok": True,
+        "contract_version": AUTHORITY_CURATION_CONTRACT_V2,
+        "curation_attempt_id": curation_attempt_id,
+        "project_id": request.project_id,
+        "selection_payload": selection_payload,
+        "quality_report": _curation_quality_report(
+            invocation=output.invocation,
+            state=output.state,
+            gate=output.gate,
+            repair_output=output.repair_output or {},
+        ),
+        "candidate_lineage_json": _curation_candidate_lineage(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            repair_output=output.repair_output or {},
+        ),
+    }
+
+
+def _curation_workflow_legacy_success_result(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    candidate: dict[str, Any] | None,
+    patches: object,
+    output: _CurationWorkflowOutput,
+) -> dict[str, Any]:
+    """Return normalized legacy workflow success for historical compatibility."""
+    return {
+        "ok": True,
+        "curation_attempt_id": curation_attempt_id,
+        "project_id": request.project_id,
+        "candidate_authority_json": candidate,
+        "patches": patches if isinstance(patches, list) else [],
+        "quality_report": _curation_quality_report(
+            invocation=output.invocation,
+            state=output.state,
+            gate=output.gate,
+            repair_output=output.repair_output or {},
+        ),
+        "candidate_lineage_json": _curation_candidate_lineage(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            repair_output=output.repair_output or {},
+        ),
+    }
+
+
+def _curation_candidate_lineage(
+    *,
+    request: AuthorityCurationRequest,
+    curation_attempt_id: str,
+    repair_output: dict[str, Any],
+) -> dict[str, object]:
+    """Return common curation candidate lineage fields."""
+    return {
+        "source_authority_id": request.source_authority_id,
+        "curation_attempt_id": curation_attempt_id,
+        "resolved_feedback_ids": repair_output.get("resolved_feedback_ids", []),
+        "unresolved_feedback_ids": repair_output.get(
+            "unresolved_feedback_ids",
+            [],
+        ),
+    }
 
 
 def _curation_gate_allows_candidate(

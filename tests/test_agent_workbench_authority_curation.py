@@ -4249,8 +4249,9 @@ def test_authority_curate_v2_passes_repair_menu_to_workflow(
     )
 
     assert result["ok"] is True
-    assert captured["contract_version"] == "authority_curation.v2"
-    repair_menu = cast("list[dict[str, object]]", captured["repair_menu"])
+    inputs = cast("curation_mod._CurationWorkflowInputs", captured["inputs"])
+    assert inputs.contract_version == "authority_curation.v2"
+    repair_menu = cast("list[dict[str, object]]", inputs.repair_menu)
     assert repair_menu[0]["handle"] == "R1"
     assert "candidate_authority_json" not in repair_menu[0]
     assert "patches" not in repair_menu[0]

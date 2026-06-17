@@ -14,9 +14,9 @@ from orchestrator_agent.agent_tools.authority_curation import (
 from orchestrator_agent.agent_tools.authority_curation.schemes import (
     AuthorityCurationGateDecision,
     AuthorityCurationPatch,
-    AuthorityCurationRepairSelectionPayload,
     AuthorityCurationRepairOutput,
     AuthorityCurationRepairPlan,
+    AuthorityCurationRepairSelectionPayload,
     AuthorityCurationWorkflowInput,
 )
 
