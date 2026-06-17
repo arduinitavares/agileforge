@@ -350,6 +350,8 @@ def _seed_curation_attempt(  # noqa: PLR0913
     curation_attempt_id: str = "curation-old",
     status: str = "succeeded",
     mutation_event_id: int | None = TRACE_MUTATION_EVENT_ID,
+    candidate_authority_id: int | None = None,
+    candidate_authority_fingerprint: str | None = None,
     created_at: datetime | None = None,
 ) -> AuthorityCurationAttempt:
     """Persist an authority curation attempt row."""
@@ -366,6 +368,8 @@ def _seed_curation_attempt(  # noqa: PLR0913
         request_hash=f"sha256:{curation_attempt_id}",
         idempotency_key=f"idempotency-{curation_attempt_id}",
         mutation_event_id=mutation_event_id,
+        candidate_authority_id=candidate_authority_id,
+        candidate_authority_fingerprint=candidate_authority_fingerprint,
         created_at=timestamp,
         updated_at=timestamp,
     )
@@ -611,14 +615,18 @@ def test_authority_status_reports_latest_curation_trace_metadata(
         feedback_attempt_id="feedback-trace",
         has_blocking_feedback=True,
     )
+    candidate_authority_id = 99
+    candidate_authority_fingerprint = "sha256:" + ("a" * 64)
     curation = _seed_curation_attempt(
         session,
         project_id=project_id,
         authority=authority,
         feedback_attempt_id=feedback.feedback_attempt_id,
         curation_attempt_id="curation-trace",
-        status="failed",
+        status="recovery_required",
         mutation_event_id=TRACE_MUTATION_EVENT_ID,
+        candidate_authority_id=candidate_authority_id,
+        candidate_authority_fingerprint=candidate_authority_fingerprint,
     )
     trace_mod.append_trace_event(
         mutation_event_id=TRACE_MUTATION_EVENT_ID,
@@ -646,6 +654,10 @@ def test_authority_status_reports_latest_curation_trace_metadata(
 
     assert result["ok"] is True
     data = result["data"]
+    assert data["latest_curation_candidate_authority_id"] == candidate_authority_id
+    assert data["latest_curation_candidate_authority_fingerprint"] == (
+        candidate_authority_fingerprint
+    )
     assert data["latest_curation_trace_artifact_id"] == (
         f"authority_curation_trace-{TRACE_MUTATION_EVENT_ID}"
     )

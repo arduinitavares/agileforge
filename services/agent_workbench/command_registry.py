@@ -1346,15 +1346,18 @@ _PHASE_2E_COMMANDS: tuple[CommandMetadata, ...] = (
         idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
         input_required=(
             "project_id",
+            "idempotency_key",
+        ),
+        input_optional=(
             "spec_version_id",
             "source_authority_id",
             "expected_source_authority_fingerprint",
             "feedback_attempt_id",
-            "idempotency_key",
-        ),
-        input_optional=(
             "max_iterations",
             "compiler_model",
+            "recovery_mutation_event_id",
+            "expected_candidate_authority_id",
+            "expected_candidate_authority_fingerprint",
             "changed_by",
             "correlation_id",
         ),

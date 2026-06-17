@@ -576,6 +576,8 @@ def _feedback_curation_defaults() -> JsonDict:
         "latest_feedback_source_authority_fingerprint": None,
         "latest_curation_attempt_id": None,
         "latest_curation_status": None,
+        "latest_curation_candidate_authority_id": None,
+        "latest_curation_candidate_authority_fingerprint": None,
         "latest_curation_failure_artifact_id": None,
         "latest_curation_trace_artifact_id": None,
         "latest_curation_last_step": None,
@@ -674,6 +676,12 @@ def _latest_feedback_and_curation(
             None if curation is None else curation.curation_attempt_id
         ),
         "latest_curation_status": curation_status,
+        "latest_curation_candidate_authority_id": (
+            None if curation is None else curation.candidate_authority_id
+        ),
+        "latest_curation_candidate_authority_fingerprint": (
+            None if curation is None else curation.candidate_authority_fingerprint
+        ),
         "latest_curation_failure_artifact_id": (
             None if curation is None else curation.failure_artifact_id
         ),

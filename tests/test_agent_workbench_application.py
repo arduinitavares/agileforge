@@ -1195,6 +1195,48 @@ class _RejectedWithBlockingFeedbackProjection(_RejectedAuthorityProjection):
         return result
 
 
+class _CuratingRecoveryAuthorityProjection(_RejectedAuthorityProjection):
+    """Fake rejected authority projection with recoverable curation metadata."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return rejected authority status with a published curation candidate."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "latest_feedback_attempt_id": "feedback-123",
+                "has_blocking_feedback": True,
+                "curation_available": True,
+                "curation_in_progress": False,
+                "rejected_pending_authority_id": 6,
+                "pending_authority_fingerprint": "sha256:abc",
+                "latest_curation_attempt_id": "curation-123",
+                "latest_curation_status": "recovery_required",
+                "latest_curation_candidate_authority_id": 7,
+                "latest_curation_candidate_authority_fingerprint": (
+                    "sha256:" + ("a" * 64)
+                ),
+            }
+        )
+        return result
+
+
+class _CuratingRecoveryWithPendingAuthorityProjection(
+    _CuratingRecoveryAuthorityProjection
+):
+    """Fake recoverable curation projection with published pending candidate."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return recoverable curation plus production-shaped pending authority."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "pending_authority_id": 7,
+                "pending_authority_fingerprint": "sha256:" + ("a" * 64),
+            }
+        )
+        return result
+
+
 class _FalseyAuthorityProjection(_FakeAuthorityProjection):
     """Falsey authority projection used to verify explicit dependency checks."""
 
@@ -5591,6 +5633,95 @@ def test_workflow_next_prefers_authority_curate_after_feedback() -> None:
     assert result["data"]["next_actions"][0]["installed"] is True
     assert result["data"]["next_actions"][0]["requires_cli_installation"] is False
     assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_rejected_state_ignores_curation_recovery_metadata() -> None:
+    """Rejected setup still routes normal feedback curation, not recovery."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_rejected",
+                "setup_spec_version_id": 4,
+            }
+        ),
+        authority_projection=_CuratingRecoveryAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    command = result["data"]["next_valid_commands"][0]
+    assert "--recovery-mutation-event-id" not in command
+    assert command == (
+        f"agileforge authority curate --project-id {PROJECT_ID} "
+        "--spec-version-id 4 "
+        "--source-authority-id 6 "
+        "--expected-source-authority-fingerprint sha256:abc "
+        "--feedback-attempt-id feedback-123 "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def test_workflow_next_after_curation_recovery_includes_recovery_command() -> None:
+    """Recovery-required curation points to authority curate recovery mode."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_curating",
+                "setup_spec_version_id": 4,
+                "setup_curation_mutation_event_id": 647,
+            }
+        ),
+        authority_projection=_CuratingRecoveryWithPendingAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    command = result["data"]["next_valid_commands"][0]
+    assert command == (
+        f"agileforge authority curate --project-id {PROJECT_ID} "
+        "--recovery-mutation-event-id 647 "
+        "--expected-candidate-authority-id 7 "
+        f"--expected-candidate-authority-fingerprint {'sha256:' + ('a' * 64)} "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert result["data"]["next_actions"] == [
+        {
+            "command": command,
+            "installed": True,
+            "requires_cli_installation": False,
+            "reason": (
+                "Authority curation published a candidate and needs explicit "
+                "recovery to restore pending review."
+            ),
+            "requires": ["idempotency_key"],
+        }
+    ]
+
+
+def test_workflow_next_curating_without_recovery_metadata_emits_inspection() -> None:
+    """Active curation without recovery guards still points to inspection."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_curating",
+                "setup_curation_mutation_event_id": 647,
+            }
+        ),
+        authority_projection=_RejectedAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        f"agileforge mutation list --project-id {PROJECT_ID} --status pending",
+        f"agileforge authority status --project-id {PROJECT_ID}",
+    ]
 
 
 def test_workflow_next_routes_regenerated_rejected_authority_to_review() -> None:

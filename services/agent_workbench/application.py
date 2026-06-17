@@ -1000,6 +1000,7 @@ class AgentWorkbenchApplication:
             "authority_compile_failed",
             "authority_compile_required",
             "authority_compiling",
+            "authority_curating",
             "authority_pending_review",
             "authority_rejected",
             "brownfield_curation_required",
@@ -1007,12 +1008,18 @@ class AgentWorkbenchApplication:
         }:
             authority = (
                 self.authority_status(project_id=project_id)
-                if setup_status in {"authority_pending_review", "authority_rejected"}
+                if setup_status
+                in {
+                    "authority_curating",
+                    "authority_pending_review",
+                    "authority_rejected",
+                }
                 else None
             )
             effective_setup_status = (
                 "authority_pending_review"
-                if _authority_has_pending_review(authority)
+                if setup_status != "authority_curating"
+                and _authority_has_pending_review(authority)
                 else setup_status
             )
             review = (
@@ -2761,6 +2768,13 @@ def _setup_workflow_next(
             authority=authority,
             workflow=workflow,
         )
+    elif setup_status == "authority_curating":
+        _apply_authority_curating_routing(
+            data=data,
+            project_id=project_id,
+            authority=authority,
+            workflow=workflow,
+        )
     elif setup_status == "failed":
         _apply_failed_setup_routing(
             data=data,
@@ -3053,6 +3067,44 @@ def _apply_authority_curation_in_progress_routing(
         }
         for command in commands
     ]
+    data["manual_remediation"] = []
+
+
+def _apply_authority_curating_routing(
+    *,
+    data: dict[str, Any],
+    project_id: int,
+    authority: dict[str, Any] | None,
+    workflow: dict[str, Any],
+) -> None:
+    """Publish active curation inspection or explicit recovery action."""
+    authority_data = _envelope_data(authority) if authority is not None else {}
+    recovery_action = _authority_curate_recovery_next_action_from_state(
+        project_id=project_id,
+        workflow=workflow,
+        authority_data=authority_data,
+    )
+    if recovery_action is None:
+        _apply_authority_curation_in_progress_routing(
+            data=data,
+            project_id=project_id,
+        )
+        return
+    if recovery_action["installed"] is True:
+        data["next_valid_commands"] = [recovery_action["command"]]
+    else:
+        data["next_valid_commands"] = []
+        data["blocked_future_commands"] = [
+            {
+                "command": recovery_action["command"],
+                "installed": False,
+                "reason": (
+                    "Authority curation recovery is required, but the CLI "
+                    "command is not installed yet."
+                ),
+            }
+        ]
+    data["next_actions"] = [recovery_action]
     data["manual_remediation"] = []
 
 
@@ -5736,6 +5788,56 @@ def _authority_curate_next_action_from_state(
         "reason": "Structured authority feedback exists for the rejected authority.",
         "requires": ["idempotency_key"],
     }
+
+
+def _authority_curate_recovery_next_action_from_state(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    authority_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return authority curation recovery action when candidate guards exist."""
+    recovery_mutation_event_id = authority_data.get(
+        "latest_curation_mutation_event_id"
+    )
+    if not isinstance(recovery_mutation_event_id, int):
+        workflow_state = _envelope_data(workflow).get("state")
+        state_data = workflow_state if isinstance(workflow_state, dict) else {}
+        recovery_mutation_event_id = state_data.get(
+            "setup_curation_mutation_event_id"
+        )
+    recovery_candidate_authority_id = authority_data.get(
+        "latest_curation_candidate_authority_id"
+    )
+    recovery_candidate_fingerprint = authority_data.get(
+        "latest_curation_candidate_authority_fingerprint"
+    )
+    if (
+        isinstance(recovery_mutation_event_id, int)
+        and isinstance(recovery_candidate_authority_id, int)
+        and isinstance(recovery_candidate_fingerprint, str)
+        and recovery_candidate_fingerprint
+    ):
+        installed = command_is_available(AUTHORITY_CURATE_COMMAND)
+        command = (
+            f"{AUTHORITY_CURATE_COMMAND} --project-id {project_id} "
+            f"--recovery-mutation-event-id {recovery_mutation_event_id} "
+            f"--expected-candidate-authority-id {recovery_candidate_authority_id} "
+            "--expected-candidate-authority-fingerprint "
+            f"{recovery_candidate_fingerprint} "
+            "--idempotency-key <idempotency_key>"
+        )
+        return {
+            "command": command,
+            "installed": installed,
+            "requires_cli_installation": not installed,
+            "reason": (
+                "Authority curation published a candidate and needs explicit "
+                "recovery to restore pending review."
+            ),
+            "requires": ["idempotency_key"],
+        }
+    return None
 
 
 def _workflow_setup_spec_version_id(workflow: dict[str, Any]) -> int | None:

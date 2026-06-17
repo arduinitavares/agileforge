@@ -444,15 +444,18 @@ def test_authority_curate_command_is_registered() -> None:
     assert schema["idempotency_policy"]["non_dry_run"] == "required"
     assert schema["input"]["required"] == [
         "project_id",
+        "idempotency_key",
+    ]
+    assert schema["input"]["optional"] == [
         "spec_version_id",
         "source_authority_id",
         "expected_source_authority_fingerprint",
         "feedback_attempt_id",
-        "idempotency_key",
-    ]
-    assert schema["input"]["optional"] == [
         "max_iterations",
         "compiler_model",
+        "recovery_mutation_event_id",
+        "expected_candidate_authority_id",
+        "expected_candidate_authority_fingerprint",
         "changed_by",
         "correlation_id",
     ]
