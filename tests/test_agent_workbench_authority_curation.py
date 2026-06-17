@@ -648,6 +648,62 @@ def test_feedback_record_rejects_project_authority_mismatch(
     assert rows == []
 
 
+def test_feedback_record_rejects_accepted_authority(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Feedback recording is only valid while an authority is pending review."""
+    project_id, authority_id, fingerprint = _seed_pending_authority(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, authority_id)
+        assert authority is not None
+        spec = session.get(SpecRegistry, authority.spec_version_id)
+        assert spec is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=project_id,
+                spec_version_id=authority.spec_version_id,
+                status="accepted",
+                policy="manual",
+                decided_by="reviewer",
+                decided_at=datetime(2026, 6, 16, 14, tzinfo=UTC),
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority_id,
+                authority_fingerprint=fingerprint,
+                terminal_decision_key=(
+                    f"{project_id}:{authority.spec_version_id}:{authority_id}"
+                ),
+                provenance_source="test",
+            )
+        )
+        session.commit()
+
+    feedback_file = _write_feedback(tmp_path, authority_id=authority_id)
+
+    result = AuthorityCurationRunner(engine=engine).feedback_record(
+        AuthorityFeedbackRecordRequest(
+            project_id=project_id,
+            pending_authority_id=authority_id,
+            expected_authority_fingerprint=fingerprint,
+            feedback_file=str(feedback_file),
+            idempotency_key="feedback-record-accepted-authority",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_NOT_PENDING"
+    assert result["errors"][0]["details"] == {
+        "project_id": project_id,
+        "authority_id": authority_id,
+        "authority_status": "accepted",
+    }
+    with Session(engine) as session:
+        rows = session.exec(select(AuthorityFeedbackAttempt)).all()
+    assert rows == []
+
+
 def test_feedback_record_persists_blocking_feedback(
     engine: Engine,
     tmp_path: Path,
@@ -2376,6 +2432,104 @@ def test_authority_curate_reconciles_expired_start_without_candidate(
     assert workflow_state["setup_curation_mutation_event_id"] is None
     assert len(attempts) == 1
     assert attempts[0].candidate_authority_id is None
+
+
+def test_authority_curate_expired_recovery_keeps_published_candidate_manual(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """DB candidate evidence prevents false no-side-effect reconciliation."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+    request = AuthorityCurationRequest(
+        project_id=fixture.project_id,
+        spec_version_id=fixture.spec_version_id,
+        source_authority_id=fixture.authority_id,
+        expected_source_authority_fingerprint=fixture.authority_fingerprint,
+        feedback_attempt_id=fixture.feedback_attempt_id,
+        idempotency_key="curate-expired-with-candidate-evidence",
+    )
+
+    def fake_run_curation(**_: object) -> dict[str, object]:
+        with Session(engine) as session:
+            ledger = session.exec(select(CliMutationLedger)).one()
+            ledger.lease_expires_at = datetime(
+                2020,
+                1,
+                1,
+                tzinfo=UTC,
+            ).replace(tzinfo=None)
+            session.add(ledger)
+            session.commit()
+        message = "worker died after candidate publish"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_run_curation,
+    )
+
+    first = runner.curate(request)
+    assert first["ok"] is False
+    with Session(engine) as session:
+        ledger = session.exec(select(CliMutationLedger)).one()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        candidate = CompiledSpecAuthority(
+            spec_version_id=fixture.spec_version_id,
+            compiler_version="2.0.0",
+            prompt_hash="b" * 64,
+            compiled_artifact_json=_compiled_artifact_json(),
+            scope_themes="[]",
+            invariants='[{"id":"INV-published","text":"Candidate exists."}]',
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(candidate)
+        session.flush()
+        candidate_id = require_id(candidate.authority_id, "authority_id")
+        candidate_fingerprint = pending_authority_fingerprint(candidate)
+        attempt.candidate_authority_id = candidate_id
+        attempt.candidate_authority_fingerprint = candidate_fingerprint
+        session.add(attempt)
+        session.commit()
+        mutation_event_id = require_id(
+            ledger.mutation_event_id,
+            "mutation_event_id",
+        )
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_curating",
+            "setup_curation_mutation_event_id": mutation_event_id,
+        },
+    )
+
+    second = runner.curate(request)
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "MUTATION_RECOVERY_REQUIRED"
+    with Session(engine) as session:
+        recovered_ledger = session.exec(select(CliMutationLedger)).one()
+        recovered_attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert recovered_ledger.status == "recovery_required"
+    assert recovered_ledger.status != "domain_failed_no_side_effects"
+    assert recovered_attempt.candidate_authority_id == candidate_id
+    assert recovered_attempt.candidate_authority_fingerprint == (
+        candidate_fingerprint
+    )
 
 
 def test_authority_curate_no_side_effect_replay_preserves_advanced_workflow(

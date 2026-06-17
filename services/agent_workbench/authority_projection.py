@@ -542,10 +542,10 @@ def _build_status_data(
     disk_warning = _disk_spec_warning(disk_spec)
     if disk_warning is not None:
         warnings.append(disk_warning)
-    feedback_curation = _latest_feedback_and_curation(
+    feedback_curation = _feedback_curation_for_selection(
         session,
         project_id=project_id,
-        authority_id=_feedback_curation_authority_id(selection),
+        selection=selection,
         curation_ready=_curation_projection_ready(session),
     )
     context = _StatusContext(
@@ -597,17 +597,63 @@ def _authority_curation_trace_summary(*, mutation_event_id: int) -> JsonDict:
         return {}
 
 
-def _feedback_curation_authority_id(
+def _feedback_curation_for_selection(
+    session: Session,
+    *,
+    project_id: int,
     selection: _AuthoritySelection,
+    curation_ready: bool,
+) -> JsonDict:
+    """Return feedback/curation metadata for the current review lineage."""
+    if not curation_ready:
+        return _feedback_curation_defaults()
+    pending_authority_id = _pending_authority_id(selection.pending_authority)
+    rejected_source_authority_id = _rejected_curation_source_authority_id(
+        selection
+    )
+    if rejected_source_authority_id is not None:
+        rejected_curation = _latest_feedback_and_curation(
+            session,
+            project_id=project_id,
+            authority_id=rejected_source_authority_id,
+            curation_ready=curation_ready,
+        )
+        if (
+            pending_authority_id is None
+            or rejected_curation.get("latest_curation_candidate_authority_id")
+            == pending_authority_id
+        ):
+            return rejected_curation
+    return _latest_feedback_and_curation(
+        session,
+        project_id=project_id,
+        authority_id=pending_authority_id,
+        curation_ready=curation_ready,
+    )
+
+
+def _pending_authority_id(
+    pending_authority: CompiledSpecAuthority | None,
 ) -> int | None:
-    """Return the current pending or rejected authority candidate id."""
-    pending_authority = selection.pending_authority
+    """Return a pending authority row id when present."""
     if pending_authority is not None and pending_authority.authority_id is not None:
         return pending_authority.authority_id
-    rejected = selection.rejected
-    if rejected is not None:
-        return rejected.pending_authority_id
     return None
+
+
+def _rejected_curation_source_authority_id(
+    selection: _AuthoritySelection,
+) -> int | None:
+    """Return rejected source id only when it belongs to the latest spec."""
+    rejected = selection.rejected
+    latest_spec = selection.latest_spec
+    if (
+        rejected is None
+        or latest_spec is None
+        or rejected.spec_version_id != latest_spec.spec_version_id
+    ):
+        return None
+    return rejected.pending_authority_id
 
 
 def _latest_feedback_and_curation(

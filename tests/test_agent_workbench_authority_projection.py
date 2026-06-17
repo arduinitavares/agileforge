@@ -665,6 +665,198 @@ def test_authority_status_reports_latest_curation_trace_metadata(
     assert data["latest_curation_last_status"] == "failed"
 
 
+def test_authority_status_keeps_curation_metadata_with_published_candidate(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A pending curated candidate must not hide rejected-source curation state."""
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    source_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=source_authority,
+        feedback_attempt_id="feedback-published-candidate",
+        has_blocking_feedback=True,
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=spec,
+        authority=source_authority,
+    )
+    candidate_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version="2.0.0",
+        prompt_hash="b" * 64,
+    )
+    candidate_authority_id = require_id(
+        candidate_authority.authority_id,
+        "authority_id",
+    )
+    candidate_authority_fingerprint = pending_authority_fingerprint(
+        candidate_authority
+    )
+    assert candidate_authority_fingerprint is not None
+    _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=source_authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-published-candidate",
+        status="recovery_required",
+        mutation_event_id=None,
+        candidate_authority_id=candidate_authority_id,
+        candidate_authority_fingerprint=candidate_authority_fingerprint,
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["pending_authority_id"] == candidate_authority_id
+    assert data["pending_authority_fingerprint"] == candidate_authority_fingerprint
+    assert data["latest_feedback_attempt_id"] == feedback.feedback_attempt_id
+    assert data["latest_curation_attempt_id"] == "curation-published-candidate"
+    assert data["latest_curation_status"] == "recovery_required"
+    assert data["latest_curation_candidate_authority_id"] == (
+        candidate_authority_id
+    )
+    assert data["latest_curation_candidate_authority_fingerprint"] == (
+        candidate_authority_fingerprint
+    )
+
+
+def test_authority_status_ignores_old_rejection_curation_for_new_pending_spec(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Old rejected-spec curation metadata must not leak into newer pending spec."""
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    rejected_spec = _seed_spec(session, product_id=project_id, content="old")
+    rejected_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(
+            rejected_spec.spec_version_id,
+            "spec_version_id",
+        ),
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=rejected_authority,
+        feedback_attempt_id="feedback-old-spec",
+        has_blocking_feedback=True,
+    )
+    _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=rejected_authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-old-spec",
+        status="recovery_required",
+        mutation_event_id=None,
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=rejected_spec,
+        authority=rejected_authority,
+    )
+    latest_spec = _seed_spec(session, product_id=project_id, content="new")
+    pending_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(
+            latest_spec.spec_version_id,
+            "spec_version_id",
+        ),
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["pending_authority_id"] == pending_authority.authority_id
+    assert data["latest_feedback_attempt_id"] is None
+    assert data["latest_curation_attempt_id"] is None
+    assert data["has_blocking_feedback"] is False
+    assert data["curation_available"] is False
+
+
+def test_authority_status_ignores_same_spec_rejection_without_curation_link(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Same-spec rejected feedback must not leak into unrelated pending candidate."""
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    rejected_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=rejected_authority,
+        feedback_attempt_id="feedback-same-spec",
+        has_blocking_feedback=True,
+    )
+    _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=rejected_authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-unlinked-same-spec",
+        status="recovery_required",
+        mutation_event_id=None,
+        candidate_authority_id=999,
+        candidate_authority_fingerprint="sha256:" + ("9" * 64),
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=spec,
+        authority=rejected_authority,
+    )
+    pending_authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version="2.0.0",
+        prompt_hash="b" * 64,
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["pending_authority_id"] == pending_authority.authority_id
+    assert data["latest_feedback_attempt_id"] is None
+    assert data["latest_curation_attempt_id"] is None
+    assert data["has_blocking_feedback"] is False
+    assert data["curation_available"] is False
+
+
 def test_authority_status_trace_summary_failure_is_fail_open(
     session: Session,
     tmp_path: Path,

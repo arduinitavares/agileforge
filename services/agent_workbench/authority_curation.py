@@ -1449,9 +1449,19 @@ class AuthorityCurationRunner:
             )
             with Session(self._engine) as session:
                 session.add(authority)
-                session.commit()
-                session.refresh(authority)
+                session.flush()
                 published = _published_curation_candidate(authority)
+                row = _required_curation_attempt_for_publication(
+                    session=session,
+                    curation_attempt_id=attempt.curation_attempt_id,
+                )
+                _apply_succeeded_curation_attempt(
+                    row,
+                    published=published,
+                    validated=validated,
+                )
+                session.add(row)
+                session.commit()
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
@@ -1511,11 +1521,6 @@ class AuthorityCurationRunner:
                     ),
                 ),
             ):
-                self._update_succeeded_curation_attempt(
-                    attempt.curation_attempt_id,
-                    published=published,
-                    validated=validated,
-                )
                 self._mark_workflow_pending_review(
                     request=request,
                     pending_authority_id=published.authority_id,
@@ -2044,18 +2049,49 @@ class AuthorityCurationRunner:
             ).first()
             if row is None:
                 return
-            row.status = "succeeded"
-            row.candidate_authority_id = published.authority_id
-            row.candidate_authority_fingerprint = published.authority_fingerprint
-            row.diff_summary_json = _canonical_json(validated.diff["summary"])
-            row.lineage_json = _canonical_json(validated.diff["lineage_json"])
-            row.quality_report_json = _canonical_json(validated.quality_report)
-            row.candidate_lineage_json = _canonical_json(
-                validated.candidate_lineage
+            _apply_succeeded_curation_attempt(
+                row,
+                published=published,
+                validated=validated,
             )
-            row.updated_at = datetime.now(UTC)
             session.add(row)
             session.commit()
+
+
+def _apply_succeeded_curation_attempt(
+    row: AuthorityCurationAttempt,
+    *,
+    published: _PublishedCurationCandidate,
+    validated: _ValidatedCurationCandidate,
+) -> None:
+    """Set successful curation audit metadata on an attempt row."""
+    row.status = "succeeded"
+    row.candidate_authority_id = published.authority_id
+    row.candidate_authority_fingerprint = published.authority_fingerprint
+    row.diff_summary_json = _canonical_json(validated.diff["summary"])
+    row.lineage_json = _canonical_json(validated.diff["lineage_json"])
+    row.quality_report_json = _canonical_json(validated.quality_report)
+    row.candidate_lineage_json = _canonical_json(validated.candidate_lineage)
+    row.updated_at = datetime.now(UTC)
+
+
+def _required_curation_attempt_for_publication(
+    *,
+    session: Session,
+    curation_attempt_id: str,
+) -> AuthorityCurationAttempt:
+    """Return the attempt row that must share the candidate publication commit."""
+    row = session.exec(
+        select(AuthorityCurationAttempt).where(
+            AuthorityCurationAttempt.curation_attempt_id == curation_attempt_id
+        )
+    ).first()
+    if row is None:
+        message = (
+            "Authority curation attempt disappeared before candidate publication."
+        )
+        raise RuntimeError(message)
+    return row
 
 
 def _record_feedback_in_session(
@@ -3546,6 +3582,30 @@ def _authority_guard(
                     "project_id": request.project_id,
                     "authority_id": request.pending_authority_id,
                     "authority_project_id": authority_project_id,
+                },
+            ),
+        )
+
+    terminal_decision = session.exec(
+        select(SpecAuthorityAcceptance)
+        .where(SpecAuthorityAcceptance.product_id == request.project_id)
+        .where(
+            SpecAuthorityAcceptance.pending_authority_id
+            == request.pending_authority_id
+        )
+        .order_by(cast("Any", SpecAuthorityAcceptance.decided_at).desc())
+    ).first()
+    if terminal_decision is not None and terminal_decision.status == "accepted":
+        return _AuthorityGuardResult(
+            authority=None,
+            authority_fingerprint=None,
+            error=_authority_not_pending_error(
+                request=request,
+                message="Authority is no longer pending review.",
+                details={
+                    "project_id": request.project_id,
+                    "authority_id": request.pending_authority_id,
+                    "authority_status": terminal_decision.status,
                 },
             ),
         )
