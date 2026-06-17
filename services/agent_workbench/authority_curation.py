@@ -2874,8 +2874,7 @@ def _unsafe_curation_patch_response(
     context: _PatchApplicationContext,
     reason: str,
     patch_index: int,
-    target_kind: str | None = None,
-    target_id: str | None = None,
+    patch_details: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return fail-closed response for unsafe model patch output."""
     details: dict[str, Any] = {
@@ -2885,10 +2884,8 @@ def _unsafe_curation_patch_response(
         "patch_index": patch_index,
         "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
     }
-    if target_kind is not None:
-        details["target_kind"] = target_kind
-    if target_id is not None:
-        details["target_id"] = target_id
+    if patch_details is not None:
+        details.update(patch_details)
     return error_envelope(
         command=AUTHORITY_CURATE_COMMAND,
         error=workbench_error(
@@ -2919,6 +2916,7 @@ def _apply_candidate_patch(
     target_kind = _string_or_none(patch_payload.get("target_kind"))
     target_id = _string_or_none(patch_payload.get("target_id"))
     operation = _string_or_none(patch_payload.get("op"))
+    path = _string_or_none(patch_payload.get("path"))
     if target_kind is None or target_id is None or operation is None:
         return _unsafe_curation_patch_response(
             context=context,
@@ -2935,8 +2933,10 @@ def _apply_candidate_patch(
             context=context,
             reason="untargeted_patch_target",
             patch_index=patch_index,
-            target_kind=target_kind,
-            target_id=target_id,
+            patch_details=_patch_error_details(
+                target_kind=target_kind,
+                target_id=target_id,
+            ),
         )
     target = _find_patch_target(
         candidate,
@@ -2948,8 +2948,10 @@ def _apply_candidate_patch(
             context=context,
             reason="patch_target_not_found",
             patch_index=patch_index,
-            target_kind=target_kind,
-            target_id=authorized_target_id,
+            patch_details=_patch_error_details(
+                target_kind=target_kind,
+                target_id=authorized_target_id,
+            ),
         )
     applied = _apply_single_patch(
         target=target,
@@ -2963,9 +2965,29 @@ def _apply_candidate_patch(
         context=context,
         reason=applied,
         patch_index=patch_index,
-        target_kind=target_kind,
-        target_id=authorized_target_id,
+        patch_details=_patch_error_details(
+            target_kind=target_kind,
+            target_id=authorized_target_id,
+            operation=operation,
+            path=path,
+        ),
     )
+
+
+def _patch_error_details(
+    *,
+    target_kind: str,
+    target_id: str,
+    operation: str | None = None,
+    path: str | None = None,
+) -> dict[str, str]:
+    """Return bounded patch metadata safe to expose in CLI error details."""
+    details = {"target_kind": target_kind, "target_id": target_id}
+    if operation is not None:
+        details["operation"] = operation
+    if path is not None:
+        details["path"] = path
+    return details
 
 
 def _authorized_patch_target_id(
@@ -3164,6 +3186,14 @@ def _apply_replace_value_patch(
     if not isinstance(item, dict):
         return "patch_target_not_structured"
     item_payload = cast("dict[str, Any]", item)
+    text_path_result = _apply_replace_text_value_patch(
+        item_payload,
+        path=path,
+        value=patch["value"],
+        target_kind=target_kind,
+    )
+    if text_path_result != "not_text_path":
+        return text_path_result
     path_error = _replace_json_pointer_value(
         item_payload,
         path=path,
@@ -3176,12 +3206,42 @@ def _apply_replace_value_patch(
     return None
 
 
+def _apply_replace_text_value_patch(
+    item: dict[str, Any],
+    *,
+    path: str,
+    value: object,
+    target_kind: str,
+) -> str | None:
+    """Apply a value patch when it targets an existing top-level text field."""
+    text_field = _text_field_from_json_pointer_path(path)
+    if text_field is None:
+        return "not_text_path"
+    if not isinstance(value, str):
+        return "invalid_patch"
+    if not isinstance(item.get(text_field), str):
+        return "patch_path_not_found"
+    item[text_field] = value
+    _recompute_invariant_id_if_possible(item, target_kind=target_kind)
+    return None
+
+
 def _text_field_for_patch(item: dict[str, Any]) -> str:
     """Return existing text-like field for a textual patch."""
     for field_name in _PATCH_TEXT_FIELDS:
         if isinstance(item.get(field_name), str):
             return field_name
     return "text"
+
+
+def _text_field_from_json_pointer_path(path: str) -> str | None:
+    """Return a text field when a value patch targets one top-level text path."""
+    if not path.startswith("/") or "/" in path[1:]:
+        return None
+    field_name = _decode_json_pointer_part(path[1:])
+    if field_name in _PATCH_TEXT_FIELDS:
+        return field_name
+    return None
 
 
 def _replace_json_pointer_value(

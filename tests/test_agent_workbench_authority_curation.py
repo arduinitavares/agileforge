@@ -470,6 +470,49 @@ def _structured_parameter_patch_curation_result(
     }
 
 
+def _text_value_patch_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a text replacement encoded as a JSON pointer value patch."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "invariant",
+                "target_id": "INV-curation-1",
+                "op": "replace_value",
+                "path": "/text",
+                "value": "Review packets include qualified guard evidence.",
+            }
+        ],
+        "candidate_lineage_json": {"source": "text-value-patch"},
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _unsupported_path_patch_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return a value patch using an unsupported invariant path."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "patches": [
+            {
+                "target_kind": "invariant",
+                "target_id": "INV-curation-1",
+                "op": "replace_value",
+                "path": "/unsupported",
+                "value": "Unsupported path should fail with details.",
+            }
+        ],
+        "quality_report": {"status": "passed"},
+    }
+
+
 def _untargeted_change_curation_result(
     fixture: RejectedAuthorityFixture,
 ) -> dict[str, object]:
@@ -2209,6 +2252,89 @@ def test_authority_curate_rejects_missing_patch_target(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
     assert result["errors"][0]["details"]["reason"] == "patch_target_not_found"
+
+
+def test_authority_curate_accepts_text_json_pointer_value_patch(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch applier treats /text value replacements as bounded text edits."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _text_value_patch_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-text-json-pointer-value-patch",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    invariants = {item["id"]: item for item in candidate["invariants"]}
+    assert invariants["INV-curation-1"]["text"] == (
+        "Review packets include qualified guard evidence."
+    )
+    assert invariants["INV-curation-untargeted"]["text"] == (
+        "Unrelated review packets remain stable."
+    )
+
+
+def test_authority_curate_reports_unsupported_patch_operation_and_path(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsafe patch errors expose bounded path details for debugging."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _unsupported_path_patch_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-reports-unsupported-patch-path",
+        )
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert error["details"]["reason"] == "unsupported_patch_path"
+    assert error["details"]["operation"] == "replace_value"
+    assert error["details"]["path"] == "/unsupported"
 
 
 def test_authority_curate_replaces_structured_invariant_parameter(
