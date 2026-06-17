@@ -8,12 +8,14 @@ import json
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Final, cast
 
+import pytest
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.dml import Update
 from sqlmodel import Session, SQLModel, select
 
 import services.agent_workbench.mutation_ledger as mutation_ledger_mod
+import utils.authority_curation_trace as trace_mod
 from models.agent_workbench import CliMutationLedger
 from services.agent_workbench.mutation_ledger import (
     IDEMPOTENCY_KEY_REUSED,
@@ -24,13 +26,21 @@ from services.agent_workbench.mutation_ledger import (
     MutationStatus,
     RecoveryAction,
 )
+from tests.typing_helpers import require_id
 
 if TYPE_CHECKING:
-    import pytest
+    from pathlib import Path
+
     from sqlalchemy.engine import Engine
 
 PROJECT_ID: Final[int] = 7
 _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
+TRACE_METADATA_KEYS: Final[tuple[str, ...]] = (
+    "trace_artifact_id",
+    "trace_artifact_present",
+    "last_trace_step",
+    "last_trace_status",
+)
 
 
 def _repo(engine: Engine) -> MutationLedgerRepository:
@@ -766,6 +776,115 @@ def test_show_event_returns_json_friendly_row_payload(engine: Engine) -> None:
     }
 
 
+def test_mutation_show_includes_authority_curation_trace_metadata(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation show enriches authority curation rows with trace summary."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    repo = _repo(engine)
+    loaded = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-show-trace",
+        request_hash="sha256:trace",
+        project_id=3,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=datetime(2026, 6, 16, 12, tzinfo=UTC),
+    )
+    mutation_event_id = require_id(
+        loaded.ledger.mutation_event_id,
+        "mutation_event_id",
+    )
+    trace_mod.append_trace_event(
+        mutation_event_id=mutation_event_id,
+        project_id=3,
+        step="adk_invocation_started",
+        status="started",
+    )
+
+    result = repo.show_event(mutation_event_id=mutation_event_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["trace_artifact_id"] == (
+        f"authority_curation_trace-{mutation_event_id}"
+    )
+    assert data["trace_artifact_present"] is True
+    assert data["last_trace_step"] == "adk_invocation_started"
+    assert data["last_trace_status"] == "started"
+
+
+def test_mutation_show_trace_summary_failure_is_fail_open(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trace summary failures must not block mutation show payloads."""
+    calls = 0
+
+    def fail_summary(*, mutation_event_id: int) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        assert mutation_event_id > 0
+        message = "trace summary failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(trace_mod, "summarize_trace", fail_summary)
+    repo = _repo(engine)
+    row = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-show-trace-fail-open",
+        request_hash="sha256:trace-fail-open",
+        project_id=3,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=datetime(2026, 6, 16, 12, tzinfo=UTC),
+    ).ledger
+    mutation_event_id = require_id(row.mutation_event_id, "mutation_event_id")
+
+    result = repo.show_event(mutation_event_id=mutation_event_id)
+
+    assert calls == 1
+    assert result["ok"] is True
+    assert result["data"]["mutation_event_id"] == mutation_event_id
+    assert result["data"]["command"] == "agileforge authority curate"
+    for key in TRACE_METADATA_KEYS:
+        assert key in result["data"]
+        assert result["data"][key] is None
+
+
+def test_mutation_show_trace_programmer_error_is_not_swallowed(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation show propagates non-operational trace summary bugs."""
+
+    def broken_summary(*, mutation_event_id: int) -> dict[str, object]:
+        assert mutation_event_id > 0
+        message = "programmer bug"
+        raise TypeError(message)
+
+    monkeypatch.setattr(trace_mod, "summarize_trace", broken_summary)
+    repo = _repo(engine)
+    row = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-show-trace-type-error",
+        request_hash="sha256:trace-type-error",
+        project_id=3,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=datetime(2026, 6, 16, 12, tzinfo=UTC),
+    ).ledger
+    mutation_event_id = require_id(row.mutation_event_id, "mutation_event_id")
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        repo.show_event(mutation_event_id=mutation_event_id)
+
+
 def test_show_event_returns_registered_not_found_error(engine: Engine) -> None:
     """Return a registered not-found error for missing mutation rows."""
     repo = _repo(engine)
@@ -846,6 +965,42 @@ def test_list_events_filters_by_project_and_status(engine: Engine) -> None:
     assert result["data"]["items"][0]["status"] == MutationStatus.PENDING.value
 
 
+def test_list_events_omits_authority_curation_trace_metadata(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation list keeps authority curation trace metadata show-only."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    repo = _repo(engine)
+    row = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-list-trace",
+        request_hash="sha256:trace-list",
+        project_id=PROJECT_ID,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=datetime(2026, 6, 16, 12, tzinfo=UTC),
+    ).ledger
+    mutation_event_id = require_id(row.mutation_event_id, "mutation_event_id")
+    trace_mod.append_trace_event(
+        mutation_event_id=mutation_event_id,
+        project_id=PROJECT_ID,
+        step="adk_invocation_started",
+        status="started",
+    )
+
+    result = repo.list_events(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert len(result["data"]["items"]) == 1
+    item = result["data"]["items"][0]
+    assert item["mutation_event_id"] == mutation_event_id
+    for key in TRACE_METADATA_KEYS:
+        assert key not in item
+
+
 def test_resume_event_acquires_recovery_lease_without_domain_recovery(
     engine: Engine,
 ) -> None:
@@ -887,6 +1042,56 @@ def test_resume_event_acquires_recovery_lease_without_domain_recovery(
         "domain_resume_required": True,
     }
     assert result["data"]["response"] is None
+
+
+def test_resume_event_omits_authority_curation_trace_metadata(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation resume keeps authority curation trace metadata show-only."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    repo = _repo(engine)
+    now = datetime(2026, 6, 16, 12, tzinfo=UTC)
+    row = repo.create_or_load(
+        command="agileforge authority curate",
+        idempotency_key="curate-resume-trace",
+        request_hash="sha256:trace-resume",
+        project_id=PROJECT_ID,
+        correlation_id="corr",
+        changed_by="test",
+        lease_owner="lease",
+        now=now,
+        lease_seconds=1,
+    ).ledger
+    mutation_event_id = require_id(row.mutation_event_id, "mutation_event_id")
+    trace_mod.append_trace_event(
+        mutation_event_id=mutation_event_id,
+        project_id=PROJECT_ID,
+        step="adk_invocation_started",
+        status="started",
+    )
+    repo._force_recovery_required_for_test(
+        mutation_event_id=mutation_event_id,
+        recovery_action=RecoveryAction.RESUME_FROM_STEP,
+        safe_to_auto_resume=True,
+        last_error={"code": "CRASHED"},
+        now=now + timedelta(seconds=2),
+    )
+
+    result = repo.resume_event(
+        mutation_event_id=mutation_event_id,
+        correlation_id="corr-resume",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["mutation_event_id"] == mutation_event_id
+    assert result["data"]["recovery"] == {
+        "acquired": True,
+        "domain_resume_required": True,
+    }
+    for key in TRACE_METADATA_KEYS:
+        assert key not in result["data"]
 
 
 def test_resume_event_returns_structured_conflict_error(engine: Engine) -> None:

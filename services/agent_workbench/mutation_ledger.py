@@ -148,7 +148,12 @@ class MutationLedgerRepository:
         self._engine: Engine = engine
         self.fail_after_retry_update_for_test: bool = False
 
-    def show_event(self, *, mutation_event_id: int) -> dict[str, Any]:
+    def show_event(
+        self,
+        *,
+        mutation_event_id: int,
+        include_trace_metadata: bool = True,
+    ) -> dict[str, Any]:
         """Return one mutation ledger event in a service envelope."""
         with Session(self._engine) as session:
             row = session.get(CliMutationLedger, mutation_event_id)
@@ -158,7 +163,12 @@ class MutationLedgerRepository:
                     details={"mutation_event_id": mutation_event_id},
                     remediation=["agileforge mutation list"],
                 )
-            return _success_result(_row_payload(row))
+            return _success_result(
+                _row_payload(
+                    row,
+                    include_trace_metadata=include_trace_metadata,
+                )
+            )
 
     def list_events(
         self,
@@ -185,7 +195,10 @@ class MutationLedgerRepository:
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         """Acquire a recovery lease without performing domain recovery."""
-        shown = self.show_event(mutation_event_id=mutation_event_id)
+        shown = self.show_event(
+            mutation_event_id=mutation_event_id,
+            include_trace_metadata=False,
+        )
         if shown.get("ok") is not True:
             return shown
 
@@ -1133,7 +1146,34 @@ def _timestamp_payload(value: datetime | None) -> str | None:
     return _utc_isoformat(value)
 
 
-def _row_payload(row: CliMutationLedger) -> dict[str, Any]:
+def _authority_curation_trace_payload(*, mutation_event_id: int) -> dict[str, Any]:
+    """Return fail-open trace metadata for an authority curation mutation."""
+    payload: dict[str, Any] = {
+        "trace_artifact_id": None,
+        "trace_artifact_present": None,
+        "last_trace_step": None,
+        "last_trace_status": None,
+    }
+    try:
+        from utils.authority_curation_trace import (  # noqa: PLC0415
+            summarize_trace,
+            trace_artifact_path,
+        )
+
+        payload.update(summarize_trace(mutation_event_id=mutation_event_id))
+        payload["trace_artifact_present"] = trace_artifact_path(
+            mutation_event_id
+        ).exists()
+    except (OSError, UnicodeError):
+        return payload
+    return payload
+
+
+def _row_payload(
+    row: CliMutationLedger,
+    *,
+    include_trace_metadata: bool = False,
+) -> dict[str, Any]:
     """Return a JSON-friendly mutation ledger row payload."""
     payload: dict[str, Any] = {
         "mutation_event_id": row.mutation_event_id,
@@ -1165,5 +1205,15 @@ def _row_payload(row: CliMutationLedger) -> dict[str, Any]:
     if row.superseded_by_mutation_event_id is not None:
         payload["superseded_by_mutation_event_id"] = (
             row.superseded_by_mutation_event_id
+        )
+    if (
+        include_trace_metadata
+        and row.command == "agileforge authority curate"
+        and row.mutation_event_id is not None
+    ):
+        payload.update(
+            _authority_curation_trace_payload(
+                mutation_event_id=row.mutation_event_id
+            )
         )
     return payload

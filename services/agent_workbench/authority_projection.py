@@ -577,9 +577,22 @@ def _feedback_curation_defaults() -> JsonDict:
         "latest_curation_attempt_id": None,
         "latest_curation_status": None,
         "latest_curation_failure_artifact_id": None,
+        "latest_curation_trace_artifact_id": None,
+        "latest_curation_last_step": None,
+        "latest_curation_last_status": None,
         "curation_available": False,
         "curation_in_progress": False,
     }
+
+
+def _authority_curation_trace_summary(*, mutation_event_id: int) -> JsonDict:
+    """Return fail-open trace summary metadata for an authority curation."""
+    try:
+        from utils.authority_curation_trace import summarize_trace  # noqa: PLC0415
+
+        return dict(summarize_trace(mutation_event_id=mutation_event_id))
+    except (OSError, UnicodeError):
+        return {}
 
 
 def _feedback_curation_authority_id(
@@ -643,6 +656,12 @@ def _latest_feedback_and_curation(
     has_blocking = bool(feedback and feedback.has_blocking_feedback)
     curation_status = None if curation is None else curation.status
     curation_in_progress = running_curation is not None
+    mutation_event_id = None if curation is None else curation.mutation_event_id
+    trace_summary: JsonDict = {}
+    if mutation_event_id is not None:
+        trace_summary = _authority_curation_trace_summary(
+            mutation_event_id=mutation_event_id
+        )
     return {
         "has_blocking_feedback": has_blocking,
         "latest_feedback_attempt_id": (
@@ -658,6 +677,13 @@ def _latest_feedback_and_curation(
         "latest_curation_failure_artifact_id": (
             None if curation is None else curation.failure_artifact_id
         ),
+        "latest_curation_trace_artifact_id": (
+            None
+            if mutation_event_id is None
+            else trace_summary.get("trace_artifact_id")
+        ),
+        "latest_curation_last_step": trace_summary.get("last_trace_step"),
+        "latest_curation_last_status": trace_summary.get("last_trace_status"),
         "curation_available": has_blocking
         and not curation_in_progress
         and curation_status != "succeeded",

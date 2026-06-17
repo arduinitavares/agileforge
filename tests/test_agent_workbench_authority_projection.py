@@ -8,9 +8,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
+import pytest
 from sqlalchemy import create_engine, text
 from sqlmodel import select
 
+import utils.authority_curation_trace as trace_mod
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
 from models.core import Product
 from models.specs import (
@@ -38,13 +40,13 @@ from utils.spec_schemas import (
 )
 
 if TYPE_CHECKING:
-    import pytest
     from sqlalchemy.engine import Engine
     from sqlmodel import Session
 
 SCHEMA_NOT_READY_EXIT_CODE: Final[int] = 5
 NOT_FOUND_EXIT_CODE: Final[int] = 4
 AUTHORITY_ERROR_EXIT_CODE: Final[int] = 4
+TRACE_MUTATION_EVENT_ID: Final[int] = 647
 
 
 def _spec_hash(content: str) -> str:
@@ -347,6 +349,7 @@ def _seed_curation_attempt(  # noqa: PLR0913
     feedback_attempt_id: str,
     curation_attempt_id: str = "curation-old",
     status: str = "succeeded",
+    mutation_event_id: int | None = TRACE_MUTATION_EVENT_ID,
     created_at: datetime | None = None,
 ) -> AuthorityCurationAttempt:
     """Persist an authority curation attempt row."""
@@ -362,6 +365,7 @@ def _seed_curation_attempt(  # noqa: PLR0913
         status=status,
         request_hash=f"sha256:{curation_attempt_id}",
         idempotency_key=f"idempotency-{curation_attempt_id}",
+        mutation_event_id=mutation_event_id,
         created_at=timestamp,
         updated_at=timestamp,
     )
@@ -584,6 +588,180 @@ def test_authority_status_scopes_curation_to_latest_feedback(
     assert data["latest_curation_status"] is None
     assert data["curation_available"] is True
     assert data["curation_in_progress"] is False
+
+
+def test_authority_status_reports_latest_curation_trace_metadata(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority status links latest curation attempt to trace summary."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id="feedback-trace",
+        has_blocking_feedback=True,
+    )
+    curation = _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-trace",
+        status="failed",
+        mutation_event_id=TRACE_MUTATION_EVENT_ID,
+    )
+    trace_mod.append_trace_event(
+        mutation_event_id=TRACE_MUTATION_EVENT_ID,
+        project_id=project_id,
+        step="adk_gate_parse_failed",
+        status="failed",
+        curation_attempt_id=curation.curation_attempt_id,
+        error={
+            "code": "SPEC_COMPILE_FAILED",
+            "message": "gate failed",
+            "retryable": False,
+        },
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=spec,
+        authority=authority,
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["latest_curation_trace_artifact_id"] == (
+        f"authority_curation_trace-{TRACE_MUTATION_EVENT_ID}"
+    )
+    assert data["latest_curation_last_step"] == "adk_gate_parse_failed"
+    assert data["latest_curation_last_status"] == "failed"
+
+
+def test_authority_status_trace_summary_failure_is_fail_open(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trace summary failures must not block authority status."""
+    calls = 0
+
+    def fail_summary(*, mutation_event_id: int) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        assert mutation_event_id == TRACE_MUTATION_EVENT_ID
+        message = "trace summary failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(trace_mod, "summarize_trace", fail_summary)
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id="feedback-trace-fail-open",
+        has_blocking_feedback=True,
+    )
+    curation = _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-trace-fail-open",
+        status="failed",
+        mutation_event_id=TRACE_MUTATION_EVENT_ID,
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=spec,
+        authority=authority,
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).status(project_id=project_id)
+
+    assert calls == 1
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["latest_curation_attempt_id"] == curation.curation_attempt_id
+    assert data["latest_curation_status"] == "failed"
+    assert data["latest_curation_trace_artifact_id"] is None
+    assert data["latest_curation_last_step"] is None
+    assert data["latest_curation_last_status"] is None
+
+
+def test_authority_status_trace_programmer_error_is_not_swallowed(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority status propagates non-operational trace summary bugs."""
+
+    def broken_summary(*, mutation_event_id: int) -> dict[str, object]:
+        assert mutation_event_id == TRACE_MUTATION_EVENT_ID
+        message = "programmer bug"
+        raise TypeError(message)
+
+    monkeypatch.setattr(trace_mod, "summarize_trace", broken_summary)
+    product = _seed_product(session)
+    project_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=project_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    feedback = _seed_feedback_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id="feedback-trace-type-error",
+        has_blocking_feedback=True,
+    )
+    _seed_curation_attempt(
+        session,
+        project_id=project_id,
+        authority=authority,
+        feedback_attempt_id=feedback.feedback_attempt_id,
+        curation_attempt_id="curation-trace-type-error",
+        status="failed",
+        mutation_event_id=TRACE_MUTATION_EVENT_ID,
+    )
+    _reject_spec(
+        session,
+        product_id=project_id,
+        spec=spec,
+        authority=authority,
+    )
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        AuthorityProjectionService(
+            engine=_engine(session),
+            repo_root=tmp_path,
+        ).status(project_id=project_id)
 
 
 def test_authority_status_treats_new_candidate_after_rejection_as_pending(
