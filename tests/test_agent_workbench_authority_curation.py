@@ -1947,6 +1947,177 @@ def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedbac
     )
 
 
+def test_authority_curate_allows_assumption_index_alias_when_feedback_targets_alias(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model assumption[index] aliases may map to feedback-approved ASM ids."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        compiled = json.loads(str(authority.compiled_artifact_json))
+        compiled["assumptions"] = [
+            "Report contexts are exhaustive.",
+            "Unrelated assumption remains stable.",
+        ]
+        authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = authority_fingerprint
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-authority-assumption-1",
+                        "target_kind": "authority_candidate",
+                        "target_id": f"authority:{fixture.authority_id}",
+                        "issue_type": "invalid_assumption",
+                        "severity": "blocking",
+                        "instruction": (
+                            "Repair authority assumption ASM-1 only. "
+                            "The report contexts are required examples, not "
+                            "an exhaustive closed list."
+                        ),
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(authority)
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "curation_attempt_id": "curation-fake-result",
+            "project_id": fixture.project_id,
+            "patches": [
+                {
+                    "target_kind": "assumption",
+                    "target_id": "assumptions[0]",
+                    "op": "replace_text",
+                    "new_text": (
+                        "Report contexts are required examples, not exhaustive."
+                    ),
+                },
+            ],
+            "quality_report": {"status": "passed"},
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-authority-candidate-assumption-index-alias",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    assert candidate["assumptions"][0] == (
+        "Report contexts are required examples, not exhaustive."
+    )
+    assert candidate["assumptions"][1] == "Unrelated assumption remains stable."
+
+
+def test_authority_curate_rejects_assumption_index_alias_without_feedback_target(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index aliases must still fail closed when not feedback-approved."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        compiled = json.loads(str(authority.compiled_artifact_json))
+        compiled["assumptions"] = [
+            "First assumption remains stable.",
+            "Second assumption remains stable.",
+        ]
+        authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
+        authority_fingerprint = pending_authority_fingerprint(authority)
+        assert authority_fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = authority_fingerprint
+        feedback.feedback_json = json.dumps(
+            {
+                "feedback_items": [
+                    {
+                        "feedback_id": "AFB-authority-assumption-1",
+                        "target_kind": "authority_candidate",
+                        "target_id": f"authority:{fixture.authority_id}",
+                        "issue_type": "invalid_assumption",
+                        "severity": "blocking",
+                        "instruction": "Repair authority assumption ASM-1 only.",
+                    },
+                ],
+            },
+            sort_keys=True,
+        )
+        session.add(authority)
+        session.add(feedback)
+        session.commit()
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "curation_attempt_id": "curation-fake-result",
+            "project_id": fixture.project_id,
+            "patches": [
+                {
+                    "target_kind": "assumption",
+                    "target_id": "assumptions[1]",
+                    "op": "replace_text",
+                    "new_text": "Unapproved assumption changed.",
+                },
+            ],
+            "quality_report": {"status": "passed"},
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-rejects-unapproved-assumption-index-alias",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert result["errors"][0]["details"]["reason"] == "untargeted_patch_target"
+
+
 def test_authority_curate_rejects_untargeted_patch(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,

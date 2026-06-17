@@ -219,6 +219,7 @@ def test_downstream_agents_reference_state_placeholders() -> None:
     assert "{authority_curation_quality_findings}" in compiler_instruction
     assert "Never use authority:* ids as patch targets" in compiler_instruction
     assert "ASM-*, GAP-*, or INV-*" in compiler_instruction
+    assert "Do not use collection-index aliases" in compiler_instruction
 
     gate_instruction = _instruction_text(agents["AuthorityGateDecision"].instruction)
     assert "{authority_curation_repair_output}" in gate_instruction
