@@ -21,6 +21,7 @@ from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.authority_curation import (
+    AuthorityCurationRecoveryRequest,
     AuthorityCurationRequest,
     AuthorityFeedbackRecordRequest,
 )
@@ -1361,6 +1362,19 @@ class _FakeAuthorityCurationRunner:
             "errors": [],
         }
 
+    def recover(self, request: AuthorityCurationRecoveryRequest) -> dict[str, Any]:
+        """Record a curation recovery request."""
+        self.calls.append(("recover", request))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "status": "authority_pending_review",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
 
 class _FakeScopeExtensionRunner:
     """Fake scope-extension runner used to verify facade delegation and routing."""
@@ -2655,6 +2669,32 @@ def test_application_authority_curate_delegates_to_runner() -> None:
             ),
         )
     ]
+
+
+def test_application_authority_curate_delegates_recovery_to_runner() -> None:
+    """Recovery args build a recovery request instead of normal curation request."""
+    runner = _FakeAuthorityCurationRunner()
+    app = AgentWorkbenchApplication(authority_curation_runner=runner)
+
+    result = app.authority_curate(
+        project_id=PROJECT_ID,
+        recovery_mutation_event_id=647,
+        expected_candidate_authority_id=7,
+        expected_candidate_authority_fingerprint="sha256:" + ("a" * 64),
+        idempotency_key="recover-curate-app-001",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "recover"
+    assert runner.calls[0][1] == AuthorityCurationRecoveryRequest(
+        project_id=PROJECT_ID,
+        recovery_mutation_event_id=647,
+        expected_candidate_authority_id=7,
+        expected_candidate_authority_fingerprint="sha256:" + ("a" * 64),
+        idempotency_key="recover-curate-app-001",
+        changed_by="cli-agent",
+        correlation_id=None,
+    )
 
 
 def test_application_scope_extension_facades_pass_request_data_to_runner() -> None:

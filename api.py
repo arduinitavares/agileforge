@@ -31,7 +31,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import desc
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import QueryableAttribute
@@ -366,15 +366,60 @@ class AuthorityCurateApiRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    spec_version_id: int
-    source_authority_id: int
-    expected_source_authority_fingerprint: str = Field(min_length=1)
-    feedback_attempt_id: str = Field(min_length=1)
+    spec_version_id: int | None = None
+    source_authority_id: int | None = None
+    expected_source_authority_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+    )
+    feedback_attempt_id: str | None = Field(default=None, min_length=1)
+    recovery_mutation_event_id: int | None = None
+    expected_candidate_authority_id: int | None = None
+    expected_candidate_authority_fingerprint: str | None = Field(
+        default=None,
+        min_length=1,
+    )
     max_iterations: int = Field(default=2, ge=1, le=2)
     compiler_model: str | None = Field(default=None, min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = Field(default="dashboard-ui", min_length=1)
     correlation_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_curation_mode(self) -> AuthorityCurateApiRequest:
+        recovery_fields = (
+            self.recovery_mutation_event_id,
+            self.expected_candidate_authority_id,
+            self.expected_candidate_authority_fingerprint,
+        )
+        normal_fields = (
+            self.spec_version_id,
+            self.source_authority_id,
+            self.expected_source_authority_fingerprint,
+            self.feedback_attempt_id,
+            self.compiler_model,
+        )
+        recovery_present = any(item is not None for item in recovery_fields)
+        if recovery_present:
+            if any(item is not None for item in normal_fields):
+                message = (
+                    "authority curate recovery cannot include normal curation inputs"
+                )
+                raise ValueError(message)
+            if any(item is None for item in recovery_fields):
+                message = (
+                    "authority curate recovery requires mutation event, "
+                    "candidate id, and candidate fingerprint"
+                )
+                raise ValueError(message)
+            return self
+        if any(item is None for item in normal_fields[:4]):
+            message = (
+                "normal authority curate requires spec version, source authority, "
+                "source fingerprint, and feedback attempt"
+            )
+            raise ValueError(message)
+        return self
 
 
 class ScopeExtensionValidateApiRequest(BaseModel):
@@ -2777,6 +2822,11 @@ async def curate_project_authority(
             req.expected_source_authority_fingerprint
         ),
         feedback_attempt_id=req.feedback_attempt_id,
+        recovery_mutation_event_id=req.recovery_mutation_event_id,
+        expected_candidate_authority_id=req.expected_candidate_authority_id,
+        expected_candidate_authority_fingerprint=(
+            req.expected_candidate_authority_fingerprint
+        ),
         max_iterations=req.max_iterations,
         compiler_model=req.compiler_model,
         idempotency_key=req.idempotency_key,

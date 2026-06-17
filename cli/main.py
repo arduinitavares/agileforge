@@ -333,11 +333,14 @@ class _Application(Protocol):
         self,
         *,
         project_id: int,
-        spec_version_id: int,
-        source_authority_id: int,
-        expected_source_authority_fingerprint: str,
-        feedback_attempt_id: str,
         idempotency_key: str,
+        spec_version_id: int | None = None,
+        source_authority_id: int | None = None,
+        expected_source_authority_fingerprint: str | None = None,
+        feedback_attempt_id: str | None = None,
+        recovery_mutation_event_id: int | None = None,
+        expected_candidate_authority_id: int | None = None,
+        expected_candidate_authority_fingerprint: str | None = None,
         max_iterations: int = 2,
         compiler_model: str | None = None,
         changed_by: str = "cli-agent",
@@ -1482,13 +1485,15 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help="Run bounded authority curation.",
     )
     authority_curate.add_argument("--project-id", type=int, required=True)
-    authority_curate.add_argument("--spec-version-id", type=int, required=True)
-    authority_curate.add_argument("--source-authority-id", type=int, required=True)
+    authority_curate.add_argument("--spec-version-id", type=int)
+    authority_curate.add_argument("--source-authority-id", type=int)
     authority_curate.add_argument(
         "--expected-source-authority-fingerprint",
-        required=True,
     )
-    authority_curate.add_argument("--feedback-attempt-id", required=True)
+    authority_curate.add_argument("--feedback-attempt-id")
+    authority_curate.add_argument("--recovery-mutation-event-id", type=int)
+    authority_curate.add_argument("--expected-candidate-authority-id", type=int)
+    authority_curate.add_argument("--expected-candidate-authority-fingerprint")
     authority_curate.add_argument("--max-iterations", type=int, default=2)
     authority_curate.add_argument("--compiler-model")
     authority_curate.add_argument("--idempotency-key", required=True)
@@ -2614,6 +2619,43 @@ def _authority_curate(
     application: _Application,
 ) -> CommandResult:
     """Route authority curation to the application facade."""
+    recovery_present = args.recovery_mutation_event_id is not None
+    normal_values = (
+        args.spec_version_id,
+        args.source_authority_id,
+        args.expected_source_authority_fingerprint,
+        args.feedback_attempt_id,
+        args.compiler_model,
+    )
+    if recovery_present and any(item is not None for item in normal_values):
+        message = "authority curate recovery cannot include normal curation inputs"
+        raise _CliParseError(message)
+    if recovery_present and (
+        args.expected_candidate_authority_id is None
+        or args.expected_candidate_authority_fingerprint is None
+    ):
+        message = (
+            "authority curate recovery requires "
+            "--expected-candidate-authority-id and "
+            "--expected-candidate-authority-fingerprint"
+        )
+        raise _CliParseError(message)
+    if not recovery_present and (
+        args.expected_candidate_authority_id is not None
+        or args.expected_candidate_authority_fingerprint is not None
+    ):
+        message = (
+            "authority curate recovery candidate inputs require "
+            "--recovery-mutation-event-id"
+        )
+        raise _CliParseError(message)
+    if not recovery_present and any(item is None for item in normal_values[:4]):
+        message = (
+            "normal authority curate requires --spec-version-id, "
+            "--source-authority-id, --expected-source-authority-fingerprint, "
+            "and --feedback-attempt-id"
+        )
+        raise _CliParseError(message)
     return (
         "agileforge authority curate",
         application.authority_curate(
@@ -2624,6 +2666,11 @@ def _authority_curate(
                 args.expected_source_authority_fingerprint
             ),
             feedback_attempt_id=args.feedback_attempt_id,
+            recovery_mutation_event_id=args.recovery_mutation_event_id,
+            expected_candidate_authority_id=args.expected_candidate_authority_id,
+            expected_candidate_authority_fingerprint=(
+                args.expected_candidate_authority_fingerprint
+            ),
             max_iterations=args.max_iterations,
             compiler_model=args.compiler_model,
             idempotency_key=args.idempotency_key,
@@ -4284,6 +4331,10 @@ def main(argv: list[str] | None = None, *, application: object | None = None) ->
             result,
             compact_warnings=_compact_warnings_requested(args),
         )
+    except _CliParseError as exc:
+        envelope = _parse_error_envelope(str(exc), argv)
+        _print_json(envelope)
+        return INVALID_COMMAND_EXIT_CODE
     except Exception as exc:  # noqa: BLE001
         envelope = _exception_envelope(exc)
         _print_json(envelope)

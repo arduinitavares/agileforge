@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from services.agent_workbench.authority_curation import (
+        AuthorityCurationRecoveryRequest,
         AuthorityCurationRequest,
         AuthorityFeedbackRecordRequest,
     )
@@ -75,6 +76,23 @@ def get_engine() -> Engine:
     from models.db import get_engine as _get_engine  # noqa: PLC0415
 
     return _get_engine()
+
+
+def _authority_curate_invalid_request(
+    *,
+    message: str,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Return invalid authority curate argument envelope."""
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.INVALID_COMMAND,
+            message=message,
+            remediation=["Use either normal curation args or recovery args."],
+        ),
+        correlation_id=correlation_id,
+    )
 
 
 class _ReadProjection(Protocol):
@@ -180,6 +198,10 @@ class _AuthorityCurationRunner(Protocol):
 
     def curate(self, request: AuthorityCurationRequest) -> dict[str, Any]:
         """Run bounded authority curation."""
+        ...
+
+    def recover(self, request: AuthorityCurationRecoveryRequest) -> dict[str, Any]:
+        """Recover a published authority curation candidate."""
         ...
 
 
@@ -1403,11 +1425,14 @@ class AgentWorkbenchApplication:
         self,
         *,
         project_id: int,
-        spec_version_id: int,
-        source_authority_id: int,
-        expected_source_authority_fingerprint: str,
-        feedback_attempt_id: str,
         idempotency_key: str,
+        spec_version_id: int | None = None,
+        source_authority_id: int | None = None,
+        expected_source_authority_fingerprint: str | None = None,
+        feedback_attempt_id: str | None = None,
+        recovery_mutation_event_id: int | None = None,
+        expected_candidate_authority_id: int | None = None,
+        expected_candidate_authority_fingerprint: str | None = None,
         max_iterations: int = 2,
         compiler_model: str | None = None,
         changed_by: str = "cli-agent",
@@ -1415,9 +1440,78 @@ class AgentWorkbenchApplication:
     ) -> dict[str, Any]:
         """Run bounded authority curation."""
         from services.agent_workbench.authority_curation import (  # noqa: PLC0415
+            AuthorityCurationRecoveryRequest,
             AuthorityCurationRequest,
         )
 
+        if recovery_mutation_event_id is None and (
+            expected_candidate_authority_id is not None
+            or expected_candidate_authority_fingerprint is not None
+        ):
+            return _authority_curate_invalid_request(
+                message=(
+                    "authority curate recovery candidate inputs require "
+                    "recovery mutation event id"
+                ),
+                correlation_id=correlation_id,
+            )
+        if recovery_mutation_event_id is not None:
+            if (
+                expected_candidate_authority_id is None
+                or expected_candidate_authority_fingerprint is None
+            ):
+                return _authority_curate_invalid_request(
+                    message=(
+                        "authority curate recovery requires candidate "
+                        "authority id and fingerprint"
+                    ),
+                    correlation_id=correlation_id,
+                )
+            if any(
+                item is not None
+                for item in (
+                    spec_version_id,
+                    source_authority_id,
+                    expected_source_authority_fingerprint,
+                    feedback_attempt_id,
+                    compiler_model,
+                )
+            ):
+                return _authority_curate_invalid_request(
+                    message=(
+                        "authority curate recovery cannot include normal "
+                        "curation inputs"
+                    ),
+                    correlation_id=correlation_id,
+                )
+            return self._get_authority_curation_runner().recover(
+                AuthorityCurationRecoveryRequest(
+                    project_id=project_id,
+                    recovery_mutation_event_id=recovery_mutation_event_id,
+                    expected_candidate_authority_id=(
+                        expected_candidate_authority_id
+                    ),
+                    expected_candidate_authority_fingerprint=(
+                        expected_candidate_authority_fingerprint
+                    ),
+                    idempotency_key=idempotency_key,
+                    changed_by=changed_by,
+                    correlation_id=correlation_id,
+                )
+            )
+        if (
+            spec_version_id is None
+            or source_authority_id is None
+            or expected_source_authority_fingerprint is None
+            or feedback_attempt_id is None
+        ):
+            return _authority_curate_invalid_request(
+                message=(
+                    "normal authority curate requires spec version, source "
+                    "authority, source fingerprint, and feedback attempt"
+                ),
+                correlation_id=correlation_id,
+            )
         return self._get_authority_curation_runner().curate(
             AuthorityCurationRequest(
                 project_id=project_id,

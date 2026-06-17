@@ -19,6 +19,7 @@ from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbac
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.authority_curation import (
+    AuthorityCurationRecoveryRequest,
     AuthorityCurationRequest,
     AuthorityCurationRunner,
     AuthorityFeedbackFile,
@@ -26,6 +27,7 @@ from services.agent_workbench.authority_curation import (
     AuthorityFeedbackRecordRequest,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from services.agent_workbench.mutation_ledger import LedgerLoadResult
 from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
@@ -1735,6 +1737,475 @@ def test_authority_curate_pending_review_failure_requires_recovery(
         "mutation_finalize_started",
         "mutation_finalize_completed",
     ]
+
+
+def test_authority_curate_recovery_restores_pending_review_after_publish(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recovery mode reconciles an already-published curation candidate without ADK."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "workflow down"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    workflow = FailsPendingReviewWorkflow()
+    workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    first = AuthorityCurationRunner(engine=engine, workflow=workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-recover-published",
+        )
+    )
+    assert first["ok"] is False
+    details = first["errors"][0]["details"]
+    original_mutation_event_id = details["mutation_event_id"]
+    candidate_authority_id = details["candidate_authority_id"]
+    candidate_fingerprint = details["candidate_authority_fingerprint"]
+
+    recovery_workflow = FakeWorkflowPort()
+    recovery_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_curating"},
+    )
+    recovery_runner = AuthorityCurationRunner(
+        engine=engine,
+        workflow=recovery_workflow,
+    )
+
+    recovered = recovery_runner.recover(
+        AuthorityCurationRecoveryRequest(
+            project_id=fixture.project_id,
+            recovery_mutation_event_id=original_mutation_event_id,
+            expected_candidate_authority_id=candidate_authority_id,
+            expected_candidate_authority_fingerprint=candidate_fingerprint,
+            idempotency_key="recover-curate-published",
+        )
+    )
+    replay = recovery_runner.recover(
+        AuthorityCurationRecoveryRequest(
+            project_id=fixture.project_id,
+            recovery_mutation_event_id=original_mutation_event_id,
+            expected_candidate_authority_id=candidate_authority_id,
+            expected_candidate_authority_fingerprint=candidate_fingerprint,
+            idempotency_key="recover-curate-published",
+        )
+    )
+
+    assert recovered["ok"] is True
+    assert replay == recovered
+    assert recovered["data"]["status"] == "authority_pending_review"
+    assert recovered["data"]["pending_authority_id"] == candidate_authority_id
+    assert recovered["data"]["recovered_mutation_event_id"] == (
+        original_mutation_event_id
+    )
+    assert recovered["data"]["trace_artifact_id"].startswith(
+        "authority_curation_trace-"
+    )
+    assert recovery_workflow.get_session_status(str(fixture.project_id))[
+        "setup_status"
+    ] == "authority_pending_review"
+    with Session(engine) as session:
+        rows = session.exec(select(CliMutationLedger)).all()
+    by_id = {row.mutation_event_id: row for row in rows}
+    assert by_id[original_mutation_event_id].status == "superseded"
+    recovery_mutation_event_id = recovered["data"]["recovery_mutation_event_id"]
+    assert by_id[recovery_mutation_event_id].status == "succeeded"
+
+
+def test_authority_curate_recovery_rejects_candidate_mismatch_from_original_response(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Original recovery response candidate identity fences recovery."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "workflow down"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    workflow = FailsPendingReviewWorkflow()
+    workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    first = AuthorityCurationRunner(engine=engine, workflow=workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-recover-mismatch",
+        )
+    )
+    assert first["ok"] is False
+    original_details = first["errors"][0]["details"]
+    original_mutation_event_id = original_details["mutation_event_id"]
+
+    wrong_candidate_json = json.loads(_compiled_artifact_json())
+    wrong_candidate_json["invariants"] = [
+        {
+            "id": "INV-curation-wrong-candidate",
+            "source_item_id": "SRC-curation-1",
+            "text": "Wrong but valid candidate for recovery mismatch test.",
+        }
+    ]
+    with Session(engine) as session:
+        wrong_authority = CompiledSpecAuthority(
+            spec_version_id=fixture.spec_version_id,
+            compiler_version="2.0.0",
+            prompt_hash="b" * 64,
+            compiled_artifact_json=json.dumps(
+                wrong_candidate_json,
+                sort_keys=True,
+            ),
+            scope_themes=json.dumps([]),
+            invariants=json.dumps(wrong_candidate_json["invariants"]),
+            eligible_feature_ids=json.dumps([]),
+            rejected_features=json.dumps([]),
+            spec_gaps=json.dumps([]),
+        )
+        session.add(wrong_authority)
+        attempt = session.exec(
+            select(AuthorityCurationAttempt).where(
+                AuthorityCurationAttempt.mutation_event_id
+                == original_mutation_event_id
+            )
+        ).one()
+        attempt.candidate_authority_id = None
+        attempt.candidate_authority_fingerprint = None
+        session.add(attempt)
+        session.commit()
+        session.refresh(wrong_authority)
+        wrong_candidate_id = require_id(
+            wrong_authority.authority_id,
+            "authority_id",
+        )
+        wrong_candidate_fingerprint = pending_authority_fingerprint(
+            wrong_authority
+        )
+    assert wrong_candidate_fingerprint is not None
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=FakeWorkflowPort(),
+    ).recover(
+        AuthorityCurationRecoveryRequest(
+            project_id=fixture.project_id,
+            recovery_mutation_event_id=original_mutation_event_id,
+            expected_candidate_authority_id=wrong_candidate_id,
+            expected_candidate_authority_fingerprint=wrong_candidate_fingerprint,
+            idempotency_key="recover-curate-mismatch",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RECOVERY_INVALID"
+    assert result["errors"][0]["details"]["reason"] == (
+        "original_response_candidate_mismatch"
+    )
+
+
+def test_authority_curate_recovery_does_not_clobber_newer_pending_review(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stale recovery must not overwrite a newer pending review candidate."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "workflow down"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    workflow = FailsPendingReviewWorkflow()
+    workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    first = AuthorityCurationRunner(engine=engine, workflow=workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-recover-stale-workflow",
+        )
+    )
+    details = first["errors"][0]["details"]
+    original_mutation_event_id = details["mutation_event_id"]
+    candidate_authority_id = details["candidate_authority_id"]
+    candidate_fingerprint = details["candidate_authority_fingerprint"]
+
+    recovery_workflow = FakeWorkflowPort()
+    newer_pending_state = {
+        "fsm_state": "SETUP_REQUIRED",
+        "setup_status": "authority_pending_review",
+        "pending_authority_id": candidate_authority_id + 1000,
+        "pending_authority_fingerprint": "sha256:" + ("9" * 64),
+    }
+    recovery_workflow.update_session_status(
+        str(fixture.project_id),
+        newer_pending_state,
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=recovery_workflow,
+    ).recover(
+        AuthorityCurationRecoveryRequest(
+            project_id=fixture.project_id,
+            recovery_mutation_event_id=original_mutation_event_id,
+            expected_candidate_authority_id=candidate_authority_id,
+            expected_candidate_authority_fingerprint=candidate_fingerprint,
+            idempotency_key="recover-curate-stale-workflow",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_RESUME_CONFLICT"
+    assert recovery_workflow.get_session_status(str(fixture.project_id)) == (
+        newer_pending_state
+    )
+
+
+def test_authority_curate_recovery_lease_conflict_replays_same_key(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recovery lease conflict finalizes retry row for deterministic replay."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "workflow down"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    workflow = FailsPendingReviewWorkflow()
+    workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    first = AuthorityCurationRunner(engine=engine, workflow=workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-recover-lease-conflict",
+        )
+    )
+    details = first["errors"][0]["details"]
+    original_mutation_event_id = details["mutation_event_id"]
+    candidate_authority_id = details["candidate_authority_id"]
+    candidate_fingerprint = details["candidate_authority_fingerprint"]
+    assert curation_mod.MutationLedgerRepository(
+        engine=engine
+    ).acquire_recovery_lease(
+        mutation_event_id=original_mutation_event_id,
+        expected_project_id=fixture.project_id,
+        recovery_lease_owner="other-recovery-worker",
+        now=datetime.now(UTC),
+    )
+    request = AuthorityCurationRecoveryRequest(
+        project_id=fixture.project_id,
+        recovery_mutation_event_id=original_mutation_event_id,
+        expected_candidate_authority_id=candidate_authority_id,
+        expected_candidate_authority_fingerprint=candidate_fingerprint,
+        idempotency_key="recover-curate-lease-conflict",
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=FakeWorkflowPort())
+
+    conflict = runner.recover(request)
+    replay = runner.recover(request)
+
+    assert conflict["ok"] is False
+    assert replay == conflict
+    assert conflict["errors"][0]["code"] == "MUTATION_RESUME_CONFLICT"
+    retry_mutation_event_id = conflict["errors"][0]["details"][
+        "retry_mutation_event_id"
+    ]
+    with Session(engine) as session:
+        retry_row = session.get(CliMutationLedger, retry_mutation_event_id)
+    assert retry_row is not None
+    assert retry_row.status != "pending"
+
+
+def test_authority_curate_recovery_linked_finalize_conflict_replays_same_key(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fallback transfer conflict finalizes retry row for deterministic replay."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+
+    class FailsPendingReviewWorkflow(FakeWorkflowPort):
+        def update_session_status(
+            self,
+            session_id: str,
+            partial_update: dict[str, object],
+        ) -> None:
+            if partial_update.get("setup_status") == "authority_pending_review":
+                message = "workflow down"
+                raise RuntimeError(message)
+            super().update_session_status(session_id, partial_update)
+
+    workflow = FailsPendingReviewWorkflow()
+    workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+    first = AuthorityCurationRunner(engine=engine, workflow=workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-recover-linked-finalize-conflict",
+        )
+    )
+    details = first["errors"][0]["details"]
+    original_mutation_event_id = details["mutation_event_id"]
+    candidate_authority_id = details["candidate_authority_id"]
+    candidate_fingerprint = details["candidate_authority_fingerprint"]
+
+    def conflict_after_retry_restore(  # noqa: PLR0913
+        self: curation_mod.MutationLedgerRepository,
+        *,
+        retry_mutation_event_id: int,
+        retry_lease_owner: str,
+        original_mutation_event_id: int,
+        original_recovery_lease_owner: str,
+        after: dict[str, Any],
+        retry_response: dict[str, Any],
+        original_replay_response: dict[str, Any],
+        now: datetime,
+    ) -> LedgerLoadResult:
+        del retry_lease_owner, after, retry_response, original_replay_response
+        self.release_recovery_lease(
+            mutation_event_id=original_mutation_event_id,
+            recovery_lease_owner=original_recovery_lease_owner,
+            now=now,
+        )
+        with Session(engine) as session:
+            retry_row = session.get(CliMutationLedger, retry_mutation_event_id)
+        assert retry_row is not None
+        return LedgerLoadResult(
+            ledger=retry_row,
+            error_code=curation_mod.MUTATION_RESUME_CONFLICT,
+        )
+
+    monkeypatch.setattr(
+        curation_mod.MutationLedgerRepository,
+        "finalize_linked_retry_success",
+        conflict_after_retry_restore,
+    )
+    request = AuthorityCurationRecoveryRequest(
+        project_id=fixture.project_id,
+        recovery_mutation_event_id=original_mutation_event_id,
+        expected_candidate_authority_id=candidate_authority_id,
+        expected_candidate_authority_fingerprint=candidate_fingerprint,
+        idempotency_key="recover-curate-linked-finalize-conflict",
+    )
+    recovery_workflow = FakeWorkflowPort()
+    recovery_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_curating",
+            "setup_curation_mutation_event_id": original_mutation_event_id,
+        },
+    )
+    runner = AuthorityCurationRunner(
+        engine=engine,
+        workflow=recovery_workflow,
+    )
+
+    conflict = runner.recover(request)
+    replay = runner.recover(request)
+
+    assert conflict["ok"] is False
+    assert replay == conflict
+    assert conflict["errors"][0]["code"] == "MUTATION_RESUME_CONFLICT"
+    retry_mutation_event_id = conflict["errors"][0]["details"][
+        "retry_mutation_event_id"
+    ]
+    with Session(engine) as session:
+        retry_row = session.get(CliMutationLedger, retry_mutation_event_id)
+    assert retry_row is not None
+    assert retry_row.status != "pending"
 
 
 def test_authority_curate_finalize_success_false_requires_recovery(

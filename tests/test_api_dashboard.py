@@ -610,11 +610,14 @@ class FakeAuthorityApplication:
         self,
         *,
         project_id: int,
-        spec_version_id: int,
-        source_authority_id: int,
-        expected_source_authority_fingerprint: str,
-        feedback_attempt_id: str,
         idempotency_key: str,
+        spec_version_id: int | None = None,
+        source_authority_id: int | None = None,
+        expected_source_authority_fingerprint: str | None = None,
+        feedback_attempt_id: str | None = None,
+        recovery_mutation_event_id: int | None = None,
+        expected_candidate_authority_id: int | None = None,
+        expected_candidate_authority_fingerprint: str | None = None,
         max_iterations: int = 2,
         compiler_model: str | None = None,
         changed_by: str = "dashboard-ui",
@@ -632,6 +635,13 @@ class FakeAuthorityApplication:
                         expected_source_authority_fingerprint
                     ),
                     "feedback_attempt_id": feedback_attempt_id,
+                    "recovery_mutation_event_id": recovery_mutation_event_id,
+                    "expected_candidate_authority_id": (
+                        expected_candidate_authority_id
+                    ),
+                    "expected_candidate_authority_fingerprint": (
+                        expected_candidate_authority_fingerprint
+                    ),
                     "idempotency_key": idempotency_key,
                     "max_iterations": max_iterations,
                     "compiler_model": compiler_model,
@@ -1456,11 +1466,58 @@ def test_authority_curate_api_routes_request(
             "source_authority_id": 99,
             "expected_source_authority_fingerprint": "sha256:abc",
             "feedback_attempt_id": "feedback-1",
+            "recovery_mutation_event_id": None,
+            "expected_candidate_authority_id": None,
+            "expected_candidate_authority_fingerprint": None,
             "idempotency_key": "curate-api-001",
             "max_iterations": 2,
             "compiler_model": "openrouter/openai/gpt-5.2",
             "changed_by": "dashboard-user",
             "correlation_id": "corr-curate",
+        },
+    )
+
+
+def test_authority_curate_api_routes_recovery_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authority curation API routes explicit recovery requests."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    repo.products.append(DummyProduct(product_id=10, name="API Project"))
+    fake_app = FakeAuthorityApplication()
+    monkeypatch.setattr(api_module, "_workbench_application", lambda: fake_app)
+
+    response = client.post(
+        "/api/projects/10/authority/curate",
+        json={
+            "recovery_mutation_event_id": 647,
+            "expected_candidate_authority_id": 7,
+            "expected_candidate_authority_fingerprint": "sha256:" + ("a" * 64),
+            "idempotency_key": "recover-api-001",
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-recover",
+        },
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert fake_app.calls[-1] == (
+        "authority_curate",
+        {
+            "project_id": 10,
+            "spec_version_id": None,
+            "source_authority_id": None,
+            "expected_source_authority_fingerprint": None,
+            "feedback_attempt_id": None,
+            "recovery_mutation_event_id": 647,
+            "expected_candidate_authority_id": 7,
+            "expected_candidate_authority_fingerprint": "sha256:" + ("a" * 64),
+            "idempotency_key": "recover-api-001",
+            "max_iterations": 2,
+            "compiler_model": None,
+            "changed_by": "dashboard-user",
+            "correlation_id": "corr-recover",
         },
     )
 

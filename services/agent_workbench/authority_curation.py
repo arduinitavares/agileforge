@@ -92,6 +92,7 @@ _LEDGER_MUTATION_EVENT_ID: Any = CliMutationLedger.mutation_event_id
 _LEDGER_STATUS: Any = CliMutationLedger.status
 _LEDGER_LEASE_OWNER: Any = CliMutationLedger.lease_owner
 _LEDGER_LEASE_EXPIRES_AT: Any = CliMutationLedger.lease_expires_at
+_CURATION_ROW_ID: Any = AuthorityCurationAttempt.curation_row_id
 
 FeedbackTargetKind = Literal[
     "invariant",
@@ -183,6 +184,18 @@ class AuthorityCurationRequest(_StrictModel):
     feedback_attempt_id: str = Field(min_length=1)
     max_iterations: int = Field(default=2, ge=1, le=2)
     compiler_model: str | None = Field(default=None, min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+    correlation_id: str | None = None
+
+
+class AuthorityCurationRecoveryRequest(_StrictModel):
+    """Guarded request for published authority curation recovery."""
+
+    project_id: int
+    recovery_mutation_event_id: int
+    expected_candidate_authority_id: int
+    expected_candidate_authority_fingerprint: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
     correlation_id: str | None = None
@@ -436,6 +449,157 @@ class AuthorityCurationRunner:
             active_mutation=active_mutation,
             attempt=attempt,
         )
+
+    def recover(  # noqa: PLR0911
+        self,
+        request: AuthorityCurationRecoveryRequest,
+    ) -> dict[str, Any]:
+        """Recover a curation mutation after candidate publication."""
+        now = datetime.now(UTC)
+        ledger = MutationLedgerRepository(engine=self._engine)
+        retry_lease_owner = (
+            f"agileforge-cli:authority-curate-recovery:"
+            f"{request.idempotency_key}:{uuid4()}"
+        )
+        loaded = ledger.create_or_load(
+            command=AUTHORITY_CURATE_COMMAND,
+            idempotency_key=request.idempotency_key,
+            request_hash=_curation_recovery_request_hash(request),
+            project_id=request.project_id,
+            correlation_id=request.correlation_id or str(uuid4()),
+            changed_by=request.changed_by,
+            lease_owner=retry_lease_owner,
+            now=now,
+            recovers_mutation_event_id=request.recovery_mutation_event_id,
+            lease_seconds=AUTHORITY_CURATION_LEASE_SECONDS,
+        )
+        if loaded.response is not None:
+            return loaded.response
+        retry_mutation_event_id = _required_mutation_event_id(
+            loaded.ledger.mutation_event_id
+        )
+        if loaded.error_code is not None:
+            return _curation_ledger_error_response(
+                error_code=loaded.error_code,
+                mutation_event_id=retry_mutation_event_id,
+                correlation_id=request.correlation_id,
+            )
+
+        original = ledger.show_event(
+            mutation_event_id=request.recovery_mutation_event_id
+        )
+        original_data = _require_recoverable_curate_event(
+            original,
+            request=request,
+            retry_mutation_event_id=retry_mutation_event_id,
+        )
+        if not _is_recovery_data(original_data):
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=retry_mutation_event_id,
+                lease_owner=retry_lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=original_data,
+            )
+            return original_data
+
+        original_recovery_owner = (
+            "authority-curation-recovery:"
+            f"{retry_mutation_event_id}:recovers:"
+            f"{request.recovery_mutation_event_id}"
+        )
+        if not ledger.acquire_recovery_lease(
+            mutation_event_id=request.recovery_mutation_event_id,
+            expected_project_id=request.project_id,
+            recovery_lease_owner=original_recovery_owner,
+            now=now,
+            lease_seconds=AUTHORITY_CURATION_LEASE_SECONDS,
+        ):
+            response = _authority_curation_recovery_conflict_response(
+                retry_mutation_event_id=retry_mutation_event_id,
+                original_mutation_event_id=request.recovery_mutation_event_id,
+                correlation_id=request.correlation_id,
+            )
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=retry_mutation_event_id,
+                lease_owner=retry_lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=response,
+            )
+            return response
+
+        candidate_error = self._validate_recovered_candidate(
+            request,
+            original_data=original_data,
+        )
+        if candidate_error is not None:
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=retry_mutation_event_id,
+                lease_owner=retry_lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=candidate_error,
+            )
+            ledger.release_recovery_lease(
+                mutation_event_id=request.recovery_mutation_event_id,
+                recovery_lease_owner=original_recovery_owner,
+                now=datetime.now(UTC),
+            )
+            return candidate_error
+
+        try:
+            workflow_error = self._restore_recovered_workflow_pending_review(request)
+        except Exception as exc:  # noqa: BLE001
+            return self._transfer_recovery_to_retry(
+                ledger=ledger,
+                request=request,
+                retry_mutation_event_id=retry_mutation_event_id,
+                retry_lease_owner=retry_lease_owner,
+                original_recovery_owner=original_recovery_owner,
+                last_error={"code": type(exc).__name__},
+            )
+        if workflow_error is not None:
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=retry_mutation_event_id,
+                lease_owner=retry_lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=workflow_error,
+            )
+            ledger.release_recovery_lease(
+                mutation_event_id=request.recovery_mutation_event_id,
+                recovery_lease_owner=original_recovery_owner,
+                now=datetime.now(UTC),
+            )
+            return workflow_error
+
+        self._mark_recovered_curation_attempt_succeeded(request)
+
+        response = _authority_curation_recovery_success_response(
+            request=request,
+            retry_mutation_event_id=retry_mutation_event_id,
+        )
+        linked = ledger.finalize_linked_retry_success(
+            retry_mutation_event_id=retry_mutation_event_id,
+            retry_lease_owner=retry_lease_owner,
+            original_mutation_event_id=request.recovery_mutation_event_id,
+            original_recovery_lease_owner=original_recovery_owner,
+            after=response["data"],
+            retry_response=response,
+            original_replay_response=response,
+            now=datetime.now(UTC),
+        )
+        if linked.error_code == MUTATION_RESUME_CONFLICT:
+            return self._transfer_recovery_to_retry(
+                ledger=ledger,
+                request=request,
+                retry_mutation_event_id=retry_mutation_event_id,
+                retry_lease_owner=retry_lease_owner,
+                original_recovery_owner=original_recovery_owner,
+                last_error={"code": MUTATION_RESUME_CONFLICT},
+            )
+        return response
 
     def feedback_record(
         self,
@@ -1396,6 +1560,218 @@ class AuthorityCurationRunner:
             },
         )
 
+    def _restore_recovered_workflow_pending_review(
+        self,
+        request: AuthorityCurationRecoveryRequest,
+    ) -> dict[str, Any] | None:
+        """Restore pending review only when workflow state is recovery-safe."""
+        state = self._workflow.get_session_status(str(request.project_id))
+        if _workflow_pending_review_matches_recovery(
+            state=state,
+            request=request,
+        ):
+            return None
+        if not _workflow_state_allows_recovery_restore(
+            state=state,
+            request=request,
+        ):
+            return _authority_curation_recovery_conflict_response(
+                retry_mutation_event_id=None,
+                original_mutation_event_id=request.recovery_mutation_event_id,
+                correlation_id=request.correlation_id,
+            )
+        self._workflow.update_session_status(
+            str(request.project_id),
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_pending_review",
+                "setup_curation_mutation_event_id": None,
+                "pending_authority_id": request.expected_candidate_authority_id,
+                "pending_authority_fingerprint": (
+                    request.expected_candidate_authority_fingerprint
+                ),
+                "setup_next_actions": [
+                    {
+                        "command": "agileforge authority review",
+                        "args": {"project_id": request.project_id},
+                        "reason": "Review the recovered authority candidate.",
+                    }
+                ],
+            },
+        )
+        return None
+
+    def _validate_recovered_candidate(  # noqa: PLR0911
+        self,
+        request: AuthorityCurationRecoveryRequest,
+        *,
+        original_data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate recovered candidate identity and project ownership."""
+        original_candidate = _original_recovery_candidate_details(original_data)
+        if original_candidate:
+            original_candidate_id = original_candidate.get("candidate_authority_id")
+            original_candidate_fingerprint = original_candidate.get(
+                "candidate_authority_fingerprint"
+            )
+            if (
+                original_candidate_id is not None
+                and original_candidate_id != request.expected_candidate_authority_id
+            ) or (
+                original_candidate_fingerprint is not None
+                and original_candidate_fingerprint
+                != request.expected_candidate_authority_fingerprint
+            ):
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="original_response_candidate_mismatch",
+                    details={
+                        "original_candidate_authority_id": original_candidate_id,
+                        "original_candidate_authority_fingerprint": (
+                            original_candidate_fingerprint
+                        ),
+                    },
+                )
+        with Session(self._engine) as session:
+            authority = session.get(
+                CompiledSpecAuthority,
+                request.expected_candidate_authority_id,
+            )
+            if authority is None:
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="candidate_authority_not_found",
+                )
+            spec = session.get(SpecRegistry, authority.spec_version_id)
+            if spec is None or spec.product_id != request.project_id:
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="candidate_authority_project_mismatch",
+                )
+            actual_fingerprint = pending_authority_fingerprint(authority)
+            if (
+                actual_fingerprint
+                != request.expected_candidate_authority_fingerprint
+            ):
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="candidate_authority_fingerprint_mismatch",
+                    details={
+                        "actual_candidate_authority_fingerprint": (
+                            actual_fingerprint
+                        )
+                    },
+                )
+            attempt = _latest_curation_attempt_for_mutation(
+                session=session,
+                mutation_event_id=request.recovery_mutation_event_id,
+            )
+            if attempt is None or attempt.project_id != request.project_id:
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="curation_attempt_not_found",
+                )
+            attempt_has_candidate_evidence = (
+                attempt.candidate_authority_id is not None
+                or attempt.candidate_authority_fingerprint is not None
+            )
+            if not original_candidate and not attempt_has_candidate_evidence:
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="recovery_candidate_evidence_missing",
+                )
+            if (
+                attempt.candidate_authority_id is not None
+                and attempt.candidate_authority_id
+                != request.expected_candidate_authority_id
+            ):
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="curation_attempt_candidate_mismatch",
+                )
+            if (
+                attempt.candidate_authority_fingerprint is not None
+                and attempt.candidate_authority_fingerprint
+                != request.expected_candidate_authority_fingerprint
+            ):
+                return _authority_curation_recovery_invalid_response(
+                    request=request,
+                    reason="curation_attempt_fingerprint_mismatch",
+                )
+        return None
+
+    def _mark_recovered_curation_attempt_succeeded(
+        self,
+        request: AuthorityCurationRecoveryRequest,
+    ) -> None:
+        """Mark the recovered curation attempt succeeded when it is incomplete."""
+        with Session(self._engine) as session:
+            attempt = _latest_curation_attempt_for_mutation(
+                session=session,
+                mutation_event_id=request.recovery_mutation_event_id,
+            )
+            if attempt is None:
+                return
+            attempt.status = "succeeded"
+            attempt.candidate_authority_id = (
+                request.expected_candidate_authority_id
+            )
+            attempt.candidate_authority_fingerprint = (
+                request.expected_candidate_authority_fingerprint
+            )
+            attempt.updated_at = datetime.now(UTC)
+            session.add(attempt)
+            session.commit()
+
+    def _transfer_recovery_to_retry(  # noqa: PLR0913
+        self,
+        *,
+        ledger: MutationLedgerRepository,
+        request: AuthorityCurationRecoveryRequest,
+        retry_mutation_event_id: int,
+        retry_lease_owner: str,
+        original_recovery_owner: str,
+        last_error: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Transfer recovery-required ownership to the linked retry row."""
+        retry_response = _authority_curation_recovery_required_response(
+            request=request,
+            retry_mutation_event_id=retry_mutation_event_id,
+            recovered_by_mutation_event_id=None,
+        )
+        original_replay_response = _authority_curation_recovery_required_response(
+            request=request,
+            retry_mutation_event_id=request.recovery_mutation_event_id,
+            recovered_by_mutation_event_id=retry_mutation_event_id,
+        )
+        transferred = ledger.transfer_linked_retry_recovery(
+            retry_mutation_event_id=retry_mutation_event_id,
+            retry_lease_owner=retry_lease_owner,
+            original_mutation_event_id=request.recovery_mutation_event_id,
+            original_recovery_lease_owner=original_recovery_owner,
+            recovery_action=RecoveryAction.RECONCILE_THEN_RESUME,
+            safe_to_auto_resume=False,
+            last_error=last_error,
+            retry_response=retry_response,
+            original_replay_response=original_replay_response,
+            now=datetime.now(UTC),
+        )
+        if transferred.error_code == MUTATION_RESUME_CONFLICT:
+            response = _authority_curation_recovery_conflict_response(
+                retry_mutation_event_id=retry_mutation_event_id,
+                original_mutation_event_id=request.recovery_mutation_event_id,
+                correlation_id=request.correlation_id,
+            )
+            _finalize_mutation_status(
+                engine=self._engine,
+                mutation_event_id=retry_mutation_event_id,
+                lease_owner=retry_lease_owner,
+                status=MutationStatus.GUARD_REJECTED,
+                response=response,
+            )
+            return response
+        return retry_response
+
     def _load_source_authority_and_feedback(
         self,
         *,
@@ -1754,6 +2130,258 @@ def _curation_request_hash(request: AuthorityCurationRequest) -> str:
             "max_iterations": request.max_iterations,
             "compiler_model": request.compiler_model,
         }
+    )
+
+
+def _curation_recovery_request_hash(
+    request: AuthorityCurationRecoveryRequest,
+) -> str:
+    """Return deterministic request hash for curation recovery idempotency."""
+    return canonical_hash(
+        {
+            "command": AUTHORITY_CURATE_COMMAND,
+            "mode": "published_candidate_recovery",
+            "project_id": request.project_id,
+            "recovery_mutation_event_id": request.recovery_mutation_event_id,
+            "expected_candidate_authority_id": (
+                request.expected_candidate_authority_id
+            ),
+            "expected_candidate_authority_fingerprint": (
+                request.expected_candidate_authority_fingerprint
+            ),
+        }
+    )
+
+
+def _require_recoverable_curate_event(
+    original: dict[str, Any],
+    *,
+    request: AuthorityCurationRecoveryRequest,
+    retry_mutation_event_id: int,
+) -> dict[str, Any]:
+    """Validate original ledger row is a recoverable authority curate event."""
+    if original.get("ok") is not True:
+        return _authority_curation_recovery_invalid_response(
+            request=request,
+            reason="recovery_mutation_not_found",
+            details={"retry_mutation_event_id": retry_mutation_event_id},
+        )
+    data = original.get("data")
+    if not isinstance(data, dict):
+        return _authority_curation_recovery_invalid_response(
+            request=request,
+            reason="recovery_mutation_not_found",
+            details={"retry_mutation_event_id": retry_mutation_event_id},
+        )
+    if data.get("project_id") != request.project_id:
+        return _authority_curation_recovery_invalid_response(
+            request=request,
+            reason="recovery_mutation_project_mismatch",
+            details={"retry_mutation_event_id": retry_mutation_event_id},
+        )
+    if data.get("command") != AUTHORITY_CURATE_COMMAND:
+        return _authority_curation_recovery_invalid_response(
+            request=request,
+            reason="recovery_mutation_command_mismatch",
+            details={"retry_mutation_event_id": retry_mutation_event_id},
+        )
+    if data.get("status") != MutationStatus.RECOVERY_REQUIRED.value:
+        return _authority_curation_recovery_invalid_response(
+            request=request,
+            reason="recovery_mutation_not_recoverable",
+            details={
+                "retry_mutation_event_id": retry_mutation_event_id,
+                "actual_status": data.get("status"),
+            },
+        )
+    return data
+
+
+def _is_recovery_data(value: dict[str, Any]) -> bool:
+    """Return whether helper output is valid ledger data, not an error envelope."""
+    return value.get("command") == AUTHORITY_CURATE_COMMAND and (
+        value.get("status") == MutationStatus.RECOVERY_REQUIRED.value
+    )
+
+
+def _original_recovery_candidate_details(
+    original_data: dict[str, Any],
+) -> dict[str, object]:
+    """Return candidate fields from the original recovery-required response."""
+    response = original_data.get("response")
+    if not isinstance(response, dict):
+        return {}
+    details = _response_error_details(response)
+    candidate_details: dict[str, object] = {}
+    candidate_authority_id = details.get("candidate_authority_id")
+    if candidate_authority_id is not None:
+        candidate_details["candidate_authority_id"] = candidate_authority_id
+    candidate_authority_fingerprint = details.get(
+        "candidate_authority_fingerprint"
+    )
+    if candidate_authority_fingerprint is not None:
+        candidate_details["candidate_authority_fingerprint"] = (
+            candidate_authority_fingerprint
+        )
+    return candidate_details
+
+
+def _workflow_pending_review_matches_recovery(
+    *,
+    state: dict[str, Any],
+    request: AuthorityCurationRecoveryRequest,
+) -> bool:
+    """Return whether workflow already points at recovered candidate."""
+    return (
+        state.get("fsm_state") == "SETUP_REQUIRED"
+        and state.get("setup_status") == "authority_pending_review"
+        and state.get("pending_authority_id")
+        == request.expected_candidate_authority_id
+        and state.get("pending_authority_fingerprint")
+        == request.expected_candidate_authority_fingerprint
+    )
+
+
+def _workflow_state_allows_recovery_restore(
+    *,
+    state: dict[str, Any],
+    request: AuthorityCurationRecoveryRequest,
+) -> bool:
+    """Return whether current workflow mutex still belongs to this recovery."""
+    if state.get("fsm_state") != "SETUP_REQUIRED":
+        return False
+    if state.get("setup_status") != "authority_curating":
+        return False
+    state_mutation_event_id = state.get("setup_curation_mutation_event_id")
+    return state_mutation_event_id in (
+        None,
+        request.recovery_mutation_event_id,
+        str(request.recovery_mutation_event_id),
+    )
+
+
+def _latest_curation_attempt_for_mutation(
+    *,
+    session: Session,
+    mutation_event_id: int,
+) -> AuthorityCurationAttempt | None:
+    """Return latest curation attempt linked to a mutation event."""
+    return session.exec(
+        select(AuthorityCurationAttempt)
+        .where(AuthorityCurationAttempt.mutation_event_id == mutation_event_id)
+        .order_by(_CURATION_ROW_ID.desc())
+    ).first()
+
+
+def _authority_curation_recovery_invalid_response(
+    *,
+    request: AuthorityCurationRecoveryRequest,
+    reason: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a bounded invalid recovery envelope."""
+    response_details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "recovery_mutation_event_id": request.recovery_mutation_event_id,
+        "expected_candidate_authority_id": (
+            request.expected_candidate_authority_id
+        ),
+        "expected_candidate_authority_fingerprint": (
+            request.expected_candidate_authority_fingerprint
+        ),
+        "reason": reason,
+    }
+    if details is not None:
+        response_details.update(details)
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_RECOVERY_INVALID,
+            message="Authority curation recovery request is invalid.",
+            details=response_details,
+            remediation=["Inspect the mutation ledger before retrying recovery."],
+        ),
+        correlation_id=request.correlation_id,
+    )
+
+
+def _authority_curation_recovery_conflict_response(
+    *,
+    retry_mutation_event_id: int | None,
+    original_mutation_event_id: int,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Return a recovery lease or linked-finalization conflict envelope."""
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_RESUME_CONFLICT,
+            message="Authority curation recovery cannot acquire mutation ownership.",
+            details={
+                "retry_mutation_event_id": retry_mutation_event_id,
+                "original_mutation_event_id": original_mutation_event_id,
+            },
+            remediation=["Re-read mutation state before retrying recovery."],
+        ),
+        correlation_id=correlation_id,
+    )
+
+
+def _authority_curation_recovery_success_response(
+    *,
+    request: AuthorityCurationRecoveryRequest,
+    retry_mutation_event_id: int,
+) -> dict[str, Any]:
+    """Return successful published-candidate recovery response."""
+    return success_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        data={
+            "status": "authority_pending_review",
+            "project_id": request.project_id,
+            "recovered_mutation_event_id": request.recovery_mutation_event_id,
+            "recovery_mutation_event_id": retry_mutation_event_id,
+            "pending_authority_id": request.expected_candidate_authority_id,
+            "pending_authority_fingerprint": (
+                request.expected_candidate_authority_fingerprint
+            ),
+            "trace_artifact_id": trace_artifact_id(
+                request.recovery_mutation_event_id
+            ),
+        },
+        correlation_id=request.correlation_id,
+    )
+
+
+def _authority_curation_recovery_required_response(
+    *,
+    request: AuthorityCurationRecoveryRequest,
+    retry_mutation_event_id: int,
+    recovered_by_mutation_event_id: int | None,
+) -> dict[str, Any]:
+    """Return recovery-required response for partially recovered linked retry."""
+    details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "mutation_event_id": retry_mutation_event_id,
+        "recovery_mutation_event_id": request.recovery_mutation_event_id,
+        "candidate_authority_id": request.expected_candidate_authority_id,
+        "candidate_authority_fingerprint": (
+            request.expected_candidate_authority_fingerprint
+        ),
+        "trace_artifact_id": trace_artifact_id(
+            request.recovery_mutation_event_id
+        ),
+    }
+    if recovered_by_mutation_event_id is not None:
+        details["recovered_by_mutation_event_id"] = recovered_by_mutation_event_id
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_RECOVERY_REQUIRED,
+            message="Authority curation recovery needs another resume attempt.",
+            details=details,
+            remediation=["Retry authority curation recovery with a new key."],
+        ),
+        correlation_id=request.correlation_id,
     )
 
 
