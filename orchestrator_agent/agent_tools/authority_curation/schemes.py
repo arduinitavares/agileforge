@@ -86,7 +86,7 @@ class AuthorityCurationRepairOutput(_StrictModel):
 
     mode: Literal["targeted", "full_recompile", "fail_no_candidate"]
     patches: list[AuthorityCurationPatch] = Field(default_factory=list)
-    candidate_authority_json: dict[str, object] | None = None
+    candidate_authority_json: str | None = None
     resolved_feedback_ids: list[str] = Field(default_factory=list)
     unresolved_feedback_ids: list[str] = Field(default_factory=list)
     failure_reason: str | None = None

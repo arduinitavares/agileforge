@@ -160,6 +160,19 @@ def test_repair_patch_value_schema_has_explicit_json_types() -> None:
     assert all("type" in option for option in value_schema["anyOf"])
 
 
+def test_repair_output_schema_does_not_request_open_candidate_json() -> None:
+    """Strict providers reject arbitrary object fields in response_format."""
+    schema = AuthorityCurationRepairOutput.model_json_schema()
+    candidate_schema = schema["properties"]["candidate_authority_json"]
+    branches = candidate_schema.get("anyOf", [candidate_schema])
+
+    assert not any(
+        option.get("type") == "object"
+        and option.get("additionalProperties") is not False
+        for option in branches
+    )
+
+
 def test_validate_workflow_input_returns_strict_model() -> None:
     """The public validator returns the strict workflow input model."""
     validated = validate_workflow_input(_valid_workflow_payload())
