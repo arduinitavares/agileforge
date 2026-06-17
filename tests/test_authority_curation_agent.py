@@ -244,11 +244,14 @@ def test_downstream_agents_reference_state_placeholders() -> None:
     assert "{authority_curation_repair_plan}" in compiler_instruction
     assert "{authority_curation_semantic_findings}" in compiler_instruction
     assert "{authority_curation_quality_findings}" in compiler_instruction
-    assert "Never use authority:* ids as patch targets" in compiler_instruction
-    assert "ASM-*, GAP-*, or INV-*" in compiler_instruction
-    assert "Do not use collection-index aliases" in compiler_instruction
     assert "For authority_curation.v2 inputs" in compiler_instruction
     assert "Pick target_handle values exactly from the repair_menu" in (
+        compiler_instruction
+    )
+    assert "Emit one repair selection for every repair_menu entry" in (
+        compiler_instruction
+    )
+    assert "Never use ASM-*, GAP-*, INV-*, authority:*, or collection-index" in (
         compiler_instruction
     )
     forbidden_output_clause = (
@@ -256,6 +259,7 @@ def test_downstream_agents_reference_state_placeholders() -> None:
         "candidate_authority_json"
     )
     assert forbidden_output_clause in compiler_instruction
+    assert "targeted patch operations in patches" not in compiler_instruction
 
     gate_instruction = _instruction_text(agents["AuthorityGateDecision"].instruction)
     assert "{authority_curation_repair_output}" in gate_instruction

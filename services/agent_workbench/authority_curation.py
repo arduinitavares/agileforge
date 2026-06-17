@@ -5072,6 +5072,16 @@ def _curation_workflow_success_result(
         )
         if invalid_v2_result is not None:
             return invalid_v2_result
+        selection_payload = _json_object_from_value(
+            output.repair_output.get("selection_payload")
+        )
+        if selection_payload is not None:
+            return _curation_workflow_v2_success_result(
+                request=request,
+                curation_attempt_id=curation_attempt_id,
+                selection_payload=selection_payload,
+                output=output,
+            )
     if not _curation_gate_allows_candidate(
         gate=output.gate,
         repair_output=output.repair_output,
