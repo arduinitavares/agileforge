@@ -102,6 +102,8 @@ def _ensure_index_exists(
     table_name: str,
     index_name: str,
     column_names: list[str],
+    *,
+    repair_equivalent_regular: bool = False,
 ) -> bool:
     """
     Ensure an index exists on a table, creating it if necessary.
@@ -117,22 +119,32 @@ def _ensure_index_exists(
     if index_name in existing_by_name:
         return False
 
-    # Strict mode: enforce canonical naming for equivalent indexes.
+    # Strict by default; selected migrations may repair older metadata names.
     requested_columns = tuple(column_names)
     conflicting_equivalent_indexes = []
     for idx in existing_indexes:
         idx_columns = tuple(idx.get("column_names") or [])
+        if idx_columns == requested_columns and bool(idx.get("unique")):
+            return False
         if idx_columns == requested_columns:
             conflicting_equivalent_indexes.append(idx["name"])
 
     if conflicting_equivalent_indexes:
-        conflicts = ", ".join(sorted(conflicting_equivalent_indexes))
-        message = (
-            "Non-canonical index detected for "
-            f"{table_name}({', '.join(column_names)}): {conflicts}. "
-            f"Expected canonical index name: {index_name}."
-        )
-        raise RuntimeError(message)
+        if not repair_equivalent_regular:
+            conflicts = ", ".join(sorted(conflicting_equivalent_indexes))
+            message = (
+                "Non-canonical index detected for "
+                f"{table_name}({', '.join(column_names)}): {conflicts}. "
+                f"Expected canonical index name: {index_name}."
+            )
+            raise RuntimeError(message)
+        with engine.begin() as conn:
+            for conflict_name in sorted(conflicting_equivalent_indexes):
+                logger.info(
+                    "db.migration.drop_index",
+                    extra={"table_name": table_name, "index_name": conflict_name},
+                )
+                conn.execute(text(f"DROP INDEX {conflict_name}"))
 
     columns_str = ", ".join(column_names)
     create_index_sql = f"CREATE INDEX {index_name} ON {table_name} ({columns_str})"
@@ -1710,7 +1722,13 @@ def _ensure_authority_curation_indexes(
     actions: list[str] = []
 
     for index_name, columns, action in regular_indexes:
-        if _ensure_index_exists(engine, table_name, index_name, columns):
+        if _ensure_index_exists(
+            engine,
+            table_name,
+            index_name,
+            columns,
+            repair_equivalent_regular=True,
+        ):
             actions.append(action)
 
     for index_name, columns, action in unique_indexes:
