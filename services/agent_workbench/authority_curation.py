@@ -9,6 +9,7 @@ import importlib
 import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,10 +56,15 @@ from utils.adk_runner import (
     get_agent_model_info,
     parse_json_payload,
 )
+from utils.authority_curation_trace import (
+    append_trace_event,
+    summarize_trace,
+    trace_artifact_id,
+)
 from utils.failure_artifacts import write_failure_artifact
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Coroutine, Iterator, Mapping
 
     from google.adk.models.base_llm import BaseLlm
     from google.genai import types
@@ -286,37 +292,119 @@ class AuthorityCurationRunner:
         active_mutation = self._start_curation_mutation(request)
         if not isinstance(active_mutation, _ActiveMutation):
             return active_mutation
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="mutation_lease_acquired",
+            status="completed",
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
 
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="guard_validation_started",
+            status="started",
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
         guard_error = self._validate_curation_guards(request)
         if guard_error is not None:
-            _finalize_mutation_status(
-                engine=self._engine,
+            guard_error = _decorate_response_trace_artifact(
+                guard_error,
                 mutation_event_id=active_mutation.mutation_event_id,
-                lease_owner=active_mutation.lease_owner,
-                status=MutationStatus.GUARD_REJECTED,
+            )
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="guard_validation_failed",
+                status="failed",
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+                error=_trace_error_from_response(
+                    guard_error,
+                    current_step="guard_validation_started",
+                ),
+            )
+            self._finalize_mutation_status_with_trace(
+                request=request,
+                active_mutation=active_mutation,
                 response=guard_error,
+                status=MutationStatus.GUARD_REJECTED,
             )
             return guard_error
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="guard_validation_completed",
+            status="completed",
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
 
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="curation_attempt_create_started",
+            status="started",
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
         attempt = self._create_running_curation_attempt(
             request=request,
             request_hash=_curation_request_hash(request),
+            mutation_event_id=active_mutation.mutation_event_id,
         )
         if not isinstance(attempt, AuthorityCurationAttempt):
-            _finalize_mutation_status(
-                engine=self._engine,
+            attempt = _decorate_response_trace_artifact(
+                attempt,
                 mutation_event_id=active_mutation.mutation_event_id,
-                lease_owner=active_mutation.lease_owner,
-                status=MutationStatus.GUARD_REJECTED,
+            )
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="curation_attempt_create_failed",
+                status="failed",
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+                error=_trace_error_from_response(
+                    attempt,
+                    current_step="curation_attempt_create_started",
+                ),
+            )
+            self._finalize_mutation_status_with_trace(
+                request=request,
+                active_mutation=active_mutation,
                 response=attempt,
+                status=MutationStatus.GUARD_REJECTED,
             )
             return attempt
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="curation_attempt_create_completed",
+            status="completed",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
 
         try:
-            self._mark_workflow_curating(
-                request=request,
+            with _trace_step_safely(
                 mutation_event_id=active_mutation.mutation_event_id,
-            )
+                project_id=request.project_id,
+                step="workflow_curating_status_started",
+                completed_step="workflow_curating_status_completed",
+                failed_step="workflow_curating_status_failed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+            ):
+                self._mark_workflow_curating(
+                    request=request,
+                    mutation_event_id=active_mutation.mutation_event_id,
+                )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
@@ -327,6 +415,9 @@ class AuthorityCurationRunner:
                         "project_id": request.project_id,
                         "curation_attempt_id": attempt.curation_attempt_id,
                         "exception_type": type(exc).__name__,
+                        "trace_artifact_id": trace_artifact_id(
+                            active_mutation.mutation_event_id
+                        ),
                     },
                 ),
                 correlation_id=request.correlation_id,
@@ -566,6 +657,7 @@ class AuthorityCurationRunner:
         *,
         request: AuthorityCurationRequest,
         request_hash: str,
+        mutation_event_id: int,
     ) -> AuthorityCurationAttempt | dict[str, Any]:
         """Persist the in-progress curation attempt before workflow work."""
         now = datetime.now(UTC)
@@ -590,6 +682,7 @@ class AuthorityCurationRunner:
             request_hash=request_hash,
             idempotency_key=request.idempotency_key,
             changed_by=request.changed_by,
+            mutation_event_id=mutation_event_id,
             created_at=now,
             updated_at=now,
         )
@@ -637,11 +730,34 @@ class AuthorityCurationRunner:
         attempt: AuthorityCurationAttempt,
     ) -> dict[str, Any]:
         """Run the ADK workflow and finalize minimal attempt state."""
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="input_load_started",
+            status="started",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
         loaded_inputs = self._load_source_authority_and_feedback(
             request=request,
             attempt=attempt,
+            mutation_event_id=active_mutation.mutation_event_id,
         )
         if not isinstance(loaded_inputs, _LoadedCurationInputs):
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="input_load_failed",
+                status="failed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+                error=_trace_error_from_response(
+                    loaded_inputs,
+                    current_step="input_load_started",
+                ),
+            )
             self._finalize_failed_curation(
                 request=request,
                 active_mutation=active_mutation,
@@ -650,14 +766,33 @@ class AuthorityCurationRunner:
                 status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
             )
             return loaded_inputs
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="input_load_completed",
+            status="completed",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
 
         try:
-            workflow_result = run_authority_curation_workflow(
-                request=request,
+            with _trace_step_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="adk_invocation_started",
+                completed_step="adk_invocation_completed",
+                failed_step="adk_invocation_failed",
                 curation_attempt_id=attempt.curation_attempt_id,
-                source_authority_json=loaded_inputs.source_authority_json,
-                feedback_json=loaded_inputs.feedback_json,
-            )
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+            ):
+                workflow_result = run_authority_curation_workflow(
+                    request=request,
+                    curation_attempt_id=attempt.curation_attempt_id,
+                    source_authority_json=loaded_inputs.source_authority_json,
+                    feedback_json=loaded_inputs.feedback_json,
+                )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
@@ -668,6 +803,9 @@ class AuthorityCurationRunner:
                         "project_id": request.project_id,
                         "curation_attempt_id": attempt.curation_attempt_id,
                         "exception_type": type(exc).__name__,
+                        "trace_artifact_id": trace_artifact_id(
+                            active_mutation.mutation_event_id
+                        ),
                     },
                 ),
                 correlation_id=request.correlation_id,
@@ -682,12 +820,38 @@ class AuthorityCurationRunner:
             return response
 
         if workflow_result.get("ok") is True:
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="diff_validation_started",
+                status="started",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+            )
             validated = self._validate_successful_curation_candidate(
                 request=request,
                 attempt=attempt,
                 workflow_result=workflow_result,
+                mutation_event_id=active_mutation.mutation_event_id,
             )
             if not isinstance(validated, _ValidatedCurationCandidate):
+                _append_trace_event_safely(
+                    mutation_event_id=active_mutation.mutation_event_id,
+                    project_id=request.project_id,
+                    step="diff_validation_failed",
+                    status="failed",
+                    curation_attempt_id=attempt.curation_attempt_id,
+                    correlation_id=request.correlation_id,
+                    attributes=_curation_failure_trace_attributes(
+                        request=request,
+                        response=validated,
+                    ),
+                    error=_trace_error_from_response(
+                        validated,
+                        current_step="diff_validation_started",
+                    ),
+                )
                 self._finalize_failed_curation(
                     request=request,
                     active_mutation=active_mutation,
@@ -696,19 +860,31 @@ class AuthorityCurationRunner:
                     status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
                 )
                 return validated
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="diff_validation_completed",
+                status="completed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+            )
 
             published = self._publish_validated_curation_candidate(
                 request=request,
                 attempt=attempt,
                 validated=validated,
+                mutation_event_id=active_mutation.mutation_event_id,
             )
             if not isinstance(published, _PublishedCurationCandidate):
                 if _response_error_code(published) == (
                     ErrorCode.MUTATION_RECOVERY_REQUIRED.value
                 ):
                     self._finalize_recovery_required_curation(
+                        request=request,
                         active_mutation=active_mutation,
                         response=published,
+                        curation_attempt_id=attempt.curation_attempt_id,
                     )
                 else:
                     self._finalize_failed_curation(
@@ -727,6 +903,9 @@ class AuthorityCurationRunner:
                     "project_id": request.project_id,
                     "curation_attempt_id": attempt.curation_attempt_id,
                     "mutation_event_id": active_mutation.mutation_event_id,
+                    "trace_artifact_id": trace_artifact_id(
+                        active_mutation.mutation_event_id
+                    ),
                     "pending_authority_id": published.authority_id,
                     "pending_authority_fingerprint": (
                         published.authority_fingerprint
@@ -735,6 +914,19 @@ class AuthorityCurationRunner:
                     "lineage": validated.diff["lineage_json"],
                 },
                 correlation_id=request.correlation_id,
+            )
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_started",
+                status="started",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(
+                    request,
+                    candidate_authority_id=published.authority_id,
+                    candidate_authority_fingerprint=published.authority_fingerprint,
+                ),
             )
             finalized = active_mutation.ledger.finalize_success(
                 mutation_event_id=active_mutation.mutation_event_id,
@@ -751,6 +943,35 @@ class AuthorityCurationRunner:
                 now=datetime.now(UTC),
             )
             if not finalized:
+                _append_trace_event_safely(
+                    mutation_event_id=active_mutation.mutation_event_id,
+                    project_id=request.project_id,
+                    step="mutation_finalize_failed",
+                    status="failed",
+                    curation_attempt_id=attempt.curation_attempt_id,
+                    correlation_id=request.correlation_id,
+                    attributes=_curation_trace_attributes(
+                        request,
+                        candidate_authority_id=published.authority_id,
+                        candidate_authority_fingerprint=(
+                            published.authority_fingerprint
+                        ),
+                        failure_stage="ledger_finalize_failed_after_publish",
+                    ),
+                    error={
+                        "code": ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+                        "message": "Authority curation mutation finalization failed.",
+                        "retryable": False,
+                        "details": {
+                            "current_step": "mutation_finalize_started",
+                            "failure_stage": "ledger_finalize_failed_after_publish",
+                            "candidate_authority_id": published.authority_id,
+                            "candidate_authority_fingerprint": (
+                                published.authority_fingerprint
+                            ),
+                        },
+                    },
+                )
                 recovery_response = _published_curation_recovery_response(
                     request=request,
                     attempt=attempt,
@@ -761,10 +982,28 @@ class AuthorityCurationRunner:
                     },
                 )
                 self._finalize_recovery_required_curation(
+                    request=request,
                     active_mutation=active_mutation,
                     response=recovery_response,
+                    curation_attempt_id=attempt.curation_attempt_id,
                 )
                 return recovery_response
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_completed",
+                status="completed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(
+                    request,
+                    candidate_authority_id=published.authority_id,
+                    candidate_authority_fingerprint=published.authority_fingerprint,
+                    event_count=_trace_event_count_safely(
+                        mutation_event_id=active_mutation.mutation_event_id,
+                    ),
+                ),
+            )
             return response
 
         if workflow_result.get("status") == "failed":
@@ -772,6 +1011,20 @@ class AuthorityCurationRunner:
                 request=request,
                 attempt=attempt,
                 workflow_result=workflow_result,
+                mutation_event_id=active_mutation.mutation_event_id,
+            )
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="adk_invocation_failed",
+                status="failed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+                error=_trace_error_from_response(
+                    response,
+                    current_step="adk_invocation_started",
+                ),
             )
             self._finalize_failed_curation(
                 request=request,
@@ -787,9 +1040,27 @@ class AuthorityCurationRunner:
             error=workbench_error(
                 ErrorCode.COMMAND_NOT_IMPLEMENTED,
                 message="Authority curation workflow is not implemented.",
-                details={"curation_attempt_id": attempt.curation_attempt_id},
+                details={
+                    "curation_attempt_id": attempt.curation_attempt_id,
+                    "trace_artifact_id": trace_artifact_id(
+                        active_mutation.mutation_event_id
+                    ),
+                },
             ),
             correlation_id=request.correlation_id,
+        )
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="adk_invocation_failed",
+            status="failed",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+            error=_trace_error_from_response(
+                response,
+                current_step="adk_invocation_started",
+            ),
         )
         self._finalize_failed_curation(
             request=request,
@@ -806,6 +1077,7 @@ class AuthorityCurationRunner:
         request: AuthorityCurationRequest,
         attempt: AuthorityCurationAttempt,
         workflow_result: dict[str, Any],
+        mutation_event_id: int,
     ) -> _ValidatedCurationCandidate | dict[str, Any]:
         """Validate workflow candidate JSON before marking curation succeeded."""
         candidate_authority_json = _json_object_from_value(
@@ -816,12 +1088,14 @@ class AuthorityCurationRunner:
                 request=request,
                 attempt=attempt,
                 reason="missing_or_invalid_candidate_authority_json",
+                mutation_event_id=mutation_event_id,
             )
         candidate_authority_json = cast("dict[str, Any]", candidate_authority_json)
 
         loaded = self._load_source_authority_and_feedback(
             request=request,
             attempt=attempt,
+            mutation_event_id=mutation_event_id,
         )
         if not isinstance(loaded, _LoadedCurationInputs):
             return loaded
@@ -846,6 +1120,7 @@ class AuthorityCurationRunner:
                         "curation_attempt_id": attempt.curation_attempt_id,
                         "validation_error_count": len(exc.validation_errors),
                         "validation_errors": exc.validation_errors,
+                        "trace_artifact_id": trace_artifact_id(mutation_event_id),
                     },
                 ),
                 correlation_id=request.correlation_id,
@@ -862,6 +1137,7 @@ class AuthorityCurationRunner:
                             "untargeted_change_count"
                         ],
                         "untargeted_changes": diff["untargeted_changes"],
+                        "trace_artifact_id": trace_artifact_id(mutation_event_id),
                     },
                 ),
                 correlation_id=request.correlation_id,
@@ -883,9 +1159,19 @@ class AuthorityCurationRunner:
         request: AuthorityCurationRequest,
         attempt: AuthorityCurationAttempt,
         validated: _ValidatedCurationCandidate,
+        mutation_event_id: int,
     ) -> _PublishedCurationCandidate | dict[str, Any]:
         """Publish a validated candidate as a new pending authority row."""
         candidate_authority_json = validated.candidate_authority_json
+        _append_trace_event_safely(
+            mutation_event_id=mutation_event_id,
+            project_id=request.project_id,
+            step="candidate_publication_started",
+            status="started",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(request),
+        )
         try:
             authority = _authority_from_candidate_json(
                 spec_version_id=request.spec_version_id,
@@ -897,7 +1183,7 @@ class AuthorityCurationRunner:
                 session.refresh(authority)
                 published = _published_curation_candidate(authority)
         except Exception as exc:  # noqa: BLE001
-            return error_envelope(
+            response = error_envelope(
                 command=AUTHORITY_CURATE_COMMAND,
                 error=workbench_error(
                     ErrorCode.MUTATION_FAILED,
@@ -906,28 +1192,75 @@ class AuthorityCurationRunner:
                         "project_id": request.project_id,
                         "curation_attempt_id": attempt.curation_attempt_id,
                         "exception_type": type(exc).__name__,
+                        "trace_artifact_id": trace_artifact_id(mutation_event_id),
                     },
                 ),
                 correlation_id=request.correlation_id,
             )
+            _append_trace_event_safely(
+                mutation_event_id=mutation_event_id,
+                project_id=request.project_id,
+                step="candidate_publication_failed",
+                status="failed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(request),
+                error=_trace_error_from_response(
+                    response,
+                    current_step="candidate_publication_started",
+                ),
+            )
+            return response
+        _append_trace_event_safely(
+            mutation_event_id=mutation_event_id,
+            project_id=request.project_id,
+            step="candidate_publication_completed",
+            status="completed",
+            curation_attempt_id=attempt.curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=_curation_trace_attributes(
+                request,
+                candidate_authority_id=published.authority_id,
+                candidate_authority_fingerprint=published.authority_fingerprint,
+            ),
+        )
         try:
-            self._update_succeeded_curation_attempt(
-                attempt.curation_attempt_id,
-                published=published,
-                validated=validated,
-            )
-            self._mark_workflow_pending_review(
-                request=request,
-                pending_authority_id=published.authority_id,
-                pending_authority_fingerprint=published.authority_fingerprint,
-            )
+            with _trace_step_safely(
+                mutation_event_id=mutation_event_id,
+                project_id=request.project_id,
+                step="workflow_pending_review_started",
+                completed_step="workflow_pending_review_completed",
+                failed_step="workflow_pending_review_failed",
+                curation_attempt_id=attempt.curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=_curation_trace_attributes(
+                    request,
+                    candidate_authority_id=published.authority_id,
+                    candidate_authority_fingerprint=(
+                        published.authority_fingerprint
+                    ),
+                ),
+            ):
+                self._update_succeeded_curation_attempt(
+                    attempt.curation_attempt_id,
+                    published=published,
+                    validated=validated,
+                )
+                self._mark_workflow_pending_review(
+                    request=request,
+                    pending_authority_id=published.authority_id,
+                    pending_authority_fingerprint=published.authority_fingerprint,
+                )
         except Exception as exc:  # noqa: BLE001
             return _published_curation_recovery_response(
                 request=request,
                 attempt=attempt,
                 published=published,
                 failure_stage="workflow_update_failed_after_publish",
-                metadata={"exception_type": type(exc).__name__},
+                metadata={
+                    "exception_type": type(exc).__name__,
+                    "mutation_event_id": mutation_event_id,
+                },
             )
         return published
 
@@ -962,6 +1295,7 @@ class AuthorityCurationRunner:
         *,
         request: AuthorityCurationRequest,
         attempt: AuthorityCurationAttempt,
+        mutation_event_id: int | None = None,
     ) -> _LoadedCurationInputs | dict[str, Any]:
         """Load source authority artifact and feedback row for host validation."""
         with Session(self._engine) as session:
@@ -989,6 +1323,7 @@ class AuthorityCurationRunner:
                     request=request,
                     attempt=attempt,
                     reason="missing_or_invalid_source_authority_inputs",
+                    mutation_event_id=mutation_event_id,
                 )
             source_authority_json = cast("dict[str, Any]", source_authority_json)
             return _LoadedCurationInputs(
@@ -1006,18 +1341,22 @@ class AuthorityCurationRunner:
         status: MutationStatus,
     ) -> None:
         """Finalize failed curation and restore rejected workflow state."""
+        response = _decorate_response_trace_artifact(
+            response,
+            mutation_event_id=active_mutation.mutation_event_id,
+        )
         failure_artifact_id = _response_failure_artifact_id(response)
         error_code = _response_error_code(response)
         self._update_failed_curation_attempt(
             attempt.curation_attempt_id,
             failure_artifact_id=failure_artifact_id,
         )
-        _finalize_mutation_status(
-            engine=self._engine,
-            mutation_event_id=active_mutation.mutation_event_id,
-            lease_owner=active_mutation.lease_owner,
-            status=status,
+        self._finalize_mutation_status_with_trace(
+            request=request,
+            active_mutation=active_mutation,
             response=response,
+            status=status,
+            curation_attempt_id=attempt.curation_attempt_id,
         )
         self._restore_authority_rejected_workflow(
             request=request,
@@ -1025,19 +1364,118 @@ class AuthorityCurationRunner:
             error_code=error_code,
         )
 
+    def _finalize_mutation_status_with_trace(
+        self,
+        *,
+        request: AuthorityCurationRequest,
+        active_mutation: _ActiveMutation,
+        response: dict[str, Any],
+        status: MutationStatus,
+        curation_attempt_id: str | None = None,
+    ) -> bool:
+        """Finalize a failed mutation and trace the ledger terminal write."""
+        attributes = _curation_failure_trace_attributes(
+            request=request,
+            response=response,
+        )
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="mutation_finalize_started",
+            status="started",
+            curation_attempt_id=curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=attributes,
+        )
+        finalized = _finalize_mutation_status(
+            engine=self._engine,
+            mutation_event_id=active_mutation.mutation_event_id,
+            lease_owner=active_mutation.lease_owner,
+            status=status,
+            response=response,
+        )
+        if finalized:
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_completed",
+                status="completed",
+                curation_attempt_id=curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=attributes,
+            )
+        else:
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_failed",
+                status="failed",
+                curation_attempt_id=curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=attributes,
+                error={
+                    "code": ErrorCode.MUTATION_FAILED.value,
+                    "message": "Authority curation mutation finalization failed.",
+                    "retryable": False,
+                    "details": {"current_step": "mutation_finalize_started"},
+                },
+            )
+        return finalized
+
     def _finalize_recovery_required_curation(
         self,
         *,
+        request: AuthorityCurationRequest,
         active_mutation: _ActiveMutation,
         response: dict[str, Any],
+        curation_attempt_id: str | None = None,
     ) -> None:
         """Persist recovery-required mutation state after publish side effects."""
-        _finalize_mutation_recovery_required(
+        attributes = _curation_failure_trace_attributes(
+            request=request,
+            response=response,
+        )
+        _append_trace_event_safely(
+            mutation_event_id=active_mutation.mutation_event_id,
+            project_id=request.project_id,
+            step="mutation_finalize_started",
+            status="started",
+            curation_attempt_id=curation_attempt_id,
+            correlation_id=request.correlation_id,
+            attributes=attributes,
+        )
+        finalized = _finalize_mutation_recovery_required(
             engine=self._engine,
             mutation_event_id=active_mutation.mutation_event_id,
             lease_owner=active_mutation.lease_owner,
             response=response,
         )
+        if finalized:
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_completed",
+                status="completed",
+                curation_attempt_id=curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=attributes,
+            )
+        else:
+            _append_trace_event_safely(
+                mutation_event_id=active_mutation.mutation_event_id,
+                project_id=request.project_id,
+                step="mutation_finalize_failed",
+                status="failed",
+                curation_attempt_id=curation_attempt_id,
+                correlation_id=request.correlation_id,
+                attributes=attributes,
+                error={
+                    "code": ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
+                    "message": "Authority curation recovery finalization failed.",
+                    "retryable": False,
+                    "details": {"current_step": "mutation_finalize_started"},
+                },
+            )
 
     def _restore_authority_rejected_workflow(
         self,
@@ -1213,6 +1651,196 @@ def _curation_request_hash(request: AuthorityCurationRequest) -> str:
     )
 
 
+def _curation_trace_attributes(
+    request: AuthorityCurationRequest,
+    *,
+    candidate_authority_id: int | None = None,
+    candidate_authority_fingerprint: str | None = None,
+    event_count: object = None,
+    failure_stage: str | None = None,
+) -> dict[str, object]:
+    """Return allowlisted trace attributes for authority curation."""
+    attrs: dict[str, object] = {
+        "spec_version_id": request.spec_version_id,
+        "source_authority_id": request.source_authority_id,
+        "source_authority_fingerprint": (
+            request.expected_source_authority_fingerprint
+        ),
+        "feedback_attempt_id": request.feedback_attempt_id,
+        "requested_model_id": _authority_curation_model_id(request),
+        "compiler_version": AUTHORITY_CURATION_COMPILER_VERSION,
+        "prompt_hash": AUTHORITY_CURATION_PROMPT_HASH,
+    }
+    if candidate_authority_id is not None:
+        attrs["candidate_authority_id"] = candidate_authority_id
+    if candidate_authority_fingerprint is not None:
+        attrs["candidate_authority_fingerprint"] = candidate_authority_fingerprint
+    if event_count is not None:
+        attrs["event_count"] = event_count
+    if failure_stage is not None:
+        attrs["failure_stage"] = failure_stage
+    return attrs
+
+
+def _curation_failure_trace_attributes(
+    *,
+    request: AuthorityCurationRequest,
+    response: dict[str, Any],
+) -> dict[str, object]:
+    """Return trace attributes with bounded failure counters from a response."""
+    attrs = _curation_trace_attributes(request)
+    details = _response_error_details(response)
+    for key in ("validation_error_count", "untargeted_change_count"):
+        if key in details:
+            attrs[key] = details[key]
+    return attrs
+
+
+def _decorate_response_trace_artifact(
+    response: dict[str, Any],
+    *,
+    mutation_event_id: int,
+) -> dict[str, Any]:
+    """Add trace artifact metadata to the first response error details."""
+    errors = response.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return response
+    first_error = errors[0]
+    if not isinstance(first_error, dict):
+        return response
+    details = first_error.get("details")
+    decorated_details = dict(details) if isinstance(details, dict) else {}
+    decorated_details["trace_artifact_id"] = trace_artifact_id(mutation_event_id)
+    first_error["details"] = decorated_details
+    return response
+
+
+def _append_trace_event_safely(  # noqa: PLR0913
+    *,
+    mutation_event_id: int,
+    project_id: int,
+    step: str,
+    status: str,
+    curation_attempt_id: str | None = None,
+    correlation_id: str | None = None,
+    attributes: Mapping[str, object] | None = None,
+    error: Mapping[str, object] | None = None,
+) -> None:
+    """Append a trace event without masking curation behavior."""
+    with suppress(Exception):
+        append_trace_event(
+            mutation_event_id=mutation_event_id,
+            project_id=project_id,
+            step=step,
+            status=status,
+            curation_attempt_id=curation_attempt_id,
+            correlation_id=correlation_id,
+            attributes=attributes,
+            error=error,
+        )
+
+
+@contextmanager
+def _trace_step_safely(  # noqa: PLR0913
+    *,
+    mutation_event_id: int,
+    project_id: int,
+    step: str,
+    completed_step: str,
+    failed_step: str,
+    curation_attempt_id: str | None = None,
+    correlation_id: str | None = None,
+    attributes: Mapping[str, object] | None = None,
+) -> Iterator[None]:
+    """Trace a step without allowing trace failures to change behavior."""
+    _append_trace_event_safely(
+        mutation_event_id=mutation_event_id,
+        project_id=project_id,
+        step=step,
+        status="started",
+        curation_attempt_id=curation_attempt_id,
+        correlation_id=correlation_id,
+        attributes=attributes,
+    )
+    try:
+        yield
+    except Exception as exc:
+        _append_trace_event_safely(
+            mutation_event_id=mutation_event_id,
+            project_id=project_id,
+            step=failed_step,
+            status="failed",
+            curation_attempt_id=curation_attempt_id,
+            correlation_id=correlation_id,
+            attributes=attributes,
+            error={
+                "code": type(exc).__name__,
+                "message": "Authority curation step failed.",
+                "retryable": False,
+                "details": {"current_step": step},
+            },
+        )
+        raise
+    else:
+        _append_trace_event_safely(
+            mutation_event_id=mutation_event_id,
+            project_id=project_id,
+            step=completed_step,
+            status="completed",
+            curation_attempt_id=curation_attempt_id,
+            correlation_id=correlation_id,
+            attributes=attributes,
+        )
+
+
+def _trace_event_count_safely(*, mutation_event_id: int) -> object:
+    """Return trace event_count when summary is readable."""
+    with suppress(Exception):
+        return summarize_trace(mutation_event_id=mutation_event_id).get("event_count")
+    return None
+
+
+def _trace_error_from_response(
+    response: dict[str, Any],
+    *,
+    current_step: str,
+) -> dict[str, object]:
+    """Return a bounded trace error from a workbench response envelope."""
+    errors = response.get("errors")
+    first_error = errors[0] if isinstance(errors, list) and errors else {}
+    if not isinstance(first_error, dict):
+        first_error = {}
+    code = _string_or_none(first_error.get("code")) or ErrorCode.MUTATION_FAILED.value
+    message = _string_or_none(first_error.get("message")) or (
+        "Authority curation step failed."
+    )
+    retryable = first_error.get("retryable")
+    error: dict[str, object] = {
+        "code": code,
+        "message": message,
+        "retryable": retryable if isinstance(retryable, bool) else False,
+    }
+    failure_artifact_id = _string_or_none(first_error.get("failure_artifact_id"))
+    if failure_artifact_id is not None:
+        error["failure_artifact_id"] = failure_artifact_id
+    details = _response_error_details(response)
+    details["current_step"] = current_step
+    error["details"] = details
+    return error
+
+
+def _response_error_details(response: dict[str, Any]) -> dict[str, object]:
+    """Extract response error details without exposing non-object values."""
+    errors = response.get("errors")
+    first_error = errors[0] if isinstance(errors, list) and errors else {}
+    if not isinstance(first_error, dict):
+        return {}
+    details = first_error.get("details")
+    if not isinstance(details, dict):
+        return {}
+    return {str(key): value for key, value in details.items()}
+
+
 def _json_object_from_value(value: object) -> dict[str, Any] | None:
     """Return a JSON object from an existing dict or encoded string."""
     model_dump = getattr(value, "model_dump", None)
@@ -1337,18 +1965,22 @@ def _invalid_curation_candidate_response(
     request: AuthorityCurationRequest,
     attempt: AuthorityCurationAttempt,
     reason: str,
+    mutation_event_id: int | None = None,
 ) -> dict[str, Any]:
     """Return a structured fail-closed curation validation error."""
+    details: dict[str, Any] = {
+        "project_id": request.project_id,
+        "curation_attempt_id": attempt.curation_attempt_id,
+        "reason": reason,
+    }
+    if mutation_event_id is not None:
+        details["trace_artifact_id"] = trace_artifact_id(mutation_event_id)
     return error_envelope(
         command=AUTHORITY_CURATE_COMMAND,
         error=workbench_error(
             ErrorCode.MUTATION_FAILED,
             message="Authority curation did not produce a valid candidate.",
-            details={
-                "project_id": request.project_id,
-                "curation_attempt_id": attempt.curation_attempt_id,
-                "reason": reason,
-            },
+            details=details,
         ),
         correlation_id=request.correlation_id,
     )
@@ -1432,6 +2064,7 @@ def _failed_curation_workflow_response(
     request: AuthorityCurationRequest,
     attempt: AuthorityCurationAttempt,
     workflow_result: dict[str, Any],
+    mutation_event_id: int,
 ) -> dict[str, Any]:
     """Return a bounded envelope for a failed workflow result."""
     code = _error_code_from_workflow(workflow_result.get("error_code"))
@@ -1439,6 +2072,7 @@ def _failed_curation_workflow_response(
     details: dict[str, Any] = {
         "project_id": request.project_id,
         "curation_attempt_id": attempt.curation_attempt_id,
+        "trace_artifact_id": trace_artifact_id(mutation_event_id),
     }
     if failure_artifact_id is not None:
         details["failure_artifact_id"] = failure_artifact_id
@@ -1466,6 +2100,7 @@ def _published_curation_recovery_response(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return recovery-required response after candidate publication."""
+    metadata_details = metadata or {}
     details: dict[str, Any] = {
         "project_id": request.project_id,
         "curation_attempt_id": attempt.curation_attempt_id,
@@ -1473,7 +2108,10 @@ def _published_curation_recovery_response(
         "candidate_authority_fingerprint": published.authority_fingerprint,
         "failure_stage": failure_stage,
     }
-    details.update(metadata or {})
+    metadata_mutation_event_id = metadata_details.get("mutation_event_id")
+    if isinstance(metadata_mutation_event_id, int):
+        details["trace_artifact_id"] = trace_artifact_id(metadata_mutation_event_id)
+    details.update(metadata_details)
     return error_envelope(
         command=AUTHORITY_CURATE_COMMAND,
         error=workbench_error(

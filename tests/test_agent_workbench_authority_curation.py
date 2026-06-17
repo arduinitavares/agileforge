@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, select
 
 import services.agent_workbench.authority_curation as curation_mod
+import utils.authority_curation_trace as trace_mod
 from db.migrations import ensure_schema_current
 from models.agent_workbench import CliMutationLedger
 from models.authority_curation import AuthorityCurationAttempt, AuthorityFeedbackAttempt
@@ -1014,10 +1015,231 @@ def test_authority_curate_sets_curating_before_workflow(
 
     assert result["ok"] is True
     assert captured_state["setup_status"] == "authority_curating"
+    assert captured_state["setup_next_actions"] == [
+        {
+            "command": "agileforge mutation show",
+            "args": {"mutation_event_id": result["data"]["mutation_event_id"]},
+            "reason": "Inspect the active authority curation mutation.",
+        }
+    ]
     with Session(engine) as session:
         rows = session.exec(select(AuthorityCurationAttempt)).all()
     assert len(rows) == 1
     assert rows[0].status == "succeeded"
+
+
+def test_authority_curate_success_writes_trace_artifact(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Successful curation writes a durable host-step trace."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-trace-success",
+            compiler_model="openrouter/test/model",
+            correlation_id="corr-trace-success",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["trace_artifact_id"].startswith("authority_curation_trace-")
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.mutation_event_id == ledger.mutation_event_id
+    summary = trace_mod.summarize_trace(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    assert summary["candidate_published"] is True
+    steps = [
+        event["step"]
+        for event in trace_mod.read_trace_events(
+            mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+        )
+    ]
+    assert "mutation_lease_acquired" in steps
+    assert "workflow_curating_status_completed" in steps
+    assert "adk_invocation_completed" in steps
+    assert "diff_validation_completed" in steps
+    assert "candidate_publication_completed" in steps
+    assert "mutation_finalize_completed" in steps
+
+
+def test_authority_curate_success_ignores_trace_failures(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trace failures must not mask successful curation behavior."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+
+    def fail_trace_write(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        message = "trace write failed"
+        raise OSError(message)
+
+    def fail_trace_summary(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        message = "trace summary failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(curation_mod, "append_trace_event", fail_trace_write)
+    monkeypatch.setattr(curation_mod, "summarize_trace", fail_trace_summary)
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-trace-write-failure",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "authority_pending_review"
+    workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert workflow_state["pending_authority_id"] == data["pending_authority_id"]
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert attempt.status == "succeeded"
+    assert ledger.status == "succeeded"
+    assert attempt.mutation_event_id == ledger.mutation_event_id
+
+
+def test_authority_curate_diff_failure_writes_trace_failure_event(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Host diff failure is visible in the durable trace."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _untargeted_change_curation_result(fixture),
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-trace-diff-failure",
+        )
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert details["trace_artifact_id"].startswith("authority_curation_trace-")
+    with Session(engine) as session:
+        ledger = session.exec(select(CliMutationLedger)).one()
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    steps = [event["step"] for event in events]
+    assert steps.index("diff_validation_failed") < steps.index(
+        "mutation_finalize_started"
+    )
+    assert events[-1]["step"] == "mutation_finalize_completed"
+    assert events[-1]["status"] == "completed"
+    assert "candidate_publication_completed" not in [event["step"] for event in events]
+
+
+def test_authority_curate_guard_failure_writes_trace_finalize_event(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Post-lease guard failures include trace metadata and finalization events."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint="sha256:stale",
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-trace-guard-failure",
+        )
+    )
+
+    assert result["ok"] is False
+    details = result["errors"][0]["details"]
+    assert details["trace_artifact_id"].startswith("authority_curation_trace-")
+    with Session(engine) as session:
+        ledger = session.exec(select(CliMutationLedger)).one()
+        attempts = session.exec(select(AuthorityCurationAttempt)).all()
+    assert attempts == []
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    steps = [event["step"] for event in events]
+    assert "guard_validation_failed" in steps
+    assert "mutation_finalize_started" in steps
+    assert events[-1]["step"] == "mutation_finalize_completed"
+    assert events[-1]["status"] == "completed"
 
 
 def test_authority_curate_fails_closed_for_untargeted_diff(
@@ -1396,11 +1618,11 @@ def test_authority_curate_failure_returns_to_rejected(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_CURATION_MAX_ITERATIONS"
-    assert result["errors"][0]["details"] == {
-        "project_id": fixture.project_id,
-        "curation_attempt_id": result["errors"][0]["details"]["curation_attempt_id"],
-        "failure_artifact_id": "authority-curation-failed-001",
-    }
+    details = result["errors"][0]["details"]
+    assert details["project_id"] == fixture.project_id
+    assert details["curation_attempt_id"]
+    assert details["failure_artifact_id"] == "authority-curation-failed-001"
+    assert details["trace_artifact_id"].startswith("authority_curation_trace-")
     workflow_state = fake_workflow.get_session_status(str(fixture.project_id))
     assert workflow_state["setup_status"] == "authority_rejected"
     assert (
@@ -1428,8 +1650,10 @@ def test_authority_curate_failure_returns_to_rejected(
 def test_authority_curate_pending_review_failure_requires_recovery(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Workflow failure after candidate publication must not be retried blindly."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
 
@@ -1504,13 +1728,22 @@ def test_authority_curate_pending_review_failure_requires_recovery(
     )
     assert ledger.status == "recovery_required"
     assert ledger.status != "domain_failed_no_side_effects"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    assert [event["step"] for event in events[-2:]] == [
+        "mutation_finalize_started",
+        "mutation_finalize_completed",
+    ]
 
 
 def test_authority_curate_finalize_success_false_requires_recovery(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Ledger finalize failure after publication must not return success."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -1581,6 +1814,12 @@ def test_authority_curate_finalize_success_false_requires_recovery(
     )
     assert ledger.status == "recovery_required"
     assert ledger.status != "pending"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(ledger.mutation_event_id, "mutation_event_id")
+    )
+    steps = [event["step"] for event in events]
+    assert "mutation_finalize_failed" in steps
+    assert steps[-2:] == ["mutation_finalize_started", "mutation_finalize_completed"]
 
 
 def test_authority_curate_rejects_when_already_curating(
