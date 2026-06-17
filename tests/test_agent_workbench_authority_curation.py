@@ -4291,6 +4291,142 @@ def test_authority_curate_kill_switch_returns_fail_no_candidate(
     assert result["errors"][0]["details"]["failure_reason"] == "fail_no_candidate"
 
 
+@pytest.mark.parametrize(
+    ("workflow_result", "reason"),
+    [
+        (
+            {
+                "ok": True,
+                "contract_version": "authority_curation.v2",
+                "patches": [
+                    {
+                        "target_kind": "assumption",
+                        "target_id": "authority:7",
+                        "op": "replace_text",
+                        "new_text": "bad",
+                    }
+                ],
+            },
+            "legacy_patch_forbidden",
+        ),
+        (
+            {
+                "ok": True,
+                "contract_version": "authority_curation.v2",
+                "patches": [
+                    {
+                        "target_kind": "assumption",
+                        "target_id": "assumptions[10]",
+                        "op": "replace_text",
+                        "new_text": "bad",
+                    }
+                ],
+            },
+            "legacy_patch_forbidden",
+        ),
+        (
+            {
+                "ok": True,
+                "contract_version": "authority_curation.v2",
+                "patches": [
+                    {
+                        "target_kind": "assumption",
+                        "target_id": "ASM-11",
+                        "op": "replace_value",
+                        "path": "$.source_authority_json.assumptions[10]",
+                        "value": "bad",
+                    }
+                ],
+            },
+            "legacy_patch_forbidden",
+        ),
+        (
+            {
+                "ok": True,
+                "contract_version": "authority_curation.v2",
+                "candidate_authority_json": {
+                    "invariants": [],
+                    "assumptions": [],
+                    "gaps": [],
+                },
+            },
+            "full_candidate_forbidden",
+        ),
+    ],
+)
+def test_authority_curate_v2_replays_legacy_failure_shapes(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_result: dict[str, object],
+    reason: str,
+) -> None:
+    """Observed ASA legacy output shapes must fail before diff validation."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: workflow_result,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key=f"curate-v2-replay-{reason}",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["details"]["reason"] == reason
+
+
+def test_authority_curate_v2_fails_gate_when_blocking_feedback_omitted(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v2 candidate cannot pass review with blocking feedback unrepaired."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {"repairs": []},
+            "quality_report": {"status": "passed"},
+        },
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-unresolved-feedback",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SPEC_COMPILE_FAILED"
+
+
 def test_authority_curate_honors_gate_unresolved_feedback_id(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,

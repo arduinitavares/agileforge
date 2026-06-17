@@ -3077,6 +3077,34 @@ def _authority_repair_target_not_found_response(
     )
 
 
+def _authority_repair_feedback_omitted_response(
+    *,
+    context: _PatchApplicationContext,
+    missing_feedback_ids: list[str],
+) -> dict[str, Any]:
+    """Return compile failure when v2 output omits blocking feedback repair."""
+    _append_repair_selection_rejected_trace(
+        context=context,
+        reason="blocking_feedback_omitted",
+        details={"missing_feedback_ids": missing_feedback_ids},
+    )
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.SPEC_COMPILE_FAILED,
+            message="Authority curation did not resolve all blocking feedback.",
+            details={
+                "project_id": context.request.project_id,
+                "curation_attempt_id": context.attempt.curation_attempt_id,
+                "reason": "blocking_feedback_omitted",
+                "missing_feedback_ids": missing_feedback_ids,
+                "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+            },
+        ),
+        correlation_id=context.request.correlation_id,
+    )
+
+
 def _append_repair_selection_rejected_trace(
     *,
     context: _PatchApplicationContext,
@@ -3122,12 +3150,6 @@ def _apply_repair_selections(
             context=context,
             reason="repairs_not_list",
         )
-    candidate = json.loads(json.dumps(source_authority_json))
-    menu_by_handle = {
-        str(item["handle"]): item
-        for item in repair_menu
-        if isinstance(item.get("handle"), str)
-    }
     for index, repair in enumerate(repairs):
         if not isinstance(repair, dict):
             return _authority_repair_intent_invalid_response(
@@ -3135,6 +3157,29 @@ def _apply_repair_selections(
                 reason="invalid_repair",
                 repair_index=index,
             )
+    expected_feedback_ids = {
+        str(item["feedback_id"])
+        for item in repair_menu
+        if isinstance(item.get("feedback_id"), str)
+    }
+    selected_feedback_ids = {
+        str(repair["feedback_id"])
+        for repair in repairs
+        if isinstance(repair.get("feedback_id"), str)
+    }
+    missing_feedback_ids = sorted(expected_feedback_ids - selected_feedback_ids)
+    if missing_feedback_ids:
+        return _authority_repair_feedback_omitted_response(
+            context=context,
+            missing_feedback_ids=missing_feedback_ids,
+        )
+    candidate = json.loads(json.dumps(source_authority_json))
+    menu_by_handle = {
+        str(item["handle"]): item
+        for item in repair_menu
+        if isinstance(item.get("handle"), str)
+    }
+    for index, repair in enumerate(repairs):
         error = _apply_one_repair_selection(
             context=context,
             candidate=candidate,
