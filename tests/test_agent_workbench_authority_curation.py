@@ -405,6 +405,68 @@ def _patch_repair_curation_result(
     }
 
 
+def _v2_selection_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return v2 repair-menu selections instead of model-authored patches."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "contract_version": "authority_curation.v2",
+        "selection_payload": {
+            "repairs": [
+                {
+                    "feedback_id": "AFB-curation-1",
+                    "target_handle": "R1",
+                    "repair_kind": "replace_text",
+                    "replacement_text": (
+                        "Review packets include qualified guard evidence."
+                    ),
+                }
+            ]
+        },
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _v2_full_candidate_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return forbidden v2 full-candidate output."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "contract_version": "authority_curation.v2",
+        "candidate_authority_json": json.loads(_compiled_artifact_json()),
+        "quality_report": {"status": "passed"},
+    }
+
+
+def _v2_unknown_handle_curation_result(
+    fixture: RejectedAuthorityFixture,
+) -> dict[str, object]:
+    """Return v2 selection for a handle not minted by the host."""
+    return {
+        "ok": True,
+        "curation_attempt_id": "curation-fake-result",
+        "project_id": fixture.project_id,
+        "contract_version": "authority_curation.v2",
+        "selection_payload": {
+            "repairs": [
+                {
+                    "feedback_id": "AFB-curation-1",
+                    "target_handle": "R99",
+                    "repair_kind": "replace_text",
+                    "replacement_text": "Unknown handles must fail.",
+                }
+            ]
+        },
+        "quality_report": {"status": "passed"},
+    }
+
+
 def _untargeted_patch_curation_result(
     fixture: RejectedAuthorityFixture,
 ) -> dict[str, object]:
@@ -1996,6 +2058,129 @@ def test_authority_curate_applies_targeted_patches_deterministically(
         "Unrelated assumption remains stable."
     )
     assert json.loads(attempt.candidate_lineage_json) == {"source": "patches"}
+
+
+def test_authority_curate_applies_v2_repair_selection_deterministically(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host applies v2 menu selections without model-authored target paths."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _v2_selection_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-selection",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    invariants = {item["id"]: item for item in candidate["invariants"]}
+    assert invariants["INV-curation-1"]["text"] == (
+        "Review packets include qualified guard evidence."
+    )
+    assert invariants["INV-curation-untargeted"]["text"] == (
+        "Unrelated review packets remain stable."
+    )
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert json.loads(attempt.candidate_lineage_json)["contract_version"] == (
+        "authority_curation.v2"
+    )
+
+
+def test_authority_curate_rejects_v2_full_candidate_output(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2 curation cannot bypass the repair-menu contract with full JSON."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _v2_full_candidate_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-full-candidate-rejected",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
+    assert result["errors"][0]["details"]["reason"] == "full_candidate_forbidden"
+
+
+def test_authority_curate_rejects_v2_unknown_repair_handle(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2 curation can select only handles minted in the host repair menu."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _v2_unknown_handle_curation_result(fixture),
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-unknown-handle-rejected",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
+    assert result["errors"][0]["details"]["reason"] == "unknown_repair_handle"
+    assert result["errors"][0]["details"]["repair_index"] == 0
 
 
 def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedback(

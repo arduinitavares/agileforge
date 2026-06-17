@@ -100,6 +100,7 @@ AUTHORITY_CURATION_STATE_REPAIR_PLAN = "authority_curation_repair_plan"
 AUTHORITY_CURATION_STATE_REPAIR_OUTPUT = "authority_curation_repair_output"
 AUTHORITY_CURATION_STATE_GATE = "authority_curation_gate_decision"
 AUTHORITY_CURATION_FAILURE_PHASE = "authority_curation"
+AUTHORITY_CURATION_CONTRACT_V2 = "authority_curation.v2"
 _INVARIANT_PARAMETERS_ADAPTER = TypeAdapter(InvariantParameters)
 _PATCH_TEXT_FIELDS = (
     "text",
@@ -1474,9 +1475,9 @@ class AuthorityCurationRunner:
             candidate_authority_json=candidate_authority_json,
             diff=diff,
             quality_report=_json_like_or_empty(workflow_result.get("quality_report")),
-            candidate_lineage=_json_like_or_empty(
-                workflow_result.get("candidate_lineage_json"),
-                default=diff["lineage_json"],
+            candidate_lineage=_candidate_lineage_from_workflow_result(
+                workflow_result=workflow_result,
+                diff=diff,
             ),
         )
 
@@ -2820,6 +2821,12 @@ def _candidate_authority_from_workflow_result(
     workflow_result: dict[str, Any],
 ) -> dict[str, Any]:
     """Return full candidate JSON from either full output or patch output."""
+    if workflow_result.get("contract_version") == AUTHORITY_CURATION_CONTRACT_V2:
+        return _candidate_authority_from_v2_selection(
+            context=context,
+            loaded=loaded,
+            workflow_result=workflow_result,
+        )
     candidate = _json_object_from_value(workflow_result.get("candidate_authority_json"))
     if candidate is not None:
         return candidate
@@ -2836,6 +2843,42 @@ def _candidate_authority_from_workflow_result(
         attempt=context.attempt,
         reason="missing_or_invalid_candidate_authority_json",
         mutation_event_id=context.mutation_event_id,
+    )
+
+
+def _candidate_authority_from_v2_selection(
+    *,
+    context: _PatchApplicationContext,
+    loaded: _LoadedCurationInputs,
+    workflow_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply v2 host-menu selections and reject legacy output shapes."""
+    if workflow_result.get("candidate_authority_json") is not None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="full_candidate_forbidden",
+        )
+    if workflow_result.get("patches") is not None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="legacy_patch_forbidden",
+        )
+
+    repair_menu = _build_repair_menu(
+        source_authority_json=loaded.source_authority_json,
+        feedback_json=loaded.feedback_json,
+    )
+    selection_payload = _json_object_from_value(workflow_result.get("selection_payload"))
+    if selection_payload is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="selection_payload_missing",
+        )
+    return _apply_repair_selections(
+        context=context,
+        source_authority_json=loaded.source_authority_json,
+        repair_menu=repair_menu,
+        selection_payload=selection_payload,
     )
 
 
@@ -2895,6 +2938,287 @@ def _unsafe_curation_patch_response(
         ),
         correlation_id=context.request.correlation_id,
     )
+
+
+def _authority_repair_intent_invalid_response(
+    *,
+    context: _PatchApplicationContext,
+    reason: str,
+    repair_index: int | None = None,
+    details: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    """Return fail-closed response for invalid v2 repair-menu output."""
+    response_details: dict[str, object] = {
+        "project_id": context.request.project_id,
+        "curation_attempt_id": context.attempt.curation_attempt_id,
+        "reason": reason,
+        "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+    }
+    if repair_index is not None:
+        response_details["repair_index"] = repair_index
+    if details is not None:
+        response_details.update(details)
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID,
+            message="Authority curation produced an invalid repair selection.",
+            details=response_details,
+        ),
+        correlation_id=context.request.correlation_id,
+    )
+
+
+def _authority_repair_target_not_found_response(
+    *,
+    context: _PatchApplicationContext,
+    reason: str,
+    repair_index: int,
+    details: dict[str, object],
+) -> dict[str, Any]:
+    """Return fail-closed response for stale or missing v2 repair targets."""
+    response_details: dict[str, object] = {
+        "project_id": context.request.project_id,
+        "curation_attempt_id": context.attempt.curation_attempt_id,
+        "reason": reason,
+        "repair_index": repair_index,
+        "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+    }
+    response_details.update(details)
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND,
+            message="Authority repair menu target was not found.",
+            details=response_details,
+        ),
+        correlation_id=context.request.correlation_id,
+    )
+
+
+def _apply_repair_selections(
+    *,
+    context: _PatchApplicationContext,
+    source_authority_json: dict[str, Any],
+    repair_menu: list[dict[str, Any]],
+    selection_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply v2 model selections through host-minted repair menu handles."""
+    repairs = selection_payload.get("repairs")
+    if not isinstance(repairs, list):
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="repairs_not_list",
+        )
+    candidate = json.loads(json.dumps(source_authority_json))
+    menu_by_handle = {
+        str(item["handle"]): item
+        for item in repair_menu
+        if isinstance(item.get("handle"), str)
+    }
+    for index, repair in enumerate(repairs):
+        if not isinstance(repair, dict):
+            return _authority_repair_intent_invalid_response(
+                context=context,
+                reason="invalid_repair",
+                repair_index=index,
+            )
+        error = _apply_one_repair_selection(
+            context=context,
+            candidate=candidate,
+            menu_by_handle=menu_by_handle,
+            repair=cast("dict[str, Any]", repair),
+            repair_index=index,
+        )
+        if error is not None:
+            return error
+    return candidate
+
+
+def _apply_one_repair_selection(
+    *,
+    context: _PatchApplicationContext,
+    candidate: dict[str, Any],
+    menu_by_handle: dict[str, dict[str, Any]],
+    repair: dict[str, Any],
+    repair_index: int,
+) -> dict[str, Any] | None:
+    """Validate and apply one selected v2 repair handle."""
+    forbidden_keys = {
+        "target_id",
+        "target_kind",
+        "op",
+        "path",
+        "value",
+        "patches",
+        "candidate_authority_json",
+    }
+    if forbidden_keys.intersection(repair):
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="model_authored_target_forbidden",
+            repair_index=repair_index,
+        )
+
+    handle = _string_or_none(repair.get("target_handle"))
+    feedback_id = _string_or_none(repair.get("feedback_id"))
+    repair_kind = _string_or_none(repair.get("repair_kind"))
+    if handle is None or feedback_id is None or repair_kind is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="invalid_repair",
+            repair_index=repair_index,
+        )
+    menu_item = menu_by_handle.get(handle)
+    if menu_item is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="unknown_repair_handle",
+            repair_index=repair_index,
+            details={"target_handle": handle},
+        )
+    if menu_item.get("feedback_id") != feedback_id:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="feedback_id_mismatch",
+            repair_index=repair_index,
+            details={"target_handle": handle},
+        )
+    allowed_repair_kinds = menu_item.get("allowed_repair_kinds")
+    if (
+        not isinstance(allowed_repair_kinds, list)
+        or repair_kind not in allowed_repair_kinds
+    ):
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="repair_kind_not_allowed",
+            repair_index=repair_index,
+            details={"target_handle": handle, "repair_kind": repair_kind},
+        )
+    if repair_kind == "mark_unresolvable":
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="feedback_marked_unresolvable",
+            repair_index=repair_index,
+            details={"target_handle": handle},
+        )
+    if repair_kind != "replace_text":
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="unsupported_repair_kind",
+            repair_index=repair_index,
+            details={"target_handle": handle, "repair_kind": repair_kind},
+        )
+    replacement_text = _string_or_none(repair.get("replacement_text"))
+    if replacement_text is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="replacement_text_missing",
+            repair_index=repair_index,
+            details={"target_handle": handle},
+        )
+    return _apply_replace_text_selection(
+        context=context,
+        candidate=candidate,
+        menu_item=menu_item,
+        replacement_text=replacement_text,
+        repair_index=repair_index,
+    )
+
+
+def _apply_replace_text_selection(
+    *,
+    context: _PatchApplicationContext,
+    candidate: dict[str, Any],
+    menu_item: dict[str, Any],
+    replacement_text: str,
+    repair_index: int,
+) -> dict[str, Any] | None:
+    """Apply one validated text repair to its exact host-bound field."""
+    target_kind = _string_or_none(menu_item.get("target_kind"))
+    target_id = _string_or_none(menu_item.get("target_id"))
+    target_field = _string_or_none(menu_item.get("target_field"))
+    handle = _string_or_none(menu_item.get("handle")) or ""
+    if target_kind is None or target_id is None or target_field is None:
+        return _authority_repair_intent_invalid_response(
+            context=context,
+            reason="invalid_repair_menu_entry",
+            repair_index=repair_index,
+            details={"target_handle": handle},
+        )
+    target = _find_patch_target(
+        candidate,
+        target_kind=target_kind,
+        target_id=target_id,
+    )
+    if target is None:
+        return _authority_repair_target_not_found_response(
+            context=context,
+            reason="repair_target_not_found",
+            repair_index=repair_index,
+            details=_repair_selection_error_details(
+                target_kind=target_kind,
+                target_id=target_id,
+                target_handle=handle,
+            ),
+        )
+    container, index, item = target
+    current_text = _target_text_value(item, target_field=target_field)
+    expected_hash = _string_or_none(menu_item.get("target_content_hash"))
+    if current_text is None:
+        return _authority_repair_target_not_found_response(
+            context=context,
+            reason="repair_target_not_textual",
+            repair_index=repair_index,
+            details=_repair_selection_error_details(
+                target_kind=target_kind,
+                target_id=target_id,
+                target_handle=handle,
+            ),
+        )
+    if expected_hash is not None and _content_hash(current_text) != expected_hash:
+        return _authority_repair_target_not_found_response(
+            context=context,
+            reason="repair_target_content_changed",
+            repair_index=repair_index,
+            details=_repair_selection_error_details(
+                target_kind=target_kind,
+                target_id=target_id,
+                target_handle=handle,
+            ),
+        )
+    if isinstance(item, str):
+        container[index] = replacement_text
+        return None
+    if not isinstance(item, dict):
+        return _authority_repair_target_not_found_response(
+            context=context,
+            reason="repair_target_not_structured",
+            repair_index=repair_index,
+            details=_repair_selection_error_details(
+                target_kind=target_kind,
+                target_id=target_id,
+                target_handle=handle,
+            ),
+        )
+    item_payload = cast("dict[str, Any]", item)
+    item_payload[target_field] = replacement_text
+    _recompute_invariant_id_if_possible(item_payload, target_kind=target_kind)
+    return None
+
+
+def _repair_selection_error_details(
+    *,
+    target_kind: str,
+    target_id: str,
+    target_handle: str,
+) -> dict[str, object]:
+    """Return bounded repair-selection target metadata."""
+    return {
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "target_handle": target_handle,
+    }
 
 
 def _apply_candidate_patch(
@@ -3476,6 +3800,33 @@ def _json_like_or_empty(value: object, *, default: object | None = None) -> obje
     if isinstance(value, dict | list):
         return value
     return default if default is not None else {}
+
+
+def _candidate_lineage_from_workflow_result(
+    *,
+    workflow_result: dict[str, Any],
+    diff: dict[str, Any],
+) -> object:
+    """Return candidate lineage with v2 repair-menu provenance when absent."""
+    explicit = _json_like_or_empty(workflow_result.get("candidate_lineage_json"))
+    if explicit != {}:
+        return explicit
+    if workflow_result.get("contract_version") == AUTHORITY_CURATION_CONTRACT_V2:
+        selection_payload = _json_object_from_value(
+            workflow_result.get("selection_payload")
+        )
+        repairs = (
+            selection_payload.get("repairs")
+            if selection_payload is not None
+            else None
+        )
+        repair_count = len(repairs) if isinstance(repairs, list) else 0
+        return {
+            "contract_version": AUTHORITY_CURATION_CONTRACT_V2,
+            "repair_count": repair_count,
+            "lineage_json": diff["lineage_json"],
+        }
+    return diff["lineage_json"]
 
 
 def _string_or_none(value: object) -> str | None:
