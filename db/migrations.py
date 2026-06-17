@@ -1600,6 +1600,7 @@ AUTHORITY_CURATION_ATTEMPTS_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS authority_curation_attempts (
     curation_row_id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES products(product_id),
+    mutation_event_id INTEGER,
     curation_attempt_id VARCHAR NOT NULL,
     source_authority_id INTEGER NOT NULL,
     source_authority_fingerprint VARCHAR NOT NULL,
@@ -1698,6 +1699,37 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     return actions
 
 
+def _ensure_authority_curation_indexes(
+    engine: Engine,
+    table_name: str,
+    regular_indexes: tuple[tuple[str, list[str], str], ...],
+    unique_indexes: tuple[tuple[str, list[str], str], ...] = (),
+    partial_unique_indexes: tuple[tuple[str, list[str], str, str], ...] = (),
+) -> list[str]:
+    """Ensure authority curation indexes exist and return migration actions."""
+    actions: list[str] = []
+
+    for index_name, columns, action in regular_indexes:
+        if _ensure_index_exists(engine, table_name, index_name, columns):
+            actions.append(action)
+
+    for index_name, columns, action in unique_indexes:
+        if _ensure_unique_index_exists(engine, table_name, index_name, columns):
+            actions.append(action)
+
+    for index_name, columns, where, action in partial_unique_indexes:
+        if _ensure_partial_unique_index_exists(
+            engine,
+            table_name,
+            index_name,
+            columns,
+            where,
+        ):
+            actions.append(action)
+
+    return actions
+
+
 def migrate_authority_curation_tables(engine: Engine) -> list[str]:
     """Ensure authority curation feedback and attempt tables exist."""
     actions: list[str] = []
@@ -1709,31 +1741,32 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
     ):
         actions.append("created table: authority_feedback_attempts")
 
-    if _ensure_index_exists(
-        engine,
-        "authority_feedback_attempts",
-        "ix_authority_feedback_project_status",
-        ["project_id", "status"],
-    ):
-        actions.append("created index: ix_authority_feedback_project_status")
-
-    if _ensure_index_exists(
-        engine,
-        "authority_feedback_attempts",
-        "ix_authority_feedback_source_authority",
-        ["source_authority_id"],
-    ):
-        actions.append("created index: ix_authority_feedback_source_authority")
-
-    if _ensure_unique_index_exists(
-        engine,
-        "authority_feedback_attempts",
-        "uq_authority_feedback_project_idempotency",
-        ["project_id", "idempotency_key"],
-    ):
-        actions.append(
-            "created unique index: uq_authority_feedback_project_idempotency"
+    actions.extend(
+        _ensure_authority_curation_indexes(
+            engine,
+            "authority_feedback_attempts",
+            (
+                (
+                    "ix_authority_feedback_project_status",
+                    ["project_id", "status"],
+                    "created index: ix_authority_feedback_project_status",
+                ),
+                (
+                    "ix_authority_feedback_source_authority",
+                    ["source_authority_id"],
+                    "created index: ix_authority_feedback_source_authority",
+                ),
+            ),
+            (
+                (
+                    "uq_authority_feedback_project_idempotency",
+                    ["project_id", "idempotency_key"],
+                    "created unique index: "
+                    "uq_authority_feedback_project_idempotency",
+                ),
+            ),
         )
+    )
 
     if _ensure_table_exists(
         engine,
@@ -1742,43 +1775,54 @@ def migrate_authority_curation_tables(engine: Engine) -> list[str]:
     ):
         actions.append("created table: authority_curation_attempts")
 
-    if _ensure_index_exists(
+    if _ensure_column_exists(
         engine,
         "authority_curation_attempts",
-        "ix_authority_curation_project_status",
-        ["project_id", "status"],
+        "mutation_event_id",
+        "INTEGER",
     ):
-        actions.append("created index: ix_authority_curation_project_status")
+        actions.append("added column: authority_curation_attempts.mutation_event_id")
 
-    if _ensure_index_exists(
-        engine,
-        "authority_curation_attempts",
-        "ix_authority_curation_source_authority",
-        ["source_authority_id"],
-    ):
-        actions.append("created index: ix_authority_curation_source_authority")
-
-    if _ensure_unique_index_exists(
-        engine,
-        "authority_curation_attempts",
-        "uq_authority_curation_project_idempotency",
-        ["project_id", "idempotency_key"],
-    ):
-        actions.append(
-            "created unique index: uq_authority_curation_project_idempotency"
+    actions.extend(
+        _ensure_authority_curation_indexes(
+            engine,
+            "authority_curation_attempts",
+            (
+                (
+                    "ix_authority_curation_project_status",
+                    ["project_id", "status"],
+                    "created index: ix_authority_curation_project_status",
+                ),
+                (
+                    "ix_authority_curation_mutation_event_id",
+                    ["mutation_event_id"],
+                    "created index: ix_authority_curation_mutation_event_id",
+                ),
+                (
+                    "ix_authority_curation_source_authority",
+                    ["source_authority_id"],
+                    "created index: ix_authority_curation_source_authority",
+                ),
+            ),
+            (
+                (
+                    "uq_authority_curation_project_idempotency",
+                    ["project_id", "idempotency_key"],
+                    "created unique index: "
+                    "uq_authority_curation_project_idempotency",
+                ),
+            ),
+            (
+                (
+                    "uq_authority_curation_running_authority",
+                    ["project_id", "source_authority_id"],
+                    "status = 'running'",
+                    "created partial unique index: "
+                    "uq_authority_curation_running_authority",
+                ),
+            ),
         )
-
-    if _ensure_partial_unique_index_exists(
-        engine,
-        "authority_curation_attempts",
-        "uq_authority_curation_running_authority",
-        ["project_id", "source_authority_id"],
-        "status = 'running'",
-    ):
-        actions.append(
-            "created partial unique index: "
-            "uq_authority_curation_running_authority"
-        )
+    )
 
     return actions
 

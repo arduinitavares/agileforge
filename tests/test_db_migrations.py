@@ -201,6 +201,7 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     assert {
         "curation_row_id",
         "project_id",
+        "mutation_event_id",
         "curation_attempt_id",
         "source_authority_id",
         "source_authority_fingerprint",
@@ -242,6 +243,7 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
         for index in inspector.get_indexes("authority_curation_attempts")
     }
     assert "ix_authority_curation_project_status" in curation_indexes
+    assert "ix_authority_curation_mutation_event_id" in curation_indexes
     assert "ix_authority_curation_source_authority" in curation_indexes
     assert "uq_authority_curation_running_authority" in curation_indexes
     assert _has_unique_columns(
@@ -259,6 +261,66 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
         "project_id",
         "source_authority_id",
     )
+
+
+def test_authority_curation_migration_updates_legacy_attempt_table(
+    tmp_path: Path,
+) -> None:
+    """Existing curation attempt storage gains mutation linkage."""
+    engine = _create_min_runtime_schema(
+        f"sqlite:///{(tmp_path / 'legacy-authority-curation.sqlite3').as_posix()}"
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE authority_curation_attempts (
+                    curation_row_id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES products(product_id),
+                    curation_attempt_id VARCHAR NOT NULL,
+                    source_authority_id INTEGER NOT NULL,
+                    source_authority_fingerprint VARCHAR NOT NULL,
+                    spec_version_id INTEGER NOT NULL,
+                    feedback_attempt_id VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'running',
+                    max_iterations INTEGER NOT NULL DEFAULT 2,
+                    iteration_count INTEGER NOT NULL DEFAULT 0,
+                    compiler_model VARCHAR,
+                    candidate_authority_id INTEGER,
+                    candidate_authority_fingerprint VARCHAR,
+                    request_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_lineage_json TEXT NOT NULL DEFAULT '{}',
+                    diff_summary_json TEXT NOT NULL DEFAULT '{}',
+                    lineage_json TEXT NOT NULL DEFAULT '{}',
+                    quality_report_json TEXT NOT NULL DEFAULT '{}',
+                    failure_artifact_id VARCHAR,
+                    request_hash VARCHAR NOT NULL,
+                    idempotency_key VARCHAR NOT NULL,
+                    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT uq_authority_curation_project_attempt
+                        UNIQUE (project_id, curation_attempt_id),
+                    CONSTRAINT uq_authority_curation_project_idempotency
+                        UNIQUE (project_id, idempotency_key)
+                )
+                """
+            )
+        )
+
+    ensure_schema_current(engine)
+
+    inspector = inspect(engine)
+    curation_columns = {
+        column["name"]
+        for column in inspector.get_columns("authority_curation_attempts")
+    }
+    curation_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("authority_curation_attempts")
+    }
+    assert "mutation_event_id" in curation_columns
+    assert "ix_authority_curation_mutation_event_id" in curation_indexes
 
 
 def _has_unique_columns(

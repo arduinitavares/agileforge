@@ -144,6 +144,7 @@ AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
         columns=(
             "curation_row_id",
             "project_id",
+            "mutation_event_id",
             "curation_attempt_id",
             "source_authority_id",
             "source_authority_fingerprint",
@@ -169,6 +170,7 @@ AUTHORITY_CURATION_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
         ),
         indexes=(
             "ix_authority_curation_project_status",
+            "ix_authority_curation_mutation_event_id",
             "ix_authority_curation_source_authority",
             AUTHORITY_CURATION_RUNNING_INDEX,
         ),

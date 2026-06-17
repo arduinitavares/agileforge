@@ -75,6 +75,7 @@ class AuthorityCurationAttempt(SQLModel, table=True):
             name="uq_authority_curation_project_idempotency",
         ),
         Index("ix_authority_curation_project_status", "project_id", "status"),
+        Index("ix_authority_curation_mutation_event_id", "mutation_event_id"),
         Index("ix_authority_curation_source_authority", "source_authority_id"),
         Index(
             "uq_authority_curation_running_authority",
@@ -87,6 +88,7 @@ class AuthorityCurationAttempt(SQLModel, table=True):
 
     curation_row_id: int | None = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="products.product_id")
+    mutation_event_id: int | None = Field(default=None)
     curation_attempt_id: str
     source_authority_id: int
     source_authority_fingerprint: str

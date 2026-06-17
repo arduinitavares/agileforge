@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel
 
 from models.core import Product
@@ -134,6 +135,58 @@ def test_authority_curation_readiness_requires_idempotency_uniqueness() -> None:
         "uq_authority_curation_running_authority"
         in requirements_by_table["authority_curation_attempts"].indexes
     )
+
+
+def test_authority_curation_readiness_requires_mutation_event_id(
+    engine: Engine,
+) -> None:
+    """Authority curation readiness requires the attempt-to-mutation link."""
+    SQLModel.metadata.create_all(engine)
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE authority_curation_attempts"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE authority_curation_attempts (
+                    curation_row_id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    curation_attempt_id VARCHAR NOT NULL,
+                    source_authority_id INTEGER NOT NULL,
+                    source_authority_fingerprint VARCHAR NOT NULL,
+                    spec_version_id INTEGER NOT NULL,
+                    feedback_attempt_id VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'running',
+                    max_iterations INTEGER NOT NULL DEFAULT 2,
+                    iteration_count INTEGER NOT NULL DEFAULT 0,
+                    compiler_model VARCHAR,
+                    candidate_authority_id INTEGER,
+                    candidate_authority_fingerprint VARCHAR,
+                    request_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_lineage_json TEXT NOT NULL DEFAULT '{}',
+                    diff_summary_json TEXT NOT NULL DEFAULT '{}',
+                    lineage_json TEXT NOT NULL DEFAULT '{}',
+                    quality_report_json TEXT NOT NULL DEFAULT '{}',
+                    failure_artifact_id VARCHAR,
+                    request_hash VARCHAR NOT NULL,
+                    idempotency_key VARCHAR NOT NULL,
+                    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+    result = check_schema_readiness(engine, AUTHORITY_CURATION_REQUIREMENTS)
+
+    assert result.ok is False
+    missing_elements = {
+        f"{table}.{element}"
+        for table, elements in result.missing.items()
+        for element in elements
+    }
+    assert "authority_curation_attempts.mutation_event_id" in missing_elements
 
 
 def test_schema_requirement_rejects_bare_string_columns() -> None:
