@@ -3932,7 +3932,7 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default curate path must invoke ADK adapter instead of dead command stub."""
+    """Default curate path must invoke ADK adapter with the v2 repair menu."""
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -3944,7 +3944,6 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
         },
     )
     captured: dict[str, object] = {}
-    candidate = _targeted_repair_curation_result(fixture)["candidate_authority_json"]
 
     def fake_invoke(
         *,
@@ -3963,7 +3962,19 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
             "state": {
                 "authority_curation_repair_output": {
                     "mode": "targeted",
-                    "candidate_authority_json": candidate,
+                    "selection_payload": {
+                        "repairs": [
+                            {
+                                "feedback_id": "AFB-curation-1",
+                                "target_handle": "R1",
+                                "repair_kind": "replace_text",
+                                "replacement_text": (
+                                    "Review packets include qualified guard "
+                                    "evidence."
+                                ),
+                            }
+                        ]
+                    },
                     "resolved_feedback_ids": ["AFB-curation-1"],
                     "unresolved_feedback_ids": [],
                 },
@@ -3998,6 +4009,9 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
     payload = cast("dict[str, object]", captured["payload"])
     assert payload["source_authority_id"] == fixture.authority_id
     assert payload["source_authority_json"] == json.loads(_compiled_artifact_json())
+    assert payload["contract_version"] == "authority_curation.v2"
+    repair_menu = cast("list[dict[str, object]]", payload["repair_menu"])
+    assert repair_menu[0]["handle"] == "R1"
     assert payload["feedback_json"] == {
         "feedback_items": [
             {
@@ -4023,7 +4037,7 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default ADK adapter should pass patch output to host patch applier."""
+    """Default ADK adapter should pass v2 selections to the host applier."""
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -4051,16 +4065,19 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
             "state": {
                 "authority_curation_repair_output": {
                     "mode": "targeted",
-                    "patches": [
-                        {
-                            "target_kind": "invariant",
-                            "target_id": "INV-curation-1",
-                            "op": "replace_text",
-                            "new_text": (
-                                "Review packets include qualified guard evidence."
-                            ),
-                        }
-                    ],
+                    "selection_payload": {
+                        "repairs": [
+                            {
+                                "feedback_id": "AFB-curation-1",
+                                "target_handle": "R1",
+                                "repair_kind": "replace_text",
+                                "replacement_text": (
+                                    "Review packets include qualified guard "
+                                    "evidence."
+                                ),
+                            }
+                        ]
+                    },
                     "resolved_feedback_ids": ["AFB-curation-1"],
                     "unresolved_feedback_ids": [],
                 },
@@ -4131,16 +4148,19 @@ def test_authority_curate_ignores_gate_unresolved_ids_outside_feedback(
             "state": {
                 "authority_curation_repair_output": {
                     "mode": "targeted",
-                    "patches": [
-                        {
-                            "target_kind": "invariant",
-                            "target_id": "INV-curation-1",
-                            "op": "replace_text",
-                            "new_text": (
-                                "Review packets include qualified guard evidence."
-                            ),
-                        }
-                    ],
+                    "selection_payload": {
+                        "repairs": [
+                            {
+                                "feedback_id": "AFB-curation-1",
+                                "target_handle": "R1",
+                                "repair_kind": "replace_text",
+                                "replacement_text": (
+                                    "Review packets include qualified guard "
+                                    "evidence."
+                                ),
+                            }
+                        ]
+                    },
                     "resolved_feedback_ids": ["AFB-curation-1"],
                     "unresolved_feedback_ids": [],
                 },
@@ -4175,6 +4195,100 @@ def test_authority_curate_ignores_gate_unresolved_ids_outside_feedback(
     with Session(engine) as session:
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
     assert attempt.status == "succeeded"
+
+
+def test_authority_curate_v2_passes_repair_menu_to_workflow(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host must pass the bounded v2 repair menu into the workflow."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    captured: dict[str, object] = {}
+
+    def fake_workflow(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {
+                "repairs": [
+                    {
+                        "feedback_id": "AFB-curation-1",
+                        "target_handle": "R1",
+                        "repair_kind": "replace_text",
+                        "replacement_text": (
+                            "Review packets include qualified guard evidence."
+                        ),
+                    }
+                ]
+            },
+            "quality_report": {"status": "passed"},
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_workflow,
+    )
+    fake_workflow_port = FakeWorkflowPort()
+    fake_workflow_port.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow_port)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-menu-input",
+        )
+    )
+
+    assert result["ok"] is True
+    assert captured["contract_version"] == "authority_curation.v2"
+    repair_menu = cast("list[dict[str, object]]", captured["repair_menu"])
+    assert repair_menu[0]["handle"] == "R1"
+    assert "candidate_authority_json" not in repair_menu[0]
+    assert "patches" not in repair_menu[0]
+
+
+def test_authority_curate_kill_switch_returns_fail_no_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-model test mode must fail before provider invocation."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    monkeypatch.setenv("AGILEFORGE_AUTHORITY_CURATION_MODE", "fail_no_candidate")
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation._invoke_authority_curation_workflow",
+        lambda **_: pytest.fail("kill switch must not invoke ADK"),
+    )
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-v2-kill-switch",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "SPEC_COMPILE_FAILED"
+    assert result["errors"][0]["details"]["failure_reason"] == "fail_no_candidate"
 
 
 def test_authority_curate_honors_gate_unresolved_feedback_id(

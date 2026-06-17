@@ -71,6 +71,7 @@ class AuthorityCurationRepairMenuEntry(_StrictModel):
     overlay_target_key: str = Field(min_length=1)
     allowed_repair_kinds: list[Literal["replace_text", "mark_unresolvable"]]
     target_content_hash: str | None = Field(default=None, min_length=1)
+    not_repairable_reason: str | None = Field(default=None, min_length=1)
 
 
 class AuthorityCurationRepairSelection(_StrictModel):

@@ -235,6 +235,32 @@ def test_validate_workflow_input_returns_strict_model() -> None:
     assert validated.max_iterations == EXPECTED_MAX_ITERATIONS
 
 
+def test_workflow_input_accepts_not_repairable_menu_entries() -> None:
+    """Host-built structural menu entries must survive strict ADK validation."""
+    payload = _valid_workflow_payload()
+    payload["contract_version"] = "authority_curation.v2"
+    payload["repair_menu"] = [
+        {
+            "handle": "R1",
+            "feedback_id": "AFB-param",
+            "target_kind": "invariant",
+            "target_id": "INV-1",
+            "target_field": "text",
+            "target_review_label": "INV-1",
+            "overlay_target_key": "REQ-1:invariant:text:0",
+            "allowed_repair_kinds": ["mark_unresolvable"],
+            "target_content_hash": "sha256:" + ("a" * 64),
+            "not_repairable_reason": "structural_repair_deferred",
+        }
+    ]
+
+    validated = AuthorityCurationWorkflowInput.model_validate(payload)
+
+    assert validated.repair_menu[0].not_repairable_reason == (
+        "structural_repair_deferred"
+    )
+
+
 def test_authority_curation_workflow_uses_loop_agent_contract() -> None:
     """The factory builds an ordered ADK Workflow without invoking a model."""
     workflow = build_authority_curation_workflow(model="test-model")

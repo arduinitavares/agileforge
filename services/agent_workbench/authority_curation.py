@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
@@ -1093,6 +1094,18 @@ class AuthorityCurationRunner:
             attributes=_curation_trace_attributes(request),
         )
 
+        repair_menu = _build_repair_menu(
+            source_authority_json=loaded_inputs.source_authority_json,
+            feedback_json=loaded_inputs.feedback_json,
+        )
+        menu_fingerprint = _fingerprint_json(repair_menu)
+        _update_running_curation_attempt_metadata(
+            engine=self._engine,
+            curation_attempt_id=attempt.curation_attempt_id,
+            contract_version=AUTHORITY_CURATION_CONTRACT_V2,
+            menu_fingerprint=menu_fingerprint,
+        )
+
         try:
             with _trace_step_safely(
                 mutation_event_id=active_mutation.mutation_event_id,
@@ -1110,6 +1123,9 @@ class AuthorityCurationRunner:
                     source_authority_json=loaded_inputs.source_authority_json,
                     feedback_json=loaded_inputs.feedback_json,
                     mutation_event_id=active_mutation.mutation_event_id,
+                    contract_version=AUTHORITY_CURATION_CONTRACT_V2,
+                    repair_menu=repair_menu,
+                    menu_fingerprint=menu_fingerprint,
                 )
         except Exception as exc:  # noqa: BLE001
             response = error_envelope(
@@ -2162,6 +2178,29 @@ def _apply_curation_attempt_metadata(
     overlay_json = metadata.get("overlay_json")
     if isinstance(overlay_json, dict):
         row.overlay_json = _canonical_json(overlay_json)
+
+
+def _update_running_curation_attempt_metadata(
+    *,
+    engine: Engine,
+    curation_attempt_id: str,
+    contract_version: str,
+    menu_fingerprint: str,
+) -> None:
+    """Persist v2 invocation metadata before model execution starts."""
+    with Session(engine) as session:
+        row = session.exec(
+            select(AuthorityCurationAttempt).where(
+                AuthorityCurationAttempt.curation_attempt_id == curation_attempt_id
+            )
+        ).first()
+        if row is None:
+            return
+        row.contract_version = contract_version
+        row.menu_fingerprint = menu_fingerprint
+        row.updated_at = datetime.now(UTC)
+        session.add(row)
+        session.commit()
 
 
 def _required_curation_attempt_for_publication(
@@ -4038,6 +4077,9 @@ def _failed_curation_workflow_response(
     }
     if failure_artifact_id is not None:
         details["failure_artifact_id"] = failure_artifact_id
+    failure_reason = _string_or_none(workflow_result.get("failure_reason"))
+    if failure_reason is not None:
+        details["failure_reason"] = failure_reason
     return error_envelope(
         command=AUTHORITY_CURATE_COMMAND,
         error=workbench_error(
@@ -4390,6 +4432,11 @@ def _authority_curation_model_id(request: AuthorityCurationRequest) -> str:
     return str(model_config_module.get_model_id("spec_authority_compiler"))
 
 
+def _authority_curation_mode() -> str:
+    """Return the host curation execution mode."""
+    return os.getenv("AGILEFORGE_AUTHORITY_CURATION_MODE", "repair_menu")
+
+
 async def _invoke_authority_curation_workflow_async(
     *,
     payload: dict[str, object],
@@ -4496,6 +4543,9 @@ def run_authority_curation_workflow(
     source_authority_json: dict[str, Any],
     feedback_json: str,
     mutation_event_id: int | None = None,
+    contract_version: str = AUTHORITY_CURATION_CONTRACT_V2,
+    repair_menu: list[dict[str, Any]] | None = None,
+    menu_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Run the ADK authority curation workflow and normalize its output."""
     feedback_payload = _json_object_from_value(feedback_json)
@@ -4511,6 +4561,37 @@ def run_authority_curation_workflow(
             ),
         )
 
+    if _authority_curation_mode() == "fail_no_candidate":
+        result = _curation_workflow_failure_result(
+            request=request,
+            curation_attempt_id=curation_attempt_id,
+            failure=_CurationWorkflowFailure(
+                error_code=ErrorCode.SPEC_COMPILE_FAILED,
+                failure_stage="host_kill_switch",
+                failure_summary=(
+                    "Authority curation stopped before model invocation."
+                ),
+                model_info={"requested_model_id": "not_invoked"},
+                extra={
+                    "failure_reason": "fail_no_candidate",
+                    "menu_fingerprint": menu_fingerprint,
+                },
+                trace_artifact_id=(
+                    trace_artifact_id(mutation_event_id)
+                    if mutation_event_id is not None
+                    else None
+                ),
+            ),
+        )
+        result["failure_reason"] = "fail_no_candidate"
+        return result
+
+    workflow_repair_menu = repair_menu
+    if workflow_repair_menu is None:
+        workflow_repair_menu = _build_repair_menu(
+            source_authority_json=source_authority_json,
+            feedback_json=feedback_json,
+        )
     payload: dict[str, object] = {
         "project_id": request.project_id,
         "spec_version_id": request.spec_version_id,
@@ -4520,6 +4601,8 @@ def run_authority_curation_workflow(
         ),
         "source_authority_json": source_authority_json,
         "feedback_json": feedback_payload,
+        "repair_menu": workflow_repair_menu,
+        "contract_version": contract_version,
         "max_iterations": request.max_iterations,
     }
     model_id = _authority_curation_model_id(request)
@@ -4586,7 +4669,37 @@ def run_authority_curation_workflow(
             repair_output.get("candidate_authority_json")
         )
         patches = repair_output.get("patches")
-        if candidate is not None or isinstance(patches, list):
+        selection_payload = _json_object_from_value(
+            repair_output.get("selection_payload")
+        )
+        if contract_version == AUTHORITY_CURATION_CONTRACT_V2:
+            if selection_payload is not None:
+                return {
+                    "ok": True,
+                    "contract_version": AUTHORITY_CURATION_CONTRACT_V2,
+                    "curation_attempt_id": curation_attempt_id,
+                    "project_id": request.project_id,
+                    "selection_payload": selection_payload,
+                    "quality_report": _curation_quality_report(
+                        invocation=invocation,
+                        state=state,
+                        gate=gate,
+                        repair_output=repair_output,
+                    ),
+                    "candidate_lineage_json": {
+                        "source_authority_id": request.source_authority_id,
+                        "curation_attempt_id": curation_attempt_id,
+                        "resolved_feedback_ids": repair_output.get(
+                            "resolved_feedback_ids",
+                            [],
+                        ),
+                        "unresolved_feedback_ids": repair_output.get(
+                            "unresolved_feedback_ids",
+                            [],
+                        ),
+                    },
+                }
+        elif candidate is not None or isinstance(patches, list):
             return {
                 "ok": True,
                 "curation_attempt_id": curation_attempt_id,
