@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import inspect, text
 from sqlmodel import Session, select
 
 import services.agent_workbench.authority_curation as curation_mod
@@ -71,6 +72,77 @@ class FakeWorkflowPort:
         current = dict(self.state.get(session_id, {}))
         current.update(partial_update)
         self.state[session_id] = current
+
+
+def test_authority_curation_runner_ensures_business_db_ready(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner construction migrates curation tables before any DB access."""
+    calls: list[Engine] = []
+
+    def fake_business_db_ready(*, engine_override: Engine | None = None) -> None:
+        assert engine_override is not None
+        calls.append(engine_override)
+
+    monkeypatch.setattr(
+        curation_mod,
+        "ensure_business_db_ready",
+        fake_business_db_ready,
+    )
+
+    AuthorityCurationRunner(engine=engine)
+
+    assert calls == [engine]
+
+
+def test_authority_curation_runner_repairs_legacy_missing_mutation_event_id(
+    engine: Engine,
+) -> None:
+    """Runner construction repairs legacy curation tables before recovery queries."""
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS authority_curation_attempts"))
+        connection.execute(
+            text(
+                """
+                CREATE TABLE authority_curation_attempts (
+                    curation_row_id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    curation_attempt_id VARCHAR NOT NULL,
+                    source_authority_id INTEGER NOT NULL,
+                    source_authority_fingerprint VARCHAR NOT NULL,
+                    spec_version_id INTEGER NOT NULL,
+                    feedback_attempt_id VARCHAR NOT NULL,
+                    status VARCHAR DEFAULT 'running' NOT NULL,
+                    max_iterations INTEGER DEFAULT 2 NOT NULL,
+                    iteration_count INTEGER DEFAULT 0 NOT NULL,
+                    compiler_model VARCHAR,
+                    candidate_authority_id INTEGER,
+                    candidate_authority_fingerprint VARCHAR,
+                    request_json TEXT DEFAULT '{}' NOT NULL,
+                    candidate_lineage_json TEXT DEFAULT '{}' NOT NULL,
+                    diff_summary_json TEXT DEFAULT '{}' NOT NULL,
+                    lineage_json TEXT DEFAULT '{}' NOT NULL,
+                    quality_report_json TEXT DEFAULT '{}' NOT NULL,
+                    failure_artifact_id VARCHAR,
+                    request_hash VARCHAR NOT NULL,
+                    idempotency_key VARCHAR NOT NULL,
+                    changed_by VARCHAR DEFAULT 'cli-agent' NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+    AuthorityCurationRunner(engine=engine)
+
+    inspector = inspect(engine)
+    curation_columns = {
+        column["name"]
+        for column in inspector.get_columns("authority_curation_attempts")
+    }
+    assert "mutation_event_id" in curation_columns
 
 
 def _compiled_artifact_json() -> str:
