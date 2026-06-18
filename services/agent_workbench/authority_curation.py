@@ -3014,11 +3014,59 @@ def _candidate_authority_from_v2_selection(
         repair_menu=repair_menu,
         selection_payload=selection_payload,
     )
-    return _apply_repair_selections(
+    candidate = _apply_repair_selections(
         context=context,
         source_authority_json=loaded.source_authority_json,
         repair_menu=repair_menu,
         selection_payload=selection_payload,
+    )
+    if isinstance(candidate, dict) and candidate.get("ok") is False:
+        return candidate
+    gate_failure = _v2_gate_failure_after_valid_selection(
+        context=context,
+        loaded=loaded,
+        workflow_result=workflow_result,
+    )
+    if gate_failure is not None:
+        return gate_failure
+    return candidate
+
+
+def _v2_gate_failure_after_valid_selection(
+    *,
+    context: _PatchApplicationContext,
+    loaded: _LoadedCurationInputs,
+    workflow_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return gate failure after v2 selections pass host validation."""
+    gate = _json_object_from_value(workflow_result.get("_gate"))
+    repair_output = _json_object_from_value(workflow_result.get("_repair_output"))
+    feedback_payload = _json_object_from_value(loaded.feedback_json)
+    if gate is None or repair_output is None or feedback_payload is None:
+        return None
+    if _curation_gate_allows_candidate(
+        gate=gate,
+        repair_output=repair_output,
+        feedback_payload=feedback_payload,
+    ):
+        return None
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            _curation_failure_code(gate=gate),
+            message="Authority curation gate rejected the repaired candidate.",
+            details={
+                "project_id": context.request.project_id,
+                "curation_attempt_id": context.attempt.curation_attempt_id,
+                "reason": _curation_failure_summary(gate=gate),
+                "gate_status": gate.get("status"),
+                "unresolved_feedback_ids": sorted(
+                    _string_set(gate.get("unresolved_feedback_ids"))
+                ),
+                "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+            },
+        ),
+        correlation_id=context.request.correlation_id,
     )
 
 
@@ -5211,6 +5259,8 @@ def _curation_workflow_v2_success_result(
         "curation_attempt_id": curation_attempt_id,
         "project_id": request.project_id,
         "selection_payload": selection_payload,
+        "_gate": output.gate,
+        "_repair_output": output.repair_output or {},
         "quality_report": _curation_quality_report(
             invocation=output.invocation,
             state=output.state,
