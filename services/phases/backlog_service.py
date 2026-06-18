@@ -174,6 +174,72 @@ def _has_scope_extension_delta_context(state: dict[str, Any]) -> bool:
     )
 
 
+def _project_backlog_history_items(
+    state: dict[str, Any],
+    attempts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return Backlog attempts annotated with current/stale scope-extension status."""
+    return [
+        _project_backlog_history_item(state=state, attempt=attempt)
+        for attempt in attempts
+    ]
+
+
+def _non_empty_string_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _project_backlog_history_item(
+    *,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+) -> dict[str, Any]:
+    item = copy.deepcopy(attempt)
+    is_current = _backlog_attempt_matches_current_scope(state=state, attempt=attempt)
+    item["is_current"] = is_current
+    item["is_stale"] = not is_current
+    if is_current:
+        item.pop("stale_reason", None)
+    else:
+        item["stale_reason"] = "scope_extension_pending"
+    return item
+
+
+def _backlog_attempt_matches_current_scope(
+    *,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+) -> bool:
+    if not _has_scope_extension_delta_context(state):
+        return True
+
+    current_context = state.get("scope_extension_context")
+    input_context = attempt.get("input_context")
+    if not isinstance(current_context, dict) or not isinstance(input_context, dict):
+        return False
+    if input_context.get("generation_mode") != "scope_extension":
+        return False
+
+    attempt_context = input_context.get("scope_extension")
+    if not isinstance(attempt_context, dict):
+        return False
+
+    for key in ("amended_spec_version_id", "amended_spec_hash"):
+        current_value = current_context.get(key)
+        if current_value is not None and attempt_context.get(key) != current_value:
+            return False
+
+    current_added = set(
+        _non_empty_string_items(current_context.get("added_source_item_ids"))
+    )
+    attempt_added = set(
+        _non_empty_string_items(attempt_context.get("added_source_item_ids"))
+    )
+    return not current_added or attempt_added == current_added
+
+
 def _should_preserve_setup_required_for_backlog_failure(
     *,
     fsm_state: str,
@@ -348,9 +414,13 @@ async def get_backlog_history(
 ) -> dict[str, Any]:
     state = await load_state()
     attempts = ensure_backlog_attempts(state)
+    items = _project_backlog_history_items(state, attempts)
+    current_count = sum(1 for item in items if item.get("is_current") is True)
     return {
-        "items": attempts,
-        "count": len(attempts),
+        "items": items,
+        "count": len(items),
+        "current_count": current_count,
+        "stale_count": len(items) - current_count,
     }
 
 

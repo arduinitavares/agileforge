@@ -87,6 +87,9 @@ let visionAttemptCount = 0;
 
 let latestBacklogIsComplete = false;
 let backlogAttemptCount = 0;
+let latestBacklogAttemptId = null;
+let latestBacklogArtifactFingerprint = null;
+let latestBacklogSaveIdempotencyKey = null;
 
 let latestRoadmapIsComplete = false;
 let roadmapAttemptCount = 0;
@@ -2532,6 +2535,53 @@ async function saveVisionDraft() {
 
 // --- BACKLOG LOGIC ---
 
+function isCurrentBacklogAttempt(item) {
+    return Boolean(item) && item.is_current !== false && item.is_stale !== true;
+}
+
+function currentBacklogHistoryItems(items) {
+    if (!Array.isArray(items)) return [];
+    return items.filter(isCurrentBacklogAttempt);
+}
+
+function latestCurrentBacklogAttempt(items) {
+    const currentItems = currentBacklogHistoryItems(items);
+    return currentItems.length > 0 ? currentItems[currentItems.length - 1] : null;
+}
+
+function updateLatestBacklogDraftGuards(...sources) {
+    let nextAttemptId = null;
+    let nextArtifactFingerprint = null;
+
+    sources.forEach(source => {
+        if (!source || typeof source !== 'object') return;
+        if (!nextAttemptId && typeof source.attempt_id === 'string') {
+            nextAttemptId = source.attempt_id;
+        }
+        if (!nextArtifactFingerprint && typeof source.artifact_fingerprint === 'string') {
+            nextArtifactFingerprint = source.artifact_fingerprint;
+        }
+    });
+
+    if (
+        latestBacklogAttemptId !== nextAttemptId
+        || latestBacklogArtifactFingerprint !== nextArtifactFingerprint
+    ) {
+        latestBacklogSaveIdempotencyKey = null;
+    }
+
+    latestBacklogAttemptId = nextAttemptId;
+    latestBacklogArtifactFingerprint = nextArtifactFingerprint;
+}
+
+function backlogSaveIdempotencyKey() {
+    if (!latestBacklogSaveIdempotencyKey) {
+        const suffix = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}`;
+        latestBacklogSaveIdempotencyKey = `save-backlog-${selectedProjectId}-${latestBacklogAttemptId}-${suffix}`;
+    }
+    return latestBacklogSaveIdempotencyKey;
+}
+
 function renderBacklogArtifactHtml(artifact) {
     if (!artifact) return '<div class="text-[11px] text-slate-500 text-center mt-10">No backlog generated yet.</div>';
 
@@ -2645,18 +2695,25 @@ function renderBacklogHistory(items) {
     const reversed = [...items].reverse();
     reversed.forEach((item, index) => {
         const stamp = item.created_at || '-';
-        const state = item.is_complete ? 'Complete' : 'Needs input';
-        const color = item.is_complete ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30 ring-emerald-200' : 'text-amber-600 bg-amber-50 dark:bg-amber-900/30 ring-amber-200';
+        const isStale = item.is_stale === true || item.is_current === false;
+        const state = isStale ? 'Handled' : (item.is_complete ? 'Complete' : 'Needs input');
+        const color = isStale
+            ? 'text-slate-500 bg-slate-100 dark:bg-slate-800 ring-slate-200'
+            : (item.is_complete ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30 ring-emerald-200' : 'text-amber-600 bg-amber-50 dark:bg-amber-900/30 ring-amber-200');
         const trigger = item.trigger === 'auto_transition' ? 'Auto setup' : 'Manual refine';
+        const staleText = isStale ? '<p class="text-[10px] font-semibold text-slate-400 mt-1">Superseded by current accepted scope.</p>' : '';
 
         const row = document.createElement('div');
-        row.className = 'border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-800/60 transition-transform';
+        row.className = isStale
+            ? 'border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-100/70 dark:bg-slate-900/40 opacity-75 transition-transform'
+            : 'border border-slate-200 dark:border-slate-700 rounded-lg p-3 bg-slate-50 dark:bg-slate-800/60 transition-transform';
         row.innerHTML = `
             <div class="flex items-center justify-between">
                 <span class="text-xs font-extrabold text-slate-700 dark:text-slate-300">Attempt ${items.length - index}</span>
                 <span class="text-[10px] uppercase ${color} px-2 py-0.5 rounded-full ring-1 ring-inset font-bold">${state}</span>
             </div>
             <p class="text-[11px] font-semibold text-slate-500 mt-2">Trigger: <span class="text-slate-700 dark:text-slate-300 font-bold">${trigger}</span></p>
+            ${staleText}
             <p class="text-[10px] text-slate-400 mt-1">${stamp}</p>
         `;
         container.appendChild(row);
@@ -2668,7 +2725,8 @@ function updateBacklogSaveButton() {
     const hint = document.getElementById('backlog-save-hint');
     if (!button || !hint) return;
 
-    const canSave = Boolean(selectedProjectId) && latestBacklogIsComplete;
+    const guardsReady = Boolean(latestBacklogAttemptId && latestBacklogArtifactFingerprint);
+    const canSave = Boolean(selectedProjectId) && latestBacklogIsComplete && guardsReady;
     button.disabled = !canSave;
     button.className = canSave
         ? 'inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-sm'
@@ -2676,13 +2734,14 @@ function updateBacklogSaveButton() {
 
     hint.innerText = canSave
         ? 'Backlog is complete. Proceed to save and advance to Roadmap.'
-        : 'Save is disabled until latest Backlog output has is_complete=true.';
+        : 'Save is disabled until a current Backlog draft is complete.';
 }
 
 async function loadBacklogHistory() {
     if (!selectedProjectId) {
         backlogAttemptCount = 0;
         latestBacklogIsComplete = false;
+        updateLatestBacklogDraftGuards(null);
         renderBacklogHistory([]);
         return;
     }
@@ -2691,20 +2750,26 @@ async function loadBacklogHistory() {
         const response = await fetch(`/api/projects/${selectedProjectId}/backlog/history`);
         const data = await response.json();
         if (data.status !== 'success') {
+            backlogAttemptCount = 0;
+            latestBacklogIsComplete = false;
+            updateLatestBacklogDraftGuards(null);
             renderBacklogHistory([]);
             return;
         }
 
         const items = Array.isArray(data.data?.items) ? data.data.items : [];
-        backlogAttemptCount = items.length;
+        const currentItems = currentBacklogHistoryItems(items);
+        const latest = latestCurrentBacklogAttempt(items);
+        backlogAttemptCount = currentItems.length;
         renderBacklogHistory(items);
 
-        if (items.length > 0) {
-            const latest = items[items.length - 1];
+        if (latest) {
             latestBacklogIsComplete = Boolean(latest.is_complete);
+            updateLatestBacklogDraftGuards(latest, latest.output_artifact);
             renderBacklogAttemptPanels(latest.input_context || null, latest.output_artifact || null);
         } else {
             latestBacklogIsComplete = false;
+            updateLatestBacklogDraftGuards(null);
             renderBacklogAttemptPanels(null, null);
         }
 
@@ -2713,6 +2778,7 @@ async function loadBacklogHistory() {
         console.error('Failed to load backlog history:', error);
         backlogAttemptCount = 0;
         latestBacklogIsComplete = false;
+        updateLatestBacklogDraftGuards(null);
         renderBacklogHistory([]);
     }
 }
@@ -2755,6 +2821,7 @@ async function generateBacklogDraft() {
         }
 
         latestBacklogIsComplete = Boolean(data.data?.is_complete);
+        updateLatestBacklogDraftGuards(data.data, data.data?.output_artifact);
         renderBacklogAttemptPanels(data.data?.input_context || null, data.data?.output_artifact || null);
         setPhaseState(data.data?.fsm_state || 'BACKLOG_INTERVIEW', 'backlog');
 
@@ -2779,6 +2846,11 @@ async function saveBacklogDraft() {
 
     const button = document.getElementById('btn-save-backlog');
     const original = button?.innerHTML;
+    if (!latestBacklogAttemptId || !latestBacklogArtifactFingerprint) {
+        alert('Backlog draft guards are missing. Reload Backlog history or regenerate the backlog draft before saving.');
+        updateBacklogSaveButton();
+        return;
+    }
     if (button) {
         button.innerHTML = '<span class="material-symbols-outlined text-sm">save</span> Saving...';
         button.disabled = true;
@@ -2788,6 +2860,13 @@ async function saveBacklogDraft() {
     try {
         const response = await fetch(`/api/projects/${selectedProjectId}/backlog/save`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                attempt_id: latestBacklogAttemptId,
+                expected_artifact_fingerprint: latestBacklogArtifactFingerprint,
+                expected_state: 'BACKLOG_REVIEW',
+                idempotency_key: backlogSaveIdempotencyKey(),
+            }),
         });
 
         if (response.status === 409) {

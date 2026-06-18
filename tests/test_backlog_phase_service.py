@@ -669,6 +669,100 @@ async def test_scope_extension_existing_backlog_skips_feedback_gate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_backlog_history_marks_prior_attempts_stale_for_scope_extension() -> None:
+    """Pending scope extension must not expose old Backlog attempts as current."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_INTERVIEW",
+        "setup_status": "passed",
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "trigger": "auto_transition",
+                "is_complete": True,
+                "artifact_fingerprint": "sha256:old",
+                "input_context": {"generation_mode": "greenfield"},
+                "output_artifact": {
+                    "backlog_items": [_savable_backlog_item()],
+                    "is_complete": True,
+                },
+            }
+        ],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    payload = await get_backlog_history(load_state=load_state)
+
+    assert payload["count"] == 1
+    assert payload["current_count"] == 0
+    assert payload["stale_count"] == 1
+    item = payload["items"][0]
+    assert item["attempt_id"] == "backlog-attempt-1"
+    assert item["is_current"] is False
+    assert item["is_stale"] is True
+    assert item["stale_reason"] == "scope_extension_pending"
+
+
+@pytest.mark.asyncio
+async def test_backlog_history_keeps_matching_scope_extension_attempt_current() -> None:
+    """Current scope-extension attempts remain saveable in history projection."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_REVIEW",
+        "setup_status": "passed",
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 11,
+            "base_spec_hash": "sha256:base",
+            "amended_spec_version_id": 12,
+            "amended_spec_hash": "sha256:amended",
+            "added_source_item_ids": ["REQ.reporting-export"],
+        },
+        "backlog_attempts": [
+            {
+                "attempt_id": "backlog-attempt-1",
+                "trigger": "manual_refine",
+                "is_complete": True,
+                "artifact_fingerprint": "sha256:current",
+                "input_context": {
+                    "generation_mode": "scope_extension",
+                    "scope_extension": {
+                        "amended_spec_version_id": 12,
+                        "amended_spec_hash": "sha256:amended",
+                        "added_source_item_ids": ["REQ.reporting-export"],
+                    },
+                },
+                "output_artifact": {
+                    "backlog_items": [_savable_backlog_item()],
+                    "is_complete": True,
+                },
+            }
+        ],
+    }
+
+    async def load_state() -> JsonDict:
+        return state
+
+    payload = await get_backlog_history(load_state=load_state)
+
+    assert payload["count"] == 1
+    assert payload["current_count"] == 1
+    assert payload["stale_count"] == 0
+    item = payload["items"][0]
+    assert item["is_current"] is True
+    assert item["is_stale"] is False
+    assert "stale_reason" not in item
+
+
+@pytest.mark.asyncio
 async def test_scope_extension_saved_context_requires_feedback_gate() -> None:
     """Consumed scope-extension context must not bypass normal refinement feedback."""
     state: JsonDict = {
