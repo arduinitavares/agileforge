@@ -113,6 +113,100 @@ def _state_with_complete_story_draft(
     }
 
 
+def _scope_extension_state_with_legacy_story_draft() -> JsonDict:
+    """Return scope-extension state with stale same-name Story runtime."""
+    parent_requirement = "Shared requirement"
+    artifact = _story_artifact(parent_requirement, "Legacy saved-looking draft")
+    artifact_fingerprint = _story_artifact_fingerprint(parent_requirement, artifact)
+    artifact["artifact_fingerprint"] = artifact_fingerprint
+    legacy_attempt: JsonDict = {
+        "attempt_id": "attempt-1",
+        "created_at": "2026-06-09T10:45:25Z",
+        "classification": "reusable_content_result",
+        "is_reusable": True,
+        "retryable": False,
+        "draft_kind": "complete_draft",
+        "artifact_fingerprint": artifact_fingerprint,
+        "input_context": {
+            "requirement_context": "Part of Release: Old milestone",
+        },
+        "output_artifact": artifact,
+    }
+    return {
+        "scope_extension_context": {
+            "schema": "agileforge.scope_extension.v1",
+            "base_spec_version_id": 7,
+            "amended_spec_version_id": 12,
+            "added_source_item_ids": ["SRC-NEW"],
+        },
+        "roadmap_releases": [
+            {
+                "theme": "Old milestone",
+                "reasoning": "Old scope.",
+                "items": [parent_requirement],
+            },
+            {
+                "theme": "Extension milestone",
+                "reasoning": "New amended scope.",
+                "items": [parent_requirement],
+                "extension_of_spec_version_id": 7,
+                "accepted_spec_version_id": 12,
+                "source_item_ids": ["SRC-NEW"],
+            },
+        ],
+        "fsm_state": "STORY_INTERVIEW",
+        "story_attempts": {
+            parent_requirement: [
+                {
+                    "created_at": legacy_attempt["created_at"],
+                    "output_artifact": artifact,
+                    "is_complete": True,
+                }
+            ]
+        },
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [legacy_attempt],
+                    "draft_projection": {
+                        "latest_reusable_attempt_id": "attempt-1",
+                        "kind": "complete_draft",
+                        "is_complete": True,
+                        "artifact_fingerprint": artifact_fingerprint,
+                    },
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {
+                        "payload": {"parent_requirement": parent_requirement}
+                    },
+                }
+            }
+        },
+    }
+
+
+def _mark_current_story_draft_scope_extension(
+    state: JsonDict,
+    parent_requirement: str,
+) -> None:
+    """Tag the active Story draft as generated for the amended extension scope."""
+    runtime = _story_runtime_for(state, parent_requirement)
+    extension_metadata: JsonDict = {
+        "extension_scope": True,
+        "accepted_spec_version_id": 12,
+        "source_item_ids": ["SRC-NEW"],
+    }
+    draft_projection = runtime.get("draft_projection")
+    if isinstance(draft_projection, dict):
+        draft_projection.update(extension_metadata)
+    attempts = runtime.get("attempt_history")
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if isinstance(attempt, dict) and attempt.get("attempt_id") == "attempt-1":
+                attempt.update(extension_metadata)
+
+
 def test_story_save_payload_blocks_complete_all_low_artifact() -> None:
     """Complete all-Low drafts are not saveable even without quality metadata."""
     state = _state_with_complete_story_draft()
@@ -468,6 +562,55 @@ async def test_get_story_pending_scope_extension_does_not_use_legacy_same_name_s
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_scope_extension_does_not_use_legacy_same_name_draft() -> (  # noqa: E501
+    None
+):
+    """Extension pending status ignores stale same-name Story drafts."""
+    state = _scope_extension_state_with_legacy_story_draft()
+
+    payload = await get_story_pending(load_state=lambda: _async_value(state))
+
+    assert payload["saved_count"] == 0
+    assert payload["grouped_items"] == [
+        {
+            "group_id": "milestone_1",
+            "theme": "Extension milestone",
+            "reasoning": "New amended scope.",
+            "extension_scope": True,
+            "accepted_spec_version_id": 12,
+            "source_item_ids": ["SRC-NEW"],
+            "requirements": [
+                {
+                    "requirement": "Shared requirement",
+                    "status": "Pending",
+                    "attempt_count": 0,
+                    "extension_scope": True,
+                    "accepted_spec_version_id": 12,
+                    "source_item_ids": ["SRC-NEW"],
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_story_history_scope_extension_does_not_advertise_stale_draft_save() -> (  # noqa: E501
+    None
+):
+    """Story history does not expose save guards for stale scope drafts."""
+    state = _scope_extension_state_with_legacy_story_draft()
+
+    payload = await get_story_history(
+        parent_requirement="Shared requirement",
+        load_state=lambda: _async_value(state),
+    )
+
+    data = payload["data"]
+    assert data["current_draft"] is None
+    assert data["save"] == {"available": False}
 
 
 @pytest.mark.asyncio
@@ -1715,6 +1858,7 @@ async def test_save_story_draft_scope_extension_uses_amended_spec_metadata() -> 
             "source_item_ids": ["SRC-NEW"],
         },
     ]
+    _mark_current_story_draft_scope_extension(state, "Requirement A")
     artifact_fingerprint = state["interview_runtime"]["story"]["Requirement A"][
         "draft_projection"
     ]["artifact_fingerprint"]
@@ -2468,6 +2612,7 @@ async def test_complete_story_phase_scope_extension_requires_same_name_extension
         )
 
     state["fsm_state"] = "STORY_REVIEW"
+    _mark_current_story_draft_scope_extension(state, parent_requirement)
     artifact_fingerprint = state["interview_runtime"]["story"][parent_requirement][
         "draft_projection"
     ]["artifact_fingerprint"]

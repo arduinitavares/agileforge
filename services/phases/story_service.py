@@ -195,6 +195,32 @@ def _metadata_matches_extension_scope(
     )
 
 
+def _scope_metadata_from_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(record, dict) or record.get("extension_scope") is not True:
+        return None
+
+    metadata: dict[str, Any] = {"extension_scope": True}
+    accepted_spec_version_id = _coerce_int(record.get("accepted_spec_version_id"))
+    if accepted_spec_version_id is not None:
+        metadata["accepted_spec_version_id"] = accepted_spec_version_id
+    source_item_ids = _string_list(record.get("source_item_ids"))
+    if source_item_ids:
+        metadata["source_item_ids"] = source_item_ids
+    return metadata
+
+
+def _record_matches_story_scope(
+    record: dict[str, Any] | None,
+    expected_metadata: dict[str, Any] | None,
+) -> bool:
+    if expected_metadata is None:
+        return True
+    return _metadata_matches_extension_scope(
+        _scope_metadata_from_record(record),
+        expected_metadata,
+    )
+
+
 def _story_saved_metadata(
     state: dict[str, Any],
     *,
@@ -647,15 +673,23 @@ def _find_attempt_by_id(
     return None
 
 
-def _story_current_draft_artifact(
+def _story_current_draft_attempt(
     runtime: dict[str, Any],
 ) -> dict[str, Any] | None:
     draft_projection = runtime.get("draft_projection") or {}
     attempt_id = draft_projection.get("latest_reusable_attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id:
         return None
+    return _find_attempt_by_id(runtime, attempt_id)
 
-    attempt = _find_attempt_by_id(runtime, attempt_id)
+
+def _story_attempt_artifact_for_scope(
+    attempt: dict[str, Any] | None,
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not _record_matches_story_scope(attempt, extension_metadata):
+        return None
     artifact = (attempt or {}).get("output_artifact")
     if not isinstance(artifact, dict):
         return None
@@ -664,6 +698,15 @@ def _story_current_draft_artifact(
     if not isinstance(stories, list) or len(stories) == 0:
         return None
     return artifact
+
+
+def _story_current_draft_artifact(
+    runtime: dict[str, Any],
+) -> dict[str, Any] | None:
+    return _story_attempt_artifact_for_scope(
+        _story_current_draft_attempt(runtime),
+        extension_metadata=None,
+    )
 
 
 def _story_artifact_fingerprint(
@@ -769,18 +812,29 @@ def _story_merge_recommendation_from_artifact(
 
 
 def story_save_payload(runtime: dict[str, Any]) -> dict[str, Any] | None:
+    return story_save_payload_for_scope(runtime, extension_metadata=None)
+
+
+def story_save_payload_for_scope(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     draft_projection = runtime.get("draft_projection") or {}
     if draft_projection.get("kind") != "complete_draft":
         return None
+    if not _record_matches_story_scope(draft_projection, extension_metadata):
+        return None
 
-    artifact = _story_current_draft_artifact(runtime)
-    if not isinstance(artifact, dict):
+    artifact = _story_attempt_artifact_for_scope(
+        _story_current_draft_attempt(runtime),
+        extension_metadata=extension_metadata,
+    )
+    if artifact is None:
         return None
     if _story_merge_recommendation_from_artifact(artifact):
         return None
-    if not artifact.get("is_complete"):
-        return None
-    if not story_quality_saveable(artifact):
+    if not artifact.get("is_complete") or not story_quality_saveable(artifact):
         return None
     return artifact
 
@@ -1140,15 +1194,32 @@ def story_resolution_summary(runtime: dict[str, Any]) -> dict[str, Any]:
 
 
 def story_has_working_state(runtime: dict[str, Any]) -> bool:
+    return story_has_working_state_for_scope(runtime, extension_metadata=None)
+
+
+def story_has_working_state_for_scope(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> bool:
     if story_current_resolution(runtime):
-        return True
+        resolution_projection = runtime.get("resolution_projection")
+        return _record_matches_story_scope(
+            resolution_projection if isinstance(resolution_projection, dict) else None,
+            extension_metadata,
+        )
 
     draft_projection = runtime.get("draft_projection") or {}
-    if draft_projection:
+    if draft_projection and _record_matches_story_scope(
+        draft_projection if isinstance(draft_projection, dict) else None,
+        extension_metadata,
+    ):
         return True
 
     request_projection = runtime.get("request_projection") or {}
-    if isinstance(request_projection.get("payload"), dict):
+    if isinstance(request_projection.get("payload"), dict) and (
+        _record_matches_story_scope(request_projection, extension_metadata)
+    ):
         return True
 
     feedback_projection = runtime.get("feedback_projection") or {}
@@ -1161,6 +1232,7 @@ def story_has_working_state(runtime: dict[str, Any]) -> bool:
         and item.get("status") == "unabsorbed"
         and isinstance(item.get("text"), str)
         and item.get("text").strip()
+        and _record_matches_story_scope(item, extension_metadata)
         for item in items
     )
 
@@ -1208,15 +1280,29 @@ def _attempt_output_artifact(attempt: dict[str, Any] | None) -> dict[str, Any] |
     return artifact if isinstance(artifact, dict) else None
 
 
-def story_interview_summary(runtime: dict[str, Any]) -> dict[str, Any]:
+def story_interview_summary(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     draft_projection = runtime.get("draft_projection") or {}
     retry_target_attempt_id = story_retry_target_attempt_id(runtime)
-    save_payload = story_save_payload(runtime)
+    save_payload = story_save_payload_for_scope(
+        runtime,
+        extension_metadata=extension_metadata,
+    )
     latest_attempt = _latest_story_attempt(runtime)
     latest_artifact = _attempt_output_artifact(latest_attempt)
 
     current_draft = None
-    if draft_projection:
+    current_draft_attempt = _story_current_draft_attempt(runtime)
+    if draft_projection and _record_matches_story_scope(
+        draft_projection if isinstance(draft_projection, dict) else None,
+        extension_metadata,
+    ) and _record_matches_story_scope(
+        current_draft_attempt,
+        extension_metadata,
+    ):
         current_draft = {
             "attempt_id": draft_projection.get("latest_reusable_attempt_id"),
             "kind": draft_projection.get("kind"),
@@ -1435,16 +1521,29 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
                 extension_metadata=extension_metadata,
             ):
                 status = "Merged"
-            elif story_has_working_state(runtime):
+            elif story_has_working_state_for_scope(
+                runtime,
+                extension_metadata=extension_metadata,
+            ):
                 status = "Attempted"
             else:
                 status = "Pending"
+
+            attempt_count = len(attempts)
+            if extension_metadata is not None:
+                attempt_count = sum(
+                    1
+                    for attempt in runtime.get("attempt_history") or []
+                    if isinstance(attempt, dict)
+                    and attempt.get("trigger") != "reset"
+                    and _record_matches_story_scope(attempt, extension_metadata)
+                )
 
             milestone_group["requirements"].append(
                 {
                     "requirement": req,
                     "status": status,
-                    "attempt_count": len(attempts),
+                    "attempt_count": attempt_count,
                     **(extension_metadata or {}),
                 }
             )
@@ -1585,8 +1684,15 @@ async def generate_story_draft(
         state,
         parent_requirement=normalized_parent_requirement,
     )
+    extension_metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
 
-    has_working_state = story_has_working_state(runtime)
+    has_working_state = story_has_working_state_for_scope(
+        runtime,
+        extension_metadata=extension_metadata,
+    )
     has_prior_attempt = story_has_prior_attempt(runtime)
     normalized_user_input = user_input.strip() if isinstance(user_input, str) else None
     if has_working_state and not normalized_user_input:
@@ -1611,16 +1717,21 @@ async def generate_story_draft(
                 "data": {
                     "generation_ran": False,
                     "feedback_quality": feedback_quality,
-                    **story_interview_summary(runtime),
+                    **story_interview_summary(
+                        runtime,
+                        extension_metadata=extension_metadata,
+                    ),
                 },
             }
 
-        append_feedback_entry(
+        feedback_entry = append_feedback_entry(
             runtime,
             normalized_user_input,
             now_iso(),
             feedback_quality=feedback_quality,
         )
+        if extension_metadata is not None and isinstance(feedback_entry, dict):
+            feedback_entry.update(extension_metadata)
 
     included_feedback_ids = story_unabsorbed_feedback_ids(runtime)
     story_result = await run_story_agent_from_state(
@@ -1656,6 +1767,8 @@ async def generate_story_draft(
         included_feedback_ids=included_feedback_ids,
         context_version="story-runtime.v1",
     )
+    if extension_metadata is not None and isinstance(request_projection, dict):
+        request_projection.update(extension_metadata)
 
     attempt_id = f"attempt-{len(runtime.get('attempt_history') or []) + 1}"
     append_attempt(
@@ -1673,6 +1786,7 @@ async def generate_story_draft(
             "retryable": story_retryable(story_result.get("classification")),
             "draft_kind": story_result.get("draft_kind"),
             "output_artifact": story_result.get("output_artifact") or {},
+            **(extension_metadata or {}),
             **failure_meta(story_result, fallback_summary=story_result.get("error")),
         },
     )
@@ -1686,6 +1800,8 @@ async def generate_story_draft(
             is_complete=bool(story_result.get("is_complete", False)),
             updated_at=created_at,
         )
+        if extension_metadata is not None:
+            runtime["draft_projection"].update(extension_metadata)
         mark_feedback_absorbed(
             runtime,
             feedback_ids=included_feedback_ids,
@@ -1704,7 +1820,10 @@ async def generate_story_draft(
     )
     next_state = (
         OrchestratorState.STORY_REVIEW.value
-        if story_save_payload(runtime)
+        if story_save_payload_for_scope(
+            runtime,
+            extension_metadata=extension_metadata,
+        )
         else OrchestratorState.STORY_INTERVIEW.value
     )
     state["fsm_state"] = next_state
@@ -1717,7 +1836,10 @@ async def generate_story_draft(
             "generation_ran": True,
             "feedback_quality": feedback_quality,
             "output_artifact": story_result.get("output_artifact"),
-            **story_interview_summary(runtime),
+            **story_interview_summary(
+                runtime,
+                extension_metadata=extension_metadata,
+            ),
         },
     }
 
@@ -1746,6 +1868,10 @@ async def retry_story_draft(
         parent_requirement,
     )
     runtime = ensure_story_runtime(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
+    extension_metadata = _requirement_extension_metadata(
         state,
         parent_requirement=normalized_parent_requirement,
     )
@@ -1787,6 +1913,7 @@ async def retry_story_draft(
             "retryable": story_retryable(story_result.get("classification")),
             "draft_kind": story_result.get("draft_kind"),
             "output_artifact": story_result.get("output_artifact") or {},
+            **(extension_metadata or {}),
             **failure_meta(story_result, fallback_summary=story_result.get("error")),
         },
     )
@@ -1800,6 +1927,8 @@ async def retry_story_draft(
             is_complete=bool(story_result.get("is_complete", False)),
             updated_at=created_at,
         )
+        if extension_metadata is not None:
+            runtime["draft_projection"].update(extension_metadata)
         mark_feedback_absorbed(
             runtime,
             feedback_ids=included_feedback_ids,
@@ -1818,7 +1947,10 @@ async def retry_story_draft(
     )
     next_state = (
         OrchestratorState.STORY_REVIEW.value
-        if story_save_payload(runtime)
+        if story_save_payload_for_scope(
+            runtime,
+            extension_metadata=extension_metadata,
+        )
         else OrchestratorState.STORY_INTERVIEW.value
     )
     state["fsm_state"] = next_state
@@ -1829,7 +1961,10 @@ async def retry_story_draft(
         "parent_requirement": normalized_parent_requirement,
         "data": {
             "output_artifact": story_result.get("output_artifact"),
-            **story_interview_summary(runtime),
+            **story_interview_summary(
+                runtime,
+                extension_metadata=extension_metadata,
+            ),
         },
     }
 
@@ -1848,13 +1983,20 @@ async def get_story_history(
         state,
         parent_requirement=normalized_parent_requirement,
     )
+    extension_metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
     attempt_history = runtime.get("attempt_history") or []
     return {
         "parent_requirement": normalized_parent_requirement,
         "data": {
             "items": attempt_history,
             "count": len(attempt_history),
-            **story_interview_summary(runtime),
+            **story_interview_summary(
+                runtime,
+                extension_metadata=extension_metadata,
+            ),
         },
     }
 
@@ -1879,6 +2021,10 @@ async def save_story_draft(
         parent_requirement,
     )
     runtime = ensure_story_runtime(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
+    extension_metadata = _requirement_extension_metadata(
         state,
         parent_requirement=normalized_parent_requirement,
     )
@@ -1930,7 +2076,10 @@ async def save_story_draft(
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
 
-    assessment = story_save_payload(runtime)
+    assessment = story_save_payload_for_scope(
+        runtime,
+        extension_metadata=extension_metadata,
+    )
 
     if not assessment:
         raise StoryPhaseError(
