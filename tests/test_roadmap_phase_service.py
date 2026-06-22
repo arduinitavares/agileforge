@@ -680,6 +680,7 @@ async def test_generate_roadmap_allows_active_reset_stale_marker() -> None:
         "stale_backlog_reason": "active_backlog_reset",
         "stale_since_backlog_attempt_id": "backlog-attempt-12",
         "active_backlog_reset_attempt_id": "backlog-attempt-12",
+        "backlog_items": [{"requirement": "Seed backlog item"}],
     }
     saved: JsonDict = {}
 
@@ -734,6 +735,7 @@ async def test_generate_roadmap_allows_active_reset_retry_from_interview() -> No
         "stale_backlog_reason": "active_backlog_reset",
         "stale_since_backlog_attempt_id": "backlog-attempt-12",
         "active_backlog_reset_attempt_id": "backlog-attempt-12",
+        "backlog_items": [{"requirement": "Seed backlog item"}],
     }
     saved: JsonDict = {}
 
@@ -933,6 +935,56 @@ async def test_generate_roadmap_draft_forces_incomplete_when_questions_remain() 
     assert saved["state"]["product_roadmap_assessment"]["attempt_id"] == (
         "roadmap-attempt-1"
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_roadmap_draft_forces_incomplete_on_coverage_mismatch() -> (
+    None
+):
+    """Generation cannot mark a draft complete when save coverage would reject it."""
+    state: JsonDict = {
+        "fsm_state": "BACKLOG_PERSISTENCE",
+        "backlog_items": [
+            {"requirement": "Requirement A"},
+            {"requirement": "Requirement B"},
+        ],
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_roadmap_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id, user_input
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": _complete_roadmap_artifact(
+                items=["Requirement A"],
+                is_complete=True,
+            ),
+            "is_complete": True,
+            "error": None,
+        }
+
+    payload = await generate_roadmap_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_roadmap_agent=fake_run_roadmap_agent_from_state,
+        user_input=None,
+    )
+
+    assert payload["is_complete"] is False
+    assert payload["fsm_state"] == "ROADMAP_INTERVIEW"
+    assert payload["output_artifact"]["is_complete"] is False
+    assert payload["output_artifact"]["clarifying_questions"] == [
+        "Roadmap coverage mismatch: missing=['Requirement B'], unknown=[], duplicate=[]"
+    ]
+    assert saved["state"]["product_roadmap_assessment"]["is_complete"] is False
 
 
 @pytest.mark.asyncio

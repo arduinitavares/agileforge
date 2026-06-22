@@ -241,15 +241,38 @@ async def generate_roadmap_draft(
         user_input=normalized_user_input,
     )
     output_artifact = dict(roadmap_result.get("output_artifact") or {})
+    input_context = dict(roadmap_result.get("input_context") or {})
+    input_context.update(_active_reset_provenance(state))
+    should_check_coverage = (
+        bool(roadmap_result.get("success"))
+        and bool(roadmap_result.get("is_complete"))
+        and not _has_clarifying_questions(output_artifact)
+    )
+    coverage_mismatch_message = (
+        _roadmap_coverage_mismatch_message(
+            state,
+            output_artifact,
+            input_context=input_context,
+        )
+        if should_check_coverage
+        else None
+    )
     is_complete = _effective_roadmap_completion(
         roadmap_result,
         output_artifact,
+        coverage_mismatch_message=coverage_mismatch_message,
     )
     output_artifact["is_complete"] = is_complete
+    if coverage_mismatch_message and not is_complete:
+        questions = output_artifact.get("clarifying_questions")
+        if not isinstance(questions, list):
+            questions = []
+        if coverage_mismatch_message not in questions:
+            output_artifact["clarifying_questions"] = [
+                *[item for item in questions if isinstance(item, str)],
+                coverage_mismatch_message,
+            ]
     artifact_fingerprint = _roadmap_artifact_fingerprint(output_artifact)
-
-    input_context = dict(roadmap_result.get("input_context") or {})
-    input_context.update(_active_reset_provenance(state))
 
     attempt_count = record_roadmap_attempt(
         state,
@@ -420,14 +443,60 @@ async def save_roadmap_draft(
     return payload
 
 
+def _roadmap_generation_extension_context(
+    state: dict[str, Any],
+    *,
+    input_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    saved_context = _saved_scope_extension_context(state)
+    if input_context.get("generation_mode") != "scope_extension":
+        if saved_context is not None:
+            raise RoadmapPhaseError(
+                "Scope extension Roadmap save is missing scope extension "
+                "generation metadata.",
+            )
+        return None
+    if saved_context is None:
+        raise RoadmapPhaseError(
+            "Scope extension Roadmap requires saved extension Backlog before "
+            "generation or save.",
+        )
+    return saved_context
+
+
+def _roadmap_coverage_mismatch_message(
+    state: dict[str, Any],
+    output_artifact: dict[str, Any],
+    *,
+    input_context: dict[str, Any],
+) -> str | None:
+    try:
+        roadmap_data = RoadmapBuilderOutput.model_validate(output_artifact)
+        _assert_exact_backlog_coverage(
+            state,
+            roadmap_data,
+            extension_context=_roadmap_generation_extension_context(
+                state,
+                input_context=input_context,
+            ),
+        )
+    except RoadmapPhaseError as exc:
+        return exc.detail
+    return None
+
+
 def _effective_roadmap_completion(
     roadmap_result: dict[str, Any],
     output_artifact: dict[str, Any],
+    *,
+    coverage_mismatch_message: str | None,
 ) -> bool:
     """Return completion after enforcing runtime consistency rules."""
     if not roadmap_result.get("success"):
         return False
     if _has_clarifying_questions(output_artifact):
+        return False
+    if coverage_mismatch_message:
         return False
     return bool(roadmap_result.get("is_complete"))
 
