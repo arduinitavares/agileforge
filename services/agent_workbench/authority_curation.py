@@ -15,6 +15,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
@@ -87,6 +88,8 @@ if TYPE_CHECKING:
 AUTHORITY_FEEDBACK_RECORD_COMMAND = "agileforge authority feedback record"
 AUTHORITY_CURATE_COMMAND = "agileforge authority curate"
 AUTHORITY_CURATION_LEASE_SECONDS = 600
+AUTHORITY_CURATION_HEARTBEAT_INTERVAL_SECONDS = 60.0
+AUTHORITY_CURATION_HEARTBEAT_JOIN_TIMEOUT_SECONDS = 1.0
 AUTHORITY_CURATION_COMPILER_VERSION = "authority-curation.v1"
 AUTHORITY_CURATION_PROMPT_HASH = canonical_hash(
     {
@@ -1176,7 +1179,7 @@ class AuthorityCurationRunner:
                 curation_attempt_id=attempt.curation_attempt_id,
                 correlation_id=request.correlation_id,
                 attributes=_curation_trace_attributes(request),
-            ):
+            ), _heartbeat_curation_lease(active_mutation=active_mutation):
                 workflow_result = run_authority_curation_workflow(
                     request=request,
                     curation_attempt_id=attempt.curation_attempt_id,
@@ -1265,6 +1268,34 @@ class AuthorityCurationRunner:
                 correlation_id=request.correlation_id,
                 attributes=_curation_trace_attributes(request),
             )
+
+            lease_error = _active_lease_required_before_publish_response(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+            )
+            if lease_error is not None:
+                _append_trace_event_safely(
+                    mutation_event_id=active_mutation.mutation_event_id,
+                    project_id=request.project_id,
+                    step="candidate_publication_blocked",
+                    status="failed",
+                    curation_attempt_id=attempt.curation_attempt_id,
+                    correlation_id=request.correlation_id,
+                    attributes=_curation_trace_attributes(request),
+                    error=_trace_error_from_response(
+                        lease_error,
+                        current_step="candidate_publication_started",
+                    ),
+                )
+                self._finalize_failed_curation(
+                    request=request,
+                    active_mutation=active_mutation,
+                    attempt=attempt,
+                    response=lease_error,
+                    status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+                )
+                return lease_error
 
             published = self._publish_validated_curation_candidate(
                 request=request,
@@ -4690,6 +4721,78 @@ def _finalize_mutation_status(
         )
         session.commit()
         return result.rowcount == 1
+
+
+@contextmanager
+def _heartbeat_curation_lease(
+    *,
+    active_mutation: _ActiveMutation,
+) -> Iterator[None]:
+    """Refresh the curation mutation lease while ADK execution is blocked."""
+    stop_event = Event()
+
+    def heartbeat_loop() -> None:
+        while not stop_event.wait(AUTHORITY_CURATION_HEARTBEAT_INTERVAL_SECONDS):
+            with suppress(Exception):
+                if not active_mutation.ledger.heartbeat(
+                    mutation_event_id=active_mutation.mutation_event_id,
+                    lease_owner=active_mutation.lease_owner,
+                    now=datetime.now(UTC),
+                    lease_seconds=AUTHORITY_CURATION_LEASE_SECONDS,
+                ):
+                    return
+
+    heartbeat_thread = Thread(
+        target=heartbeat_loop,
+        name=f"authority-curation-heartbeat-{active_mutation.mutation_event_id}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(
+            timeout=AUTHORITY_CURATION_HEARTBEAT_JOIN_TIMEOUT_SECONDS
+        )
+
+
+def _active_lease_required_before_publish_response(
+    *,
+    request: AuthorityCurationRequest,
+    active_mutation: _ActiveMutation,
+    attempt: AuthorityCurationAttempt,
+) -> dict[str, Any] | None:
+    """Return an error if the worker no longer owns the mutation before publish."""
+    if active_mutation.ledger.require_active_owner(
+        mutation_event_id=active_mutation.mutation_event_id,
+        lease_owner=active_mutation.lease_owner,
+        now=datetime.now(UTC),
+        lease_seconds=AUTHORITY_CURATION_LEASE_SECONDS,
+    ):
+        return None
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.MUTATION_FAILED,
+            message=(
+                "Authority curation mutation expired before candidate publication."
+            ),
+            details={
+                "project_id": request.project_id,
+                "mutation_event_id": active_mutation.mutation_event_id,
+                "curation_attempt_id": attempt.curation_attempt_id,
+                "trace_artifact_id": trace_artifact_id(
+                    active_mutation.mutation_event_id
+                ),
+            },
+            remediation=[
+                "Retry authority curation with a fresh idempotency key.",
+                "Inspect the trace with agileforge authority curation trace.",
+            ],
+        ),
+        correlation_id=request.correlation_id,
+    )
 
 
 def _finalize_mutation_recovery_required(

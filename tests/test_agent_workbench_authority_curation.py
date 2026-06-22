@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -28,7 +29,10 @@ from services.agent_workbench.authority_curation import (
     AuthorityFeedbackRecordRequest,
 )
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
-from services.agent_workbench.mutation_ledger import LedgerLoadResult
+from services.agent_workbench.mutation_ledger import (
+    LedgerLoadResult,
+    MutationLedgerRepository,
+)
 from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
@@ -2854,6 +2858,146 @@ def test_authority_curate_publishes_pending_review_candidate(
     assert pending_authority_id == attempt.candidate_authority_id
     assert pending_fingerprint == attempt.candidate_authority_fingerprint
     assert pending_fingerprint == pending_authority_fingerprint(pending_authority)
+
+
+def test_authority_curate_heartbeats_lease_during_workflow(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long ADK curation keeps the mutation lease active while workflow runs."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    heartbeat_calls: list[float] = []
+    heartbeat_seen_during_workflow = False
+    original_heartbeat = curation_mod.MutationLedgerRepository.heartbeat
+
+    def heartbeat_spy(
+        self: MutationLedgerRepository,
+        *,
+        mutation_event_id: int,
+        lease_owner: str,
+        now: datetime,
+        lease_seconds: int = curation_mod.AUTHORITY_CURATION_LEASE_SECONDS,
+    ) -> bool:
+        heartbeat_calls.append(time.monotonic())
+        return bool(
+            original_heartbeat(
+                self,
+                mutation_event_id=mutation_event_id,
+                lease_owner=lease_owner,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+        )
+
+    def fake_curation_workflow(**_: object) -> dict[str, object]:
+        nonlocal heartbeat_seen_during_workflow
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            if heartbeat_calls:
+                heartbeat_seen_during_workflow = True
+                break
+            time.sleep(0.005)
+        return _targeted_repair_curation_result(fixture)
+
+    monkeypatch.setattr(
+        curation_mod.MutationLedgerRepository,
+        "heartbeat",
+        heartbeat_spy,
+    )
+    monkeypatch.setattr(
+        curation_mod,
+        "AUTHORITY_CURATION_HEARTBEAT_INTERVAL_SECONDS",
+        0.01,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        fake_curation_workflow,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-heartbeats-during-workflow",
+        )
+    )
+
+    assert result["ok"] is True
+    assert heartbeat_seen_during_workflow is True
+
+
+def test_authority_curate_blocks_candidate_publish_without_active_lease(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Curation must not publish a candidate after losing mutation ownership."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: _targeted_repair_curation_result(fixture),
+    )
+
+    def lost_active_owner(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        curation_mod.MutationLedgerRepository,
+        "require_active_owner",
+        lost_active_owner,
+    )
+    runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-lost-lease-before-publish",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MUTATION_FAILED"
+    assert result["errors"][0]["message"] == (
+        "Authority curation mutation expired before candidate publication."
+    )
+    with Session(engine) as session:
+        authorities = session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == fixture.spec_version_id
+            )
+        ).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+
+    assert len(authorities) == 1
+    assert attempt.candidate_authority_id is None
+    assert ledger.status == "domain_failed_no_side_effects"
 
 
 def test_authority_curate_failure_returns_to_rejected(
