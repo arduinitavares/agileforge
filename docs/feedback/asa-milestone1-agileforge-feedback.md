@@ -529,3 +529,29 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   correctly.
 - Severity: non-blocking UX/state-projection issue unless it causes users to
   plan or execute against stale Sprint assumptions.
+
+### Workflow next advertises unsafe story repair-readiness after Sprint work exists
+
+- Project: ASA `project_id=3`
+- Context: after Sprint `63` closed successfully and post-sprint triage was
+  recorded as `impact=none`, AgileForge routed to Story work for the scope
+  extension. `Initial Offline Learning Stack Decision Record` stories were
+  generated and saved from `attempt-3`, then `story complete --scope milestone
+  --scope-id milestone_0` moved the project to `SPRINT_SETUP`.
+- Observed command: `agileforge workflow next --project-id 3`
+- Actual workflow status: `sprint_setup_story_scope_repair_required`
+- Advertised valid command:
+  `agileforge story repair-readiness --project-id 3 --expected-state SPRINT_SETUP --idempotency-key <idempotency_key>`
+- Follow-up command run from the same snapshot:
+  `agileforge story repair-readiness --project-id 3 --expected-state SPRINT_SETUP --idempotency-key asa-story-scope-repair-readiness-20260623-001`
+- Actual result: `ok=false`, first error code `INVALID_COMMAND`, message
+  `Story readiness repair is unsafe after Sprint work exists.`
+- Expected behavior: `workflow next` must not advertise a mutation that the
+  same backend snapshot rejects as unsafe. It should either omit
+  `story repair-readiness`, show it only as blocked with the exact unsafe
+  reason, or route to the safe dependency/Story-scope reconciliation command.
+- Why it matters: this violates the core AgileForge CLI contract that
+  advertised next valid commands are runnable from the same guarded state.
+  It stranded ASA in `SPRINT_SETUP` with zero sprint candidates and blocked
+  `sprint generate` reason `STALE_STORY_COMPLETION_SCOPE`.
+- Severity: blocker for continuing ASA via normal AgileForge rituals.
