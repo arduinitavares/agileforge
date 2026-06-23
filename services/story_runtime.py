@@ -19,6 +19,10 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
     UserStoryWriterOutput,
 )
 from services.interview_runtime import hydrate_story_runtime_from_legacy
+from services.story_scope import (
+    _record_matches_story_scope,
+    _requirement_extension_metadata,
+)
 from utils.adk_runner import (
     get_agent_model_info,
     invoke_agent_to_text,
@@ -713,12 +717,18 @@ def _get_latest_reusable_story_artifact(
     state: dict[str, Any],
     *,
     parent_requirement: str,
+    extension_metadata: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     runtime = hydrate_story_runtime_from_legacy(
         state,
         parent_requirement=parent_requirement,
     )
     draft_projection = runtime.get("draft_projection") or {}
+    if not _record_matches_story_scope(
+        draft_projection if isinstance(draft_projection, dict) else None,
+        extension_metadata,
+    ):
+        return None
     attempt_id = draft_projection.get("latest_reusable_attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id:
         return None
@@ -728,12 +738,18 @@ def _get_latest_reusable_story_artifact(
             continue
         if attempt.get("attempt_id") != attempt_id:
             continue
+        if not _record_matches_story_scope(attempt, extension_metadata):
+            continue
         artifact = attempt.get("output_artifact")
         return artifact if isinstance(artifact, dict) else None
     return None
 
 
-def _collect_unabsorbed_feedback_text(runtime: dict[str, Any]) -> list[str]:
+def _collect_unabsorbed_feedback_text(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> list[str]:
     feedback_projection = runtime.get("feedback_projection") or {}
     if not isinstance(feedback_projection, dict):
         return []
@@ -747,6 +763,8 @@ def _collect_unabsorbed_feedback_text(runtime: dict[str, Any]) -> list[str]:
         if not isinstance(item, dict):
             continue
         if item.get("status") != "unabsorbed":
+            continue
+        if not _record_matches_story_scope(item, extension_metadata):
             continue
         text = item.get("text")
         if isinstance(text, str) and text.strip():
@@ -768,10 +786,15 @@ def build_story_request_payload(
         state,
         parent_requirement=parent_requirement,
     )
+    extension_metadata = _requirement_extension_metadata(
+        state,
+        parent_requirement=parent_requirement,
+    )
 
     reusable_artifact = _get_latest_reusable_story_artifact(
         state,
         parent_requirement=parent_requirement,
+        extension_metadata=extension_metadata,
     )
     if reusable_artifact:
         try:
@@ -789,7 +812,10 @@ def build_story_request_payload(
                 f"\n\n--- PREVIOUS DRAFT TO REFINE ---\n{reusable_artifact_json}"
             )
 
-    feedback_items = _collect_unabsorbed_feedback_text(runtime)
+    feedback_items = _collect_unabsorbed_feedback_text(
+        runtime,
+        extension_metadata=extension_metadata,
+    )
     if isinstance(current_user_input, str) and current_user_input.strip():
         feedback_items.append(current_user_input)
     if feedback_items:

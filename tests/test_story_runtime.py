@@ -167,6 +167,100 @@ async def test_run_story_agent_from_state_uses_latest_reusable_projection_draft(
 
 
 @pytest.mark.asyncio
+async def test_run_story_agent_scope_extension_ignores_legacy_draft_and_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extension generation must not refine stale same-name Story runtime."""
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        captured["payload"] = payload
+        return _valid_story_output(payload.parent_requirement)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    state = _base_state()
+    state["scope_extension_context"] = {
+        "schema": "agileforge.scope_extension.v1",
+        "base_spec_version_id": 7,
+        "amended_spec_version_id": 12,
+        "added_source_item_ids": ["SRC-NEW"],
+    }
+    state["roadmap_releases"] = [
+        {"theme": "Old milestone", "items": ["Shared requirement"]},
+        {
+            "theme": "Extension milestone",
+            "items": ["Shared requirement"],
+            "extension_of_spec_version_id": 7,
+            "accepted_spec_version_id": 12,
+            "source_item_ids": ["SRC-NEW"],
+        },
+    ]
+    state["interview_runtime"] = {
+        "story": {
+            "Shared requirement": {
+                "attempt_history": [
+                    {
+                        "attempt_id": "attempt-1",
+                        "classification": "reusable_content_result",
+                        "is_reusable": True,
+                        "retryable": False,
+                        "draft_kind": "complete_draft",
+                        "output_artifact": {
+                            "parent_requirement": "Shared requirement",
+                            "user_stories": [
+                                {
+                                    "story_title": "Legacy draft",
+                                    "statement": "As a team, I want old-scope behavior, so that this should not be reused.",  # noqa: E501
+                                    "acceptance_criteria": [
+                                        "Verify that old-scope context is absent."
+                                    ],
+                                    "invest_score": "High",
+                                    "estimated_effort": "S",
+                                    "produced_artifacts": [],
+                                }
+                            ],
+                            "is_complete": True,
+                            "clarifying_questions": [],
+                        },
+                    }
+                ],
+                "draft_projection": {
+                    "latest_reusable_attempt_id": "attempt-1",
+                    "kind": "complete_draft",
+                    "is_complete": True,
+                },
+                "feedback_projection": {
+                    "items": [
+                        {
+                            "feedback_id": "feedback-legacy",
+                            "text": "Legacy feedback should not be reused.",
+                            "status": "unabsorbed",
+                        }
+                    ],
+                    "next_feedback_sequence": 1,
+                },
+                "request_projection": {},
+            }
+        }
+    }
+
+    result = await story_runtime.run_story_agent_from_state(
+        state,
+        project_id=1,
+        parent_requirement="Shared requirement",
+        user_input="Make this more INVEST.",
+    )
+
+    requirement_context = captured["payload"].requirement_context
+    assert result["success"] is True
+    assert "--- PREVIOUS DRAFT TO REFINE ---" not in requirement_context
+    assert "Legacy draft" not in requirement_context
+    assert "Legacy feedback should not be reused." not in requirement_context
+    assert "Make this more INVEST." in requirement_context
+
+
+@pytest.mark.asyncio
 async def test_run_story_agent_from_state_includes_only_unabsorbed_feedback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

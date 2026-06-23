@@ -824,7 +824,14 @@ async def test_generate_story_draft_first_generation_allows_guidance_input() -> 
         ).append(attempt),
         promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
             "draft_projection", {}
-        ).update(kwargs),
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
         mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
         failure_meta=lambda *_args, **_kwargs: {},
     )
@@ -837,6 +844,100 @@ async def test_generate_story_draft_first_generation_allows_guidance_input() -> 
     }
     assert payload["data"]["generation_ran"] is True
     assert payload["data"]["feedback_quality"] is None
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_scope_extension_allows_guidance_after_legacy_attempt() -> (  # noqa: E501
+    None
+):
+    """First extension generation is not soft-gated by stale same-name attempts."""
+    parent_requirement = "Shared requirement"
+    artifact = _story_artifact(parent_requirement, "Extension draft")
+    state = _scope_extension_state_with_legacy_story_draft()
+    runtime = state["interview_runtime"]["story"][parent_requirement]
+    runtime["feedback_projection"]["items"].append(
+        {
+            "feedback_id": "feedback-legacy",
+            "text": "Legacy scope feedback.",
+            "created_at": "2026-06-09T10:46:00Z",
+            "status": "unabsorbed",
+            "absorbed_by_attempt_id": None,
+        }
+    )
+    calls = {"agent": 0, "feedback": 0}
+    captured: JsonDict = {}
+
+    async def fake_run_story_agent_from_state(
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> JsonDict:
+        del state_arg
+        calls["agent"] += 1
+        captured["project_id"] = project_id
+        captured["parent_requirement"] = parent_requirement
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "extension"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {"parent_requirement": parent_requirement},
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(*args: object, **kwargs: object) -> JsonDict:
+        del args, kwargs
+        calls["feedback"] += 1
+        return {}
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Make this more INVEST.",
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-22T12:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == {"agent": 1, "feedback": 0}
+    assert captured == {
+        "project_id": 7,
+        "parent_requirement": parent_requirement,
+        "user_input": "Make this more INVEST.",
+    }
+    assert payload["fsm_state"] == "STORY_REVIEW"
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"] is None
+    assert runtime["attempt_history"][-1]["draft_basis_attempt_id"] is None
+    assert runtime["attempt_history"][-1]["included_feedback_ids"] == []
 
 
 @pytest.mark.asyncio
