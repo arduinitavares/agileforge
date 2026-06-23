@@ -4267,6 +4267,120 @@ def test_workflow_next_routes_stale_story_interview_to_stored_scope_complete() -
     assert result["data"]["blocked_future_commands"] == []
 
 
+def test_workflow_next_routes_non_saveable_story_attempt_to_refinement() -> None:
+    """Do not complete a stored scope after a later unsaveable Story attempt."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "STORY_INTERVIEW",
+                "roadmap_releases": [
+                    {"items": ["Requirement A", "Requirement B"]},
+                    {"items": ["State Window Feature Generation"]},
+                ],
+                "story_saved": {
+                    "Requirement A": True,
+                    "Requirement B": True,
+                    "State Window Feature Generation": True,
+                },
+                "story_completion_scope": {
+                    "schema_version": "agileforge.story_completion_scope.v1",
+                    "scope": "milestone",
+                    "scope_id": "milestone_0",
+                    "requirements": ["Requirement A", "Requirement B"],
+                    "completed_at": "2026-06-10T20:16:52Z",
+                },
+                "interview_runtime": {
+                    "story": {
+                        "State Window Feature Generation": {
+                            "draft_projection": {
+                                "kind": "complete_draft",
+                                "is_complete": True,
+                                "latest_reusable_attempt_id": "attempt-2",
+                                "artifact_fingerprint": "sha256:state-window-old",
+                            },
+                            "attempt_history": [
+                                {
+                                    "attempt_id": "attempt-2",
+                                    "artifact_fingerprint": "sha256:state-window-old",
+                                    "is_reusable": True,
+                                    "output_artifact": {
+                                        "is_complete": True,
+                                        "quality": {
+                                            "coverage_status": "complete",
+                                            "quality_findings": [],
+                                            "saveable": True,
+                                        },
+                                        "user_stories": [
+                                            {
+                                                "story_title": (
+                                                    "Old state window draft"
+                                                ),
+                                                "invest_score": "High",
+                                            }
+                                        ],
+                                    },
+                                },
+                                {
+                                    "attempt_id": "attempt-3",
+                                    "artifact_fingerprint": "sha256:state-window",
+                                    "draft_kind": "quality_blocked_draft",
+                                    "has_full_artifact": False,
+                                    "is_reusable": False,
+                                    "output_artifact": {
+                                        "is_complete": False,
+                                        "quality": {
+                                            "coverage_status": "complete",
+                                            "quality_findings": [
+                                                {
+                                                    "code": (
+                                                        "STORY_DEPENDENCY_"
+                                                        "CANDIDATE_UNRESOLVED"
+                                                    )
+                                                }
+                                            ],
+                                            "saveable": False,
+                                        },
+                                        "user_stories": [
+                                            {
+                                                "story_title": (
+                                                    "Generate state window features"
+                                                ),
+                                                "invest_score": "High",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        (
+            "agileforge story history --project-id 7 "
+            '--parent-requirement "State Window Feature Generation"'
+        ),
+        (
+            "agileforge story generate --project-id 7 "
+            '--parent-requirement "State Window Feature Generation" '
+            "--input <feedback>"
+        ),
+    ]
+    assert not any(
+        "agileforge story complete" in command
+        for command in result["data"]["next_valid_commands"]
+    )
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+
+
 def test_workflow_next_routes_reopened_story_to_generate_not_sprint() -> None:
     """Route reopened Story correction to Story commands instead of Sprint."""
     app = AgentWorkbenchApplication(

@@ -4058,6 +4058,12 @@ def _story_interview_command_candidates(
     generate_command: tuple[str, str],
 ) -> list[tuple[str, str]]:
     """Return Story commands for interview state, including recovery bridges."""
+    refinement_requirement = _non_saveable_story_refinement_requirement(workflow)
+    if refinement_requirement is not None:
+        return _story_refinement_commands_for_requirement(
+            project_id=project_id,
+            parent_requirement=refinement_requirement,
+        )
     scoped_complete_commands = _existing_story_scope_complete_commands(
         project_id=project_id,
         workflow=workflow,
@@ -4119,6 +4125,54 @@ def _story_review_commands_for_candidate(
             ),
         ),
     ]
+
+
+def _story_refinement_commands_for_requirement(
+    *,
+    project_id: int,
+    parent_requirement: str,
+) -> list[tuple[str, str]]:
+    """Return Story commands for refining an existing non-saveable draft."""
+    parent_flag = _story_parent_requirement_flag(parent_requirement)
+    return [
+        (
+            "agileforge story history",
+            f"agileforge story history --project-id {project_id} {parent_flag}",
+        ),
+        (
+            "agileforge story generate",
+            (
+                f"agileforge story generate --project-id {project_id} "
+                f"{parent_flag} "
+                "--input <feedback>"
+            ),
+        ),
+    ]
+
+
+def _non_saveable_story_refinement_requirement(workflow: dict[str, Any]) -> str | None:
+    """Return a requirement whose latest Story attempt is not saveable."""
+    state = _envelope_data(workflow).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    interview_runtime = state_data.get("interview_runtime")
+    if not isinstance(interview_runtime, dict):
+        return None
+    story_runtime = interview_runtime.get("story")
+    if not isinstance(story_runtime, dict):
+        return None
+
+    from services.phases.story_service import story_interview_summary  # noqa: PLC0415
+
+    for parent_requirement, runtime in story_runtime.items():
+        if not isinstance(parent_requirement, str) or not parent_requirement:
+            continue
+        if not isinstance(runtime, dict):
+            continue
+        summary = story_interview_summary(runtime)
+        quality = summary.get("quality")
+        if isinstance(quality, dict) and quality.get("saveable") is False:
+            return parent_requirement
+    return None
 
 
 def _saveable_story_review_candidate(
