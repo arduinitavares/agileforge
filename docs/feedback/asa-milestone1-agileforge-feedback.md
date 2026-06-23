@@ -555,3 +555,28 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   It stranded ASA in `SPRINT_SETUP` with zero sprint candidates and blocked
   `sprint generate` reason `STALE_STORY_COMPLETION_SCOPE`.
 - Severity: blocker for continuing ASA via normal AgileForge rituals.
+
+### Story refinement route omits force-feedback for non-saveable attempts
+
+- Project: ASA `project_id=3`
+- Context: after issue `#151` was fixed, `workflow next` correctly stopped
+  advertising `story complete` after the non-saveable `State Window Feature
+  Generation` attempt.
+- Observed command from `workflow next`:
+  `agileforge story generate --project-id 3 --parent-requirement "State Window Feature Generation" --input <feedback>`
+- Actual behavior: running the advertised command with feedback returned the
+  same `attempt-3`, same fingerprint
+  `sha256:af58e0b06faee6664704fe15ef44479d2c921fc63cf4c90e7298cdf6f6e431fb`,
+  and the same five `STORY_DEPENDENCY_CANDIDATE_UNRESOLVED` blockers.
+- Workaround: adding `--force-feedback` produced a new saveable `attempt-4`
+  with fingerprint
+  `sha256:4d3ea215b10c9d11cbaf7fc57664f3769c89c6ae3e9404431cb4c6189bb128b9`.
+- Expected behavior: when the only safe path is refining a non-saveable Story
+  attempt, `workflow next` should advertise the runnable refinement command,
+  including `--force-feedback` if that flag is required to produce a new
+  attempt.
+- Why it matters: the backend no longer misroutes to completion, but the
+  advertised recovery command can still appear to accept feedback while leaving
+  the draft unchanged. This is confusing during live AgileForge dogfooding.
+- Severity: non-blocking UX/runnable-command issue; ASA continued with the
+  explicit `--force-feedback` workaround.
