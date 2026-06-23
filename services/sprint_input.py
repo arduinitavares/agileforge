@@ -12,12 +12,52 @@ from services.agent_workbench.fingerprints import canonical_hash
 from services.orchestrator_query_service import fetch_sprint_candidates
 from services.sprint_selection import (
     SprintSelectionError,
+    SprintSelectionResult,
     derive_group_slot,
     derive_parent_group,
     select_sprint_story_rows,
 )
 
 DEFAULT_PRIORITY: int = 999
+GOVERNANCE_SPEC_UPDATE_WARNING_CODE: str = "SPRINT_GOVERNANCE_SPEC_UPDATE"
+GOVERNANCE_SPEC_UPDATE_SELECTION_ERROR_CODE: str = (
+    "SPRINT_SELECTION_GOVERNANCE_SPEC_UPDATE"
+)
+GOVERNANCE_SPEC_UPDATE_WARNING_MESSAGE: str = (
+    "Some sprint candidates require governance/spec/authority workflow before "
+    "sprint execution."
+)
+GOVERNANCE_SPEC_UPDATE_MATCH_PHRASES: tuple[str, ...] = (
+    "agileforge.spec.v1",
+    "specs/spec.json",
+    "specs/spec.md",
+    "spec amendment",
+    "amended spec",
+    "amend the spec",
+    "update the spec file",
+    "compiled authority",
+    "compile authority",
+    "authority compilation",
+    "authority review",
+    "authority acceptance",
+    "accepted authority",
+    "regenerate authority",
+    "project scope extension",
+    "scope extension workflow",
+    "update source of truth",
+    "change source of truth",
+    "source-of-truth update",
+    "source-of-truth change",
+)
+GOVERNANCE_SPEC_UPDATE_TEXT_FIELDS: tuple[str, ...] = (
+    "story_title",
+    "title",
+    "story_description",
+    "acceptance_criteria",
+    "acceptance_criteria_items",
+    "source_requirement",
+    "story_compliance_boundary_summaries",
+)
 STANDARD_SPRINT_CANDIDATE_BLOCKING_CODES: set[str] = {
     "SPRINT_CANDIDATES_UNSIZED",
     "SPRINT_CANDIDATES_DEFAULT_PRIORITY",
@@ -67,6 +107,207 @@ def coerce_priority(value: object, fallback: int) -> int:
     """Ensure priority is always an integer >= 1."""
     parsed = normalize_positive_int(value)
     return parsed if parsed is not None else max(1, fallback)
+
+
+def governance_spec_update_story_ids(candidates: list[dict[str, Any]]) -> list[int]:
+    """Return candidate IDs that need governance/spec/authority workflow first."""
+    story_ids: list[int] = []
+    for candidate in candidates:
+        story_id = normalize_positive_int(candidate.get("story_id"))
+        if story_id is not None and _is_governance_spec_update_story(candidate):
+            story_ids.append(story_id)
+    return sorted(set(story_ids))
+
+
+def governance_spec_update_warnings(
+    story_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Return advisory warnings for governance/spec update candidates."""
+    normalized_story_ids = sorted(set(story_ids))
+    if not normalized_story_ids:
+        return []
+    return [
+        {
+            "code": GOVERNANCE_SPEC_UPDATE_WARNING_CODE,
+            "message": GOVERNANCE_SPEC_UPDATE_WARNING_MESSAGE,
+            "story_ids": normalized_story_ids,
+        }
+    ]
+
+
+def add_governance_spec_update_candidate_warning(
+    candidate_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Annotate candidate payloads without turning governance stories into blockers."""
+    result = dict(candidate_result)
+    raw_stories = result.get("stories")
+    stories = raw_stories if isinstance(raw_stories, list) else []
+    story_ids = governance_spec_update_story_ids(
+        [story for story in stories if isinstance(story, dict)]
+    )
+    result["governance_spec_update_story_ids"] = story_ids
+    existing_warnings = [
+        warning
+        for warning in (result.get("warnings") or [])
+        if isinstance(warning, dict)
+    ]
+    existing_codes = {
+        as_text(warning.get("code")).strip() for warning in existing_warnings
+    }
+    warnings = list(existing_warnings)
+    if story_ids and GOVERNANCE_SPEC_UPDATE_WARNING_CODE not in existing_codes:
+        warnings.extend(governance_spec_update_warnings(story_ids))
+    result["warnings"] = warnings
+    return result
+
+
+def _is_governance_spec_update_story(candidate: dict[str, Any]) -> bool:
+    text = " ".join(
+        as_text(candidate.get(field)).casefold()
+        for field in GOVERNANCE_SPEC_UPDATE_TEXT_FIELDS
+    )
+    normalized = " ".join(text.split())
+    return any(phrase in normalized for phrase in GOVERNANCE_SPEC_UPDATE_MATCH_PHRASES)
+
+
+def _depends_on_story_ids(candidate: dict[str, Any], story_ids: set[int]) -> bool:
+    dependency_ids = [
+        *(candidate.get("prerequisite_story_ids") or []),
+        *(candidate.get("blocked_by_story_ids") or []),
+    ]
+    for dependency_id in dependency_ids:
+        normalized_dependency_id = normalize_positive_int(dependency_id)
+        if normalized_dependency_id in story_ids:
+            return True
+    return False
+
+
+def _governance_spec_update_selection_failure(
+    *,
+    story_ids: list[int],
+    candidate_result: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_story_ids = sorted(set(story_ids))
+    return {
+        "success": False,
+        "error_code": GOVERNANCE_SPEC_UPDATE_SELECTION_ERROR_CODE,
+        "message": (
+            "Selected stories require governance/spec/authority workflow before "
+            "sprint execution: "
+            + ", ".join(str(story_id) for story_id in normalized_story_ids)
+            + ". Close the active/planned sprint, then use the "
+            "scope-extension/authority workflow."
+        ),
+        "selection_details": {
+            "governance_spec_update_story_ids": normalized_story_ids,
+        },
+        "governance_spec_update_story_ids": normalized_story_ids,
+        "candidate_result": candidate_result,
+        "input_context": {},
+    }
+
+
+def _selected_story_ids_failure(
+    *,
+    candidate_rows: list[dict[str, Any]],
+    normalized_selected_ids: list[int],
+    governance_spec_update_id_set: set[int],
+    candidate_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    by_id = {
+        int(row["story_id"]): row
+        for row in candidate_rows
+        if isinstance(row, dict)
+        and normalize_positive_int(row.get("story_id")) is not None
+    }
+    invalid_ids = [
+        story_id for story_id in normalized_selected_ids if story_id not in by_id
+    ]
+    if invalid_ids:
+        return {
+            "success": False,
+            "error_code": "SPRINT_SELECTION_INVALID",
+            "message": (
+                "Some selected_story_ids are not refined TO_DO candidates: "
+                + ", ".join(str(item) for item in invalid_ids)
+            ),
+            "invalid_selected_ids": invalid_ids,
+            "candidate_result": candidate_result,
+            "input_context": {},
+        }
+
+    selected_governance_ids = [
+        story_id
+        for story_id in normalized_selected_ids
+        if story_id in governance_spec_update_id_set
+    ]
+    if selected_governance_ids:
+        return _governance_spec_update_selection_failure(
+            story_ids=selected_governance_ids,
+            candidate_result=candidate_result,
+        )
+    return None
+
+
+def _select_sprint_rows_for_context(
+    *,
+    candidate_rows: list[dict[str, Any]],
+    normalized_selected_ids: list[int],
+    governance_spec_update_ids: list[int],
+    capacity_points: int,
+    candidate_result: dict[str, Any],
+) -> tuple[
+    SprintSelectionResult | None,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+]:
+    governance_spec_update_id_set = set(governance_spec_update_ids)
+    selection_rows = candidate_rows
+    skipped_governance_story_ids: list[int] = []
+    selection_warnings: list[dict[str, Any]] = []
+    if not normalized_selected_ids and governance_spec_update_id_set:
+        selection_rows = [
+            row
+            for row in candidate_rows
+            if isinstance(row, dict)
+            and normalize_positive_int(row.get("story_id"))
+            not in governance_spec_update_id_set
+            and not _depends_on_story_ids(row, governance_spec_update_id_set)
+        ]
+        skipped_governance_story_ids = governance_spec_update_ids
+        selection_warnings = governance_spec_update_warnings(
+            skipped_governance_story_ids
+        )
+        if not selection_rows:
+            return (
+                None,
+                selection_warnings,
+                _governance_spec_update_selection_failure(
+                    story_ids=governance_spec_update_ids,
+                    candidate_result=candidate_result,
+                ),
+            )
+
+    try:
+        selection = select_sprint_story_rows(
+            selection_rows,
+            max_story_points=capacity_points,
+            selected_story_ids=normalized_selected_ids,
+        )
+    except SprintSelectionError as exc:
+        return (
+            None,
+            selection_warnings,
+            {
+                "success": False,
+                "error_code": exc.code,
+                "message": str(exc),
+                "selection_details": exc.details,
+                "candidate_result": candidate_result,
+                "input_context": {},
+            },
+        )
+    return selection, selection_warnings, None
 
 
 def _sprint_candidate_readiness(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -504,10 +745,15 @@ def load_sprint_candidates(
         candidate_result,
         story_completion_scope=story_completion_scope,
     )
+    candidate_result = add_governance_spec_update_candidate_warning(candidate_result)
     stories = list(candidate_result["stories"])
     readiness = candidate_result["readiness"]
     excluded_counts = candidate_result["excluded_counts"]
     message = candidate_result["message"]
+    warnings = list(candidate_result.get("warnings") or [])
+    governance_spec_update_ids = list(
+        candidate_result.get("governance_spec_update_story_ids") or []
+    )
     source_fingerprint = canonical_hash(
         {
             "command": "agileforge sprint candidates",
@@ -516,6 +762,8 @@ def load_sprint_candidates(
             "readiness": readiness,
             "excluded_counts": excluded_counts,
             "message": message,
+            "warnings": warnings,
+            "governance_spec_update_story_ids": governance_spec_update_ids,
             "story_completion_scope": candidate_result.get("story_completion_scope"),
         }
     )
@@ -527,6 +775,8 @@ def load_sprint_candidates(
         "readiness": readiness,
         "excluded_counts": excluded_counts,
         "message": message,
+        "warnings": warnings,
+        "governance_spec_update_story_ids": governance_spec_update_ids,
         "source_fingerprint": source_fingerprint,
         "story_completion_scope": candidate_result.get("story_completion_scope"),
     }
@@ -571,28 +821,24 @@ def prepare_sprint_input_context(
     normalized_selected_ids = normalize_selected_story_ids(
         options.get("selected_story_ids")
     )
+    governance_spec_update_ids = [
+        story_id
+        for story_id in (
+            normalize_positive_int(value)
+            for value in candidate_result.get("governance_spec_update_story_ids", [])
+        )
+        if story_id is not None
+    ]
+    governance_spec_update_id_set = set(governance_spec_update_ids)
     if normalized_selected_ids:
-        by_id = {
-            int(row["story_id"]): row
-            for row in candidate_rows
-            if isinstance(row, dict)
-            and normalize_positive_int(row.get("story_id")) is not None
-        }
-        invalid_ids = [
-            story_id for story_id in normalized_selected_ids if story_id not in by_id
-        ]
-        if invalid_ids:
-            return {
-                "success": False,
-                "error_code": "SPRINT_SELECTION_INVALID",
-                "message": (
-                    "Some selected_story_ids are not refined TO_DO candidates: "
-                    + ", ".join(str(item) for item in invalid_ids)
-                ),
-                "invalid_selected_ids": invalid_ids,
-                "candidate_result": candidate_result,
-                "input_context": {},
-            }
+        selected_story_failure = _selected_story_ids_failure(
+            candidate_rows=candidate_rows,
+            normalized_selected_ids=normalized_selected_ids,
+            governance_spec_update_id_set=governance_spec_update_id_set,
+            candidate_result=candidate_result,
+        )
+        if selected_story_failure is not None:
+            return selected_story_failure
 
     capacity_points = normalize_positive_int(options.get("capacity_points"))
     if capacity_points is None:
@@ -605,21 +851,20 @@ def prepare_sprint_input_context(
         }
     capacity_source = as_text(options.get("capacity_source")).strip()
     capacity_basis = as_text(options.get("capacity_basis")).strip()
-    try:
-        selection = select_sprint_story_rows(
-            candidate_rows,
-            max_story_points=capacity_points,
-            selected_story_ids=normalized_selected_ids,
-        )
-    except SprintSelectionError as exc:
-        return {
-            "success": False,
-            "error_code": exc.code,
-            "message": str(exc),
-            "selection_details": exc.details,
-            "candidate_result": candidate_result,
-            "input_context": {},
-        }
+    (
+        selection,
+        selection_warnings,
+        selection_failure,
+    ) = _select_sprint_rows_for_context(
+        candidate_rows=candidate_rows,
+        normalized_selected_ids=normalized_selected_ids,
+        governance_spec_update_ids=governance_spec_update_ids,
+        capacity_points=capacity_points,
+        candidate_result=candidate_result,
+    )
+    if selection_failure is not None:
+        return selection_failure
+    selection = cast("SprintSelectionResult", selection)
 
     input_context: dict[str, Any] = {
         "available_stories": [
@@ -659,17 +904,31 @@ def prepare_sprint_input_context(
     if normalized_user_context:
         input_context["user_context"] = normalized_user_context
 
+    original_candidate_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(row.get("story_id"))
+            for row in candidate_rows
+            if isinstance(row, dict)
+        )
+        if story_id is not None
+    }
+    excluded_story_ids = sorted(
+        original_candidate_ids - set(selection.selected_story_ids)
+    )
+    warnings = [*selection.warnings, *selection_warnings]
     return {
         "success": True,
         "input_context": input_context,
         "candidate_result": candidate_result,
         "source_fingerprint": candidate_result.get("source_fingerprint"),
         "selected_story_ids": selection.selected_story_ids,
+        "governance_spec_update_story_ids": governance_spec_update_ids,
         "selection_policy": {
             "mode": selection.mode,
             "source_fingerprint": candidate_result.get("source_fingerprint"),
             "selected_story_ids": selection.selected_story_ids,
-            "excluded_story_ids": selection.excluded_story_ids,
+            "excluded_story_ids": excluded_story_ids,
             "story_points_used": selection.story_points_used,
             "capacity_points": capacity_points,
             "capacity_source": capacity_source,
@@ -678,6 +937,6 @@ def prepare_sprint_input_context(
             "dependency_closed": selection.dependency_closed,
             "dependency_edges": selection.dependency_edges,
             "dependency_promoted_story_ids": selection.dependency_promoted_story_ids,
-            "warnings": selection.warnings,
+            "warnings": warnings,
         },
     }

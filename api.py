@@ -3501,6 +3501,11 @@ async def get_project_sprint_candidates(project_id: int) -> dict[str, Any]:
             "count": result.get("count", 0),
             "excluded_counts": result.get("excluded_counts", {}),
             "readiness": result.get("readiness"),
+            "warnings": result.get("warnings", []),
+            "governance_spec_update_story_ids": result.get(
+                "governance_spec_update_story_ids",
+                [],
+            ),
             "story_completion_scope": result.get("story_completion_scope"),
             "message": result.get("message"),
         },

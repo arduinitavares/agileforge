@@ -140,6 +140,54 @@ def _sprint_output_for_story_ids(
     )
 
 
+def _governance_spec_update_story(story_id: int = 41) -> dict[str, Any]:
+    return {
+        "story_id": story_id,
+        "story_title": "Update product spec and authority",
+        "story_description": (
+            "Update specs/spec.json, run authority review, and accept the "
+            "compiled authority."
+        ),
+        "priority": 101,
+        "story_points": 1,
+    }
+
+
+def _implementation_story(story_id: int = 42) -> dict[str, Any]:
+    return {
+        "story_id": story_id,
+        "story_title": "Implement approved dashboard filter",
+        "story_description": "Add the persisted filter UI.",
+        "priority": 102,
+        "story_points": 2,
+    }
+
+
+def _candidate_fetcher(stories: list[dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, Any]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": len(stories),
+            "stories": stories,
+        }
+
+    return fake_fetch_sprint_candidates
+
+
+def _governance_spec_update_warning(story_ids: list[int]) -> list[dict[str, Any]]:
+    return [
+        {
+            "code": "SPRINT_GOVERNANCE_SPEC_UPDATE",
+            "message": (
+                "Some sprint candidates require governance/spec/authority "
+                "workflow before sprint execution."
+            ),
+            "story_ids": story_ids,
+        }
+    ]
+
+
 def test_prepare_sprint_input_context_rejects_invalid_selected_story_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,6 +328,92 @@ def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     ] == [66, 85]
     assert prepared["input_context"]["available_stories"][0]["parent_group"] == 1
     assert prepared["input_context"]["available_stories"][0]["group_slot"] == 1
+
+
+def test_load_sprint_candidates_warns_about_governance_spec_update_stories() -> None:
+    """Governance/spec update stories should be advisory candidate warnings."""
+    result = sprint_input.load_sprint_candidates(
+        7,
+        fetch_candidates=_candidate_fetcher(
+            [_governance_spec_update_story(), _implementation_story()]
+        ),
+    )
+
+    assert result["success"] is True
+    assert result["readiness"]["status"] == "ready"
+    assert result["governance_spec_update_story_ids"] == [41]
+    assert result["warnings"] == _governance_spec_update_warning([41])
+
+
+def test_prepare_sprint_input_context_auto_skips_governance_spec_update_stories() -> (
+    None
+):
+    """Auto-selection should skip governance/spec update stories and warn."""
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=_candidate_fetcher(
+            [_governance_spec_update_story(), _implementation_story()]
+        ),
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
+    )
+
+    assert prepared["success"] is True
+    assert prepared["selected_story_ids"] == [42]
+    assert [
+        story["story_id"] for story in prepared["input_context"]["available_stories"]
+    ] == [42]
+    assert prepared["selection_policy"]["warnings"] == (
+        _governance_spec_update_warning([41])
+    )
+
+
+def test_prepare_sprint_input_context_rejects_all_governance_spec_update_stories() -> (
+    None
+):
+    """Auto-selection should fail when every candidate is governance/spec update."""
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        fetch_candidates=_candidate_fetcher([_governance_spec_update_story()]),
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_GOVERNANCE_SPEC_UPDATE"
+    assert prepared["governance_spec_update_story_ids"] == [41]
+    assert "scope-extension" in prepared["message"]
+
+
+def test_prepare_sprint_input_rejects_selected_governance_spec_update_story() -> None:
+    """Manual selected story IDs should not include governance/spec update work."""
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=4,
+        include_task_decomposition=True,
+        selected_story_ids=[41],
+        fetch_candidates=_candidate_fetcher(
+            [_governance_spec_update_story(), _implementation_story()]
+        ),
+        capacity_points=4,
+        capacity_source="user_override",
+        capacity_basis="4 points",
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_GOVERNANCE_SPEC_UPDATE"
+    assert prepared["governance_spec_update_story_ids"] == [41]
 
 
 def test_prepare_sprint_input_reports_dependency_selection_policy() -> None:

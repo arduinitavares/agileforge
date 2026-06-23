@@ -34,7 +34,10 @@ from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_remediation,
     load_compiled_artifact,
 )
-from services.sprint_input import apply_story_completion_scope_to_candidate_result
+from services.sprint_input import (
+    add_governance_spec_update_candidate_warning,
+    apply_story_completion_scope_to_candidate_result,
+)
 from utils.spec_schemas import ValidationEvidence
 
 if TYPE_CHECKING:
@@ -779,6 +782,7 @@ class ReadProjectionService:
             raw,
             state.get("story_completion_scope"),
         )
+        raw = add_governance_spec_update_candidate_warning(raw)
         items = raw.get("stories", [])
         excluded_counts = raw.get("excluded_counts", {})
         readiness = raw.get("readiness") or {
@@ -800,6 +804,11 @@ class ReadProjectionService:
             "excluded_counts": excluded_counts,
             "readiness": readiness,
             "message": raw.get("message"),
+            "warnings": raw.get("warnings", []),
+            "governance_spec_update_story_ids": raw.get(
+                "governance_spec_update_story_ids",
+                [],
+            ),
             "story_completion_scope": raw.get("story_completion_scope"),
         }
         data = {
@@ -808,6 +817,11 @@ class ReadProjectionService:
             "excluded_counts": excluded_counts,
             "readiness": readiness,
             "message": raw.get("message"),
+            "warnings": raw.get("warnings", []),
+            "governance_spec_update_story_ids": raw.get(
+                "governance_spec_update_story_ids",
+                [],
+            ),
             "story_completion_scope": raw.get("story_completion_scope"),
             "source_fingerprint": canonical_hash(source_payload),
         }

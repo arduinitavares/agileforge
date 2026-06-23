@@ -346,6 +346,64 @@ def test_sprint_candidates_counts_excluded_story_reasons(
     }
 
 
+def test_sprint_candidates_warns_about_governance_spec_update_stories(
+    session: Session,
+) -> None:
+    """Workbench sprint candidates should expose governance/spec update warnings."""
+    product = Product(name="Governance Sprint Project", description="Demo")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    governance_story = UserStory(
+        product_id=product_id,
+        title="Update product spec and authority",
+        story_description=(
+            "Update specs/spec.json, run authority review, and accept the "
+            "compiled authority."
+        ),
+        acceptance_criteria="- Authority acceptance is complete.",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=False,
+        story_points=1,
+        rank="1",
+    )
+    implementation_story = UserStory(
+        product_id=product_id,
+        title="Implement approved dashboard filter",
+        story_description="Add the persisted filter UI.",
+        acceptance_criteria="- Filter persists across reloads.",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=False,
+        story_points=2,
+        rank="2",
+    )
+    session.add_all([governance_story, implementation_story])
+    session.commit()
+    session.refresh(governance_story)
+    service = ReadProjectionService(engine=_engine(session))
+
+    result = service.sprint_candidates(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["readiness"]["status"] == "ready"
+    assert result["data"]["governance_spec_update_story_ids"] == [
+        governance_story.story_id
+    ]
+    assert result["data"]["warnings"] == [
+        {
+            "code": "SPRINT_GOVERNANCE_SPEC_UPDATE",
+            "message": (
+                "Some sprint candidates require governance/spec/authority "
+                "workflow before sprint execution."
+            ),
+            "story_ids": [governance_story.story_id],
+        }
+    ]
+
+
 def test_sprint_candidates_filters_to_story_completion_scope(
     session: Session,
 ) -> None:
