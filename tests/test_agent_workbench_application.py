@@ -4494,8 +4494,9 @@ def test_workflow_next_blocks_generate_for_stale_story_scope(
             "reason": "STALE_STORY_COMPLETION_SCOPE",
             "message": (
                 "Sprint generation is blocked because the active Story "
-                "completion scope excludes all current Sprint candidates. Run "
-                "story repair-readiness to refresh Story planning metadata."
+                "completion scope excludes all current Sprint candidates. Use "
+                "workflow next recovery commands to refresh or reconcile Story "
+                "planning metadata."
             ),
             "candidate_count": 0,
             "excluded_counts": {
@@ -4524,7 +4525,7 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
     with Session(engine) as session:
         product = Product(product_id=PROJECT_ID, name="ASA")
         team = Team(name="ASA Team")
-        story = UserStory(
+        sprint_linked_story = UserStory(
             product_id=PROJECT_ID,
             title="Already sprint-linked story",
             story_description="As an agent, I want safe routing.",
@@ -4535,10 +4536,23 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
             is_refined=True,
             is_superseded=False,
         )
-        session.add_all([product, team, story])
+        stale_story = UserStory(
+            product_id=PROJECT_ID,
+            title="Stale backlog story",
+            story_description="As an agent, I want old scope cleaned up.",
+            acceptance_criteria="- Reconcile stale scope.",
+            source_requirement="legacy_backlog_item",
+            refinement_slot=2,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+        )
+        session.add_all([product, team, sprint_linked_story, stale_story])
         session.flush()
         assert team.team_id is not None
-        assert story.story_id is not None
+        assert sprint_linked_story.story_id is not None
+        assert stale_story.story_id is not None
+        stale_story_id = stale_story.story_id
         sprint = Sprint(
             goal="Completed ASA sprint",
             start_date=date(2026, 6, 1),
@@ -4552,7 +4566,12 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
         session.add(sprint)
         session.flush()
         assert sprint.sprint_id is not None
-        session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+        session.add(
+            SprintStory(
+                sprint_id=sprint.sprint_id,
+                story_id=sprint_linked_story.story_id,
+            )
+        )
         session.commit()
     app = AgentWorkbenchApplication(
         read_projection=_SprintSetupStaleStoryScopeReadProjection(),
@@ -4563,13 +4582,27 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
 
     assert result["ok"] is True
     data = result["data"]
-    assert data["status"] == "sprint_setup_story_scope_repair_blocked"
+    assert data["status"] == "sprint_setup_story_scope_reconcile_required"
     repair_command = (
         "agileforge story repair-readiness --project-id 7 "
         "--expected-state SPRINT_SETUP "
         "--idempotency-key <idempotency_key>"
     )
+    reconcile_command = (
+        f"agileforge story reconcile --project-id 7 --story-id {stale_story_id} "
+        "--action defer --reason <reason> --idempotency-key <idempotency_key>"
+    )
     assert repair_command not in data["next_valid_commands"]
+    assert reconcile_command in data["next_valid_commands"]
+    assert not any(
+        command.startswith(
+            (
+                "agileforge story dependencies propose",
+                "agileforge story dependencies apply",
+            )
+        )
+        for command in data["next_valid_commands"]
+    )
     assert {
         "command": repair_command,
         "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",
