@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from shlex import quote
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
@@ -16,7 +16,8 @@ import utils.authority_curation_trace as trace_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
 from models.agent_workbench import CliMutationLedger
-from models.core import Product
+from models.core import Product, Sprint, SprintStory, Team, UserStory
+from models.enums import SprintStatus
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench import post_sprint_triage as post_sprint_triage_module
 from services.agent_workbench.application import AgentWorkbenchApplication
@@ -4462,8 +4463,13 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
     assert result["data"]["source_fingerprint"].startswith("sha256:")
 
 
-def test_workflow_next_blocks_generate_for_stale_story_scope() -> None:
+def test_workflow_next_blocks_generate_for_stale_story_scope(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Route stale Story scope in Sprint setup to guarded readiness repair."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
     app = AgentWorkbenchApplication(
         read_projection=_SprintSetupStaleStoryScopeReadProjection(),
         authority_projection=_CurrentAuthorityProjection(),
@@ -4506,6 +4512,69 @@ def test_workflow_next_blocks_generate_for_stale_story_scope() -> None:
             },
         }
     ]
+
+
+def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not advertise repair-readiness when its DB safety guard would reject it."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    with Session(engine) as session:
+        product = Product(product_id=PROJECT_ID, name="ASA")
+        team = Team(name="ASA Team")
+        story = UserStory(
+            product_id=PROJECT_ID,
+            title="Already sprint-linked story",
+            story_description="As an agent, I want safe routing.",
+            acceptance_criteria="- Verify safe routing.",
+            source_requirement="state_window_feature_generation",
+            refinement_slot=1,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+        )
+        session.add_all([product, team, story])
+        session.flush()
+        assert team.team_id is not None
+        assert story.story_id is not None
+        sprint = Sprint(
+            goal="Completed ASA sprint",
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 8),
+            status=SprintStatus.COMPLETED,
+            started_at=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 6, 8, 18, 0, tzinfo=UTC),
+            product_id=PROJECT_ID,
+            team_id=team.team_id,
+        )
+        session.add(sprint)
+        session.flush()
+        assert sprint.sprint_id is not None
+        session.add(SprintStory(sprint_id=sprint.sprint_id, story_id=story.story_id))
+        session.commit()
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintSetupStaleStoryScopeReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "sprint_setup_story_scope_repair_blocked"
+    repair_command = (
+        "agileforge story repair-readiness --project-id 7 "
+        "--expected-state SPRINT_SETUP "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert repair_command not in data["next_valid_commands"]
+    assert {
+        "command": repair_command,
+        "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",
+        "message": "Story readiness repair is unsafe after Sprint work exists.",
+    } in data["blocked_commands"]
 
 
 def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:

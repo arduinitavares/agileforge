@@ -7,7 +7,7 @@ from pathlib import Path
 from shlex import quote
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2709,6 +2709,41 @@ def _sprint_setup_stale_story_scope_blocker(
     }
 
 
+def _story_readiness_repair_blocker(project_id: int) -> dict[str, str] | None:
+    """Return blocker when Story readiness repair would be unsafe."""
+    from models.core import Sprint, SprintStory, UserStory  # noqa: PLC0415
+
+    with Session(get_engine()) as session:
+        active_story_ids = [
+            story_id
+            for story_id in session.exec(
+                select(UserStory.story_id).where(
+                    UserStory.product_id == project_id,
+                    UserStory.is_refined == True,  # noqa: E712
+                    UserStory.is_superseded == False,  # noqa: E712
+                )
+            ).all()
+            if story_id is not None
+        ]
+        if not active_story_ids:
+            return None
+
+        sprint_link = session.exec(
+            select(SprintStory.story_id)
+            .join(Sprint, cast("Any", Sprint.sprint_id) == SprintStory.sprint_id)
+            .where(
+                Sprint.product_id == project_id,
+                cast("Any", SprintStory.story_id).in_(active_story_ids),
+            )
+        ).first()
+    if sprint_link is None:
+        return None
+    return {
+        "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",
+        "message": "Story readiness repair is unsafe after Sprint work exists.",
+    }
+
+
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
     """Return whether workflow state has the exact active-reset stale marker."""
     data = _envelope_data(envelope)
@@ -4297,6 +4332,46 @@ def _story_requirement_has_merge_resolution(
     return resolution.get("status") == "merged"
 
 
+def _route_story_readiness_repair(
+    *,
+    project_id: int,
+    next_valid_commands: list[str],
+    blocked_commands: list[Any],
+    blocked_future_commands: list[Any],
+) -> dict[str, str] | None:
+    """Route repair-readiness according to the same safety guard as the command."""
+    repair_command = (
+        f"agileforge story repair-readiness --project-id {project_id} "
+        "--expected-state SPRINT_SETUP "
+        "--idempotency-key <idempotency_key>"
+    )
+    if not command_is_available("agileforge story repair-readiness"):
+        blocked_future_commands.append(repair_command)
+        return None
+
+    repair_blocker = _story_readiness_repair_blocker(project_id)
+    if repair_blocker is None:
+        next_valid_commands.append(repair_command)
+        return None
+
+    blocked_commands.append({"command": repair_command, **repair_blocker})
+    return repair_blocker
+
+
+def _sprint_workflow_status(
+    *,
+    stale_scope_blocker: dict[str, Any] | None,
+    story_readiness_repair_blocker: dict[str, str] | None,
+    next_valid_commands: list[str],
+) -> str | None:
+    """Return workflow-next status for Sprint routing."""
+    if stale_scope_blocker is None:
+        return "next_phase_available" if next_valid_commands else None
+    if story_readiness_repair_blocker is None:
+        return "sprint_setup_story_scope_repair_required"
+    return "sprint_setup_story_scope_repair_blocked"
+
+
 def _sprint_workflow_next(
     *,
     project_id: int,
@@ -4330,6 +4405,7 @@ def _sprint_workflow_next(
         if fsm_state == "SPRINT_SETUP"
         else None
     )
+    story_readiness_repair_blocker = None
     for command_name, command_text in _sprint_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
@@ -4354,25 +4430,22 @@ def _sprint_workflow_next(
             blocked_future_commands.append(command_text)
 
     if stale_scope_blocker is not None:
-        repair_command = (
-            f"agileforge story repair-readiness --project-id {project_id} "
-            "--expected-state SPRINT_SETUP "
-            "--idempotency-key <idempotency_key>"
+        story_readiness_repair_blocker = _route_story_readiness_repair(
+            project_id=project_id,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=blocked_commands,
+            blocked_future_commands=blocked_future_commands,
         )
-        if command_is_available("agileforge story repair-readiness"):
-            next_valid_commands.append(repair_command)
-        else:
-            blocked_future_commands.append(repair_command)
 
     data: dict[str, Any] = {
         "project_id": project_id,
         "next_valid_commands": next_valid_commands,
         "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
-        "status": (
-            "sprint_setup_story_scope_repair_required"
-            if stale_scope_blocker is not None
-            else ("next_phase_available" if next_valid_commands else None)
+        "status": _sprint_workflow_status(
+            stale_scope_blocker=stale_scope_blocker,
+            story_readiness_repair_blocker=story_readiness_repair_blocker,
+            next_valid_commands=next_valid_commands,
         ),
     }
     data["source_fingerprint"] = canonical_hash(
