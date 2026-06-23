@@ -1093,6 +1093,15 @@ class AgentWorkbenchApplication:
             if fsm_state == "SPRINT_SETUP"
             else None
         )
+        story_pending_for_setup = (
+            self.story_pending(project_id=project_id)
+            if fsm_state == "SPRINT_SETUP"
+            and _sprint_setup_stale_story_scope_blocker(sprint_candidates_for_setup)
+            is None
+            and _sprint_setup_story_refinement_blocker(sprint_candidates_for_setup)
+            is not None
+            else None
+        )
         phase_next_handlers = (
             _vision_workflow_next,
             _backlog_workflow_next,
@@ -1107,6 +1116,7 @@ class AgentWorkbenchApplication:
                     project_id=project_id,
                     workflow=workflow,
                     sprint_candidates=sprint_candidates_for_setup,
+                    story_pending=story_pending_for_setup,
                 )
                 if phase_next_handler is _sprint_workflow_next
                 else phase_next_handler(project_id=project_id, workflow=workflow)
@@ -2709,6 +2719,33 @@ def _sprint_setup_stale_story_scope_blocker(
         "excluded_counts": excluded_counts,
         "story_completion_scope": scope,
     }
+
+
+def _sprint_setup_story_refinement_blocker(
+    candidates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return blocker when Sprint setup has no refined candidate Stories."""
+    if _sprint_candidate_count(candidates) != 0:
+        return None
+    excluded_counts = _sprint_candidate_excluded_counts(candidates)
+    non_refined_count = _positive_int_or_none(excluded_counts.get("non_refined"))
+    if non_refined_count is None:
+        return None
+    blocker: dict[str, Any] = {
+        "command": "agileforge sprint generate",
+        "reason": "SPRINT_CANDIDATES_REQUIRE_STORY_REFINEMENT",
+        "message": (
+            "Sprint generation is blocked because there are no refined Sprint "
+            "candidates. Generate or save Stories for pending requirements "
+            "before planning the Sprint."
+        ),
+        "candidate_count": 0,
+        "excluded_counts": excluded_counts,
+    }
+    scope = _envelope_data(candidates or {}).get("story_completion_scope")
+    if isinstance(scope, dict):
+        blocker["story_completion_scope"] = scope
+    return blocker
 
 
 def _story_readiness_repair_blocker(project_id: int) -> dict[str, str] | None:
@@ -4477,21 +4514,104 @@ def _route_story_scope_reconcile_for_blocker(
     )
 
 
+def _first_pending_story_requirement(
+    story_pending: dict[str, Any] | None,
+) -> str | None:
+    """Return the first pending Story requirement from the pending projection."""
+    if story_pending is None or story_pending.get("ok") is not True:
+        return None
+    grouped_items = _envelope_data(story_pending).get("grouped_items")
+    if not isinstance(grouped_items, list):
+        return None
+    for group in grouped_items:
+        if not isinstance(group, dict):
+            continue
+        requirements = group.get("requirements")
+        if not isinstance(requirements, list):
+            continue
+        for item in requirements:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "").strip().lower() != "pending":
+                continue
+            requirement = str(item.get("requirement") or "").strip()
+            if requirement:
+                return requirement
+    return None
+
+
+def _route_story_generation_for_sprint_setup(
+    *,
+    project_id: int,
+    story_pending: dict[str, Any] | None,
+    next_valid_commands: list[str],
+    blocked_future_commands: list[Any],
+) -> str | None:
+    """Route Sprint setup back to the next pending Story requirement."""
+    pending_command = f"agileforge story pending --project-id {project_id}"
+    if command_is_available("agileforge story pending"):
+        next_valid_commands.append(pending_command)
+    else:
+        blocked_future_commands.append(pending_command)
+
+    requirement = _first_pending_story_requirement(story_pending)
+    if requirement is None:
+        return None
+    generate_command = (
+        f"agileforge story generate --project-id {project_id} "
+        f"--parent-requirement {quote(requirement)}"
+    )
+    if command_is_available("agileforge story generate"):
+        next_valid_commands.append(generate_command)
+        return generate_command
+    blocked_future_commands.append(generate_command)
+    return None
+
+
 def _sprint_workflow_status(
     *,
-    stale_scope_blocker: dict[str, Any] | None,
-    story_readiness_repair_blocker: dict[str, str] | None,
-    story_scope_reconcile_commands: list[str],
-    next_valid_commands: list[str],
+    blocker_kind: str | None,
+    readiness_repair_blocked: bool,
+    has_reconcile_commands: bool,
+    has_story_generation_command: bool,
+    has_next_valid_commands: bool,
 ) -> str | None:
     """Return workflow-next status for Sprint routing."""
-    if stale_scope_blocker is None:
-        return "next_phase_available" if next_valid_commands else None
-    if story_readiness_repair_blocker is None:
+    if blocker_kind is None:
+        return "next_phase_available" if has_next_valid_commands else None
+    if blocker_kind == "story_refinement":
+        if has_story_generation_command:
+            return "sprint_setup_story_generation_required"
+        return "sprint_setup_story_generation_blocked"
+    if not readiness_repair_blocked:
         return "sprint_setup_story_scope_repair_required"
-    if story_scope_reconcile_commands:
+    if has_reconcile_commands:
         return "sprint_setup_story_scope_reconcile_required"
     return "sprint_setup_story_scope_repair_blocked"
+
+
+def _sprint_dependency_mutation_suppressed(
+    *,
+    command_name: str,
+    has_setup_blocker: bool,
+) -> bool:
+    """Return whether dependency mutation cannot resolve the current blocker."""
+    return has_setup_blocker and command_name in {
+        "agileforge story dependencies propose",
+        "agileforge story dependencies apply",
+    }
+
+
+def _sprint_generate_blocker(
+    *,
+    command_name: str,
+    stale_scope_blocker: dict[str, Any] | None,
+    story_refinement_blocker: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the active blocker for Sprint generation, if any."""
+    if command_name != "agileforge sprint generate":
+        return None
+    return stale_scope_blocker or story_refinement_blocker
 
 
 def _sprint_workflow_next(
@@ -4499,6 +4619,7 @@ def _sprint_workflow_next(
     project_id: int,
     workflow: dict[str, Any],
     sprint_candidates: dict[str, Any] | None = None,
+    story_pending: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return Sprint phase commands for Sprint workflow states."""
     fsm_state = _fsm_state_from_envelope(workflow)
@@ -4527,16 +4648,25 @@ def _sprint_workflow_next(
         if fsm_state == "SPRINT_SETUP"
         else None
     )
+    story_refinement_blocker = (
+        _sprint_setup_story_refinement_blocker(sprint_candidates)
+        if fsm_state == "SPRINT_SETUP" and stale_scope_blocker is None
+        else None
+    )
+    has_setup_blocker = (
+        stale_scope_blocker is not None or story_refinement_blocker is not None
+    )
     story_readiness_repair_blocker = None
     story_scope_reconcile_commands: list[str] = []
+    story_generation_command = None
     for command_name, command_text in _sprint_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
     ):
-        if stale_scope_blocker is not None and command_name in {
-            "agileforge story dependencies propose",
-            "agileforge story dependencies apply",
-        }:
+        if _sprint_dependency_mutation_suppressed(
+            command_name=command_name,
+            has_setup_blocker=has_setup_blocker,
+        ):
             continue
         if command_name == "agileforge sprint save" and save_blocker is not None:
             blocked_commands.append(
@@ -4546,11 +4676,13 @@ def _sprint_workflow_next(
                 }
             )
             continue
-        if (
-            command_name == "agileforge sprint generate"
-            and stale_scope_blocker is not None
-        ):
-            blocked_commands.append(stale_scope_blocker)
+        generate_blocker = _sprint_generate_blocker(
+            command_name=command_name,
+            stale_scope_blocker=stale_scope_blocker,
+            story_refinement_blocker=story_refinement_blocker,
+        )
+        if generate_blocker is not None:
+            blocked_commands.append(generate_blocker)
             continue
         if command_is_available(command_name):
             next_valid_commands.append(command_text)
@@ -4571,6 +4703,13 @@ def _sprint_workflow_next(
             next_valid_commands=next_valid_commands,
             blocked_future_commands=blocked_future_commands,
         )
+    if story_refinement_blocker is not None:
+        story_generation_command = _route_story_generation_for_sprint_setup(
+            project_id=project_id,
+            story_pending=story_pending,
+            next_valid_commands=next_valid_commands,
+            blocked_future_commands=blocked_future_commands,
+        )
 
     data: dict[str, Any] = {
         "project_id": project_id,
@@ -4578,10 +4717,17 @@ def _sprint_workflow_next(
         "blocked_commands": blocked_commands,
         "blocked_future_commands": blocked_future_commands,
         "status": _sprint_workflow_status(
-            stale_scope_blocker=stale_scope_blocker,
-            story_readiness_repair_blocker=story_readiness_repair_blocker,
-            story_scope_reconcile_commands=story_scope_reconcile_commands,
-            next_valid_commands=next_valid_commands,
+            blocker_kind=(
+                "stale_scope"
+                if stale_scope_blocker is not None
+                else "story_refinement"
+                if story_refinement_blocker is not None
+                else None
+            ),
+            readiness_repair_blocked=story_readiness_repair_blocker is not None,
+            has_reconcile_commands=bool(story_scope_reconcile_commands),
+            has_story_generation_command=story_generation_command is not None,
+            has_next_valid_commands=bool(next_valid_commands),
         ),
     }
     data["source_fingerprint"] = canonical_hash(
@@ -4592,6 +4738,11 @@ def _sprint_workflow_next(
             "sprint_candidates": (
                 _fingerprint_input(_envelope_data(sprint_candidates))
                 if sprint_candidates is not None
+                else None
+            ),
+            "story_pending": (
+                _fingerprint_input(_envelope_data(story_pending))
+                if story_pending is not None
                 else None
             ),
             "installed_command_names": sorted(installed_command_names()),

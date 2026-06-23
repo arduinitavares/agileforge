@@ -282,6 +282,44 @@ class _SprintSetupStaleStoryScopeReadProjection(_SprintReadyReadProjection):
         return result
 
 
+class _SprintSetupNonRefinedStoryScopeReadProjection(_SprintReadyReadProjection):
+    """Fake read projection for zero candidates due to non-refined requirements."""
+
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return zero candidates with non-refined exclusions."""
+        result = super().sprint_candidates(project_id=project_id)
+        result["data"].update(
+            {
+                "count": 0,
+                "message": (
+                    "Found 0 sprint candidates for milestone Story scope. "
+                    "Excluded: 15 non-refined requirements."
+                ),
+                "excluded_counts": {
+                    "non_refined": 15,
+                    "superseded": 16,
+                    "open_sprint": 0,
+                },
+                "readiness": {
+                    "status": "ready",
+                    "blocking_codes": [],
+                    "blocking_story_ids": [],
+                    "default_priority_count": 0,
+                    "unsized_count": 0,
+                },
+                "story_completion_scope": {
+                    "scope": "milestone",
+                    "scope_id": "milestone_0",
+                    "requirements": [
+                        "Technology and Model Research Spike",
+                        "Python Project Scaffold and uv Management Setup",
+                    ],
+                },
+            }
+        )
+        return result
+
+
 class _SprintDraftReadProjection(_FakeReadProjection):
     """Fake read projection for a reviewed Sprint draft state."""
 
@@ -2096,6 +2134,39 @@ class _FakeStoryRunner:
                 "project_id": project_id,
                 "fsm_state": "SPRINT_SETUP",
                 "repair_result": {"repaired_count": 1, "story_ids": [66]},
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _PendingRequirementStoryRunner(_FakeStoryRunner):
+    """Fake Story runner with pending requirements for Sprint recovery."""
+
+    def pending(self, *, project_id: int) -> dict[str, Any]:
+        """Return grouped Story requirements with one pending item."""
+        self.calls.append(("pending", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "grouped_items": [
+                    {
+                        "group_id": "milestone_1",
+                        "requirements": [
+                            {
+                                "requirement": "State Window Feature Generation",
+                                "status": "Pending",
+                            },
+                            {
+                                "requirement": "Already Saved Requirement",
+                                "status": "Saved",
+                            },
+                        ],
+                    }
+                ],
+                "saved_count": 1,
+                "total_count": 2,
             },
             "warnings": [],
             "errors": [],
@@ -4608,6 +4679,65 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
         "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",
         "message": "Story readiness repair is unsafe after Sprint work exists.",
     } in data["blocked_commands"]
+
+
+def test_workflow_next_routes_zero_candidates_to_pending_story_generation() -> None:
+    """Do not advertise Sprint generation when scoped candidates are not refined."""
+    story_runner = _PendingRequirementStoryRunner()
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintSetupNonRefinedStoryScopeReadProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+        story_runner=story_runner,
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "sprint_setup_story_generation_required"
+    assert (
+        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    )
+    assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
+    assert (
+        "agileforge story generate --project-id 7 "
+        f"--parent-requirement {quote('State Window Feature Generation')}"
+    ) in data["next_valid_commands"]
+    assert not any(
+        command.startswith(
+            (
+                "agileforge story dependencies propose",
+                "agileforge story dependencies apply",
+            )
+        )
+        for command in data["next_valid_commands"]
+    )
+    assert data["blocked_commands"] == [
+        {
+            "command": "agileforge sprint generate",
+            "reason": "SPRINT_CANDIDATES_REQUIRE_STORY_REFINEMENT",
+            "message": (
+                "Sprint generation is blocked because there are no refined "
+                "Sprint candidates. Generate or save Stories for pending "
+                "requirements before planning the Sprint."
+            ),
+            "candidate_count": 0,
+            "excluded_counts": {
+                "non_refined": 15,
+                "superseded": 16,
+                "open_sprint": 0,
+            },
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_0",
+                "requirements": [
+                    "Technology and Model Research Spike",
+                    "Python Project Scaffold and uv Management Setup",
+                ],
+            },
+        }
+    ]
+    assert story_runner.calls == [("pending", {"project_id": PROJECT_ID})]
 
 
 def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
