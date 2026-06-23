@@ -74,6 +74,8 @@ _DEPENDENCY_PROPOSE_IDEMPOTENCY_KEY = "story_dependency_propose_idempotency_keys
 _DEPENDENCY_APPLY_IDEMPOTENCY_KEY = "story_dependency_apply_idempotency_keys"
 _MAX_DEPENDENCY_ATTEMPTS = 20
 _MANUAL_EDGE_PART_COUNT = 2
+_RECONCILE_TERMINAL_ACTIONS = {"archive", "defer", "rewrite-needed", "supersede"}
+_RECONCILE_ACTIONS = {"keep", *_RECONCILE_TERMINAL_ACTIONS}
 
 
 class _ManualDependencyEdgeError(RuntimeError):
@@ -202,6 +204,31 @@ class StoryPhaseRunner:
             parent_requirement,
             expected_state,
             idempotency_key,
+        )
+
+    def reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record a brownfield/open-story reconciliation decision."""
+        return anyio.run(
+            self._reconcile,
+            project_id,
+            story_id,
+            action,
+            reason,
+            idempotency_key,
+            changed_by,
+            evidence_links,
+            superseded_by_story_id,
         )
 
     def repair_readiness(
@@ -512,6 +539,102 @@ class StoryPhaseRunner:
         except RuntimeError as exc:
             return _workflow_error(exc)
         return _data_envelope(data)
+
+    async def _reconcile(  # noqa: PLR0911, PLR0913
+        self,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str,
+        evidence_links: list[str] | None,
+        superseded_by_story_id: int | None,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        normalized_action = action.strip().lower()
+        normalized_reason = reason.strip()
+        if normalized_action not in _RECONCILE_ACTIONS:
+            return _error_envelope(
+                ErrorCode.INVALID_COMMAND,
+                "Unsupported Story reconciliation action.",
+                details={
+                    "action": action,
+                    "allowed_actions": sorted(_RECONCILE_ACTIONS),
+                },
+            )
+        if not normalized_reason:
+            return _error_envelope(
+                ErrorCode.INVALID_COMMAND,
+                "Story reconciliation requires a reason.",
+            )
+
+        try:
+            with Session(get_engine()) as session:
+                replay = _reconcile_replay(
+                    session,
+                    project_id=project_id,
+                    idempotency_key=idempotency_key,
+                )
+                if replay is not None:
+                    return _data_envelope(replay)
+
+                story = session.get(UserStory, story_id)
+                if story is None or story.product_id != project_id:
+                    return _error_envelope(
+                        ErrorCode.INVALID_COMMAND,
+                        "Story reconciliation target was not found.",
+                        details={"project_id": project_id, "story_id": story_id},
+                    )
+
+                previous_status = _story_status_value(story.status)
+                terminal = normalized_action in _RECONCILE_TERMINAL_ACTIONS
+                now = datetime.now(UTC)
+                if terminal:
+                    story.is_superseded = True
+                    story.archived_reason = f"{normalized_action}: {normalized_reason}"
+                    story.archived_at = now
+                    story.archived_by = changed_by
+                    story.archive_previous_status = previous_status
+                    if normalized_action == "supersede":
+                        story.superseded_by_story_id = superseded_by_story_id
+                story.completion_notes = normalized_reason
+                if evidence_links:
+                    story.evidence_links = json.dumps(evidence_links)
+                story.updated_at = now
+                session.add(story)
+
+                payload = _reconcile_payload(
+                    story=story,
+                    action=normalized_action,
+                    reason=normalized_reason,
+                    idempotency_key=idempotency_key,
+                    changed_by=changed_by,
+                    evidence_links=evidence_links or [],
+                    superseded_by_story_id=superseded_by_story_id,
+                    terminal=terminal,
+                )
+                session.add(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.STORIES_SAVED,
+                        product_id=project_id,
+                        session_id=str(project_id),
+                        event_metadata=json.dumps(
+                            {
+                                "action": "story_reconcile",
+                                "idempotency_key": idempotency_key,
+                                "result": payload,
+                            }
+                        ),
+                    )
+                )
+                session.commit()
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(payload)
 
     async def _repair_readiness(
         self,
@@ -1351,6 +1474,68 @@ def _dependency_apply_event_metadata(
 def _now_iso() -> str:
     """Return canonical UTC timestamp."""
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _reconcile_replay(
+    session: Session,
+    *,
+    project_id: int,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Return a prior reconciliation result for the same idempotency key."""
+    events = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.product_id == project_id,
+            WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED,
+        )
+    ).all()
+    for event in reversed(events):
+        if not event.event_metadata:
+            continue
+        try:
+            metadata = json.loads(event.event_metadata)
+        except json.JSONDecodeError:
+            continue
+        if (
+            metadata.get("action") == "story_reconcile"
+            and metadata.get("idempotency_key") == idempotency_key
+            and isinstance(metadata.get("result"), dict)
+        ):
+            return cast("dict[str, Any]", metadata["result"])
+    return None
+
+
+def _reconcile_payload(  # noqa: PLR0913
+    *,
+    story: UserStory,
+    action: str,
+    reason: str,
+    idempotency_key: str,
+    changed_by: str,
+    evidence_links: list[str],
+    superseded_by_story_id: int | None,
+    terminal: bool,
+) -> dict[str, Any]:
+    """Return the persisted reconciliation result."""
+    return {
+        "project_id": story.product_id,
+        "story_id": story.story_id,
+        "action": action,
+        "reason": reason,
+        "changed_by": changed_by,
+        "idempotency_key": idempotency_key,
+        "terminal": terminal,
+        "archived_reason": story.archived_reason,
+        "is_superseded": story.is_superseded,
+        "superseded_by_story_id": superseded_by_story_id,
+        "evidence_links": evidence_links,
+    }
+
+
+def _story_status_value(status: object) -> str:
+    """Return an enum or string status as its stored value."""
+    value = getattr(status, "value", status)
+    return str(value)
 
 
 def _assert_reopen_safe(*, project_id: int, normalized_requirement: str) -> None:

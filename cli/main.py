@@ -650,6 +650,21 @@ class _Application(Protocol):
         """Reopen one saved Story requirement before Sprint work exists."""
         ...
 
+    def story_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> JsonObject:
+        """Record a Story reconciliation decision."""
+        ...
+
     def story_repair_readiness(
         self,
         *,
@@ -1952,6 +1967,28 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_reopen.add_argument("--expected-state", required=True)
     story_reopen.add_argument("--idempotency-key", required=True)
     story_reopen.set_defaults(command_handler=_story_reopen)
+    story_reconcile = story_sub.add_parser(
+        "reconcile",
+        help="Record how an open Story should be handled before scope extension.",
+    )
+    story_reconcile.add_argument("--project-id", type=int, required=True)
+    story_reconcile.add_argument("--story-id", type=int, required=True)
+    story_reconcile.add_argument(
+        "--action",
+        choices=["keep", "archive", "defer", "supersede", "rewrite-needed"],
+        required=True,
+    )
+    story_reconcile.add_argument("--reason", required=True)
+    story_reconcile.add_argument("--idempotency-key", required=True)
+    story_reconcile.add_argument("--changed-by", default="cli-agent")
+    story_reconcile.add_argument(
+        "--evidence-link",
+        action="append",
+        dest="evidence_links",
+        help="Evidence path or URL for this reconciliation decision.",
+    )
+    story_reconcile.add_argument("--superseded-by-story-id", type=int)
+    story_reconcile.set_defaults(command_handler=_story_reconcile)
     story_repair = story_sub.add_parser(
         "repair-readiness",
         help="Backfill Story planning metadata before Sprint work starts.",
@@ -3721,6 +3758,23 @@ def _story_reopen(
         parent_requirement=args.parent_requirement,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_reconcile(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story reconcile to the application facade."""
+    return "agileforge story reconcile", application.story_reconcile(
+        project_id=args.project_id,
+        story_id=args.story_id,
+        action=args.action,
+        reason=args.reason,
+        idempotency_key=args.idempotency_key,
+        changed_by=args.changed_by,
+        evidence_links=args.evidence_links,
+        superseded_by_story_id=args.superseded_by_story_id,
     )
 
 

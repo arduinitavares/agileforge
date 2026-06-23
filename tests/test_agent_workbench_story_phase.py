@@ -24,7 +24,7 @@ from models.core import (
     UserStory,
     UserStoryDependency,
 )
-from models.enums import SprintStatus, TaskStatus, WorkflowEventType
+from models.enums import SprintStatus, StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from services.agent_workbench.story_phase import (
     StoryPhaseRunner,
@@ -238,6 +238,101 @@ def _seed_manual_dependency_stories(session: Session) -> tuple[int, int]:
     assert prerequisite.story_id is not None
     assert dependent.story_id is not None
     return dependent.story_id, prerequisite.story_id
+
+
+def _seed_open_story(session: Session) -> int:
+    product = Product(product_id=PROJECT_ID, name="Cartola")
+    story = UserStory(
+        product_id=PROJECT_ID,
+        title="Old brownfield story",
+        story_description="As an agent, I want to reconcile old work.",
+        acceptance_criteria="- Verify reconciliation.",
+        source_requirement="old_brownfield_story",
+        refinement_slot=1,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        status=StoryStatus.TO_DO,
+    )
+    session.add(product)
+    session.add(story)
+    session.commit()
+    session.refresh(story)
+    assert story.story_id is not None
+    return story.story_id
+
+
+def test_story_reconcile_archives_open_story_for_scope_extension(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story reconcile archives an open story using existing terminal fields."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    story_id = _seed_open_story(session)
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.reconcile(
+        project_id=PROJECT_ID,
+        story_id=story_id,
+        action="archive",
+        reason="already represented by approved spec",
+        idempotency_key="reconcile-story-1",
+        changed_by="agent",
+        evidence_links=["scope-extension-validate-story1.json"],
+    )
+
+    session.expire_all()
+    story = session.get(UserStory, story_id)
+    assert result["ok"] is True
+    assert result["data"]["story_id"] == story_id
+    assert result["data"]["terminal"] is True
+    assert story is not None
+    assert story.is_superseded is True
+    assert story.archived_reason == "archive: already represented by approved spec"
+    assert story.archived_by == "agent"
+    assert story.archive_previous_status == StoryStatus.TO_DO.value
+    assert story.evidence_links == '["scope-extension-validate-story1.json"]'
+    event = session.exec(select(WorkflowEvent)).one()
+    assert event.event_type == WorkflowEventType.STORIES_SAVED
+
+
+def test_story_reconcile_keep_records_decision_without_closing_story(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep is an explicit decision, not a terminal-state shortcut."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    story_id = _seed_open_story(session)
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.reconcile(
+        project_id=PROJECT_ID,
+        story_id=story_id,
+        action="keep",
+        reason="still belongs in an implementation sprint",
+        idempotency_key="keep-story-1",
+        changed_by="agent",
+    )
+
+    session.expire_all()
+    story = session.get(UserStory, story_id)
+    assert result["ok"] is True
+    assert result["data"]["terminal"] is False
+    assert story is not None
+    assert story.archived_reason is None
+    assert story.is_superseded is False
 
 
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -76,6 +76,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story save",
     "agileforge story complete",
     "agileforge story reopen",
+    "agileforge story reconcile",
     "agileforge story repair-readiness",
     "agileforge story dependencies inspect",
     "agileforge story dependencies propose",
@@ -833,6 +834,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "agileforge story save",
         "agileforge story complete",
         "agileforge story reopen",
+        "agileforge story reconcile",
         "agileforge story repair-readiness",
     }
 
@@ -849,6 +851,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
     save = command_schema_payload("agileforge story save")
     complete = command_schema_payload("agileforge story complete")
     reopen = command_schema_payload("agileforge story reopen")
+    reconcile = command_schema_payload("agileforge story reconcile")
     repair_readiness = command_schema_payload("agileforge story repair-readiness")
 
     assert pending["mutates"] is False
@@ -890,6 +893,20 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "idempotency_key",
     ]
     assert reopen["idempotency_required"] is True
+    assert reconcile["mutates"] is True
+    assert reconcile["input"]["required"] == [
+        "project_id",
+        "story_id",
+        "action",
+        "reason",
+        "idempotency_key",
+    ]
+    assert reconcile["input"]["optional"] == [
+        "changed_by",
+        "evidence_link",
+        "superseded_by_story_id",
+    ]
+    assert reconcile["idempotency_required"] is True
     assert repair_readiness["mutates"] is True
     assert repair_readiness["input"]["required"] == [
         "project_id",
@@ -897,7 +914,15 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "idempotency_key",
     ]
     assert repair_readiness["idempotency_required"] is True
-    for schema in (generate, retry, save, complete, reopen, repair_readiness):
+    for schema in (
+        generate,
+        retry,
+        save,
+        complete,
+        reopen,
+        reconcile,
+        repair_readiness,
+    ):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in schema["errors"]
         assert ErrorCode.INVALID_COMMAND.value in schema["errors"]

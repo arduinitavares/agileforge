@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
 
 PROJECT_ID = 7
+RECONCILED_STORY_ID = 17
 SPRINT_ID = 11
 SPEC_VERSION_ID = 3
 STORY_ID = 12
@@ -2035,6 +2036,41 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
+    def reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record Story reconciliation."""
+        self.calls.append(
+            (
+                "reconcile",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "action": action,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "evidence_links": evidence_links,
+                    "superseded_by_story_id": superseded_by_story_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
     def repair_readiness(
         self,
         *,
@@ -3337,6 +3373,15 @@ def test_application_routes_story_commands_to_runner() -> None:
         )["data"]["fsm_state"]
         == "STORY_INTERVIEW"
     )
+    assert app.story_reconcile(
+        project_id=PROJECT_ID,
+        story_id=RECONCILED_STORY_ID,
+        action="archive",
+        reason="covered by accepted scope",
+        idempotency_key="reconcile-story-17",
+        changed_by="agent",
+        evidence_links=["scope-extension-validate-story1.json"],
+    )["data"]["story_id"] == RECONCILED_STORY_ID
     assert runner.calls[6] == (
         "complete",
         {
@@ -3427,6 +3472,19 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "parent_requirement": "REQ.checkout",
                 "expected_state": "SPRINT_SETUP",
                 "idempotency_key": "reopen-story-1",
+            },
+        ),
+        (
+            "reconcile",
+            {
+                "project_id": PROJECT_ID,
+                "story_id": RECONCILED_STORY_ID,
+                "action": "archive",
+                "reason": "covered by accepted scope",
+                "idempotency_key": "reconcile-story-17",
+                "changed_by": "agent",
+                "evidence_links": ["scope-extension-validate-story1.json"],
+                "superseded_by_story_id": None,
             },
         ),
         (

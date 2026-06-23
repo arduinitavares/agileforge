@@ -1019,6 +1019,41 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def story_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> JsonObject:
+        """Return a story reconcile payload."""
+        self.calls.append(
+            (
+                "story_reconcile",
+                {
+                    "project_id": project_id,
+                    "story_id": story_id,
+                    "action": action,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "evidence_links": evidence_links,
+                    "superseded_by_story_id": superseded_by_story_id,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "story_id": story_id},
+            "warnings": [],
+            "errors": [],
+        }
+
     def story_repair_readiness(
         self,
         *,
@@ -3537,6 +3572,40 @@ def test_cli_routes_roadmap_commands(
                 },
             ),
             "agileforge story reopen",
+        ),
+        (
+            [
+                "story",
+                "reconcile",
+                "--project-id",
+                str(PROJECT_ID),
+                "--story-id",
+                "17",
+                "--action",
+                "archive",
+                "--reason",
+                "covered by accepted scope",
+                "--idempotency-key",
+                "reconcile-story-17",
+                "--changed-by",
+                "agent",
+                "--evidence-link",
+                "scope-extension-validate-story1.json",
+            ],
+            (
+                "story_reconcile",
+                {
+                    "project_id": PROJECT_ID,
+                    "story_id": 17,
+                    "action": "archive",
+                    "reason": "covered by accepted scope",
+                    "idempotency_key": "reconcile-story-17",
+                    "changed_by": "agent",
+                    "evidence_links": ["scope-extension-validate-story1.json"],
+                    "superseded_by_story_id": None,
+                },
+            ),
+            "agileforge story reconcile",
         ),
         (
             [

@@ -913,18 +913,34 @@ def _start_precondition_error(
             "status": preconditions.status,
             "blocking_reason": blocking_reason,
         },
-        remediation=(
-            [
-                "Complete, archive, or refine unresolved work before starting a "
-                "scope extension."
-            ]
-            if unresolved_work
-            else [
-                "Refresh workflow state and retry after current Sprint activity "
-                "is complete."
-            ]
+        remediation=_start_precondition_remediation(
+            blocking_reason,
+            unresolved_work=unresolved_work,
         ),
     )
+
+
+def _start_precondition_remediation(
+    blocking_reason: str,
+    *,
+    unresolved_work: bool,
+) -> list[str]:
+    if blocking_reason == "OPEN_STORY_EXISTS":
+        return [
+            (
+                "Reconcile each open Story first, for example: agileforge story "
+                "reconcile --project-id <project_id> --story-id <story_id> "
+                "--action archive --reason <reason> --idempotency-key <key>."
+            )
+        ]
+    if unresolved_work:
+        return [
+            "Complete, archive, or refine unresolved work before starting a "
+            "scope extension."
+        ]
+    return [
+        "Refresh workflow state and retry after current Sprint activity is complete."
+    ]
 
 
 def _pending_start_error(

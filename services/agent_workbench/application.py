@@ -521,6 +521,21 @@ class _StoryPhaseRunner(Protocol):
         """Reopen one saved Story requirement before Sprint work exists."""
         ...
 
+    def reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record a Story reconciliation decision."""
+        ...
+
     def repair_readiness(
         self,
         *,
@@ -2044,6 +2059,30 @@ class AgentWorkbenchApplication:
             parent_requirement=parent_requirement,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
+        )
+
+    def story_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        story_id: int,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+        superseded_by_story_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Record a Story reconciliation decision."""
+        return self._get_story_runner().reconcile(
+            project_id=project_id,
+            story_id=story_id,
+            action=action,
+            reason=reason,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+            evidence_links=evidence_links,
+            superseded_by_story_id=superseded_by_story_id,
         )
 
     def story_repair_readiness(

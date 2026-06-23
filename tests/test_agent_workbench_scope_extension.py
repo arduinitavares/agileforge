@@ -757,6 +757,13 @@ def test_runner_start_blocks_open_story_without_pending_spec_registration(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == ERR_SCOPE_EXTENSION_UNRESOLVED_WORK
     assert result["errors"][0]["details"]["blocking_reason"] == "OPEN_STORY_EXISTS"
+    assert result["errors"][0]["remediation"] == [
+        (
+            "Reconcile each open Story first, for example: agileforge story "
+            "reconcile --project-id <project_id> --story-id <story_id> "
+            "--action archive --reason <reason> --idempotency-key <key>."
+        )
+    ]
     assert workflow.updates == []
     spec_version_ids = [
         spec.spec_version_id for spec in _spec_rows(session, _product_id(product))
