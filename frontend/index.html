@@ -65,11 +65,11 @@
     <div id="create-project-modal" class="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6 hidden">
         <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity"
             onclick="closeCreateProjectModal()"></div>
-        <div
+        <form onsubmit="event.preventDefault(); submitNewProject();"
             class="bg-white dark:bg-slate-800 rounded-xl shadow-xl w-full max-w-lg relative z-10 flex flex-col border border-slate-200 dark:border-slate-700">
             <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
                 <h3 class="text-lg font-bold">Create New Project</h3>
-                <button onclick="closeCreateProjectModal()"
+                <button type="button" onclick="closeCreateProjectModal()"
                     aria-label="Close modal"
                     class="text-slate-400 hover:text-slate-500 dark:hover:text-slate-300 transition-colors">
                     <span class="material-symbols-outlined">close</span>
@@ -78,27 +78,27 @@
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
                     <label for="modal-project-name" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Project Name <span class="text-red-500" aria-hidden="true">*</span></label>
-                    <input id="modal-project-name" type="text" placeholder="e.g. Project Phoenix" required
+                    <input id="modal-project-name" type="text" placeholder="e.g. Project Phoenix" required pattern=".*\S+.*" title="Project name cannot be empty or just whitespace."
                         class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
                 </div>
                 <div class="space-y-2">
                     <label for="modal-spec-path" class="text-sm font-semibold text-slate-700 dark:text-slate-300">Specification File
                         Path <span class="text-red-500" aria-hidden="true">*</span></label>
-                    <input id="modal-spec-path" type="text" placeholder="C:\\path\\to\\spec.md" required aria-describedby="modal-spec-path-help"
+                    <input id="modal-spec-path" type="text" placeholder="C:\\path\\to\\spec.md" required pattern=".*\S+.*" title="File path cannot be empty or just whitespace." aria-describedby="modal-spec-path-help"
                         class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-primary" />
                     <p id="modal-spec-path-help" class="text-xs text-slate-500 mt-1">Provide the absolute path to your markdown specification.</p>
                 </div>
             </div>
             <div
                 class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 rounded-b-xl">
-                <button onclick="closeCreateProjectModal()"
+                <button type="button" onclick="closeCreateProjectModal()"
                     class="px-5 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Cancel</button>
-                <button id="btn-submit-project" onclick="submitNewProject()"
+                <button id="btn-submit-project" type="submit"
                     class="px-6 py-2.5 rounded-lg bg-primary hover:bg-primary/90 text-white font-bold transition-all shadow-sm">
                     Create Project
                 </button>
             </div>
-        </div>
+        </form>
     </div>
 
     <script src="/dashboard/app.js"></script>
