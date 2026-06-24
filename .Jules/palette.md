@@ -1,0 +1,3 @@
+## 2024-03-21 - Form Wrapping for Modals
+**Learning:** When creating modal dialogs with input fields, using `<div>` wrappers and `onclick` handlers on buttons prevents standard web behaviors like native HTML5 input validation tooltips and Enter-key submission. This forces keyboard users to explicitly tab to and activate the submit button, degrading accessibility and user flow.
+**Action:** Always wrap input fields within a `<form>` element, ensure the submit button has `type="submit"`, explicitly set `type="button"` on cancel/close buttons to prevent accidental submission, and use an `onsubmit` handler (with `event.preventDefault()`) on the form. Also add `pattern=".*\S+.*"` to required inputs to prevent whitespace-only bypasses.
