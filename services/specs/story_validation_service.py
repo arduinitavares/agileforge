@@ -1155,6 +1155,29 @@ def validate_story_with_spec_authority(
                     remediation=remediation,
                 ),
             )
+        if not getattr(loaded_artifact, "ok", False):
+            remediation = compiled_authority_schema_unsupported_remediation(
+                project_id=story.product_id,
+                spec_version_id=parsed.spec_version_id,
+            )
+            base_message = (
+                getattr(loaded_artifact, "message", None)
+                or "Compiled authority artifact is unreadable."
+            )
+            error_message = base_message + " " + " ".join(remediation)
+            return _build_failed_validation_result(
+                failure_context,
+                _FailedValidationDetails(
+                    rule="SPEC_VERSION_COMPILED",
+                    expected="Readable compiled authority exists",
+                    actual=(
+                        f"Unreadable compiled authority ({getattr(loaded_artifact, 'status', 'unknown')})"
+                    ),
+                    message=error_message,
+                    error=error_message,
+                    remediation=remediation,
+                ),
+            )
 
         artifact = _resolve_loaded_artifact(loaded_artifact)
         invariants_checked = _build_invariants_checked(

@@ -521,6 +521,52 @@ def compiled_authority_schema_unsupported_remediation(
     ]
 
 
+COMPILED_AUTHORITY_INVALID_ERROR_CODE = "COMPILED_AUTHORITY_INVALID"
+
+
+def compiled_authority_unreadable_details(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    load_result: CompiledArtifactLoadResult,
+) -> dict[str, Any]:
+    """Return standard details for unreadable compiled-authority artifacts."""
+    return {
+        "project_id": project_id,
+        "spec_version_id": spec_version_id,
+        "load_status": load_result.status,
+        "observed_schema_version": load_result.observed_schema_version,
+        "validation_error": load_result.validation_error,
+    }
+
+
+def compiled_authority_unreadable_compile_error(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    load_result: CompiledArtifactLoadResult,
+) -> dict[str, Any]:
+    """Build a compile error envelope for unreadable cached authority artifacts."""
+    return {
+        "success": False,
+        "cached": False,
+        "error": (
+            load_result.message or "Compiled authority artifact is unreadable."
+        ),
+        "error_code": COMPILED_AUTHORITY_INVALID_ERROR_CODE,
+        "details": compiled_authority_unreadable_details(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            load_result=load_result,
+        ),
+        "remediation": compiled_authority_schema_unsupported_remediation(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+        ),
+        "load_status": load_result.status,
+    }
+
+
 def _resolve_tool_module() -> object | None:
     """Load the legacy tools module when present."""
     try:
@@ -2947,6 +2993,12 @@ def _cached_compilation_result(
             "observed_schema_version": observed_schema_version,
             "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
         }
+    if not load_result.ok:
+        return compiled_authority_unreadable_compile_error(
+            project_id=context.product.product_id,
+            spec_version_id=context.spec_version.spec_version_id,
+            load_result=load_result,
+        )
     artifact = load_result.artifact
     if load_result.ok and artifact is not None:
         scope_themes_count = len(artifact.scope_themes)

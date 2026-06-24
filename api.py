@@ -206,8 +206,10 @@ from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
 from services.specs.compiler_service import (
+    COMPILED_AUTHORITY_INVALID_ERROR_CODE,
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
+    compiled_authority_unreadable_details,
     load_compiled_artifact,
 )
 from services.specs.lifecycle_service import link_spec_to_product
@@ -851,13 +853,47 @@ def _phase_authority_spec_version_id(state: dict[str, Any]) -> int | None:
     return None
 
 
+def _raise_compiled_authority_unreadable(
+    *,
+    project_id: int,
+    spec_version_id: int | None,
+    load_result: object,
+) -> None:
+    """Raise the dashboard conflict for unreadable compiled-authority artifacts."""
+    message = (
+        getattr(load_result, "message", None)
+        or "Compiled authority artifact is unreadable."
+    )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "status": "error",
+            "errors": [
+                {
+                    "code": COMPILED_AUTHORITY_INVALID_ERROR_CODE,
+                    "message": message,
+                    "details": compiled_authority_unreadable_details(
+                        project_id=project_id,
+                        spec_version_id=spec_version_id,
+                        load_result=load_result,
+                    ),
+                    "remediation": compiled_authority_schema_unsupported_remediation(
+                        project_id=project_id,
+                        spec_version_id=spec_version_id,
+                    ),
+                }
+            ],
+        },
+    )
+
+
 def _raise_if_authority_json_unsupported(
     *,
     project_id: int,
     spec_version_id: int | None,
     authority_json: object,
 ) -> None:
-    """Fail closed when a phase start source has unsupported authority JSON."""
+    """Fail closed when a phase start source has unusable authority JSON."""
     if not isinstance(authority_json, str) or not authority_json:
         return
     load_result = load_compiled_artifact(
@@ -868,6 +904,12 @@ def _raise_if_authority_json_unsupported(
             project_id=project_id,
             spec_version_id=spec_version_id,
             observed_schema_version=load_result.observed_schema_version,
+        )
+    if not load_result.ok:
+        _raise_compiled_authority_unreadable(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            load_result=load_result,
         )
 
 
