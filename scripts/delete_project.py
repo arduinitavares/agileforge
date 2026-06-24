@@ -129,6 +129,16 @@ def delete_project(product_id: int, db_path: str) -> None:  # noqa: C901, PLR091
             (product_id,),
         )
 
+        emit(
+            "  - Deleting task_execution_logs linked to user stories of this product..."  # noqa: E501
+        )
+        cur.execute(
+            "DELETE FROM task_execution_logs "
+            "WHERE task_id IN (SELECT task_id FROM tasks WHERE story_id IN "
+            "(SELECT story_id FROM user_stories WHERE product_id=?))",
+            (product_id,),
+        )
+
         emit("  - Deleting tasks linked to user stories of this product...")
         cur.execute(
             "DELETE FROM tasks WHERE story_id IN (SELECT story_id FROM user_stories WHERE product_id=?)",  # noqa: E501
