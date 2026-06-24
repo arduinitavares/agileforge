@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 
 from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependency
 from models.db import get_engine
-from models.enums import TaskStatus, WorkflowEventType
+from models.enums import StoryStatus, TaskStatus, WorkflowEventType
 from models.events import WorkflowEvent
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
@@ -540,7 +540,7 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _reconcile(  # noqa: PLR0911, PLR0913
+    async def _reconcile(  # noqa: C901, PLR0911, PLR0913
         self,
         project_id: int,
         story_id: int,
@@ -592,6 +592,29 @@ class StoryPhaseRunner:
 
                 previous_status = _story_status_value(story.status)
                 terminal = normalized_action in _RECONCILE_TERMINAL_ACTIONS
+                if terminal and _story_reconciliation_target_is_terminal(story):
+                    return _error_envelope(
+                        ErrorCode.INVALID_COMMAND,
+                        "Story reconciliation cannot supersede a completed Story.",
+                        details={
+                            "project_id": project_id,
+                            "story_id": story_id,
+                            "action": normalized_action,
+                            "status": previous_status,
+                            "is_superseded": story.is_superseded,
+                            "archived_reason": story.archived_reason,
+                        },
+                        remediation=[
+                            (
+                                "Use story show/history to inspect completed "
+                                "Story evidence."
+                            ),
+                            (
+                                "Do not archive, defer, rewrite, or supersede "
+                                "completed Stories."
+                            ),
+                        ],
+                    )
                 now = datetime.now(UTC)
                 if terminal:
                     story.is_superseded = True
@@ -1536,6 +1559,15 @@ def _story_status_value(status: object) -> str:
     """Return an enum or string status as its stored value."""
     value = getattr(status, "value", status)
     return str(value)
+
+
+def _story_reconciliation_target_is_terminal(story: UserStory) -> bool:
+    """Return whether a Story is already terminal for reconciliation purposes."""
+    return (
+        story.status in {StoryStatus.DONE, StoryStatus.ACCEPTED}
+        or story.is_superseded
+        or story.archived_reason is not None
+    )
 
 
 def _assert_reopen_safe(*, project_id: int, normalized_requirement: str) -> None:

@@ -335,6 +335,48 @@ def test_story_reconcile_keep_records_decision_without_closing_story(
     assert story.is_superseded is False
 
 
+@pytest.mark.parametrize("status", [StoryStatus.DONE, StoryStatus.ACCEPTED])
+def test_story_reconcile_rejects_completed_story_terminal_actions(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    status: StoryStatus,
+) -> None:
+    """Story reconcile must not supersede completed Stories."""
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    story_id = _seed_open_story(session)
+    story = session.get(UserStory, story_id)
+    assert story is not None
+    story.status = status
+    session.add(story)
+    session.commit()
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.reconcile(
+        project_id=PROJECT_ID,
+        story_id=story_id,
+        action="archive",
+        reason="already delivered",
+        idempotency_key=f"reject-completed-story-{status.value}",
+        changed_by="agent",
+    )
+
+    session.expire_all()
+    persisted = session.get(UserStory, story_id)
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "INVALID_COMMAND"
+    assert persisted is not None
+    assert persisted.status == status
+    assert persisted.is_superseded is False
+    assert persisted.archived_reason is None
+    assert persisted.archive_previous_status is None
+
+
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Story pending returns roadmap requirements grouped by milestone."""
 
