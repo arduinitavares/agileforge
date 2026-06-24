@@ -1,0 +1,3 @@
+## 2026-05-02 - Ensure Native HTML5 Form Validation in Modals
+**Learning:** When building modal dialogs with input fields that use JavaScript to handle submissions via `alert()` checks, users miss out on native HTML5 validation tooltips and standard keyboard submission behaviors (like pressing Enter). Using a `<form>` element instead of a `<div>` and applying `pattern=".*\S+.*"` on `required` inputs provides immediate, accessible validation feedback natively in the browser without disruptive Javascript popups.
+**Action:** Always wrap modal inputs inside a `<form onsubmit="event.preventDefault(); handler();">`, assign `type="button"` to cancel/close buttons, and `type="submit"` to the main action button to enable native accessible form behaviors.
