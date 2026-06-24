@@ -219,6 +219,40 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   `validation_details` projection for Sprint generation failures, with tests
   proving the CLI exposes offending story/task fields.
 
+## 2026-06-24 ASA extension Story generation feedback
+
+### Story refinement can fail on provider max-token affordability
+
+- Observed command/UI:
+  `agileforge story generate --project-id 3 --parent-requirement "Communication Constraint for Advisory Outputs" --input <targeted dependency feedback> --force-feedback`
+- Expected behavior:
+  Story refinement should either run with a bounded output budget the configured
+  provider can afford, or fail before mutation with a clear local configuration
+  error that tells the operator which max-token setting to reduce.
+- Actual behavior:
+  The forced refinement returned `MUTATION_FAILED` at
+  `failure_stage=invocation_exception`, with failure artifact
+  `story-20260624T032620622969Z-bdbe51a87b94`. The OpenRouter error said the
+  request asked for up to `100000` tokens but the account could only afford
+  `86157`.
+- Why it matters:
+  ASA is blocked on a normal Story refinement even though the requested change
+  is small: remove one unresolved dependency candidate from an otherwise
+  complete draft. The CLI does not expose a per-command max-token guard or an
+  obvious recovery command, so continuing requires either adding credits or
+  changing AgileForge/provider configuration outside the workflow.
+- Blocker or non-blocker:
+  Blocker for ASA continuation through AgileForge CLI.
+- Exact reproduction command or screen state:
+  From `/Users/aaat/projects/asa-deep-process-control-experiments`, run the
+  command above while the project is at Story refinement for
+  `Communication Constraint for Advisory Outputs`, after attempt `attempt-1`
+  has `STORY_DEPENDENCY_CANDIDATE_UNRESOLVED`.
+- Suggested fix:
+  Add a provider-budget preflight or adaptive max-token cap for Story
+  generation/refinement. Also consider a CLI/config override for max tokens and
+  include the refreshed recovery command in the error envelope.
+
 #### Active sprint state hides sprint generation attempt history
 
 - Original feedback item: `Active sprint state hides sprint generation attempt
