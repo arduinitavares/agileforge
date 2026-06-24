@@ -1043,14 +1043,15 @@ Generate a Sprint draft from the reviewed candidate set:
 agileforge sprint generate \
   --project-id "$PROJECT_ID" \
   --selected-story-ids 66,85 \
-  --team-velocity-assumption Medium \
-  --sprint-duration-days 14 \
+  --excluded-story-ids 276 \
+  --max-story-points 8 \
   > sprint-generate.json
 ```
 
 Use `--selected-story-ids` only when intentionally constraining scope; otherwise
 omit it and let AgileForge lock a deterministic cohort from all ready
-candidates. Use `--input` for real refinement feedback only.
+candidates. Use `--excluded-story-ids` to hard-remove ready candidates before
+the cohort is locked. Use `--input` for real refinement feedback only.
 
 #### Sprint Selection Contract
 
@@ -1068,6 +1069,9 @@ candidates:
   `SPRINT_SELECTION_DEPENDENCY_MISSING`. If all required stories are present
   but out of order, AgileForge reorders them into dependency-safe order and
   reports `SPRINT_SELECTION_MANUAL_REORDERED`.
+- Explicit exclusion mode removes `--excluded-story-ids` from eligible
+  candidates before default or manual selection. A story cannot be both selected
+  and excluded in the same request.
 
 ### Dependency-Aware Sprint Selection
 
@@ -1082,7 +1086,8 @@ Manual override:
 ```sh
 agileforge sprint generate \
   --project-id "$PROJECT_ID" \
-  --selected-story-ids <prerequisite_id>,<dependent_id>
+  --selected-story-ids <prerequisite_id>,<dependent_id> \
+  --excluded-story-ids <excluded_id>
 ```
 
 The Sprint Planner receives only the locked cohort. Its job is to write the

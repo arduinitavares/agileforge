@@ -559,6 +559,7 @@ class SprintGenerateRequest(BaseModel):
     max_story_points: int | None = Field(default=None, gt=0)
     include_task_decomposition: bool = True
     selected_story_ids: list[int] | None = None
+    excluded_story_ids: list[int] | None = None
 
 
 class SprintSaveRequest(BaseModel):
@@ -3569,6 +3570,7 @@ async def generate_project_sprint(
             max_story_points=req.max_story_points,
             include_task_decomposition=req.include_task_decomposition,
             selected_story_ids=req.selected_story_ids,
+            excluded_story_ids=req.excluded_story_ids,
             user_input=req.user_input,
         )
     except SprintPhaseError as exc:

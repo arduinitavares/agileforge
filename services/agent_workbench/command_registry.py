@@ -892,6 +892,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         input_optional=(
             "input",
             "selected_story_ids",
+            "excluded_story_ids",
             "max_story_points",
             "include_task_decomposition",
         ),

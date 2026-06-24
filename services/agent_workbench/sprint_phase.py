@@ -239,12 +239,13 @@ class SprintPhaseRunner:
         self._product_repo = product_repo or ProductRepository()
         self._workflow_service = workflow_service or WorkflowService()
 
-    def generate(
+    def generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -254,6 +255,7 @@ class SprintPhaseRunner:
             project_id,
             user_input,
             selected_story_ids,
+            excluded_story_ids,
             max_story_points,
             include_task_decomposition,
         )
@@ -1193,11 +1195,12 @@ class SprintPhaseRunner:
         )
         return response
 
-    async def _generate(  # noqa: C901, PLR0911
+    async def _generate(  # noqa: C901, PLR0911, PLR0913
         self,
         project_id: int,
         user_input: str | None,
         selected_story_ids: list[int] | None,
+        excluded_story_ids: list[int] | None,
         max_story_points: int | None,
         include_task_decomposition: bool,
     ) -> dict[str, Any]:
@@ -1278,6 +1281,7 @@ class SprintPhaseRunner:
                 max_story_points=max_story_points,
                 include_task_decomposition=include_task_decomposition,
                 selected_story_ids=selected_story_ids,
+                excluded_story_ids=excluded_story_ids,
                 user_input=user_input,
                 allow_completed_sprint_generation=allow_completed_sprint_generation,
             )

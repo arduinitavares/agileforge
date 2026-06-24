@@ -997,6 +997,7 @@ def test_sprint_generate_command_schema_removes_calendar_velocity_args() -> None
     assert generate["input"]["optional"] == [
         "input",
         "selected_story_ids",
+        "excluded_story_ids",
         "max_story_points",
         "include_task_decomposition",
     ]
@@ -1070,6 +1071,7 @@ def test_sprint_commands_are_registered() -> None:  # noqa: PLR0915
     assert generate["input"]["optional"] == [
         "input",
         "selected_story_ids",
+        "excluded_story_ids",
         "max_story_points",
         "include_task_decomposition",
     ]

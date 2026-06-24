@@ -984,9 +984,11 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
         max_story_points,  # noqa: ANN001, ARG001
         include_task_decomposition,  # noqa: ANN001, ARG001
         selected_story_ids,  # noqa: ANN001
+        excluded_story_ids,  # noqa: ANN001
         user_input,  # noqa: ANN001, ARG001
     ):
         captured["selected_story_ids"] = selected_story_ids
+        captured["excluded_story_ids"] = excluded_story_ids
         captured["capacity_points"] = capacity_points
         captured["capacity_source"] = capacity_source
         captured["capacity_basis"] = capacity_basis
@@ -1037,6 +1039,7 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
             "max_story_points": expected_capacity_points,
             "include_task_decomposition": False,
             "selected_story_ids": [12],
+            "excluded_story_ids": [276],
             "user_input": "Focus on persistence",
         },
     )
@@ -1051,6 +1054,7 @@ def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  
     sprint_plan_assessment = cast("dict[str, object]", sprint_plan_assessment)
     assert sprint_plan_assessment["is_complete"] is True
     assert captured["selected_story_ids"] == [12]
+    assert captured["excluded_story_ids"] == [276]
     assert captured["capacity_points"] == expected_capacity_points
     assert captured["capacity_source"] == "user_override"
 

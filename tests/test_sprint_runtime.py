@@ -263,6 +263,112 @@ def test_prepare_sprint_input_context_rejects_duplicate_selected_story_ids() -> 
     assert prepared["selection_details"]["duplicate_selected_ids"] == [66]
 
 
+def test_prepare_sprint_input_context_honors_excluded_story_ids() -> None:
+    """Verify explicit exclusions are applied before the Sprint cohort is locked."""
+    excluded_story_id = 276
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 4,
+            "stories": [
+                {
+                    "story_id": 275,
+                    "story_title": "Core Offline Recommendation Engine",
+                    "priority": 901,
+                    "story_points": 3,
+                },
+                {
+                    "story_id": 276,
+                    "story_title": "Integrate Safe Action Envelope Gate",
+                    "priority": 902,
+                    "story_points": 2,
+                },
+                {
+                    "story_id": 277,
+                    "story_title": "Integrate Historical Support Gates",
+                    "priority": 903,
+                    "story_points": 2,
+                },
+                {
+                    "story_id": 265,
+                    "story_title": "Define Abstention Reason Catalog",
+                    "priority": 2501,
+                    "story_points": 2,
+                },
+            ],
+        }
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context="Do not select story 276.",
+        max_story_points=7,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        excluded_story_ids=[excluded_story_id],
+        fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=7,
+        capacity_source="user_override",
+        capacity_basis="7 points",
+    )
+
+    assert prepared["success"] is True
+    assert prepared["selected_story_ids"] == [275, 277, 265]
+    assert [
+        story["story_id"] for story in prepared["input_context"]["available_stories"]
+    ] == [275, 277, 265]
+    assert prepared["selection_policy"]["requested_excluded_story_ids"] == [
+        excluded_story_id
+    ]
+    assert prepared["selection_policy"]["explicitly_excluded_story_ids"] == [
+        excluded_story_id
+    ]
+    assert excluded_story_id in prepared["selection_policy"]["excluded_story_ids"]
+
+
+def test_prepare_sprint_input_context_rejects_selected_excluded_conflict() -> None:
+    """Verify a story cannot be both manually selected and excluded."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 275,
+                    "story_title": "Core Offline Recommendation Engine",
+                    "priority": 901,
+                    "story_points": 3,
+                },
+                {
+                    "story_id": 276,
+                    "story_title": "Integrate Safe Action Envelope Gate",
+                    "priority": 902,
+                    "story_points": 2,
+                },
+            ],
+        }
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=7,
+        include_task_decomposition=True,
+        selected_story_ids=[275, 276],
+        excluded_story_ids=[276],
+        fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=7,
+        capacity_source="user_override",
+        capacity_basis="7 points",
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_CONFLICT"
+    assert prepared["conflicting_story_ids"] == [276]
+
+
 def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

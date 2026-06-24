@@ -67,6 +67,7 @@ class _RequiredSprintRunOptions(TypedDict):
 class _SprintRunOptions(_RequiredSprintRunOptions, total=False):
     max_story_points: int | None
     selected_story_ids: list[int] | None
+    excluded_story_ids: list[int] | None
     user_input: str | None
     story_completion_scope: object
 
@@ -543,6 +544,7 @@ def _prepare_sprint_payload(
         max_story_points=options.get("max_story_points"),
         include_task_decomposition=options["include_task_decomposition"],
         selected_story_ids=options.get("selected_story_ids"),
+        excluded_story_ids=options.get("excluded_story_ids"),
         story_completion_scope=options.get("story_completion_scope"),
     )
     input_context = _normalize_input_context(prepared.get("input_context"))
@@ -864,6 +866,7 @@ async def run_sprint_agent_from_state(
         "include_task_decomposition": options["include_task_decomposition"],
         "max_story_points": options.get("max_story_points"),
         "selected_story_ids": options.get("selected_story_ids"),
+        "excluded_story_ids": options.get("excluded_story_ids"),
         "user_input": options.get("user_input"),
         "story_completion_scope": state.get("story_completion_scope"),
     }

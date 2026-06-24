@@ -706,12 +706,13 @@ class _Application(Protocol):
         """Return sprint candidate projection."""
         ...
 
-    def sprint_generate(
+    def sprint_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> JsonObject:
@@ -2080,6 +2081,10 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         type=_parse_selected_story_ids,
     )
     sprint_generate.add_argument(
+        "--excluded-story-ids",
+        type=_parse_excluded_story_ids,
+    )
+    sprint_generate.add_argument(
         "--max-story-points",
         type=_parse_positive_story_points,
     )
@@ -3167,8 +3172,8 @@ def _non_empty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _parse_selected_story_ids(value: str) -> list[int]:
-    """Parse comma-separated story IDs for Sprint generation."""
+def _parse_story_id_list(value: str, *, option_name: str) -> list[int]:
+    """Parse a comma-separated positive story ID list."""
     ids: list[int] = []
     seen: set[int] = set()
     for raw_part in value.split(","):
@@ -3178,18 +3183,28 @@ def _parse_selected_story_ids(value: str) -> list[int]:
         try:
             story_id = int(part)
         except ValueError as exc:
-            message = "--selected-story-ids must be a comma-separated list of integers."
+            message = f"{option_name} must be a comma-separated list of integers."
             raise argparse.ArgumentTypeError(message) from exc
         if story_id <= 0:
-            message = "--selected-story-ids values must be positive integers."
+            message = f"{option_name} values must be positive integers."
             raise argparse.ArgumentTypeError(message)
         if story_id not in seen:
             seen.add(story_id)
             ids.append(story_id)
     if not ids:
-        message = "--selected-story-ids must include at least one story ID."
+        message = f"{option_name} must include at least one story ID."
         raise argparse.ArgumentTypeError(message)
     return ids
+
+
+def _parse_selected_story_ids(value: str) -> list[int]:
+    """Parse comma-separated selected story IDs for Sprint generation."""
+    return _parse_story_id_list(value, option_name="--selected-story-ids")
+
+
+def _parse_excluded_story_ids(value: str) -> list[int]:
+    """Parse comma-separated excluded story IDs for Sprint generation."""
+    return _parse_story_id_list(value, option_name="--excluded-story-ids")
 
 
 def _parse_positive_story_points(value: str) -> int:
@@ -3853,6 +3868,7 @@ def _sprint_generate(
         project_id=args.project_id,
         user_input=args.user_input,
         selected_story_ids=args.selected_story_ids,
+        excluded_story_ids=args.excluded_story_ids,
         max_story_points=args.max_story_points,
         include_task_decomposition=args.include_task_decomposition,
     )

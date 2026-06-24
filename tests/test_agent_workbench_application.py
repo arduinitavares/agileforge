@@ -2139,6 +2139,72 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
+    def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
+        """Record Story dependency inspection."""
+        self.calls.append(("dependency_inspect", {"project_id": project_id}))
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "dependencies": []},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def dependency_propose(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        idempotency_key: str,
+        manual_edges: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record Story dependency proposal."""
+        self.calls.append(
+            (
+                "dependency_propose",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "manual_edges": manual_edges,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "attempt_id": "story-deps-1"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def dependency_apply(
+        self,
+        *,
+        project_id: int,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story dependency apply."""
+        self.calls.append(
+            (
+                "dependency_apply",
+                {
+                    "project_id": project_id,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "applied": True},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 class _PendingRequirementStoryRunner(_FakeStoryRunner):
     """Fake Story runner with pending requirements for Sprint recovery."""
@@ -2185,6 +2251,7 @@ class _FakeSprintRunner:
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         team_velocity_assumption: str = "Medium",
         sprint_duration_days: int = 14,
         max_story_points: int | None = None,
@@ -2198,6 +2265,7 @@ class _FakeSprintRunner:
                     "project_id": project_id,
                     "user_input": user_input,
                     "selected_story_ids": selected_story_ids,
+                    "excluded_story_ids": excluded_story_ids,
                     "team_velocity_assumption": team_velocity_assumption,
                     "sprint_duration_days": sprint_duration_days,
                     "max_story_points": max_story_points,

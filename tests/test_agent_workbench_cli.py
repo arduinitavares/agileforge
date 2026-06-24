@@ -1163,12 +1163,13 @@ class _FakeApplication:
             "errors": [],
         }
 
-    def sprint_generate(
+    def sprint_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> JsonObject:
@@ -1180,6 +1181,7 @@ class _FakeApplication:
                     "project_id": project_id,
                     "user_input": user_input,
                     "selected_story_ids": selected_story_ids,
+                    "excluded_story_ids": excluded_story_ids,
                     "max_story_points": max_story_points,
                     "include_task_decomposition": include_task_decomposition,
                 },
@@ -3880,6 +3882,8 @@ def test_sprint_generate_cli_routes_generation_options(
             "7",
             "--selected-story-ids",
             "66,85",
+            "--excluded-story-ids",
+            "276",
             "--max-story-points",
             "8",
             "--input",
@@ -3898,6 +3902,7 @@ def test_sprint_generate_cli_routes_generation_options(
             "project_id": 7,
             "user_input": "Focus on live command hardening.",
             "selected_story_ids": [66, 85],
+            "excluded_story_ids": [276],
             "max_story_points": 8,
             "include_task_decomposition": False,
         },

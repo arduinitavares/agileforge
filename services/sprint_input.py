@@ -76,6 +76,7 @@ class _PrepareSprintInputOptions(TypedDict):
     max_story_points: object
     include_task_decomposition: object
     selected_story_ids: NotRequired[list[int] | None]
+    excluded_story_ids: NotRequired[list[int] | None]
     fetch_candidates: NotRequired[_SprintCandidateFetcher | None]
     story_completion_scope: NotRequired[object]
 
@@ -211,9 +212,30 @@ def _selected_story_ids_failure(
     *,
     candidate_rows: list[dict[str, Any]],
     normalized_selected_ids: list[int],
+    excluded_story_id_set: set[int],
     governance_spec_update_id_set: set[int],
     candidate_result: dict[str, Any],
 ) -> dict[str, Any] | None:
+    selected_excluded_conflicts = sorted(
+        {
+            story_id
+            for story_id in normalized_selected_ids
+            if story_id in excluded_story_id_set
+        }
+    )
+    if selected_excluded_conflicts:
+        return {
+            "success": False,
+            "error_code": "SPRINT_SELECTION_CONFLICT",
+            "message": (
+                "Story IDs cannot be both selected_story_ids and excluded_story_ids: "
+                + ", ".join(str(item) for item in selected_excluded_conflicts)
+            ),
+            "conflicting_story_ids": selected_excluded_conflicts,
+            "candidate_result": candidate_result,
+            "input_context": {},
+        }
+
     by_id = {
         int(row["story_id"]): row
         for row in candidate_rows
@@ -640,6 +662,21 @@ def normalize_selected_story_ids(value: object) -> list[int]:
     return normalized
 
 
+def normalize_excluded_story_ids(value: object) -> list[int]:
+    """Normalize excluded story IDs while deduplicating explicit exclusions."""
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        parsed = normalize_positive_int(item)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return sorted(normalized)
+
+
 def velocity_story_limit(velocity: object) -> int:
     """Upper bound for the story-count heuristic used in the UI."""
     normalized = as_text(velocity).strip().lower()
@@ -821,6 +858,16 @@ def prepare_sprint_input_context(
     normalized_selected_ids = normalize_selected_story_ids(
         options.get("selected_story_ids")
     )
+    normalized_excluded_ids = normalize_excluded_story_ids(
+        options.get("excluded_story_ids")
+    )
+    excluded_id_set = set(normalized_excluded_ids)
+    candidate_rows_for_selection = [
+        row
+        for row in candidate_rows
+        if isinstance(row, dict)
+        and normalize_positive_int(row.get("story_id")) not in excluded_id_set
+    ]
     governance_spec_update_ids = [
         story_id
         for story_id in (
@@ -832,8 +879,9 @@ def prepare_sprint_input_context(
     governance_spec_update_id_set = set(governance_spec_update_ids)
     if normalized_selected_ids:
         selected_story_failure = _selected_story_ids_failure(
-            candidate_rows=candidate_rows,
+            candidate_rows=candidate_rows_for_selection,
             normalized_selected_ids=normalized_selected_ids,
+            excluded_story_id_set=excluded_id_set,
             governance_spec_update_id_set=governance_spec_update_id_set,
             candidate_result=candidate_result,
         )
@@ -851,14 +899,28 @@ def prepare_sprint_input_context(
         }
     capacity_source = as_text(options.get("capacity_source")).strip()
     capacity_basis = as_text(options.get("capacity_basis")).strip()
+    selection_candidate_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(row.get("story_id"))
+            for row in candidate_rows_for_selection
+            if isinstance(row, dict)
+        )
+        if story_id is not None
+    }
+    governance_spec_update_ids_for_selection = [
+        story_id
+        for story_id in governance_spec_update_ids
+        if story_id in selection_candidate_ids
+    ]
     (
         selection,
         selection_warnings,
         selection_failure,
     ) = _select_sprint_rows_for_context(
-        candidate_rows=candidate_rows,
+        candidate_rows=candidate_rows_for_selection,
         normalized_selected_ids=normalized_selected_ids,
-        governance_spec_update_ids=governance_spec_update_ids,
+        governance_spec_update_ids=governance_spec_update_ids_for_selection,
         capacity_points=capacity_points,
         candidate_result=candidate_result,
     )
@@ -913,6 +975,7 @@ def prepare_sprint_input_context(
         )
         if story_id is not None
     }
+    explicitly_excluded_story_ids = sorted(original_candidate_ids & excluded_id_set)
     excluded_story_ids = sorted(
         original_candidate_ids - set(selection.selected_story_ids)
     )
@@ -929,6 +992,8 @@ def prepare_sprint_input_context(
             "source_fingerprint": candidate_result.get("source_fingerprint"),
             "selected_story_ids": selection.selected_story_ids,
             "excluded_story_ids": excluded_story_ids,
+            "requested_excluded_story_ids": normalized_excluded_ids,
+            "explicitly_excluded_story_ids": explicitly_excluded_story_ids,
             "story_points_used": selection.story_points_used,
             "capacity_points": capacity_points,
             "capacity_source": capacity_source,

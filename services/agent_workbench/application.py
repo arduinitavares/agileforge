@@ -579,12 +579,13 @@ class _StoryPhaseRunner(Protocol):
 class _SprintPhaseRunner(Protocol):
     """Sprint phase commands exposed through the facade."""
 
-    def generate(
+    def generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -2149,12 +2150,13 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
-    def sprint_generate(
+    def sprint_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         user_input: str | None = None,
         selected_story_ids: list[int] | None = None,
+        excluded_story_ids: list[int] | None = None,
         max_story_points: int | None = None,
         include_task_decomposition: bool = True,
     ) -> dict[str, Any]:
@@ -2163,6 +2165,7 @@ class AgentWorkbenchApplication:
             project_id=project_id,
             user_input=user_input,
             selected_story_ids=selected_story_ids,
+            excluded_story_ids=excluded_story_ids,
             max_story_points=max_story_points,
             include_task_decomposition=include_task_decomposition,
         )

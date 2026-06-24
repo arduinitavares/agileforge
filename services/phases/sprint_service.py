@@ -269,6 +269,7 @@ async def generate_sprint_plan(
     include_task_decomposition: bool,
     selected_story_ids: list[int] | None,
     user_input: str | None,
+    excluded_story_ids: list[int] | None = None,
     load_candidates: Callable[[], dict[str, Any]] | None = None,
     allow_completed_sprint_generation: bool = False,
 ) -> dict[str, Any]:
@@ -315,17 +316,19 @@ async def generate_sprint_plan(
     )
     previous_input_context = state.get("sprint_last_input_context")
 
-    sprint_result = await run_sprint_agent(
-        state,
-        project_id=project_id,
-        capacity_points=capacity_points,
-        capacity_source=capacity_source,
-        capacity_basis=capacity_basis,
-        max_story_points=max_story_points,
-        include_task_decomposition=include_task_decomposition,
-        selected_story_ids=selected_story_ids,
-        user_input=user_input,
-    )
+    run_options: dict[str, Any] = {
+        "project_id": project_id,
+        "capacity_points": capacity_points,
+        "capacity_source": capacity_source,
+        "capacity_basis": capacity_basis,
+        "max_story_points": max_story_points,
+        "include_task_decomposition": include_task_decomposition,
+        "selected_story_ids": selected_story_ids,
+        "user_input": user_input,
+    }
+    if excluded_story_ids is not None:
+        run_options["excluded_story_ids"] = excluded_story_ids
+    sprint_result = await run_sprint_agent(state, **run_options)
     normalized_output_artifact = normalize_sprint_output_artifact(
         cast("dict[str, Any] | None", sprint_result.get("output_artifact"))
     )
