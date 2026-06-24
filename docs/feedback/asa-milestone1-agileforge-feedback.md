@@ -614,3 +614,31 @@ as generic AgileForge workflow/bridge behavior, not ASA-specific special cases.
   the draft unchanged. This is confusing during live AgileForge dogfooding.
 - Severity: non-blocking UX/runnable-command issue; ASA continued with the
   explicit `--force-feedback` workaround.
+
+### Sprint refinement ignores explicit story exclusion feedback
+
+- Project: ASA `project_id=3`
+- Context: after Sprint `71` closed and post-sprint triage was recorded as
+  `impact=none`, `workflow next` routed to Sprint continuation. Sprint metrics
+  recommended `7` points.
+- Observed command:
+  `agileforge sprint generate --project-id 3 --max-story-points 7 --input "..."`
+- Actual `sprint-attempt-1` selected stories `275`, `276`, and `277`.
+- Problem: story `276` (`Integrate Safe Action Envelope Gate into
+  Recommendation Pipeline`) appears to duplicate work just completed and closed
+  in Sprint `71` story `273`, where the offline recommender was integrated with
+  the Safe Action Envelope gate and committed/pushed.
+- Follow-up refinement command explicitly requested removing story `276` and
+  keeping total selected points `<= 7`.
+- Actual `sprint-attempt-2` still selected `275`, `276`, and `277`.
+- Follow-up hard constraint command explicitly said: `do not select story 276`
+  and requested exact stories `275`, `277`, and `265`; if unavailable, return
+  incomplete instead of substituting `276`.
+- Actual `sprint-attempt-3` still selected `275`, `276`, and `277`.
+- Expected behavior: Sprint refinement should honor explicit exclusion feedback,
+  or return a non-saveable/incomplete draft explaining why the excluded story is
+  mandatory. It should not silently keep a story the user explicitly excluded.
+- Why it matters: saving this draft would put already completed work back into
+  the next Sprint, obscuring AgileForge delivery truth and causing duplicate
+  implementation work.
+- Severity: blocker for saving the generated Sprint draft.
