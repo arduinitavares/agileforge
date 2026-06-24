@@ -1021,6 +1021,69 @@ async def test_generate_story_draft_soft_gates_weak_feedback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_story_draft_soft_gate_preserves_story_review_when_saveable() -> (
+    None
+):
+    """Weak feedback must not demote a saveable STORY_REVIEW draft to STORY_INTERVIEW."""
+    state = _state_with_complete_story_draft()
+    parent_requirement = "Requirement A"
+    artifact_fingerprint = state["interview_runtime"]["story"][parent_requirement][
+        "draft_projection"
+    ]["artifact_fingerprint"]
+    saved_states: list[JsonDict] = []
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Make this more INVEST.",
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-09T00:00:00Z",
+        run_story_agent_from_state=pytest.fail,  # type: ignore[arg-type]
+        append_feedback_entry=pytest.fail,  # type: ignore[arg-type]
+        set_request_projection=pytest.fail,  # type: ignore[arg-type]
+        append_attempt=pytest.fail,  # type: ignore[arg-type]
+        promote_reusable_draft=pytest.fail,  # type: ignore[arg-type]
+        mark_feedback_absorbed=pytest.fail,  # type: ignore[arg-type]
+        failure_meta=pytest.fail,  # type: ignore[arg-type]
+    )
+
+    assert payload["fsm_state"] == "STORY_REVIEW"
+    assert payload["data"]["generation_ran"] is False
+    assert payload["data"]["save"] == {
+        "available": True,
+        "attempt_id": "attempt-1",
+        "artifact_fingerprint": artifact_fingerprint,
+        "expected_state": "STORY_REVIEW",
+    }
+    assert state["fsm_state"] == "STORY_REVIEW"
+    assert len(saved_states) == 0
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> SimpleNamespace:
+        return SimpleNamespace(state=state, session_id="7")
+
+    save_payload = await save_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_stories_tool=lambda _save_input, _context: {
+            "success": True,
+            "saved_count": 1,
+        },
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-save-7-requirement-a",
+    )
+
+    assert save_payload["fsm_state"] == "STORY_PERSISTENCE"
+
+
+@pytest.mark.asyncio
 async def test_generate_story_draft_force_feedback_runs_generation() -> None:
     """Forced weak feedback records quality metadata and still runs generation."""
     parent_requirement = "Requirement A"
