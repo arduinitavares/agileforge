@@ -21,7 +21,7 @@ from models.core import (
     UserStory,
 )
 from models.db import get_engine
-from models.events import StoryCompletionLog, WorkflowEvent
+from models.events import StoryCompletionLog, TaskExecutionLog, WorkflowEvent
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 
 logger = logging.getLogger(__name__)
@@ -199,9 +199,21 @@ class ProductRepository:
                 session.delete(theme)
 
             # Handle Sprints (and mappings)
-            for sprint in session.exec(
+            sprints = session.exec(
                 select(Sprint).where(Sprint.product_id == product_id)
-            ).all():
+            ).all()
+            sprint_ids = [
+                sprint.sprint_id for sprint in sprints if sprint.sprint_id is not None
+            ]
+            if sprint_ids:
+                for execution_log in session.exec(
+                    select(TaskExecutionLog).where(
+                        TaskExecutionLog.sprint_id.in_(sprint_ids)
+                    )
+                ).all():
+                    session.delete(execution_log)
+
+            for sprint in sprints:
                 for sm in session.exec(
                     select(SprintStory).where(SprintStory.sprint_id == sprint.sprint_id)
                 ).all():

@@ -121,6 +121,15 @@ def delete_project(product_id: int, db_path: str) -> None:  # noqa: C901, PLR091
         # However, manual deletion ensures we don't hit constraints if cascade isn't perfect.  # noqa: E501
 
         emit(
+            "  - Deleting task_execution_logs linked to this product's sprints..."
+        )
+        cur.execute(
+            "DELETE FROM task_execution_logs "
+            "WHERE sprint_id IN (SELECT sprint_id FROM sprints WHERE product_id=?)",
+            (product_id,),
+        )
+
+        emit(
             "  - Deleting story_completion_logs linked to user stories of this product..."  # noqa: E501
         )
         cur.execute(

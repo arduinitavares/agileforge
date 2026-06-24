@@ -23,8 +23,13 @@ from agile_sqlmodel import (
     StoryCompletionLog,
     StoryStatus,
     Task,
+    TaskAcceptanceResult,
+    TaskStatus,
+    Team,
     UserStory,
 )
+from models.events import TaskExecutionLog
+from repositories.product import ProductRepository
 from models.core import Epic, Feature, Team, Theme
 from scripts.delete_project import delete_project, resolve_db_path
 from tests.typing_helpers import require_id
@@ -141,6 +146,113 @@ def test_delete_project_removes_sprints_and_story_logs(tmp_path: Path) -> None:
         assert session.exec(select(Feature)).first() is None
         assert session.exec(select(Epic)).first() is None
         assert session.exec(select(Theme)).first() is None
+
+
+def test_delete_project_removes_task_execution_logs(tmp_path: Path) -> None:
+    """Ensure delete_project clears task execution audit rows before sprint/task deletes."""
+    db_path = tmp_path / "delete_project_task_exec.db"
+    engine = _create_sqlite_engine(db_path)
+
+    with Session(engine) as session:
+        product = Product(name="Execution Product")
+        team = Team(name="Execution Team")
+        session.add_all([product, team])
+        session.flush()
+        product_id = require_id(product.product_id, "product_id")
+        team_id = require_id(team.team_id, "team_id")
+        session.add(ProductTeam(product_id=product_id, team_id=team_id))
+
+        story = UserStory(title="Story", product_id=product_id)
+        session.add(story)
+        session.flush()
+        story_id = require_id(story.story_id, "story_id")
+
+        task = Task(description="Task", story_id=story_id)
+        session.add(task)
+        session.flush()
+        task_id = require_id(task.task_id, "task_id")
+
+        sprint = Sprint(
+            goal="Goal",
+            start_date=date.today(),  # noqa: DTZ011
+            end_date=date.today() + timedelta(days=7),  # noqa: DTZ011
+            product_id=product_id,
+            team_id=team_id,
+        )
+        session.add(sprint)
+        session.flush()
+        sprint_id = require_id(sprint.sprint_id, "sprint_id")
+
+        session.add(
+            TaskExecutionLog(
+                task_id=task_id,
+                sprint_id=sprint_id,
+                new_status=TaskStatus.IN_PROGRESS,
+                acceptance_result=TaskAcceptanceResult.NOT_CHECKED,
+            )
+        )
+        session.commit()
+
+    delete_project(product_id, str(db_path))
+
+    with Session(engine) as session:
+        assert session.exec(select(Product).where(Product.product_id == product_id)).first() is None
+        assert session.exec(select(TaskExecutionLog)).first() is None
+
+
+def test_product_repository_delete_project_removes_task_execution_logs(
+    tmp_path: Path,
+) -> None:
+    """Ensure repository delete clears task execution audit rows for sprint execution."""
+    db_path = tmp_path / "repo_delete_task_exec.db"
+    engine = _create_sqlite_engine(db_path)
+
+    with Session(engine) as session:
+        product = Product(name="Repo Product")
+        team = Team(name="Repo Team")
+        session.add_all([product, team])
+        session.flush()
+        product_id = require_id(product.product_id, "product_id")
+        team_id = require_id(team.team_id, "team_id")
+        session.add(ProductTeam(product_id=product_id, team_id=team_id))
+
+        story = UserStory(title="Story", product_id=product_id)
+        session.add(story)
+        session.flush()
+        story_id = require_id(story.story_id, "story_id")
+
+        task = Task(description="Task", story_id=story_id)
+        session.add(task)
+        session.flush()
+        task_id = require_id(task.task_id, "task_id")
+
+        sprint = Sprint(
+            goal="Goal",
+            start_date=date.today(),  # noqa: DTZ011
+            end_date=date.today() + timedelta(days=7),  # noqa: DTZ011
+            product_id=product_id,
+            team_id=team_id,
+        )
+        session.add(sprint)
+        session.flush()
+        sprint_id = require_id(sprint.sprint_id, "sprint_id")
+
+        session.add(
+            TaskExecutionLog(
+                task_id=task_id,
+                sprint_id=sprint_id,
+                new_status=TaskStatus.IN_PROGRESS,
+                acceptance_result=TaskAcceptanceResult.NOT_CHECKED,
+            )
+        )
+        session.commit()
+
+    repo = ProductRepository(session=Session(engine))
+    assert repo.delete_project(product_id) is True
+
+    with Session(engine) as session:
+        assert session.exec(select(Product).where(Product.product_id == product_id)).first() is None
+        assert session.exec(select(TaskExecutionLog)).first() is None
 
 
 def test_delete_project_removes_compiled_spec_authority(tmp_path: Path) -> None:
