@@ -369,6 +369,50 @@ def test_prepare_sprint_input_context_rejects_selected_excluded_conflict() -> No
     assert prepared["conflicting_story_ids"] == [276]
 
 
+def test_prepare_sprint_input_context_rejects_excluded_dependency() -> None:
+    """Verify explicit exclusions cannot break the dependency-closed cohort."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 2,
+            "stories": [
+                {
+                    "story_id": 275,
+                    "story_title": "Core Offline Recommendation Engine",
+                    "priority": 901,
+                    "story_points": 3,
+                },
+                {
+                    "story_id": 276,
+                    "story_title": "Integrate Safe Action Envelope Gate",
+                    "priority": 902,
+                    "story_points": 2,
+                    "blocked_by_story_ids": [275],
+                },
+            ],
+        }
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=7,
+        include_task_decomposition=True,
+        selected_story_ids=None,
+        excluded_story_ids=[275],
+        fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=7,
+        capacity_source="user_override",
+        capacity_basis="7 points",
+    )
+
+    assert prepared["success"] is False
+    assert prepared["error_code"] == "SPRINT_SELECTION_DEPENDENCY_MISSING"
+    assert prepared["selection_details"]["blocked_story_ids"] == [276]
+    assert prepared["selection_details"]["excluded_dependency_story_ids"] == [275]
+
+
 def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -271,10 +271,70 @@ def _selected_story_ids_failure(
     return None
 
 
-def _select_sprint_rows_for_context(
+def _excluded_dependency_selection_failure(
+    *,
+    candidate_rows: list[dict[str, Any]],
+    excluded_story_id_set: set[int],
+    candidate_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    blocked_dependencies: list[dict[str, Any]] = []
+    excluded_dependency_story_ids: set[int] = set()
+    for row in candidate_rows:
+        if not isinstance(row, dict):
+            continue
+        story_id = normalize_positive_int(row.get("story_id"))
+        if story_id is None:
+            continue
+        dependency_ids = [
+            *(row.get("prerequisite_story_ids") or []),
+            *(row.get("blocked_by_story_ids") or []),
+        ]
+        row_excluded_dependency_ids = sorted(
+            {
+                dependency_id
+                for dependency_id in (
+                    normalize_positive_int(value) for value in dependency_ids
+                )
+                if dependency_id in excluded_story_id_set
+            }
+        )
+        if not row_excluded_dependency_ids:
+            continue
+        blocked_dependencies.append(
+            {
+                "story_id": story_id,
+                "excluded_dependency_story_ids": row_excluded_dependency_ids,
+            }
+        )
+        excluded_dependency_story_ids.update(row_excluded_dependency_ids)
+
+    if not blocked_dependencies:
+        return None
+
+    return {
+        "success": False,
+        "error_code": "SPRINT_SELECTION_DEPENDENCY_MISSING",
+        "message": (
+            "Explicit exclusions remove prerequisite stories required by "
+            "remaining Sprint candidates."
+        ),
+        "selection_details": {
+            "blocked_story_ids": [
+                item["story_id"] for item in blocked_dependencies
+            ],
+            "excluded_dependency_story_ids": sorted(excluded_dependency_story_ids),
+            "blocked_dependencies": blocked_dependencies,
+        },
+        "candidate_result": candidate_result,
+        "input_context": {},
+    }
+
+
+def _select_sprint_rows_for_context(  # noqa: PLR0913
     *,
     candidate_rows: list[dict[str, Any]],
     normalized_selected_ids: list[int],
+    excluded_story_id_set: set[int],
     governance_spec_update_ids: list[int],
     capacity_points: int,
     candidate_result: dict[str, Any],
@@ -309,6 +369,14 @@ def _select_sprint_rows_for_context(
                     candidate_result=candidate_result,
                 ),
             )
+
+    excluded_dependency_failure = _excluded_dependency_selection_failure(
+        candidate_rows=selection_rows,
+        excluded_story_id_set=excluded_story_id_set,
+        candidate_result=candidate_result,
+    )
+    if excluded_dependency_failure is not None:
+        return None, selection_warnings, excluded_dependency_failure
 
     try:
         selection = select_sprint_story_rows(
@@ -887,7 +955,6 @@ def prepare_sprint_input_context(
         )
         if selected_story_failure is not None:
             return selected_story_failure
-
     capacity_points = normalize_positive_int(options.get("capacity_points"))
     if capacity_points is None:
         return {
@@ -920,6 +987,7 @@ def prepare_sprint_input_context(
     ) = _select_sprint_rows_for_context(
         candidate_rows=candidate_rows_for_selection,
         normalized_selected_ids=normalized_selected_ids,
+        excluded_story_id_set=excluded_id_set,
         governance_spec_update_ids=governance_spec_update_ids_for_selection,
         capacity_points=capacity_points,
         candidate_result=candidate_result,
