@@ -1108,3 +1108,88 @@ class TestSaveStoriesTool:
         assert metadata["superseded_count"] == 1
         assert metadata["story_ids"] == [first.story_id]
         assert metadata["superseded_story_ids"] == [second.story_id]
+
+    def test_save_stories_tool_refines_todo_sibling_without_rewriting_done_story(
+        self, session: Session
+    ) -> None:
+        """Allow sibling refinement without mutating an unchanged progressed story."""
+        _seed_product(session)
+        completed_story = UserStory(
+            product_id=1,
+            title="Enforce attestation gate",
+            story_description=(
+                "As a System Admin, I want persistence blocked without attestation, "
+                "so that no document is persisted without explicit consent."
+            ),
+            acceptance_criteria=(
+                "- Verify that persistence is blocked when attestation is false."
+            ),
+            persona="System Admin",
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+            status=StoryStatus.DONE,
+            story_points=3,
+        )
+        todo_story = UserStory(
+            product_id=1,
+            title="Audit attestation attempts",
+            story_description=(
+                "As a Compliance Officer, I want attestation attempts audited, "
+                "so that unsafe persistence attempts can be reviewed."
+            ),
+            acceptance_criteria=(
+                "- Verify each blocked persistence attempt creates an audit record."
+            ),
+            persona="Compliance Officer",
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=2,
+            story_origin="backlog_seed",
+            is_refined=False,
+            is_superseded=False,
+            status=StoryStatus.TO_DO,
+            story_points=3,
+        )
+        session.add(completed_story)
+        session.add(todo_story)
+        session.commit()
+        session.refresh(completed_story)
+        session.refresh(todo_story)
+        completed_story_id = completed_story.story_id
+        todo_story_id = todo_story.story_id
+        completed_ac_updated_at = completed_story.ac_updated_at
+        completed_ac_update_reason = completed_story.ac_update_reason
+
+        refined_todo = _alternate_valid_story()
+        refined_todo["estimated_effort"] = "L"
+
+        payload = SaveStoriesInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-unmodified-progressed-sibling",
+            stories=[
+                _valid_story(),
+                refined_todo,
+            ],
+        )
+
+        result = save_stories_tool(input_data=payload, tool_context=None)
+        assert result["success"] is True, result.get("error")
+        assert result["saved_count"] == 1
+        assert result["updated_story_ids"] == [todo_story_id]
+
+        session.expire_all()
+        refreshed_completed = session.get(UserStory, completed_story_id)
+        refreshed_todo = session.get(UserStory, todo_story_id)
+
+        assert refreshed_completed is not None
+        assert refreshed_completed.status == StoryStatus.DONE
+        assert refreshed_completed.story_points == completed_story.story_points
+        assert refreshed_completed.ac_updated_at == completed_ac_updated_at
+        assert refreshed_completed.ac_update_reason == completed_ac_update_reason
+
+        assert refreshed_todo is not None
+        assert refreshed_todo.is_refined is True
+        assert refreshed_todo.story_points == 5  # noqa: PLR2004

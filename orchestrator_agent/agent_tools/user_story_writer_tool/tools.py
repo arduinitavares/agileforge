@@ -242,18 +242,45 @@ def _story_save_event_matches_request(
     )
 
 
-def _story_replacement_blockers(stories: list[UserStory]) -> list[dict[str, Any]]:
+def _story_replacement_protection_reasons(story: UserStory) -> list[str]:
+    reasons: list[str] = []
+    if len(story.sprints or []) > 0:
+        reasons.append("linked_sprint")
+    status_value = getattr(story.status, "value", story.status)
+    if story.status != StoryStatus.TO_DO and status_value != StoryStatus.TO_DO.value:
+        reasons.append("status_progressed")
+    return reasons
+
+
+def _story_item_modified(story: UserStory, item: UserStoryItem) -> bool:
+    ac_text = _format_acceptance_criteria(item.acceptance_criteria)
+    points = _story_points_from_effort(item.estimated_effort)
+    return (
+        story.title != item.story_title
+        or story.story_description != item.statement
+        or story.acceptance_criteria != ac_text
+        or story.story_points != points
+    )
+
+
+def _story_replacement_blockers(
+    stories: list[UserStory],
+    validated: list[UserStoryItem],
+) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    validated_by_slot = dict(enumerate(validated, start=1))
     for story in stories:
         reasons: list[str] = []
-        if len(story.sprints or []) > 0:
-            reasons.append("linked_sprint")
+        protection_reasons = _story_replacement_protection_reasons(story)
         status_value = getattr(story.status, "value", story.status)
-        if (
-            story.status != StoryStatus.TO_DO
-            and status_value != StoryStatus.TO_DO.value
-        ):
-            reasons.append("status_progressed")
+        if protection_reasons:
+            slot = story.refinement_slot
+            if slot is None or slot not in validated_by_slot:
+                reasons.extend(protection_reasons)
+            else:
+                item = validated_by_slot[slot]
+                if _story_item_modified(story, item):
+                    reasons.extend(protection_reasons)
         if reasons:
             blockers.append(
                 {
@@ -528,12 +555,19 @@ def _persist_validated_stories(
             existing_active=existing_active,
             slot=idx,
         )
+        existing = existing_by_slot.get(idx)
+        if (
+            existing is not None
+            and _story_replacement_protection_reasons(existing)
+            and not _story_item_modified(existing, item)
+        ):
+            continue
         story_id, action = _upsert_refined_story(
             session,
             linkage=(input_data.product_id, normalized_req),
             slot=idx,
             item=item,
-            existing=existing_by_slot.get(idx),
+            existing=existing,
             rank=rank,
             story_origin=story_origin,
             accepted_spec_version_id=input_data.accepted_spec_version_id,
@@ -1192,7 +1226,7 @@ def save_stories_tool(  # noqa: PLR0911
             if input_data.story_origin == "scope_extension"
             else None,
         )
-        blockers = _story_replacement_blockers(existing_active)
+        blockers = _story_replacement_blockers(existing_active, validated)
         if blockers:
             return _unsafe_replacement_response(blockers)
 
