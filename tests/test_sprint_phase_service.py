@@ -543,6 +543,65 @@ async def test_generate_sprint_plan_blocks_unready_candidates_before_runtime() -
 
 
 @pytest.mark.asyncio
+async def test_generate_sprint_plan_allows_selected_subset_with_blocked_pool() -> None:
+    """Verify explicit selected IDs ignore readiness blockers on unselected rows."""
+    state: JsonDict = {"fsm_state": "SPRINT_SETUP"}
+    saved: list[JsonDict] = []
+    captured: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    def save_state(updated: JsonDict) -> None:
+        saved.append(dict(updated))
+
+    async def fake_run_sprint_agent(_state: JsonDict, **kwargs: object) -> JsonDict:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "input_context": {
+                "available_stories": [{"story_id": 280}, {"story_id": 287}]
+            },
+            "output_artifact": {"is_complete": False},
+            "is_complete": False,
+            "error": None,
+        }
+
+    payload = await generate_sprint_plan(
+        project_id=7,
+        load_state=load_state,
+        save_state=save_state,
+        current_planned_sprint_id=None,
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_sprint_agent=fake_run_sprint_agent,
+        failure_meta_builder=_failure_meta_builder,
+        max_story_points=7,
+        include_task_decomposition=True,
+        selected_story_ids=[280, 287],
+        excluded_story_ids=[268, 276, 279],
+        user_input="Plan selected ready stories only.",
+        load_candidates=lambda: {
+            "success": True,
+            "count": 5,
+            "stories": [],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"],
+                "blocking_story_ids": [268, 276, 279],
+            },
+        },
+        capacity_points=7,
+        capacity_source="user_override",
+        capacity_basis="7 points",
+    )
+
+    assert payload["sprint_run_success"] is True
+    assert captured["selected_story_ids"] == [280, 287]
+    assert captured["excluded_story_ids"] == [268, 276, 279]
+    assert saved
+
+
+@pytest.mark.asyncio
 async def test_failed_sprint_refinement_preserves_previous_complete_draft() -> None:
     """Verify failed refinement records history without replacing reviewed draft."""
     previous_assessment: JsonDict = {

@@ -413,6 +413,68 @@ def test_prepare_sprint_input_context_rejects_excluded_dependency() -> None:
     assert prepared["selection_details"]["excluded_dependency_story_ids"] == [275]
 
 
+def test_prepare_sprint_input_allows_manual_subset_with_unselected_blocker() -> None:
+    """Verify manual selection ignores excluded dependencies on unselected rows."""
+
+    def fake_fetch_sprint_candidates(*, product_id: int) -> dict[str, object]:
+        assert product_id == 7  # noqa: PLR2004
+        return {
+            "success": True,
+            "count": 4,
+            "stories": [
+                {
+                    "story_id": 280,
+                    "story_title": "Define packet schema",
+                    "priority": 1,
+                    "story_points": 2,
+                },
+                {
+                    "story_id": 287,
+                    "story_title": "Define evidence contract",
+                    "priority": 2,
+                    "story_points": 2,
+                },
+                {
+                    "story_id": 276,
+                    "story_title": "Duplicate safe envelope gate",
+                    "priority": 3,
+                    "story_points": 2,
+                },
+                {
+                    "story_id": 279,
+                    "story_title": "Blocked downstream suite",
+                    "priority": 4,
+                    "story_points": 3,
+                    "blocked_by_story_ids": [276],
+                },
+            ],
+            "readiness": {
+                "status": "blocked",
+                "blocking_codes": ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"],
+                "blocking_story_ids": [279],
+            },
+        }
+
+    prepared = sprint_input.prepare_sprint_input_context(
+        product_id=7,
+        user_context=None,
+        max_story_points=7,
+        include_task_decomposition=True,
+        selected_story_ids=[280, 287],
+        excluded_story_ids=[276],
+        fetch_candidates=fake_fetch_sprint_candidates,
+        capacity_points=7,
+        capacity_source="user_override",
+        capacity_basis="7 points",
+    )
+
+    assert prepared["success"] is True
+    assert prepared["selected_story_ids"] == [280, 287]
+    assert [
+        story["story_id"] for story in prepared["input_context"]["available_stories"]
+    ] == [280, 287]
+
+
 def test_prepare_sprint_input_context_auto_selects_locked_priority_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

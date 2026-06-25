@@ -2800,6 +2800,28 @@ def _sprint_setup_story_refinement_blocker(
     return blocker
 
 
+def _sprint_setup_candidate_readiness_blocker(
+    candidates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return blocker when nonzero Sprint candidates are not planning-ready."""
+    candidate_count = _sprint_candidate_count(candidates)
+    if candidate_count in (None, 0):
+        return None
+    readiness = _envelope_data(candidates or {}).get("readiness")
+    if not isinstance(readiness, dict) or readiness.get("status") != "blocked":
+        return None
+    return {
+        "command": "agileforge sprint generate",
+        "reason": "SPRINT_CANDIDATES_NOT_PLANNING_READY",
+        "message": (
+            "Sprint generation is blocked because Sprint candidates are not "
+            "planning-ready."
+        ),
+        "candidate_count": candidate_count,
+        "readiness": dict(readiness),
+    }
+
+
 def _story_readiness_repair_blocker(project_id: int) -> dict[str, str] | None:
     """Return blocker when Story readiness repair would be unsafe."""
     from models.core import Sprint, SprintStory, UserStory  # noqa: PLC0415
@@ -4732,11 +4754,16 @@ def _sprint_generate_blocker(
     command_name: str,
     stale_scope_blocker: dict[str, Any] | None,
     story_refinement_blocker: dict[str, Any] | None,
+    candidate_readiness_blocker: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Return the active blocker for Sprint generation, if any."""
     if command_name != "agileforge sprint generate":
         return None
-    return stale_scope_blocker or story_refinement_blocker
+    return (
+        stale_scope_blocker
+        or story_refinement_blocker
+        or candidate_readiness_blocker
+    )
 
 
 def _sprint_workflow_next(
@@ -4781,6 +4808,15 @@ def _sprint_workflow_next(
         if fsm_state == "SPRINT_SETUP" and stale_scope_blocker is None
         else None
     )
+    candidate_readiness_blocker = (
+        _sprint_setup_candidate_readiness_blocker(sprint_candidates)
+        if (
+            fsm_state == "SPRINT_SETUP"
+            and stale_scope_blocker is None
+            and story_refinement_blocker is None
+        )
+        else None
+    )
     has_setup_blocker = (
         stale_scope_blocker is not None or story_refinement_blocker is not None
     )
@@ -4808,6 +4844,7 @@ def _sprint_workflow_next(
             command_name=command_name,
             stale_scope_blocker=stale_scope_blocker,
             story_refinement_blocker=story_refinement_blocker,
+            candidate_readiness_blocker=candidate_readiness_blocker,
         )
         if generate_blocker is not None:
             blocked_commands.append(generate_blocker)

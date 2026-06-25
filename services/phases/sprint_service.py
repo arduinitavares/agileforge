@@ -119,6 +119,36 @@ def _load_sprint_candidates_for_state(
     )
 
 
+def _positive_int_set(values: object) -> set[int]:
+    if not isinstance(values, list):
+        return set()
+    return {
+        value
+        for value in values
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+
+
+def _generation_blocking_readiness_codes(
+    readiness: object,
+    *,
+    selected_story_ids: list[int] | None,
+) -> list[str]:
+    if not isinstance(readiness, dict):
+        return []
+    readiness_data = cast("dict[str, Any]", readiness)
+    if readiness_data.get("status") != "blocked":
+        return []
+    selected_ids = _positive_int_set(selected_story_ids)
+    if selected_ids:
+        blocking_story_ids = _positive_int_set(
+            readiness_data.get("blocking_story_ids")
+        )
+        if blocking_story_ids and blocking_story_ids.isdisjoint(selected_ids):
+            return []
+    return [str(code) for code in readiness_data.get("blocking_codes", [])]
+
+
 def reset_stale_saved_sprint_planner_working_set(
     state: dict[str, Any],
     *,
@@ -298,9 +328,12 @@ async def generate_sprint_plan(
         if load_candidates is not None
         else _load_sprint_candidates_for_state(project_id, state)
     )
-    readiness = candidates_payload.get("readiness")
-    if isinstance(readiness, dict) and readiness.get("status") == "blocked":
-        codes = ", ".join(str(code) for code in readiness.get("blocking_codes", []))
+    blocking_codes = _generation_blocking_readiness_codes(
+        candidates_payload.get("readiness"),
+        selected_story_ids=selected_story_ids,
+    )
+    if blocking_codes:
+        codes = ", ".join(blocking_codes)
         raise SprintPhaseError(
             f"Sprint candidates are not planning-ready: {codes}",
             status_code=409,

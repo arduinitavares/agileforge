@@ -248,6 +248,31 @@ class _SprintReadyReadProjection(_FakeReadProjection):
         return result
 
 
+class _SprintSetupBlockedReadinessProjection(_SprintReadyReadProjection):
+    """Fake read projection for blocked nonzero Sprint candidates."""
+
+    def sprint_candidates(self, *, project_id: int) -> dict[str, Any]:
+        """Return nonzero candidates with blocked readiness."""
+        result = super().sprint_candidates(project_id=project_id)
+        result["data"].update(
+            {
+                "count": 4,
+                "items": [
+                    {"story_id": 280, "story_points": 2, "priority": 1},
+                    {"story_id": 287, "story_points": 2, "priority": 2},
+                    {"story_id": 279, "story_points": 3, "priority": 3},
+                    {"story_id": 276, "story_points": 2, "priority": 4},
+                ],
+                "readiness": {
+                    "status": "blocked",
+                    "blocking_codes": ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"],
+                    "blocking_story_ids": [279],
+                },
+            }
+        )
+        return result
+
+
 class _SprintSetupStaleStoryScopeReadProjection(_SprintReadyReadProjection):
     """Fake read projection for stale Story completion scope in Sprint setup."""
 
@@ -4832,6 +4857,36 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
         "errors": [],
     }
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_next_blocks_generate_for_blocked_candidate_readiness() -> None:
+    """Verify workflow next does not advertise non-runnable Sprint generation."""
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintSetupBlockedReadinessProjection(),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert "agileforge sprint generate --project-id 7" not in data[
+        "next_valid_commands"
+    ]
+    assert {
+        "command": "agileforge sprint generate",
+        "reason": "SPRINT_CANDIDATES_NOT_PLANNING_READY",
+        "message": (
+            "Sprint generation is blocked because Sprint candidates are not "
+            "planning-ready."
+        ),
+        "candidate_count": 4,
+        "readiness": {
+            "status": "blocked",
+            "blocking_codes": ["SPRINT_SCOPE_EXTERNAL_DEPENDENCY"],
+            "blocking_story_ids": [279],
+        },
+    } in data["blocked_commands"]
 
 
 def test_workflow_next_blocks_generate_for_stale_story_scope(

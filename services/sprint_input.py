@@ -370,8 +370,17 @@ def _select_sprint_rows_for_context(  # noqa: PLR0913
                 ),
             )
 
+    dependency_check_rows = selection_rows
+    if normalized_selected_ids:
+        selected_id_set = set(normalized_selected_ids)
+        dependency_check_rows = [
+            row
+            for row in selection_rows
+            if isinstance(row, dict)
+            and normalize_positive_int(row.get("story_id")) in selected_id_set
+        ]
     excluded_dependency_failure = _excluded_dependency_selection_failure(
-        candidate_rows=selection_rows,
+        candidate_rows=dependency_check_rows,
         excluded_story_id_set=excluded_story_id_set,
         candidate_result=candidate_result,
     )
