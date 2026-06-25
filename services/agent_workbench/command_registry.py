@@ -661,7 +661,7 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=True,
         phase="phase_2d",
         input_required=("project_id",),
-        input_optional=("input",),
+        input_optional=("input", "input_file"),
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,

@@ -3406,6 +3406,46 @@ def test_cli_routes_roadmap_commands(
     assert app.calls == [expected_call]
 
 
+def test_cli_routes_roadmap_generate_input_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Roadmap generate should accept multiline feedback from a file."""
+    app = _FakeApplication()
+    input_file = tmp_path / "roadmap-feedback.txt"
+    input_file.write_text(
+        "Reconcile roadmap after Sprint 9.\n"
+        "Product Authority Update was not completed.\n"
+        "DB-backed review storage is not implemented.\n",
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "roadmap",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--input-file",
+            str(input_file),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge roadmap generate"
+    assert app.calls == [
+        (
+            "roadmap_generate",
+            {
+                "project_id": PROJECT_ID,
+                "user_input": input_file.read_text(encoding="utf-8"),
+            },
+        )
+    ]
+
+
 def test_cli_routes_requirement_reconcile(capsys: pytest.CaptureFixture[str]) -> None:
     """Requirement reconcile routes through the agent CLI."""
     app = _FakeApplication()

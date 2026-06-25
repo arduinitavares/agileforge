@@ -768,7 +768,7 @@ def test_roadmap_commands_are_registered_and_available() -> None:
 
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id"]
-    assert generate["input"]["optional"] == ["input"]
+    assert generate["input"]["optional"] == ["input", "input_file"]
     assert ErrorCode.MUTATION_FAILED.value in generate["errors"]
     assert history["mutates"] is False
     assert history["input"]["required"] == ["project_id"]

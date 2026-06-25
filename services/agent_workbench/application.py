@@ -3942,7 +3942,7 @@ def _roadmap_command_candidates(
             "agileforge roadmap generate",
             (
                 f"agileforge roadmap generate --project-id {project_id} "
-                "--input <feedback>"
+                "--input-file <feedback_file>"
             ),
         ),
     ]
@@ -5607,7 +5607,10 @@ def _post_sprint_roadmap_next(
         ),
         (
             "agileforge roadmap generate",
-            f"agileforge roadmap generate --project-id {project_id} --input <feedback>",
+            (
+                f"agileforge roadmap generate --project-id {project_id} "
+                "--input-file <feedback_file>"
+            ),
         ),
     ]
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)

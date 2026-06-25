@@ -4145,7 +4145,7 @@ def test_application_workflow_next_routes_roadmap_review_to_save_and_refine() ->
             "--expected-state ROADMAP_REVIEW "
             "--idempotency-key <idempotency_key>"
         ),
-        "agileforge roadmap generate --project-id 7 --input <feedback>",
+        "agileforge roadmap generate --project-id 7 --input-file <feedback_file>",
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
@@ -5613,7 +5613,7 @@ def test_workflow_next_routes_impact_roadmap_to_roadmap_reconciliation(
     assert data["status"] == "post_sprint_roadmap_reconciliation_available"
     assert data["next_valid_commands"] == [
         "agileforge roadmap history --project-id 7",
-        "agileforge roadmap generate --project-id 7 --input <feedback>",
+        "agileforge roadmap generate --project-id 7 --input-file <feedback_file>",
     ]
     all_commands = (
         data["next_valid_commands"]

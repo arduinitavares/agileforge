@@ -88,6 +88,7 @@ Examples:
   agileforge as-built assess --project-id 1 --repo-path /path/to/repo """
     """--spec-mode unknown --idempotency-key as-built-001
   agileforge roadmap generate --project-id 1 --input "optional guidance"
+  agileforge roadmap generate --project-id 1 --input-file roadmap-feedback.txt
   agileforge roadmap save --project-id 1 --attempt-id <attempt_id> """
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
     """--idempotency-key save-roadmap-001
@@ -1843,7 +1844,9 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help="Generate or refine a Roadmap draft.",
     )
     roadmap_generate.add_argument("--project-id", type=int, required=True)
-    roadmap_generate.add_argument("--input", dest="user_input")
+    roadmap_input = roadmap_generate.add_mutually_exclusive_group()
+    roadmap_input.add_argument("--input", dest="user_input")
+    roadmap_input.add_argument("--input-file", dest="user_input_file")
     roadmap_generate.set_defaults(command_handler=_roadmap_generate)
     roadmap_history = roadmap_sub.add_parser(
         "history",
@@ -3706,9 +3709,23 @@ def _roadmap_generate(
     application: _Application,
 ) -> CommandResult:
     """Route Roadmap generate to the application facade."""
-    return "agileforge roadmap generate", application.roadmap_generate(
+    command = "agileforge roadmap generate"
+    user_input = args.user_input
+    if args.user_input_file:
+        input_path = Path(str(args.user_input_file)).expanduser()
+        try:
+            user_input = input_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return _invalid_command(
+                command,
+                f"Could not read --input-file: {exc}",
+                details={"input_file": str(input_path)},
+                remediation=["Pass a readable UTF-8 text file."],
+            )
+
+    return command, application.roadmap_generate(
         project_id=args.project_id,
-        user_input=args.user_input,
+        user_input=user_input,
     )
 
 

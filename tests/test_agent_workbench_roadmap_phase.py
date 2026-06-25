@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -346,6 +347,113 @@ def test_roadmap_generate_reloads_active_seed_backlog_after_reset(
             "estimated_effort": "M",
         }
     ]
+
+
+def test_roadmap_generate_uses_saved_roadmap_not_unsaved_working_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal reconciliation must not use prior unsaved attempts as locked shape."""
+    saved_roadmap = [
+        {
+            "release_name": "Milestone 0: Product Authority Baseline",
+            "theme": "Authority baseline",
+            "focus_area": "Technical Foundation",
+            "items": ["Product Authority Update for Revision Review"],
+            "reasoning": "Accepted saved roadmap.",
+        },
+        {
+            "release_name": "Milestone 1: Verify Core Extraction Pipeline",
+            "theme": "Core extraction",
+            "focus_area": "User Value",
+            "items": ["PDF Upload and Job Ingestion"],
+            "reasoning": "Accepted saved roadmap.",
+        },
+    ]
+    workflow = _FakeWorkflowService()
+    workflow.state.update(
+        {
+            "fsm_state": "ROADMAP_REVIEW",
+            "roadmap_releases": [
+                {
+                    "release_name": "Milestone 1: Establish the Foundation",
+                    "theme": "Contaminated",
+                    "focus_area": "Technical Foundation",
+                    "items": [
+                        "Product Authority Update for Revision Review",
+                        "PDF Upload and Job Ingestion",
+                    ],
+                    "reasoning": "Milestone 1 was delivered in Sprint 9.",
+                }
+            ],
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["active_project"] = {"roadmap": json.dumps(saved_roadmap)}
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_roadmap_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        del project_id
+        input_context = build_roadmap_input_context(state, user_input=user_input)
+        captured["state"] = dict(state)
+        captured["input_context"] = input_context
+        return {
+            "success": True,
+            "input_context": input_context,
+            "output_artifact": {
+                "roadmap_releases": saved_roadmap,
+                "roadmap_summary": "Draft roadmap",
+                "is_complete": False,
+                "clarifying_questions": [],
+            },
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.roadmap_phase.run_roadmap_agent_from_state",
+        fake_run_roadmap_agent_from_state,
+    )
+    runner = RoadmapPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.generate(project_id=2, user_input="reconcile after sprint")
+
+    assert result["ok"] is True
+    assert captured["state"]["roadmap_releases"] == saved_roadmap
+    assert captured["input_context"]["locked_roadmap_shape"] == [
+        {
+            "release_name": "Milestone 0: Product Authority Baseline",
+            "items": ["Product Authority Update for Revision Review"],
+        },
+        {
+            "release_name": "Milestone 1: Verify Core Extraction Pipeline",
+            "items": ["PDF Upload and Job Ingestion"],
+        },
+    ]
+    assert "Milestone 0: Product Authority Baseline" in str(
+        captured["input_context"]["prior_roadmap_state"]
+    )
+    assert "Milestone 1: Establish the Foundation" not in str(
+        captured["input_context"]["prior_roadmap_state"]
+    )
 
 
 def test_roadmap_generate_uses_scope_extension_backlog_rows(

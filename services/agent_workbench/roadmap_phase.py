@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -211,6 +212,7 @@ class RoadmapPhaseRunner:
                 str(result.get("error", "Project hydration failed"))
             )
         _hydrate_vision_assessment_from_active_project(context.state)
+        _hydrate_saved_roadmap_from_active_project(context.state)
         _hydrate_active_backlog_from_db(context.state, project_id=project_id)
         _assert_required_context(context.state)
         return context
@@ -242,6 +244,31 @@ def _hydrate_vision_assessment_from_active_project(state: dict[str, Any]) -> Non
             "product_vision_statement": vision,
             "is_complete": True,
         }
+
+
+def _hydrate_saved_roadmap_from_active_project(state: dict[str, Any]) -> None:
+    """Use the persisted Product roadmap as the normal reconciliation base."""
+    active_project = state.get("active_project")
+    if not isinstance(active_project, dict):
+        return
+    roadmap = active_project.get("roadmap")
+    if not roadmap:
+        return
+
+    parsed: Any = roadmap
+    if isinstance(roadmap, str):
+        try:
+            parsed = json.loads(roadmap)
+        except json.JSONDecodeError:
+            return
+
+    if isinstance(parsed, dict):
+        parsed = parsed.get("roadmap_releases")
+
+    if isinstance(parsed, list) and parsed:
+        releases = [release for release in parsed if isinstance(release, dict)]
+        if releases:
+            state["roadmap_releases"] = releases
 
 
 def _hydrate_active_backlog_from_db(
