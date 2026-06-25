@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi.testclient import TestClient
 
 import api as api_module
+from models.core import Product, UserStory
 from services.phases.story_service import _story_artifact_fingerprint
+
+if TYPE_CHECKING:
+    import pytest
+    from sqlmodel import Session
+
+    from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
+        SaveStoryPatchInput,
+    )
 
 COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
 EXPECTED_REFINEMENT_ATTEMPT_COUNT = 2
@@ -81,6 +90,35 @@ def _story_artifact(
                 "produced_artifacts": [],
             }
         ],
+        "is_complete": is_complete,
+        "clarifying_questions": [],
+    }
+
+
+def _story_patch_artifact(
+    parent_requirement: str,
+    title: str,
+    *,
+    target_refinement_slot: int = 2,
+    is_complete: bool = True,
+) -> dict[str, Any]:
+    return {
+        "artifact_kind": "story_patch",
+        "parent_requirement": parent_requirement,
+        "target_refinement_slot": target_refinement_slot,
+        "story": {
+            "story_title": title,
+            "statement": (
+                "As a developer, I want targeted story saves, so that sibling "
+                "stories are not rewritten."
+            ),
+            "acceptance_criteria": [
+                "Verify only the requested story is persisted."
+            ],
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+        },
         "is_complete": is_complete,
         "clarifying_questions": [],
     }
@@ -344,6 +382,115 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
         len(state["story_attempts"]["Requirement A"])
         == EXPECTED_REFINEMENT_ATTEMPT_COUNT
     )
+
+
+def test_story_generate_api_routes_target_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Story generate API routes targeted refinement by slot."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+    captured: dict[str, object] = {}
+
+    async def fake_generate_story_draft_service(
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": kwargs["parent_requirement"],
+            "data": {
+                "current_draft": {
+                    "kind": "story_patch",
+                    "target_refinement_slot": kwargs["target_refinement_slot"],
+                }
+            },
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_story_draft_service",
+        fake_generate_story_draft_service,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/generate",
+        params={"parent_requirement": "Requirement A"},
+        json={
+            "user_input": "Refine only slot 2",
+            "target_refinement_slot": 2,
+        },
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    assert captured["target_story_id"] is None
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    assert response.json()["data"]["current_draft"]["kind"] == "story_patch"
+
+
+def test_story_generate_api_resolves_target_story_id(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Story generate resolves target story id before calling the phase service."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+    session.add(Product(product_id=product.product_id, name=product.name))
+    story = UserStory(
+        product_id=product.product_id,
+        title="Targeted saved draft",
+        story_description=(
+            "As a developer, I want targeted story saves, so that sibling "
+            "stories are not rewritten."
+        ),
+        acceptance_criteria="- Verify only the requested story is persisted.",
+        source_requirement="requirement a",
+        refinement_slot=2,
+        story_origin="refined",
+        is_refined=True,
+        is_superseded=False,
+        story_points=3,
+        rank="102",
+    )
+    session.add(story)
+    session.commit()
+    session.refresh(story)
+    captured: dict[str, object] = {}
+
+    async def fake_generate_story_draft_service(
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": kwargs["parent_requirement"],
+            "data": {
+                "current_draft": {
+                    "kind": "story_patch",
+                    "target_refinement_slot": kwargs["target_refinement_slot"],
+                }
+            },
+        }
+
+    monkeypatch.setattr(api_module, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        api_module,
+        "generate_story_draft_service",
+        fake_generate_story_draft_service,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/generate",
+        params={"parent_requirement": "Requirement A"},
+        json={
+            "user_input": "Refine only this story",
+            "target_story_id": story.story_id,
+        },
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    assert captured["target_story_id"] is None
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
 
 
 def test_story_retry_replays_frozen_request_and_preserves_prior_good_draft_when_retry_fails(  # noqa: ANN201, D103, E501
@@ -830,6 +977,108 @@ def test_story_save_uses_complete_reusable_draft_projection_not_latest_failed_at
     assert (
         workflow.states[str(product.product_id)]["story_saved"]["Requirement A"] is True
     )
+
+
+def test_story_save_patch_routes_target_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Story save-patch API routes the target slot to persistence."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Story Project")
+    existing_output = _story_artifact("Requirement A", "Saved draft")
+    existing_output["user_stories"].append(
+        {
+            "story_title": "Old target draft",
+            "statement": (
+                "As a developer, I want the old target story, so that the "
+                "patch can replace only this slot."
+            ),
+            "acceptance_criteria": [
+                "Verify the old target story is replaceable."
+            ],
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+        }
+    )
+    reusable_artifact = _story_patch_artifact(
+        "Requirement A",
+        "Targeted saved draft",
+    )
+    artifact_fingerprint = _story_artifact_fingerprint(
+        "Requirement A", reusable_artifact
+    )
+    reusable_artifact["artifact_fingerprint"] = artifact_fingerprint
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "STORY_REVIEW",
+        "interview_runtime": {
+            "story": {
+                "Requirement A": {
+                    "phase": "story",
+                    "subject_key": "Requirement A",
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "reusable_content_result",
+                            "is_reusable": True,
+                            "retryable": False,
+                            "draft_kind": "story_patch",
+                            "target_refinement_slot": 2,
+                            "artifact_fingerprint": artifact_fingerprint,
+                            "output_artifact": reusable_artifact,
+                        },
+                    ],
+                    "draft_projection": {
+                        "latest_reusable_attempt_id": "attempt-1",
+                        "kind": "story_patch",
+                        "is_complete": True,
+                        "target_refinement_slot": 2,
+                        "artifact_fingerprint": artifact_fingerprint,
+                    },
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+        "story_outputs": {
+            "Requirement A": existing_output,
+        },
+    }
+    captured: dict[str, SaveStoryPatchInput] = {}
+
+    async def fake_hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            state=workflow.states[session_id],
+            session_id=str(project_id),
+        )
+
+    def fake_save_story_patch_tool(
+        save_input: SaveStoryPatchInput,
+        _context: object,
+    ) -> dict[str, object]:
+        captured["save_input"] = save_input
+        return {"success": True, "saved_count": 1, "updated_story_ids": [29]}
+
+    monkeypatch.setattr(api_module, "_hydrate_context", fake_hydrate_context)
+    monkeypatch.setattr(api_module, "save_story_patch_tool", fake_save_story_patch_tool)
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/story/save-patch",
+        params={"parent_requirement": "Requirement A"},
+        json={
+            "attempt_id": "attempt-1",
+            "expected_artifact_fingerprint": artifact_fingerprint,
+            "expected_state": "STORY_REVIEW",
+            "idempotency_key": "story-save-patch-api-requirement-a",
+            "target_refinement_slot": 2,
+        },
+    )
+
+    assert response.status_code == 200  # noqa: PLR2004
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert captured["save_input"].target_refinement_slot == 2  # noqa: PLR2004
+    assert captured["save_input"].story == reusable_artifact["story"]
 
 
 def test_story_complete_phase_requires_and_passes_guard_body(monkeypatch):  # noqa: ANN001, ANN201, D103

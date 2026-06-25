@@ -852,13 +852,15 @@ class _FakeApplication:
             "errors": [],
         }
 
-    def story_generate(
+    def story_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> JsonObject:
         """Return a story generate payload."""
         self.calls.append(
@@ -869,6 +871,8 @@ class _FakeApplication:
                     "parent_requirement": parent_requirement,
                     "user_input": user_input,
                     "force_feedback": force_feedback,
+                    "target_story_id": target_story_id,
+                    "target_refinement_slot": target_refinement_slot,
                 },
             )
         )
@@ -950,6 +954,41 @@ class _FakeApplication:
             )
         )
         return self.results.get("story_save") or {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def story_save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> JsonObject:
+        """Return a targeted story save payload."""
+        self.calls.append(
+            (
+                "story_save_patch",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "target_story_id": target_story_id,
+                    "target_refinement_slot": target_refinement_slot,
+                },
+            )
+        )
+        return self.results.get("story_save_patch") or {
             "ok": True,
             "data": {"project_id": project_id, "fsm_state": "STORY_PERSISTENCE"},
             "warnings": [],
@@ -3518,6 +3557,8 @@ def test_cli_routes_requirement_reconcile(capsys: pytest.CaptureFixture[str]) ->
                     "parent_requirement": "REQ.checkout",
                     "user_input": "focus payment errors",
                     "force_feedback": True,
+                    "target_story_id": None,
+                    "target_refinement_slot": None,
                 },
             ),
             "agileforge story generate",
@@ -3984,6 +4025,56 @@ def test_story_generate_cli_flattens_phase_data(
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["output_artifact"]["parent_requirement"] == "Requirement A"
     assert "data" not in payload["data"]
+
+
+def test_story_generate_cli_routes_target_slot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story generate CLI routes optional targeted refinement slot."""
+    app = _FakeApplication()
+    app.results["story_generate"] = {
+        "ok": True,
+        "data": {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": "Requirement A",
+            "current_draft": {
+                "kind": "story_patch",
+                "target_refinement_slot": 2,
+            },
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+    exit_code = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            "7",
+            "--parent-requirement",
+            "Requirement A",
+            "--input",
+            "Refine only slot 2",
+            "--target-refinement-slot",
+            "2",
+        ],
+        application=app,
+    )
+
+    assert exit_code == 0
+    _stdout_payload(capsys)
+    assert app.calls[-1] == (
+        "story_generate",
+        {
+            "project_id": 7,
+            "parent_requirement": "Requirement A",
+            "user_input": "Refine only slot 2",
+            "force_feedback": False,
+            "target_story_id": None,
+            "target_refinement_slot": 2,
+        },
+    )
 
 
 def test_sprint_generate_cli_routes_generation_options(
@@ -4629,6 +4720,65 @@ def test_story_save_cli_flattens_save_result(
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["save_result"]["saved_count"] == 1
     assert "data" not in payload["data"]
+
+
+def test_story_save_patch_cli_routes_target_slot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story save-patch CLI routes target slot and guard fields."""
+    app = _FakeApplication()
+    app.results["story_save_patch"] = {
+        "ok": True,
+        "data": {
+            "parent_requirement": "Requirement A",
+            "attempt_id": "attempt-1",
+            "artifact_fingerprint": "sha256:abc",
+            "target_refinement_slot": 2,
+            "fsm_state": "STORY_PERSISTENCE",
+            "save_result": {"success": True, "saved_count": 1},
+        },
+        "warnings": [],
+        "errors": [],
+    }
+
+    exit_code = main(
+        [
+            "story",
+            "save-patch",
+            "--project-id",
+            "7",
+            "--parent-requirement",
+            "Requirement A",
+            "--attempt-id",
+            "attempt-1",
+            "--expected-artifact-fingerprint",
+            "sha256:abc",
+            "--expected-state",
+            "STORY_REVIEW",
+            "--idempotency-key",
+            "story-save-patch-7-a",
+            "--target-refinement-slot",
+            "2",
+        ],
+        application=app,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["save_result"]["saved_count"] == 1
+    assert app.calls[-1] == (
+        "story_save_patch",
+        {
+            "project_id": 7,
+            "parent_requirement": "Requirement A",
+            "attempt_id": "attempt-1",
+            "expected_artifact_fingerprint": "sha256:abc",
+            "expected_state": "STORY_REVIEW",
+            "idempotency_key": "story-save-patch-7-a",
+            "target_story_id": None,
+            "target_refinement_slot": 2,
+        },
+    )
 
 
 def test_cli_requires_backlog_save_guards(

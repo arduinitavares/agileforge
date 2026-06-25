@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, cast
 
 from google.adk.tools import ToolContext
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlmodel import Session, select
 
 from models.core import Product, UserStory, UserStoryDependency
@@ -76,6 +76,89 @@ class SaveStoriesInput(BaseModel):
             ),
         ),
     ]
+
+
+class SaveStoryPatchInput(BaseModel):
+    """Input schema for saving one targeted story refinement patch."""
+
+    idempotency_key: Annotated[
+        str,
+        Field(
+            description="Stable key used to safely replay the same persistence call."
+        ),
+    ]
+    product_id: Annotated[
+        int,
+        Field(description="The product ID that owns the target story."),
+    ]
+    parent_requirement: Annotated[
+        str,
+        Field(description="The roadmap requirement that owns the target story."),
+    ]
+    parent_rank: Annotated[
+        int | None,
+        Field(
+            default=None,
+            ge=1,
+            description=(
+                "1-based Roadmap parent order used to derive deterministic child story rank."
+            ),
+        ),
+    ] = None
+    target_story_id: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description=(
+                "Existing story ID to update. Mutually exclusive with "
+                "target_refinement_slot."
+            ),
+        ),
+    ] = None
+    target_refinement_slot: Annotated[
+        int | None,
+        Field(
+            default=None,
+            ge=1,
+            description=(
+                "Existing refinement slot to update. Mutually exclusive with "
+                "target_story_id."
+            ),
+        ),
+    ] = None
+    story_origin: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional persistence origin override for extension scope.",
+        ),
+    ] = None
+    accepted_spec_version_id: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="Accepted amended spec version that produced the story.",
+        ),
+    ] = None
+    story: Annotated[
+        dict[str, Any],
+        Field(
+            description=(
+                "Single approved story dict from user_story_writer_tool output. "
+                "Must have: story_title, statement, acceptance_criteria, invest_score."
+            ),
+        ),
+    ]
+
+    @model_validator(mode="after")
+    def _validate_exactly_one_target(self) -> "SaveStoryPatchInput":
+        has_story_id = self.target_story_id is not None
+        has_slot = self.target_refinement_slot is not None
+        if has_story_id == has_slot:
+            raise ValueError(
+                "Exactly one of target_story_id or target_refinement_slot is required."
+            )
+        return self
 
 
 def _extract_persona(statement: str) -> str | None:
@@ -210,9 +293,36 @@ def _story_save_request_identity(
     }
 
 
+def _story_patch_request_identity(  # noqa: PLR0913
+    *,
+    normalized_req: str,
+    parent_rank: int | None,
+    validated: UserStoryItem,
+    target_story_id: int,
+    target_refinement_slot: int,
+    story_origin: str | None = None,
+    accepted_spec_version_id: int | None = None,
+) -> dict[str, str]:
+    identity = _story_save_request_identity(
+        normalized_req=normalized_req,
+        parent_rank=parent_rank,
+        validated=[validated],
+        story_origin=story_origin,
+        accepted_spec_version_id=accepted_spec_version_id,
+    )
+    identity.update(
+        {
+            "operation": "story_patch",
+            "target_story_id": str(target_story_id),
+            "target_refinement_slot": str(target_refinement_slot),
+        }
+    )
+    return identity
+
+
 def _idempotency_key_reused_response(
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
 ) -> dict[str, Any]:
     return {
         "success": False,
@@ -231,6 +341,8 @@ def _story_save_event_matches_request(
     request_identity: dict[str, str],
 ) -> bool:
     metadata = _metadata_json(event.event_metadata)
+    if metadata.get("operation") == "story_patch":
+        return False
     return (
         metadata.get("normalized_requirement")
         == request_identity["normalized_requirement"]
@@ -240,6 +352,18 @@ def _story_save_event_matches_request(
         and str(metadata.get("accepted_spec_version_id", ""))
         == request_identity["accepted_spec_version_id"]
     )
+
+
+def _story_patch_event_matches_request(
+    event: WorkflowEvent,
+    *,
+    request_identity: dict[str, str],
+) -> bool:
+    metadata = _metadata_json(event.event_metadata)
+    for key, value in request_identity.items():
+        if str(metadata.get(key, "")) != value:
+            return False
+    return True
 
 
 def _story_replacement_protection_reasons(story: UserStory) -> list[str]:
@@ -315,6 +439,24 @@ def _validate_story_items(
     return validated, validation_errors
 
 
+def _story_patch_target_mismatch_response(
+    input_data: SaveStoryPatchInput,
+    *,
+    message: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "product_id": input_data.product_id,
+        "parent_requirement": input_data.parent_requirement,
+        "idempotency_key": input_data.idempotency_key,
+        "idempotency_replayed": False,
+        "error_code": "STORY_PATCH_TARGET_MISMATCH",
+        "error": message,
+        "details": details,
+    }
+
+
 def _active_stories_for_requirement(
     session: Session,
     *,
@@ -365,7 +507,7 @@ def _active_stories_for_product(
 
 def _replay_response(
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     event: WorkflowEvent,
 ) -> dict[str, Any]:
     metadata = _metadata_json(event.event_metadata)
@@ -479,7 +621,7 @@ def _upsert_refined_story(  # noqa: PLR0913
 
 def _story_save_metadata(  # noqa: PLR0913
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     request_identity: dict[str, str],
     updated_ids: list[int],
     created_ids: list[int],
@@ -504,7 +646,7 @@ def _story_save_metadata(  # noqa: PLR0913
 
 def _success_response(
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -611,9 +753,92 @@ def _persist_validated_stories(
     )
 
 
+def _resolve_story_patch_target(
+    *,
+    input_data: SaveStoryPatchInput,
+    existing_active: list[UserStory],
+) -> tuple[UserStory | None, dict[str, Any] | None]:
+    if input_data.target_story_id is not None:
+        matches = [
+            story
+            for story in existing_active
+            if story.story_id == input_data.target_story_id
+        ]
+    else:
+        matches = [
+            story
+            for story in existing_active
+            if story.refinement_slot == input_data.target_refinement_slot
+        ]
+
+    if len(matches) != 1:
+        return None, _story_patch_target_mismatch_response(
+            input_data,
+            message="Story patch target does not belong to the requested requirement.",
+            details={
+                "target_story_id": input_data.target_story_id,
+                "target_refinement_slot": input_data.target_refinement_slot,
+            },
+        )
+
+    target = matches[0]
+    if target.story_id is None or target.refinement_slot is None:
+        return None, _story_patch_target_mismatch_response(
+            input_data,
+            message="Story patch target is missing stable story linkage.",
+            details={
+                "target_story_id": target.story_id,
+                "target_refinement_slot": target.refinement_slot,
+            },
+        )
+    return target, None
+
+
+def _persist_target_story_patch(  # noqa: PLR0913
+    session: Session,
+    *,
+    input_data: SaveStoryPatchInput,
+    normalized_req: str,
+    item: UserStoryItem,
+    target: UserStory,
+    existing_active: list[UserStory],
+    request_identity: dict[str, str],
+) -> dict[str, Any]:
+    target_slot = int(target.refinement_slot or 0)
+    story_origin = input_data.story_origin or "refined"
+    story_id, action = _upsert_refined_story(
+        session,
+        linkage=(input_data.product_id, normalized_req),
+        slot=target_slot,
+        item=item,
+        existing=target,
+        rank=_refined_story_rank(
+            parent_rank=input_data.parent_rank,
+            existing_active=existing_active,
+            slot=target_slot,
+        ),
+        story_origin=story_origin,
+        accepted_spec_version_id=input_data.accepted_spec_version_id,
+    )
+    updated_ids = [story_id] if action == "updated" else []
+    created_ids = [story_id] if action == "created" else []
+    metadata = _story_save_metadata(
+        input_data=input_data,
+        request_identity=request_identity,
+        updated_ids=updated_ids,
+        created_ids=created_ids,
+        superseded_ids=[],
+        story_ids_by_slot=[{"slot": target_slot, "story_id": story_id}],
+    )
+    metadata["operation"] = "story_patch"
+    metadata["target_story_id"] = story_id
+    metadata["target_refinement_slot"] = target_slot
+    return metadata
+
+
 def _dependency_candidate_failure_response(
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     code: str,
     story_id: int,
     candidate: StoryDependencyCandidate,
@@ -670,7 +895,7 @@ def _dependency_candidate_finding(
 
 def _dependency_candidate_failure_response_from_finding(
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     finding: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -732,13 +957,14 @@ def _resolve_dependency_candidate(
     return []
 
 
-def _post_save_dependency_reference_stories(
+def _post_save_dependency_reference_stories(  # noqa: PLR0913
     session: Session,
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     normalized_req: str,
     validated: list[UserStoryItem],
     story_ids_by_slot: list[dict[str, int]] | None,
+    slot_items: list[tuple[int, UserStoryItem]] | None = None,
 ) -> tuple[list[UserStory], dict[int, int]]:
     active_stories = _active_stories_for_product(
         session,
@@ -761,7 +987,8 @@ def _post_save_dependency_reference_stories(
         story for story in active_stories if story.source_requirement != normalized_req
     ]
     dependent_story_ids: dict[int, int] = {}
-    for slot, item in enumerate(validated, start=1):
+    items = slot_items if slot_items is not None else list(enumerate(validated, start=1))
+    for slot, item in items:
         existing = existing_by_slot.get(slot)
         story_id = supplied_ids.get(slot)
         if story_id is None and existing is not None:
@@ -793,18 +1020,24 @@ def _post_save_dependency_reference_stories(
     return reference_stories, dependent_story_ids
 
 
-def evaluate_dependency_candidates(  # noqa: PLR0912
-    input_data: SaveStoriesInput,
+def evaluate_dependency_candidates(  # noqa: PLR0912, PLR0913
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     *,
     session: Session | None = None,
     normalized_req: str | None = None,
     validated: list[UserStoryItem] | None = None,
     story_ids_by_slot: list[dict[str, int]] | None = None,
+    slot_items: list[tuple[int, UserStoryItem]] | None = None,
 ) -> dict[str, Any]:
     """Return read-only dependency candidate findings before persistence."""
     owns_session = session is None
     if validated is None:
-        validated, validation_errors = _validate_story_items(input_data.stories)
+        raw_stories = (
+            input_data.stories
+            if isinstance(input_data, SaveStoriesInput)
+            else [input_data.story]
+        )
+        validated, validation_errors = _validate_story_items(raw_stories)
         if validation_errors:
             return {
                 "success": False,
@@ -812,6 +1045,13 @@ def evaluate_dependency_candidates(  # noqa: PLR0912
                 "blocking_findings": [],
                 "warning_findings": [],
             }
+    if (
+        isinstance(input_data, SaveStoryPatchInput)
+        and slot_items is None
+        and input_data.target_refinement_slot is not None
+        and validated
+    ):
+        slot_items = [(input_data.target_refinement_slot, validated[0])]
     if normalized_req is None:
         normalized_req = normalize_requirement_key(input_data.parent_requirement)
 
@@ -823,10 +1063,12 @@ def evaluate_dependency_candidates(  # noqa: PLR0912
             normalized_req=normalized_req,
             validated=validated,
             story_ids_by_slot=story_ids_by_slot,
+            slot_items=slot_items,
         )
         blocking_findings: list[dict[str, Any]] = []
         warning_findings: list[dict[str, Any]] = []
-        for slot, item in enumerate(validated, start=1):
+        items = slot_items if slot_items is not None else list(enumerate(validated, start=1))
+        for slot, item in items:
             story_id = dependent_story_ids[slot]
             for candidate in item.dependency_candidates:
                 try:
@@ -921,13 +1163,14 @@ def _dependency_edges_by_pair(
     }
 
 
-def _persist_dependency_candidates(  # noqa: PLR0912, PLR0915
+def _persist_dependency_candidates(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     *,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     normalized_req: str,
     validated: list[UserStoryItem],
     metadata: dict[str, Any],
+    slot_items: list[tuple[int, UserStoryItem]] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     slot_to_story_id = {
         item["slot"]: item["story_id"] for item in metadata.get("story_ids_by_slot", [])
@@ -938,6 +1181,7 @@ def _persist_dependency_candidates(  # noqa: PLR0912, PLR0915
         normalized_req=normalized_req,
         validated=validated,
         story_ids_by_slot=metadata.get("story_ids_by_slot", []),
+        slot_items=slot_items,
     )
     blocking_findings = evaluation.get("blocking_findings")
     if isinstance(blocking_findings, list) and blocking_findings:
@@ -965,7 +1209,8 @@ def _persist_dependency_candidates(  # noqa: PLR0912, PLR0915
     warnings: list[dict[str, Any]] = []
     proposed_count = 0
 
-    for slot, item in enumerate(validated, start=1):
+    items = slot_items if slot_items is not None else list(enumerate(validated, start=1))
+    for slot, item in items:
         story_id = slot_to_story_id.get(slot)
         if story_id is None:
             continue
@@ -1134,7 +1379,7 @@ def _story_refinement_duration(
 def _store_story_context(
     *,
     tool_context: ToolContext | None,
-    input_data: SaveStoriesInput,
+    input_data: SaveStoriesInput | SaveStoryPatchInput,
     metadata: dict[str, Any],
 ) -> None:
     if not tool_context:
@@ -1280,4 +1525,148 @@ def save_stories_tool(  # noqa: PLR0911
         return _success_response(input_data=input_data, metadata=metadata)
 
 
-__all__ = ["SaveStoriesInput", "save_stories_tool"]
+def save_story_patch_tool(  # noqa: PLR0911
+    input_data: SaveStoryPatchInput,
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
+    """Persist one targeted user story refinement to the database."""
+    engine = get_engine()
+    start_ts = time.perf_counter()
+
+    with Session(engine) as session:
+        _acquire_story_save_write_lock(session)
+
+        product = session.exec(
+            select(Product).where(Product.product_id == input_data.product_id)
+        ).first()
+        if not product:
+            return {
+                "success": False,
+                "error": f"Product with ID {input_data.product_id} not found.",
+            }
+
+        validated, validation_errors = _validate_story_items([input_data.story])
+        if validation_errors:
+            return {
+                "success": False,
+                "error": f"Validation errors: {'; '.join(validation_errors)}",
+                "valid_count": len(validated),
+                "invalid_count": len(validation_errors),
+            }
+        item = validated[0]
+
+        normalized_req = normalize_requirement_key(input_data.parent_requirement)
+        existing_active = _active_stories_for_requirement(
+            session,
+            product_id=input_data.product_id,
+            normalized_req=normalized_req,
+            story_origin=input_data.story_origin
+            if input_data.story_origin == "scope_extension"
+            else None,
+            accepted_spec_version_id=input_data.accepted_spec_version_id
+            if input_data.story_origin == "scope_extension"
+            else None,
+        )
+        target, target_error = _resolve_story_patch_target(
+            input_data=input_data,
+            existing_active=existing_active,
+        )
+        if target_error is not None:
+            return target_error
+        if target is None or target.story_id is None or target.refinement_slot is None:
+            raise RuntimeError("Story patch target resolution failed.")
+
+        protection_reasons = _story_replacement_protection_reasons(target)
+        if protection_reasons:
+            return _unsafe_replacement_response(
+                [
+                    {
+                        "story_id": target.story_id,
+                        "refinement_slot": target.refinement_slot,
+                        "title": target.title,
+                        "status": getattr(target.status, "value", target.status),
+                        "reasons": protection_reasons,
+                    }
+                ]
+            )
+
+        request_identity = _story_patch_request_identity(
+            normalized_req=normalized_req,
+            parent_rank=input_data.parent_rank,
+            validated=item,
+            target_story_id=target.story_id,
+            target_refinement_slot=target.refinement_slot,
+            story_origin=input_data.story_origin,
+            accepted_spec_version_id=input_data.accepted_spec_version_id,
+        )
+        previous_event = _find_story_save_event(
+            session,
+            product_id=input_data.product_id,
+            idempotency_key=input_data.idempotency_key,
+        )
+        if previous_event is not None:
+            if not _story_patch_event_matches_request(
+                previous_event,
+                request_identity=request_identity,
+            ):
+                return _idempotency_key_reused_response(input_data=input_data)
+            return _replay_response(input_data=input_data, event=previous_event)
+
+        metadata = _persist_target_story_patch(
+            session,
+            input_data=input_data,
+            normalized_req=normalized_req,
+            item=item,
+            target=target,
+            existing_active=existing_active,
+            request_identity=request_identity,
+        )
+        slot_items = [(int(target.refinement_slot), item)]
+        dependency_failure, dependency_metadata = _persist_dependency_candidates(
+            session,
+            input_data=input_data,
+            normalized_req=normalized_req,
+            validated=validated,
+            metadata=metadata,
+            slot_items=slot_items,
+        )
+        if dependency_failure is not None:
+            return dependency_failure
+        metadata.update(dependency_metadata)
+
+        duration_seconds = _story_refinement_duration(
+            tool_context=tool_context,
+            start_ts=start_ts,
+        )
+        session_id = getattr(tool_context, "session_id", None) if tool_context else None
+        session.add(
+            WorkflowEvent(
+                event_type=WorkflowEventType.STORIES_SAVED,
+                product_id=input_data.product_id,
+                session_id=session_id,
+                duration_seconds=float(duration_seconds),
+                event_metadata=json.dumps(metadata),
+            )
+        )
+        session.commit()
+
+        _store_story_context(
+            tool_context=tool_context,
+            input_data=input_data,
+            metadata=metadata,
+        )
+        print(
+            f"\n\033[92m[Story Patch Saved]\033[0m "
+            f"{metadata['saved_count']} stories for '{input_data.parent_requirement}' "
+            f"(updated={metadata['updated_count']}, created={metadata['created_count']})"
+        )
+
+        return _success_response(input_data=input_data, metadata=metadata)
+
+
+__all__ = [
+    "SaveStoriesInput",
+    "SaveStoryPatchInput",
+    "save_stories_tool",
+    "save_story_patch_tool",
+]

@@ -62,8 +62,10 @@ from orchestrator_agent.agent_tools.roadmap_builder.tools import (
 from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
     save_sprint_plan_tool,
 )
+from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_stories_tool,
+    save_story_patch_tool,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
@@ -188,6 +190,9 @@ from services.phases.story_service import (
 )
 from services.phases.story_service import (
     save_story_draft as save_story_draft_service,
+)
+from services.phases.story_service import (
+    save_story_patch as save_story_patch_service,
 )
 from services.phases.vision_service import (
     VisionPhaseError,
@@ -529,6 +534,15 @@ class StoryGenerateRequest(BaseModel):
 
     user_input: str | None = None
     force_feedback: bool = False
+    target_story_id: int | None = None
+    target_refinement_slot: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_target_selector(self) -> "StoryGenerateRequest":  # noqa: UP037
+        if self.target_story_id is not None and self.target_refinement_slot is not None:
+            msg = "At most one of target_story_id or target_refinement_slot is allowed."
+            raise ValueError(msg)
+        return self
 
 
 class StorySaveRequest(BaseModel):
@@ -538,6 +552,13 @@ class StorySaveRequest(BaseModel):
     expected_artifact_fingerprint: str
     expected_state: str
     idempotency_key: str
+
+
+class StorySavePatchRequest(StorySaveRequest):
+    """Request body for targeted guarded Story persistence."""
+
+    target_story_id: int | None = None
+    target_refinement_slot: int | None = None
 
 
 class StoryCompleteRequest(BaseModel):
@@ -3235,12 +3256,30 @@ async def generate_project_story(
         product=product,
         session_id=session_id,
     )
+    target_story_id = req.target_story_id
+    target_refinement_slot = req.target_refinement_slot
+    if target_story_id is not None and target_refinement_slot is None:
+        target_refinement_slot = _resolve_story_patch_target_slot(
+            project_id,
+            parent_requirement,
+            target_story_id,
+        )
+        if target_refinement_slot is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "story generate target does not belong to the requested requirement"
+                ),
+            )
+        target_story_id = None
     try:
         result = await generate_story_draft_service(
             project_id=project_id,
             parent_requirement=parent_requirement,
             user_input=req.user_input,
             force_feedback=req.force_feedback,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
             load_state=lambda: _ensure_session(session_id),
             save_state=lambda updated: _save_session_state(session_id, updated),
             now_iso=_now_iso,
@@ -3349,6 +3388,69 @@ async def save_project_story(
             hydrate_context=_hydrate_context,
             build_tool_context=_build_tool_context,
             save_stories_tool=save_stories_tool,
+        )
+    except StoryPhaseError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+        ) from exc
+
+    return {
+        "status": "success",
+        **data,
+    }
+
+
+def _resolve_story_patch_target_slot(
+    project_id: int,
+    parent_requirement: str,
+    story_id: int,
+) -> int | None:
+    normalized_requirement = normalize_requirement_key(parent_requirement)
+    with Session(get_engine()) as session:
+        story = session.get(UserStory, story_id)
+        if (
+            story is None
+            or story.product_id != project_id
+            or story.source_requirement != normalized_requirement
+            or story.is_superseded
+            or story.refinement_slot is None
+        ):
+            return None
+        return story.refinement_slot
+
+
+@app.post("/api/projects/{project_id}/story/save-patch")
+async def save_project_story_patch(
+    project_id: int, parent_requirement: str, req: StorySavePatchRequest
+) -> dict[str, Any]:
+    """Save one targeted user story draft item for a specific requirement."""
+    product = product_repo.get_by_id(project_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if (req.target_story_id is None) == (req.target_refinement_slot is None):
+        raise HTTPException(
+            status_code=400,
+            detail="story save-patch requires exactly one target selector",
+        )
+
+    session_id = str(project_id)
+    try:
+        data = await save_story_patch_service(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            attempt_id=req.attempt_id,
+            expected_artifact_fingerprint=req.expected_artifact_fingerprint,
+            expected_state=req.expected_state,
+            idempotency_key=req.idempotency_key,
+            target_story_id=req.target_story_id,
+            target_refinement_slot=req.target_refinement_slot,
+            load_state=lambda: _ensure_session(session_id),
+            save_state=lambda updated: _save_session_state(session_id, updated),
+            hydrate_context=_hydrate_context,
+            build_tool_context=_build_tool_context,
+            save_story_patch_tool=save_story_patch_tool,
+            resolve_target_refinement_slot=_resolve_story_patch_target_slot,
         )
     except StoryPhaseError as exc:
         raise HTTPException(

@@ -735,7 +735,12 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         mutates=True,
         phase="phase_2d",
         input_required=("project_id", "parent_requirement"),
-        input_optional=("input", "force_feedback"),
+        input_optional=(
+            "input",
+            "force_feedback",
+            "target_story_id",
+            "target_refinement_slot",
+        ),
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
@@ -780,6 +785,28 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
             "expected_state",
             "idempotency_key",
         ),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.AUTHORITY_NOT_ACCEPTED.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge story save-patch",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=(
+            "project_id",
+            "parent_requirement",
+            "attempt_id",
+            "expected_artifact_fingerprint",
+            "expected_state",
+            "idempotency_key",
+        ),
+        input_optional=("target_story_id", "target_refinement_slot"),
         errors=(
             ErrorCode.PROJECT_NOT_FOUND.value,
             ErrorCode.AUTHORITY_NOT_ACCEPTED.value,

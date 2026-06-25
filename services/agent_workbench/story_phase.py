@@ -20,6 +20,7 @@ from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_k
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     evaluate_dependency_candidates,
     save_stories_tool,
+    save_story_patch_tool,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
@@ -45,6 +46,7 @@ from services.phases.story_service import (
     repair_story_readiness,
     retry_story_draft,
     save_story_draft,
+    save_story_patch,
 )
 from services.story_dependencies import (
     dependency_inspect_payload,
@@ -118,13 +120,15 @@ class StoryPhaseRunner:
         """Return roadmap requirements grouped by Story completion status."""
         return anyio.run(self._pending, project_id)
 
-    def generate(
+    def generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
         return anyio.run(
@@ -133,6 +137,8 @@ class StoryPhaseRunner:
             parent_requirement,
             user_input,
             force_feedback,
+            target_story_id,
+            target_refinement_slot,
         )
 
     def retry(self, *, project_id: int, parent_requirement: str) -> dict[str, Any]:
@@ -167,6 +173,31 @@ class StoryPhaseRunner:
             expected_artifact_fingerprint,
             expected_state,
             idempotency_key,
+        )
+
+    def save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one targeted Story draft item."""
+        return anyio.run(
+            self._save_patch,
+            project_id,
+            parent_requirement,
+            attempt_id,
+            expected_artifact_fingerprint,
+            expected_state,
+            idempotency_key,
+            target_story_id,
+            target_refinement_slot,
         )
 
     def complete(  # noqa: PLR0913
@@ -327,16 +358,31 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _generate(
+    async def _generate(  # noqa: PLR0913
         self,
         project_id: int,
         parent_requirement: str,
         user_input: str | None,
         force_feedback: bool,
+        target_story_id: int | None,
+        target_refinement_slot: int | None,
     ) -> dict[str, Any]:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+
+        if target_story_id is not None and target_refinement_slot is None:
+            target_refinement_slot = _resolve_target_refinement_slot(
+                project_id,
+                parent_requirement,
+                target_story_id,
+            )
+            if target_refinement_slot is None:
+                msg = (
+                    "story generate target does not belong to the requested requirement"
+                )
+                return _phase_error(StoryPhaseError(msg, status_code=409))
+            target_story_id = None
 
         try:
             data = await generate_story_draft(
@@ -344,6 +390,8 @@ class StoryPhaseRunner:
                 parent_requirement=parent_requirement,
                 user_input=user_input,
                 force_feedback=force_feedback,
+                target_story_id=target_story_id,
+                target_refinement_slot=target_refinement_slot,
                 load_state=lambda: self._load_story_state(
                     str(project_id), project_id, product
                 ),
@@ -477,6 +525,61 @@ class StoryPhaseRunner:
                 ),
                 build_tool_context=_build_tool_context,
                 save_stories_tool=save_stories_tool,
+            )
+        except StoryPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
+    async def _save_patch(  # noqa: PLR0913
+        self,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None,
+        target_refinement_slot: int | None,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        initial_fsm_state: str | None = None
+
+        async def load_state() -> dict[str, Any]:
+            nonlocal initial_fsm_state
+            state = await self._load_story_state(str(project_id), project_id, product)
+            initial_fsm_state = (
+                str(state["fsm_state"]) if state.get("fsm_state") is not None else None
+            )
+            return state
+
+        try:
+            data = await save_story_patch(
+                project_id=project_id,
+                parent_requirement=parent_requirement,
+                attempt_id=attempt_id,
+                expected_artifact_fingerprint=expected_artifact_fingerprint,
+                expected_state=expected_state,
+                idempotency_key=idempotency_key,
+                target_story_id=target_story_id,
+                target_refinement_slot=target_refinement_slot,
+                load_state=load_state,
+                save_state=lambda state: self._save_story_mutation_state(
+                    str(project_id),
+                    state,
+                    reason="story_patch_saved",
+                    initial_fsm_state=initial_fsm_state,
+                ),
+                hydrate_context=lambda session_id, hydrated_project_id: (
+                    self._hydrate_context(session_id, hydrated_project_id, product)
+                ),
+                build_tool_context=_build_tool_context,
+                save_story_patch_tool=save_story_patch_tool,
+                resolve_target_refinement_slot=_resolve_target_refinement_slot,
             )
         except StoryPhaseError as exc:
             return _phase_error(exc)
@@ -1793,6 +1896,25 @@ def _assert_repair_readiness_safe_in_session(
             message,
             status_code=409,
         )
+
+
+def _resolve_target_refinement_slot(
+    project_id: int,
+    parent_requirement: str,
+    story_id: int,
+) -> int | None:
+    normalized_requirement = normalize_requirement_key(parent_requirement)
+    with Session(get_engine()) as session:
+        story = session.get(UserStory, story_id)
+        if (
+            story is None
+            or story.product_id != project_id
+            or story.source_requirement != normalized_requirement
+            or story.is_superseded
+            or story.refinement_slot is None
+        ):
+            return None
+        return story.refinement_slot
 
 
 def _build_tool_context(context: object) -> ToolContext:

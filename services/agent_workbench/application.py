@@ -462,13 +462,15 @@ class _StoryPhaseRunner(Protocol):
         """Return roadmap requirements grouped by Story completion status."""
         ...
 
-    def generate(
+    def generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
         ...
@@ -497,6 +499,21 @@ class _StoryPhaseRunner(Protocol):
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Persist the current Story draft."""
+        ...
+
+    def save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one targeted Story draft item."""
         ...
 
     def complete(  # noqa: PLR0913
@@ -1995,13 +2012,15 @@ class AgentWorkbenchApplication:
         """Return Story pending roadmap requirements."""
         return self._get_story_runner().pending(project_id=project_id)
 
-    def story_generate(
+    def story_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> dict[str, Any]:
         """Generate or refine a Story draft."""
         return self._get_story_runner().generate(
@@ -2009,6 +2028,8 @@ class AgentWorkbenchApplication:
             parent_requirement=parent_requirement,
             user_input=user_input,
             force_feedback=force_feedback,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
         )
 
     def story_retry(
@@ -2053,6 +2074,30 @@ class AgentWorkbenchApplication:
             expected_artifact_fingerprint=expected_artifact_fingerprint,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
+        )
+
+    def story_save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one targeted Story draft item."""
+        return self._get_story_runner().save_patch(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            attempt_id=attempt_id,
+            expected_artifact_fingerprint=expected_artifact_fingerprint,
+            expected_state=expected_state,
+            idempotency_key=idempotency_key,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
         )
 
     def story_complete(  # noqa: PLR0913

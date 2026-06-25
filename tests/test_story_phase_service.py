@@ -20,6 +20,7 @@ from services.phases.story_service import (
     repair_story_readiness,
     retry_story_draft,
     save_story_draft,
+    save_story_patch,
     story_parent_rank,
 )
 
@@ -103,6 +104,104 @@ def _state_with_complete_story_draft(
                         "latest_reusable_attempt_id": "attempt-1",
                         "kind": "complete_draft",
                         "is_complete": True,
+                        "artifact_fingerprint": artifact_fingerprint,
+                    },
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+
+
+def _story_patch_artifact(
+    parent_requirement: str = "Requirement A",
+    title: str = "Refined target story",
+    *,
+    target_refinement_slot: int = 2,
+) -> JsonDict:
+    return {
+        "artifact_kind": "story_patch",
+        "parent_requirement": parent_requirement,
+        "target_refinement_slot": target_refinement_slot,
+        "story": {
+            "story_title": title,
+            "statement": (
+                "As a developer, I want a refined target story, so that it is "
+                "ready for sprint planning."
+            ),
+            "acceptance_criteria": ["Verify that the target story is actionable."],
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+        },
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+
+
+def _state_with_story_patch_draft(
+    parent_requirement: str = "Requirement A",
+) -> JsonDict:
+    artifact = _story_patch_artifact(parent_requirement)
+    artifact_fingerprint = _story_artifact_fingerprint(parent_requirement, artifact)
+    artifact["artifact_fingerprint"] = artifact_fingerprint
+    return {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "fsm_state": "STORY_REVIEW",
+        "story_outputs": {
+            parent_requirement: {
+                "parent_requirement": parent_requirement,
+                "user_stories": [
+                    {
+                        "story_title": "Protected sibling",
+                        "statement": (
+                            "As a user, I want sibling work preserved, so that "
+                            "completed scope is stable."
+                        ),
+                        "acceptance_criteria": ["Verify sibling preservation."],
+                        "invest_score": "High",
+                        "estimated_effort": "S",
+                        "produced_artifacts": [],
+                    },
+                    {
+                        "story_title": "Old target story",
+                        "statement": (
+                            "As a user, I want target work refined, so that the "
+                            "next draft is better."
+                        ),
+                        "acceptance_criteria": ["Verify target replacement."],
+                        "invest_score": "High",
+                        "estimated_effort": "S",
+                        "produced_artifacts": [],
+                    },
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+            }
+        },
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "reusable_content_result",
+                            "is_reusable": True,
+                            "retryable": False,
+                            "draft_kind": "story_patch",
+                            "target_refinement_slot": 2,
+                            "artifact_fingerprint": artifact_fingerprint,
+                            "output_artifact": artifact,
+                        }
+                    ],
+                    "draft_projection": {
+                        "latest_reusable_attempt_id": "attempt-1",
+                        "kind": "story_patch",
+                        "is_complete": True,
+                        "target_refinement_slot": 2,
                         "artifact_fingerprint": artifact_fingerprint,
                     },
                     "feedback_projection": {"items": [], "next_feedback_sequence": 0},
@@ -806,6 +905,222 @@ Do not add cross-milestone work.
         == "Story A"
     )
     assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_with_target_slot_stores_story_patch_attempt() -> (
+    None
+):
+    """Targeted generation stores a one-story patch artifact, not a full list."""
+    parent_requirement = "Requirement A"
+    target_slot = 2
+    patch_artifact: JsonDict = {
+        "artifact_kind": "story_patch",
+        "parent_requirement": parent_requirement,
+        "target_refinement_slot": target_slot,
+        "story": {
+            "story_title": "Refined target story",
+            "statement": (
+                "As a developer, I want a refined target story, so that it is "
+                "ready for sprint planning."
+            ),
+            "acceptance_criteria": ["Verify that the target story is actionable."],
+            "invest_score": "High",
+            "estimated_effort": "S",
+            "produced_artifacts": [],
+        },
+        "is_complete": True,
+        "clarifying_questions": [],
+    }
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "story_outputs": {
+            parent_requirement: {
+                "parent_requirement": parent_requirement,
+                "user_stories": [
+                    {
+                        "story_title": "Protected sibling",
+                        "statement": (
+                            "As a user, I want sibling work preserved, so that "
+                            "completed scope is stable."
+                        ),
+                        "acceptance_criteria": ["Verify sibling preservation."],
+                        "invest_score": "High",
+                        "estimated_effort": "S",
+                        "produced_artifacts": [],
+                    },
+                    {
+                        "story_title": "Old target story",
+                        "statement": (
+                            "As a user, I want target work refined, so that the "
+                            "next draft is better."
+                        ),
+                        "acceptance_criteria": ["Verify target replacement."],
+                        "invest_score": "High",
+                        "estimated_effort": "S",
+                        "produced_artifacts": [],
+                    },
+                ],
+                "is_complete": True,
+                "clarifying_questions": [],
+            }
+        },
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+    saved_states: list[JsonDict] = []
+
+    async def fake_run_story_agent_from_state(  # noqa: PLR0913
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> JsonDict:
+        del state_arg, project_id, parent_requirement, user_input
+        assert target_story_id is None
+        assert target_refinement_slot == target_slot
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": patch_artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "story_patch",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {
+                "parent_requirement": "Requirement A",
+                "target_refinement_slot": target_slot,
+            },
+            "error": None,
+            "failure_artifact_id": None,
+            "failure_stage": None,
+            "failure_summary": None,
+            "raw_output_preview": None,
+            "has_full_artifact": False,
+        }
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Refine slot 2 only",
+        target_story_id=None,
+        target_refinement_slot=target_slot,
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=lambda runtime, text, created_at, **_kwargs: runtime[
+            "feedback_projection"
+        ]["items"].append(
+            {
+                "feedback_id": f"feedback-{len(runtime['feedback_projection']['items']) + 1}",  # noqa: E501
+                "text": text,
+                "created_at": created_at,
+                "status": "unabsorbed",
+                "absorbed_by_attempt_id": None,
+            }
+        ),
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection",
+            {},
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda runtime, *, feedback_ids, attempt_id: [
+            item.update({"status": "absorbed", "absorbed_by_attempt_id": attempt_id})
+            for item in runtime["feedback_projection"]["items"]
+            if item["feedback_id"] in set(feedback_ids)
+        ],
+        failure_meta=lambda story_result, fallback_summary: {},  # noqa: ARG005
+    )
+
+    runtime = _story_runtime_for(state, parent_requirement)
+    attempt = runtime["attempt_history"][-1]
+    output_artifact = attempt["output_artifact"]
+    assert payload["fsm_state"] == "STORY_REVIEW"
+    assert payload["data"]["current_draft"]["kind"] == "story_patch"
+    assert payload["data"]["current_draft"]["target_refinement_slot"] == target_slot
+    assert attempt["draft_kind"] == "story_patch"
+    assert attempt["target_refinement_slot"] == target_slot
+    assert output_artifact["artifact_kind"] == "story_patch"
+    assert output_artifact["story"]["story_title"] == "Refined target story"
+    assert "user_stories" not in output_artifact
+    assert runtime["draft_projection"]["target_refinement_slot"] == target_slot
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_rejects_both_patch_targets() -> None:
+    """Targeted generation accepts at most one target selector."""
+    state: JsonDict = {
+        "roadmap_releases": [{"items": ["Requirement A"]}],
+        "interview_runtime": {
+            "story": {
+                "Requirement A": {
+                    "phase": "story",
+                    "subject_key": "Requirement A",
+                    "attempt_history": [],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {},
+                }
+            }
+        },
+    }
+
+    async def fail_if_called(*_args: object, **_kwargs: object) -> JsonDict:
+        msg = "story agent should not run for invalid target selectors"
+        raise AssertionError(msg)
+
+    def noop_dict(*_args: object, **_kwargs: object) -> JsonDict:
+        return {}
+
+    def noop_list(*_args: object, **_kwargs: object) -> list[JsonDict]:
+        return []
+
+    with pytest.raises(StoryPhaseError, match="Exactly one"):
+        await generate_story_draft(
+            project_id=7,
+            parent_requirement="Requirement A",
+            user_input="Refine this story",
+            target_story_id=29,
+            target_refinement_slot=2,
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            now_iso=lambda: "2026-04-04T12:00:00Z",
+            run_story_agent_from_state=fail_if_called,
+            append_feedback_entry=noop_dict,
+            set_request_projection=noop_dict,
+            append_attempt=noop_dict,
+            promote_reusable_draft=noop_dict,
+            mark_feedback_absorbed=noop_list,
+            failure_meta=noop_dict,
+        )
 
 
 @pytest.mark.asyncio
@@ -1982,6 +2297,229 @@ async def test_save_story_draft_marks_requirement_saved_and_persists_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_save_story_patch_sends_single_target_story_from_review_draft() -> None:
+    """Story patch save sends the reviewed patch story to the persistence tool."""
+    state = _state_with_story_patch_draft()
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact = runtime["attempt_history"][0]["output_artifact"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+    hydrated = SimpleNamespace(state=state, session_id="7")
+    saved_states: list[JsonDict] = []
+    captured: JsonDict = {}
+
+    def save_state(updated: JsonDict) -> None:
+        saved_states.append(dict(updated))
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        assert session_id == "7"
+        assert project_id == 7  # noqa: PLR2004
+        return hydrated
+
+    def fake_save_story_patch_tool(save_input: object, _context: object) -> JsonDict:
+        assert hasattr(save_input, "story")
+        save_payload = cast("Any", save_input)
+        captured["save_input"] = save_input
+        captured["story"] = save_payload.story
+        captured["target_refinement_slot"] = save_payload.target_refinement_slot
+        captured["target_story_id"] = save_payload.target_story_id
+        return {"success": True, "saved_count": 1, "updated_story_ids": [29]}
+
+    payload = await save_story_patch(
+        project_id=7,
+        parent_requirement="Requirement A",
+        load_state=lambda: _async_value(state),
+        save_state=save_state,
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_story_patch_tool=fake_save_story_patch_tool,
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-patch-7-requirement-a",
+        target_story_id=None,
+        target_refinement_slot=2,
+        resolve_target_refinement_slot=None,
+    )
+
+    assert payload["parent_requirement"] == "Requirement A"
+    assert payload["fsm_state"] == "STORY_PERSISTENCE"
+    assert payload["data"]["save_result"]["updated_story_ids"] == [29]
+    assert captured["story"] == artifact["story"]
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    assert captured["target_story_id"] is None
+    assert state["story_saved"]["Requirement A"] is True
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_story_patch_reads_story_patch_artifact_story() -> None:
+    """Story patch save reads output_artifact.story without requiring user_stories."""
+    state = _state_with_story_patch_draft()
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact = runtime["attempt_history"][0]["output_artifact"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+    hydrated = SimpleNamespace(state=state, session_id="7")
+    saved_states: list[JsonDict] = []
+    captured: JsonDict = {}
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        assert session_id == "7"
+        assert project_id == 7  # noqa: PLR2004
+        return hydrated
+
+    def fake_save_story_patch_tool(save_input: object, _context: object) -> JsonDict:
+        save_payload = cast("Any", save_input)
+        captured["story"] = save_payload.story
+        captured["target_refinement_slot"] = save_payload.target_refinement_slot
+        return {"success": True, "saved_count": 1, "updated_story_ids": [29]}
+
+    payload = await save_story_patch(
+        project_id=7,
+        parent_requirement="Requirement A",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_story_patch_tool=fake_save_story_patch_tool,
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-patch-7-requirement-a",
+        target_story_id=None,
+        target_refinement_slot=2,
+        resolve_target_refinement_slot=None,
+    )
+
+    assert payload["operation"] == "story_patch"
+    assert captured["story"] == artifact["story"]
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    stories = state["story_outputs"]["Requirement A"]["user_stories"]
+    assert stories[0]["story_title"] == "Protected sibling"
+    assert stories[1]["story_title"] == "Refined target story"
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_story_patch_rejects_complete_draft_attempt() -> None:
+    """Story save-patch only accepts story_patch drafts."""
+    state = _state_with_complete_story_draft()
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> SimpleNamespace:
+        msg = "save-patch should reject before hydrating context"
+        raise AssertionError(msg)
+
+    with pytest.raises(StoryPhaseError, match="story_patch"):
+        await save_story_patch(
+            project_id=7,
+            parent_requirement="Requirement A",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_story_patch_tool=lambda _save_input, _context: {},
+            attempt_id="attempt-1",
+            expected_artifact_fingerprint=artifact_fingerprint,
+            expected_state="STORY_REVIEW",
+            idempotency_key="story-patch-7-requirement-a",
+            target_story_id=None,
+            target_refinement_slot=1,
+            resolve_target_refinement_slot=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_story_draft_rejects_story_patch_current_draft() -> None:
+    """Full-list Story save must not save a targeted patch draft."""
+    state = _state_with_story_patch_draft()
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+
+    async def hydrate_context(_session_id: str, _project_id: int) -> SimpleNamespace:
+        msg = "story save should reject patch drafts before hydration"
+        raise AssertionError(msg)
+
+    with pytest.raises(StoryPhaseError, match="complete draft"):
+        await save_story_draft(
+            project_id=7,
+            parent_requirement="Requirement A",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_stories_tool=lambda _save_input, _context: {},
+            attempt_id="attempt-1",
+            expected_artifact_fingerprint=artifact_fingerprint,
+            expected_state="STORY_REVIEW",
+            idempotency_key="story-save-7-requirement-a",
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_story_patch_merges_target_into_existing_story_output() -> None:
+    """Story patch save preserves sibling story output content."""
+    state = _state_with_story_patch_draft()
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+    state["story_outputs"] = {
+        "Requirement A": {
+            "parent_requirement": "Requirement A",
+            "user_stories": [
+                {
+                    "story_title": "Protected sibling",
+                    "statement": "As a user, I want old sibling content preserved.",
+                    "acceptance_criteria": ["Keep the sibling untouched."],
+                    "invest_score": "High",
+                    "estimated_effort": "S",
+                    "produced_artifacts": [],
+                },
+                {
+                    "story_title": "Old target story",
+                    "statement": "As a user, I want old target content replaced.",
+                    "acceptance_criteria": ["Replace this target story."],
+                    "invest_score": "High",
+                    "estimated_effort": "S",
+                    "produced_artifacts": [],
+                },
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    }
+    hydrated = SimpleNamespace(state=state, session_id="7")
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        assert session_id == "7"
+        assert project_id == 7  # noqa: PLR2004
+        return hydrated
+
+    def fake_save_story_patch_tool(_save_input: object, _context: object) -> JsonDict:
+        return {"success": True, "saved_count": 1, "updated_story_ids": [29]}
+
+    await save_story_patch(
+        project_id=7,
+        parent_requirement="Requirement A",
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda context: context,
+        save_story_patch_tool=fake_save_story_patch_tool,
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint=artifact_fingerprint,
+        expected_state="STORY_REVIEW",
+        idempotency_key="story-patch-7-requirement-a",
+        target_story_id=None,
+        target_refinement_slot=2,
+        resolve_target_refinement_slot=None,
+    )
+
+    stories = state["story_outputs"]["Requirement A"]["user_stories"]
+    assert stories[0]["story_title"] == "Protected sibling"
+    assert stories[1]["story_title"] == "Refined target story"
+
+
+@pytest.mark.asyncio
 async def test_save_story_draft_scope_extension_uses_amended_spec_metadata() -> None:
     """Extension story save preserves amended spec provenance on persistence input."""
     state = _state_with_complete_story_draft()
@@ -2197,6 +2735,49 @@ async def test_save_story_draft_replays_same_idempotency_key() -> None:
 
     assert second == first
     assert len(save_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_story_draft_rejects_patch_idempotency_payload() -> None:
+    """Do not replay a targeted patch payload as a full-list save."""
+    state = _state_with_complete_story_draft()
+    artifact_fingerprint = state["interview_runtime"]["story"]["Requirement A"][
+        "draft_projection"
+    ]["artifact_fingerprint"]
+    state["story_save_idempotency"] = {
+        "story-save-cross-operation": {
+            "operation": "story_patch",
+            "parent_requirement": "Requirement A",
+            "attempt_id": "attempt-1",
+            "artifact_fingerprint": artifact_fingerprint,
+            "target_story_id": None,
+            "target_refinement_slot": 1,
+            "fsm_state": "STORY_PERSISTENCE",
+            "data": {"save_result": {"saved_count": 1}},
+        }
+    }
+
+    async def fail_hydrate_context(
+        _session_id: str, _project_id: int
+    ) -> SimpleNamespace:
+        pytest.fail("hydrate should not be called")
+
+    with pytest.raises(StoryPhaseError, match="operation"):
+        await save_story_draft(
+            project_id=7,
+            parent_requirement="Requirement A",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: None,
+            hydrate_context=fail_hydrate_context,
+            build_tool_context=lambda context: context,
+            save_stories_tool=lambda _input_data, _tool_context: pytest.fail(
+                "save should not be called"
+            ),
+            attempt_id="attempt-1",
+            expected_artifact_fingerprint=artifact_fingerprint,
+            expected_state="STORY_REVIEW",
+            idempotency_key="story-save-cross-operation",
+        )
 
 
 @pytest.mark.asyncio

@@ -1938,13 +1938,15 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
-    def generate(
+    def generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> dict[str, Any]:
         """Record Story generation."""
         self.calls.append(
@@ -1955,6 +1957,8 @@ class _FakeStoryRunner:
                     "parent_requirement": parent_requirement,
                     "user_input": user_input,
                     "force_feedback": force_feedback,
+                    "target_story_id": target_story_id,
+                    "target_refinement_slot": target_refinement_slot,
                 },
             )
         )
@@ -2027,6 +2031,41 @@ class _FakeStoryRunner:
                     "expected_artifact_fingerprint": expected_artifact_fingerprint,
                     "expected_state": expected_state,
                     "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "fsm_state": "STORY_PERSISTENCE"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> dict[str, Any]:
+        """Record targeted Story patch save."""
+        self.calls.append(
+            (
+                "save_patch",
+                {
+                    "project_id": project_id,
+                    "parent_requirement": parent_requirement,
+                    "attempt_id": attempt_id,
+                    "expected_artifact_fingerprint": expected_artifact_fingerprint,
+                    "expected_state": expected_state,
+                    "idempotency_key": idempotency_key,
+                    "target_story_id": target_story_id,
+                    "target_refinement_slot": target_refinement_slot,
                 },
             )
         )
@@ -3487,6 +3526,8 @@ def test_story_generate_threads_force_feedback() -> None:
                 "parent_requirement": "REQ.checkout",
                 "user_input": "ship it despite sparse notes",
                 "force_feedback": True,
+                "target_story_id": None,
+                "target_refinement_slot": None,
             },
         )
     ]
@@ -3604,6 +3645,8 @@ def test_application_routes_story_commands_to_runner() -> None:
                 "parent_requirement": "REQ.checkout",
                 "user_input": "focus payment errors",
                 "force_feedback": False,
+                "target_story_id": None,
+                "target_refinement_slot": None,
             },
         ),
         (

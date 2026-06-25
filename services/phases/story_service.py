@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Any, cast
 
 from orchestrator_agent.agent_tools.story_linkage import (
@@ -13,6 +14,7 @@ from orchestrator_agent.agent_tools.story_linkage import (
 )
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     SaveStoriesInput,
+    SaveStoryPatchInput,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.agent_workbench.fingerprints import canonical_hash
@@ -653,6 +655,12 @@ def _story_attempt_artifact_for_scope(
     if not isinstance(artifact, dict):
         return None
 
+    if artifact.get("artifact_kind") == "story_patch" and isinstance(
+        artifact.get("story"),
+        dict,
+    ):
+        return artifact
+
     stories = artifact.get("user_stories")
     if not isinstance(stories, list) or len(stories) == 0:
         return None
@@ -798,7 +806,41 @@ def story_save_payload_for_scope(
     return artifact
 
 
+def story_patch_save_payload_for_scope(
+    runtime: dict[str, Any],
+    *,
+    extension_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    draft_projection = runtime.get("draft_projection") or {}
+    if draft_projection.get("kind") != "story_patch":
+        return None
+    if not _record_matches_story_scope(draft_projection, extension_metadata):
+        return None
+
+    artifact = _story_attempt_artifact_for_scope(
+        _story_current_draft_attempt(runtime),
+        extension_metadata=extension_metadata,
+    )
+    if artifact is None or artifact.get("artifact_kind") != "story_patch":
+        return None
+    if not isinstance(artifact.get("story"), dict):
+        return None
+    if not artifact.get("is_complete") or not story_quality_saveable(artifact):
+        return None
+    return artifact
+
+
 def _story_counts_from_artifact(artifact: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    if artifact.get("artifact_kind") == "story_patch":
+        story = artifact.get("story")
+        if not isinstance(story, dict):
+            return 0, _zero_invest_score_counts()
+        counts = _zero_invest_score_counts()
+        score = story.get("invest_score")
+        if isinstance(score, str):
+            counts[score] = counts.get(score, 0) + 1
+        return 1, counts
+
     stories = artifact.get("user_stories")
     if not isinstance(stories, list):
         return 0, _zero_invest_score_counts()
@@ -1044,6 +1086,9 @@ def _story_save_replay_payload(
     parent_requirement: str,
     attempt_id: str,
     expected_artifact_fingerprint: str,
+    operation: str | None = None,
+    target_story_id: int | None = None,
+    target_refinement_slot: int | None = None,
 ) -> dict[str, Any] | None:
     idempotency_registry = state.get("story_save_idempotency")
     if not isinstance(idempotency_registry, dict):
@@ -1066,6 +1111,33 @@ def _story_save_replay_payload(
     if existing.get("parent_requirement") != parent_requirement:
         raise StoryPhaseError(
             "story save idempotency key does not match this requirement",
+            status_code=409,
+        )
+    existing_operation = existing.get("operation")
+    if operation is None and existing_operation is not None:
+        raise StoryPhaseError(
+            "story save idempotency key does not match this operation",
+            status_code=409,
+        )
+    if operation is not None and existing_operation != operation:
+        raise StoryPhaseError(
+            "story save idempotency key does not match this operation",
+            status_code=409,
+        )
+    if (
+        operation == "story_patch"
+        and existing.get("target_story_id") != target_story_id
+    ):
+        raise StoryPhaseError(
+            "story save idempotency key does not match this target story",
+            status_code=409,
+        )
+    if (
+        operation == "story_patch"
+        and existing.get("target_refinement_slot") != target_refinement_slot
+    ):
+        raise StoryPhaseError(
+            "story save idempotency key does not match this target slot",
             status_code=409,
         )
     return dict(existing)
@@ -1101,6 +1173,164 @@ def _validate_story_save_current_attempt_artifact(
             "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
             status_code=409,
         )
+
+
+def _validate_story_patch_target_selector(
+    *,
+    target_story_id: int | None,
+    target_refinement_slot: int | None,
+) -> None:
+    if (target_story_id is None) == (target_refinement_slot is None):
+        raise StoryPhaseError(
+            "story save-patch requires exactly one target selector",
+            status_code=400,
+        )
+
+
+def _validate_story_generate_target_selector(
+    *,
+    target_story_id: int | None,
+    target_refinement_slot: int | None,
+) -> None:
+    if target_story_id is not None and target_refinement_slot is not None:
+        raise StoryPhaseError(
+            "Exactly one of target_story_id or target_refinement_slot is allowed.",
+            status_code=400,
+        )
+
+
+def _resolve_story_patch_target_slot(
+    *,
+    project_id: int,
+    parent_requirement: str,
+    target_story_id: int | None,
+    target_refinement_slot: int | None,
+    resolve_target_refinement_slot: Callable[[int, str, int], int | None] | None,
+) -> int:
+    if target_refinement_slot is not None:
+        return target_refinement_slot
+    if target_story_id is None:
+        raise StoryPhaseError(
+            "story save-patch requires exactly one target selector",
+            status_code=400,
+        )
+    if resolve_target_refinement_slot is None:
+        raise StoryPhaseError(
+            "story save-patch cannot resolve --target-story-id",
+            status_code=400,
+        )
+    resolved = resolve_target_refinement_slot(
+        project_id,
+        parent_requirement,
+        target_story_id,
+    )
+    if resolved is None:
+        raise StoryPhaseError(
+            "story save-patch target does not belong to the requested requirement",
+            status_code=409,
+        )
+    return resolved
+
+
+def _story_patch_artifact_for_save(
+    runtime: dict[str, Any],
+    *,
+    attempt_id: str,
+    target_story_id: int | None,
+    target_refinement_slot: int,
+) -> dict[str, Any]:
+    attempt = _find_attempt_by_id(runtime, attempt_id)
+    artifact = _attempt_output_artifact(attempt)
+    if not isinstance(attempt, dict) or attempt.get("draft_kind") != "story_patch":
+        raise StoryPhaseError(
+            "story save-patch requires a story_patch draft",
+            status_code=409,
+        )
+    if not isinstance(artifact, dict) or artifact.get("artifact_kind") != "story_patch":
+        raise StoryPhaseError(
+            "story save-patch artifact is not a story_patch",
+            status_code=409,
+        )
+    story = artifact.get("story")
+    if not isinstance(story, dict):
+        raise StoryPhaseError(
+            "story save-patch target story is invalid",
+            status_code=409,
+        )
+
+    artifact_slot = artifact.get("target_refinement_slot")
+    if artifact_slot != target_refinement_slot:
+        raise StoryPhaseError(
+            "story save-patch target mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+    attempt_slot = attempt.get("target_refinement_slot")
+    if attempt_slot is not None and attempt_slot != target_refinement_slot:
+        raise StoryPhaseError(
+            "story save-patch target mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+
+    artifact_story_id = artifact.get("target_story_id")
+    attempt_story_id = attempt.get("target_story_id")
+    if target_story_id is not None:
+        known_story_ids = [
+            story_id
+            for story_id in (artifact_story_id, attempt_story_id)
+            if story_id is not None
+        ]
+        if any(story_id != target_story_id for story_id in known_story_ids):
+            raise StoryPhaseError(
+                "story save-patch target mismatch; refresh history and review the current draft",  # noqa: E501
+                status_code=409,
+            )
+    return artifact
+
+
+def _story_patch_merged_output(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+    patch_artifact: dict[str, Any],
+    patch_story: dict[str, Any],
+    target_refinement_slot: int,
+) -> dict[str, Any]:
+    target_index = target_refinement_slot - 1
+    story_outputs = state.get("story_outputs")
+    existing = (
+        story_outputs.get(parent_requirement)
+        if isinstance(story_outputs, dict)
+        else None
+    )
+    existing_stories = (
+        existing.get("user_stories") if isinstance(existing, dict) else None
+    )
+    if not isinstance(existing_stories, list):
+        if target_index == 0:
+            return {
+                "parent_requirement": parent_requirement,
+                "user_stories": [deepcopy(patch_story)],
+                "is_complete": bool(patch_artifact.get("is_complete", True)),
+                "clarifying_questions": list(
+                    patch_artifact.get("clarifying_questions") or []
+                ),
+            }
+        raise StoryPhaseError(
+            "story save-patch cannot reconstruct sibling story output",
+            status_code=409,
+        )
+    if target_index < 0 or target_index >= len(existing_stories):
+        raise StoryPhaseError(
+            "story save-patch target slot is outside the existing story output",
+            status_code=409,
+        )
+
+    merged = deepcopy(existing) if isinstance(existing, dict) else {}
+    merged_stories = deepcopy(existing_stories)
+    merged_stories[target_index] = deepcopy(patch_story)
+    merged["parent_requirement"] = parent_requirement
+    merged["user_stories"] = merged_stories
+    return merged
 
 
 def story_current_resolution(
@@ -1259,6 +1489,9 @@ def story_interview_summary(
     save_payload = story_save_payload_for_scope(
         runtime,
         extension_metadata=extension_metadata,
+    ) or story_patch_save_payload_for_scope(
+        runtime,
+        extension_metadata=extension_metadata,
     )
     latest_attempt = _latest_story_attempt(runtime)
     latest_artifact = _attempt_output_artifact(latest_attempt)
@@ -1277,6 +1510,12 @@ def story_interview_summary(
             "kind": draft_projection.get("kind"),
             "is_complete": bool(draft_projection.get("is_complete", False)),
         }
+        if "target_story_id" in draft_projection:
+            current_draft["target_story_id"] = draft_projection.get("target_story_id")
+        if "target_refinement_slot" in draft_projection:
+            current_draft["target_refinement_slot"] = draft_projection.get(
+                "target_refinement_slot",
+            )
         artifact_fingerprint = draft_projection.get("artifact_fingerprint")
         if isinstance(artifact_fingerprint, str) and artifact_fingerprint:
             current_draft["artifact_fingerprint"] = artifact_fingerprint
@@ -1654,12 +1893,14 @@ async def get_story_pending(
     return _story_pending_items(state)
 
 
-async def generate_story_draft(
+async def generate_story_draft(  # noqa: PLR0915
     *,
     project_id: int,
     parent_requirement: str,
     user_input: str | None,
     force_feedback: bool = False,
+    target_story_id: int | None = None,
+    target_refinement_slot: int | None = None,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
     save_state: Callable[[dict[str, Any]], None],
     now_iso: Callable[[], str],
@@ -1682,6 +1923,16 @@ async def generate_story_draft(
         state,
         parent_requirement,
     )
+    _validate_story_generate_target_selector(
+        target_story_id=target_story_id,
+        target_refinement_slot=target_refinement_slot,
+    )
+    patch_generation = target_story_id is not None or target_refinement_slot is not None
+    target_metadata: dict[str, Any] = {}
+    if target_story_id is not None:
+        target_metadata["target_story_id"] = target_story_id
+    if target_refinement_slot is not None:
+        target_metadata["target_refinement_slot"] = target_refinement_slot
     runtime = ensure_story_runtime(
         state,
         parent_requirement=normalized_parent_requirement,
@@ -1742,12 +1993,26 @@ async def generate_story_draft(
         runtime,
         extension_metadata=extension_metadata,
     )
-    story_result = await run_story_agent_from_state(
-        state,
-        project_id=project_id,
-        parent_requirement=normalized_parent_requirement,
-        user_input=None if included_feedback_ids else user_input,
-    )
+    story_agent_kwargs: dict[str, Any] = {
+        "project_id": project_id,
+        "parent_requirement": normalized_parent_requirement,
+        "user_input": None if included_feedback_ids else user_input,
+    }
+    if patch_generation:
+        story_agent_kwargs.update(
+            {
+                "target_story_id": target_story_id,
+                "target_refinement_slot": target_refinement_slot,
+            }
+        )
+    story_result = await run_story_agent_from_state(state, **story_agent_kwargs)
+    if patch_generation:
+        output_artifact = story_result.get("output_artifact")
+        if isinstance(output_artifact, dict):
+            output_artifact = dict(output_artifact)
+            output_artifact.setdefault("artifact_kind", "story_patch")
+            output_artifact.update(target_metadata)
+            story_result["output_artifact"] = output_artifact
     story_result = _apply_dependency_preflight_to_story_result(
         story_result,
         project_id=project_id,
@@ -1779,6 +2044,8 @@ async def generate_story_draft(
         included_feedback_ids=included_feedback_ids,
         context_version="story-runtime.v1",
     )
+    if patch_generation and isinstance(request_projection, dict):
+        request_projection.update(target_metadata)
     if extension_metadata is not None and isinstance(request_projection, dict):
         request_projection.update(extension_metadata)
 
@@ -1798,6 +2065,7 @@ async def generate_story_draft(
             "retryable": story_retryable(story_result.get("classification")),
             "draft_kind": story_result.get("draft_kind"),
             "output_artifact": story_result.get("output_artifact") or {},
+            **target_metadata,
             **(extension_metadata or {}),
             **failure_meta(story_result, fallback_summary=story_result.get("error")),
         },
@@ -1812,6 +2080,8 @@ async def generate_story_draft(
             is_complete=bool(story_result.get("is_complete", False)),
             updated_at=created_at,
         )
+        if patch_generation:
+            runtime["draft_projection"].update(target_metadata)
         if extension_metadata is not None:
             runtime["draft_projection"].update(extension_metadata)
         mark_feedback_absorbed(
@@ -1833,6 +2103,10 @@ async def generate_story_draft(
     next_state = (
         OrchestratorState.STORY_REVIEW.value
         if story_save_payload_for_scope(
+            runtime,
+            extension_metadata=extension_metadata,
+        )
+        or story_patch_save_payload_for_scope(
             runtime,
             extension_metadata=extension_metadata,
         )
@@ -2087,6 +2361,15 @@ async def save_story_draft(
         attempt_id=attempt_id,
         expected_artifact_fingerprint=expected_artifact_fingerprint,
     )
+    current_attempt = _find_attempt_by_id(runtime, attempt_id)
+    if (
+        isinstance(current_attempt, dict)
+        and current_attempt.get("draft_kind") == "story_patch"
+    ) or draft_projection.get("kind") == "story_patch":
+        raise StoryPhaseError(
+            "story save requires a complete draft; use story save-patch for story_patch drafts",  # noqa: E501
+            status_code=409,
+        )
 
     assessment = story_save_payload_for_scope(
         runtime,
@@ -2152,6 +2435,179 @@ async def save_story_draft(
         "parent_requirement": normalized_parent_requirement,
         "attempt_id": attempt_id,
         "artifact_fingerprint": expected_artifact_fingerprint,
+        "fsm_state": OrchestratorState.STORY_PERSISTENCE.value,
+        "data": {
+            "save_result": result,
+        },
+    }
+    idempotency_registry[idempotency_key] = payload
+    save_state(context.state)
+    return payload
+
+
+async def save_story_patch(
+    *,
+    project_id: int,
+    parent_requirement: str,
+    attempt_id: str | None,
+    expected_artifact_fingerprint: str | None,
+    expected_state: str | None,
+    idempotency_key: str | None,
+    target_story_id: int | None,
+    target_refinement_slot: int | None,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    hydrate_context: Callable[[str, int], Awaitable[Any]],
+    build_tool_context: Callable[[Any], Any],
+    save_story_patch_tool: Callable[[Any, Any], dict[str, Any]],
+    resolve_target_refinement_slot: Callable[[int, str, int], int | None] | None,
+) -> dict[str, Any]:
+    state = await load_state()
+    normalized_parent_requirement = _normalize_story_requirement(
+        state,
+        parent_requirement,
+    )
+    _validate_story_patch_target_selector(
+        target_story_id=target_story_id,
+        target_refinement_slot=target_refinement_slot,
+    )
+    runtime = ensure_story_runtime(
+        state,
+        parent_requirement=normalized_parent_requirement,
+    )
+    _validate_story_save_required_guards(
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        expected_state=expected_state,
+        idempotency_key=idempotency_key,
+    )
+    attempt_id = cast("str", attempt_id)
+    expected_artifact_fingerprint = cast("str", expected_artifact_fingerprint)
+    idempotency_key = cast("str", idempotency_key)
+    target_refinement_slot = _resolve_story_patch_target_slot(
+        project_id=project_id,
+        parent_requirement=normalized_parent_requirement,
+        target_story_id=target_story_id,
+        target_refinement_slot=target_refinement_slot,
+        resolve_target_refinement_slot=resolve_target_refinement_slot,
+    )
+
+    replay_payload = _story_save_replay_payload(
+        state,
+        idempotency_key=idempotency_key,
+        parent_requirement=normalized_parent_requirement,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+        operation="story_patch",
+        target_story_id=target_story_id,
+        target_refinement_slot=target_refinement_slot,
+    )
+    if replay_payload is not None:
+        return replay_payload
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.STORY_REVIEW.value:
+        raise StoryPhaseError(
+            "story save requires FSM state STORY_REVIEW",
+            status_code=409,
+        )
+
+    draft_projection = runtime.get("draft_projection") or {}
+    current_attempt_id = draft_projection.get("latest_reusable_attempt_id")
+    if current_attempt_id != attempt_id:
+        raise StoryPhaseError(
+            "story save attempt mismatch; refresh history and review the current draft",
+            status_code=409,
+        )
+
+    current_fingerprint = draft_projection.get("artifact_fingerprint")
+    if current_fingerprint != expected_artifact_fingerprint:
+        raise StoryPhaseError(
+            "story save artifact fingerprint mismatch; refresh history and review the current draft",  # noqa: E501
+            status_code=409,
+        )
+    _validate_story_save_current_attempt_artifact(
+        runtime,
+        parent_requirement=normalized_parent_requirement,
+        attempt_id=attempt_id,
+        expected_artifact_fingerprint=expected_artifact_fingerprint,
+    )
+
+    patch_artifact = _story_patch_artifact_for_save(
+        runtime,
+        attempt_id=attempt_id,
+        target_story_id=target_story_id,
+        target_refinement_slot=target_refinement_slot,
+    )
+    target_story = cast("dict[str, Any]", patch_artifact["story"])
+
+    context = await hydrate_context(str(project_id), project_id)
+    result = save_story_patch_tool(
+        SaveStoryPatchInput(
+            product_id=project_id,
+            parent_requirement=normalized_parent_requirement,
+            parent_rank=story_parent_rank(state, normalized_parent_requirement),
+            idempotency_key=idempotency_key,
+            target_story_id=target_story_id,
+            target_refinement_slot=(
+                target_refinement_slot if target_story_id is None else None
+            ),
+            story=target_story,
+            **_story_save_extension_metadata(
+                state,
+                parent_requirement=normalized_parent_requirement,
+            ),
+        ),
+        build_tool_context(context),
+    )
+    if not result.get("success"):
+        error_code = result.get("error_code")
+        if error_code in {"STORY_REPLACEMENT_UNSAFE", "STORY_PATCH_TARGET_MISMATCH"}:
+            message = result.get("error", "Story patch is unsafe")
+            raise StoryPhaseError(
+                f"{error_code}: {message}",
+                status_code=409,
+            )
+        raise StoryPhaseError(
+            result.get("error", "Failed to save story patch"),
+            status_code=500,
+        )
+
+    _mark_story_saved(
+        context.state,
+        parent_requirement=normalized_parent_requirement,
+    )
+    context.state["fsm_state"] = OrchestratorState.STORY_PERSISTENCE.value
+    merged_output = _story_patch_merged_output(
+        context.state,
+        parent_requirement=normalized_parent_requirement,
+        patch_artifact=patch_artifact,
+        patch_story=target_story,
+        target_refinement_slot=target_refinement_slot,
+    )
+    sync_story_legacy_mirrors(
+        context.state,
+        parent_requirement=normalized_parent_requirement,
+        runtime=runtime,
+    )
+    story_outputs = context.state.get("story_outputs")
+    if not isinstance(story_outputs, dict):
+        story_outputs = {}
+        context.state["story_outputs"] = story_outputs
+    story_outputs[normalized_parent_requirement] = merged_output
+
+    idempotency_registry = context.state.get("story_save_idempotency")
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        context.state["story_save_idempotency"] = idempotency_registry
+
+    payload = {
+        "operation": "story_patch",
+        "parent_requirement": normalized_parent_requirement,
+        "attempt_id": attempt_id,
+        "artifact_fingerprint": expected_artifact_fingerprint,
+        "target_story_id": target_story_id,
+        "target_refinement_slot": target_refinement_slot,
         "fsm_state": OrchestratorState.STORY_PERSISTENCE.value,
         "data": {
             "save_result": result,

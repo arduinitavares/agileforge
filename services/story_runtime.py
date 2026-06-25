@@ -11,10 +11,14 @@ from typing import Any, TypedDict
 from pydantic import ValidationError
 
 from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
+    create_user_story_patch_agent,
+)
+from orchestrator_agent.agent_tools.user_story_writer_tool.agent import (
     root_agent as story_agent,
 )
 from orchestrator_agent.agent_tools.user_story_writer_tool.schemes import (
     STORY_QUALITY_SCHEMA_VERSION,
+    UserStoryPatchOutput,
     UserStoryWriterInput,
     UserStoryWriterOutput,
 )
@@ -137,6 +141,10 @@ def _schema_repair_feedback_text(
     *,
     error: str,
     validation_errors: object | None = None,
+    schema_name: str = "UserStoryWriterOutput",
+    required_fields: str = (
+        "parent_requirement, user_stories, is_complete, and clarifying_questions"
+    ),
 ) -> str:
     """Build bounded validation feedback for a Story schema-repair attempt."""
     details = ""
@@ -146,9 +154,9 @@ def _schema_repair_feedback_text(
         "SYSTEM_FEEDBACK: Your previous User Story response failed validation.\n"
         f"ERROR: {error}\n"
         f"VALIDATION_ERRORS: {details}\n"
-        "Return JSON only. Match the UserStoryWriterOutput schema exactly. "
-        "Required top-level fields are parent_requirement, user_stories, "
-        "is_complete, and clarifying_questions. Do not add wrapper fields."
+        f"Return JSON only. Match the {schema_name} schema exactly. "
+        f"Required top-level fields are {required_fields}. "
+        "Do not add wrapper fields."
     )
     return feedback[:MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS]
 
@@ -158,17 +166,25 @@ def _payload_with_schema_repair_feedback(
     *,
     error: str,
     validation_errors: object | None = None,
+    schema_name: str = "UserStoryWriterOutput",
+    required_fields: str = (
+        "parent_requirement, user_stories, is_complete, and clarifying_questions"
+    ),
 ) -> UserStoryWriterInput:
     """Return a Story payload with validation feedback appended to context."""
     feedback = _schema_repair_feedback_text(
         error=error,
         validation_errors=validation_errors,
+        schema_name=schema_name,
+        required_fields=required_fields,
     )
     requirement_context = f"{payload.requirement_context}\n\n{feedback}"
     return payload.model_copy(update={"requirement_context": requirement_context})
 
 
-def _has_clarifying_questions(output: UserStoryWriterOutput) -> bool:
+def _has_clarifying_questions(
+    output: UserStoryWriterOutput | UserStoryPatchOutput,
+) -> bool:
     return any(question.strip() for question in output.clarifying_questions)
 
 
@@ -506,12 +522,82 @@ def build_story_input_context(
     }
 
 
+def _target_story_summary(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+    target_refinement_slot: int,
+) -> str | None:
+    story_outputs = state.get("story_outputs")
+    if not isinstance(story_outputs, dict):
+        return None
+    artifact = story_outputs.get(parent_requirement)
+    if not isinstance(artifact, dict):
+        return None
+    stories = artifact.get("user_stories")
+    if not isinstance(stories, list):
+        return None
+    target_index = target_refinement_slot - 1
+    if target_index < 0 or target_index >= len(stories):
+        return None
+    story = stories[target_index]
+    if not isinstance(story, dict):
+        return None
+    return _story_summary_line({str(key): item for key, item in story.items()})
+
+
+def _with_story_patch_target_context(
+    request_payload: StoryInputContext,
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+    target_story_id: int | None,
+    target_refinement_slot: int,
+) -> StoryInputContext:
+    target_lines = [
+        "--- TARGETED STORY PATCH ---",
+        f"target_refinement_slot: {target_refinement_slot}",
+    ]
+    if target_story_id is not None:
+        target_lines.append(f"target_story_id: {target_story_id}")
+    target_summary = _target_story_summary(
+        state,
+        parent_requirement=parent_requirement,
+        target_refinement_slot=target_refinement_slot,
+    )
+    if target_summary:
+        target_lines.extend(["Existing target story:", target_summary])
+    target_lines.extend(
+        [
+            "Return one UserStoryPatchOutput artifact.",
+            "Do not return user_stories or sibling stories.",
+        ]
+    )
+    return {
+        **request_payload,
+        "requirement_context": (
+            request_payload["requirement_context"]
+            + "\n\n"
+            + "\n".join(target_lines)
+        ),
+    }
+
+
 async def _invoke_story_agent(payload: UserStoryWriterInput) -> str:
     return await invoke_agent_to_text(
         agent=story_agent,
         runner_identity=STORY_RUNNER_IDENTITY,
         payload_json=payload.model_dump_json(),
         no_text_error="Story agent returned no text response",
+    )
+
+
+async def _invoke_story_patch_agent(payload: UserStoryWriterInput) -> str:
+    return await invoke_agent_to_text(
+        agent=create_user_story_patch_agent(),
+        runner_identity=STORY_RUNNER_IDENTITY,
+        payload_json=payload.model_dump_json(),
+        no_text_error="Story patch agent returned no text response",
     )
 
 
@@ -700,6 +786,114 @@ def _story_success_result(
             if effective_is_complete
             else "incomplete_draft"
         ),
+        "is_reusable": not quality_blocked,
+        "is_complete": effective_is_complete,
+        "quality": quality,
+        "request_payload": request_payload,
+        "error": None,
+        "failure_artifact_id": None,
+        "failure_stage": None,
+        "failure_summary": None,
+        "raw_output_preview": None,
+        "has_full_artifact": False,
+    }
+
+
+def _story_patch_quality_summary(
+    output: UserStoryPatchOutput,
+    *,
+    has_questions: bool,
+) -> dict[str, Any]:
+    quality_findings = [
+        finding.model_dump(exclude_none=True) for finding in output.quality_findings
+    ]
+    blocking_findings = [
+        finding for finding in quality_findings if finding.get("severity") == "blocking"
+    ]
+    invest_score_counts = dict.fromkeys(_INVEST_SCORES, 0)
+    invest_score_counts[output.story.invest_score] = (
+        invest_score_counts.get(output.story.invest_score, 0) + 1
+    )
+    all_low = output.story.invest_score == "Low"
+    saveable = (
+        output.is_complete
+        and not has_questions
+        and output.coverage_status == "complete"
+        and not blocking_findings
+        and not all_low
+    )
+    return {
+        "schema_version": STORY_QUALITY_SCHEMA_VERSION,
+        "coverage_status": output.coverage_status,
+        "remaining_scope": [
+            item.strip() for item in output.remaining_scope if isinstance(item, str)
+        ],
+        "story_count": 1,
+        "invest_score_counts": invest_score_counts,
+        "requested_story_count": None,
+        "quality_findings": quality_findings,
+        "blocking_findings": blocking_findings,
+        "saveable": saveable,
+    }
+
+
+def _story_patch_success_result(  # noqa: PLR0913
+    output: UserStoryPatchOutput,
+    *,
+    raw_text: str,
+    project_id: int,
+    parent_requirement: str,
+    request_payload: StoryInputContext,
+    target_story_id: int | None,
+    target_refinement_slot: int,
+) -> dict[str, Any]:
+    if output.target_refinement_slot != target_refinement_slot:
+        return _with_failure_metadata(
+            _failure(
+                project_id=project_id,
+                parent_requirement=parent_requirement,
+                input_context=request_payload,
+                failure_stage="output_validation",
+                details=_FailureDetails(
+                    message=(
+                        "Story patch output validation failed: target_refinement_slot "
+                        "does not match the requested target."
+                    ),
+                    raw_text=raw_text,
+                ),
+            ),
+            classification="nonreusable_schema_failure",
+            draft_kind=None,
+            is_reusable=False,
+            request_payload=request_payload,
+        )
+
+    output_artifact = output.model_dump(exclude_none=True)
+    output_artifact["artifact_kind"] = "story_patch"
+    output_artifact["target_refinement_slot"] = target_refinement_slot
+    if target_story_id is not None:
+        output_artifact["target_story_id"] = target_story_id
+    has_questions = _has_clarifying_questions(output)
+    quality = _story_patch_quality_summary(output, has_questions=has_questions)
+    output_artifact["remaining_scope"] = quality["remaining_scope"]
+    output_artifact["quality_findings"] = quality["quality_findings"]
+    output_artifact["quality"] = quality
+    effective_is_complete: bool = (
+        output.is_complete
+        and not has_questions
+        and quality["coverage_status"] == "complete"
+        and not quality["blocking_findings"]
+    )
+    output_artifact["is_complete"] = effective_is_complete
+    quality_blocked = bool(quality["blocking_findings"])
+    return {
+        "success": True,
+        "input_context": request_payload,
+        "output_artifact": output_artifact,
+        "classification": (
+            "quality_gate_failed" if quality_blocked else "reusable_content_result"
+        ),
+        "draft_kind": "quality_blocked_draft" if quality_blocked else "story_patch",
         "is_reusable": not quality_blocked,
         "is_complete": effective_is_complete,
         "quality": quality,
@@ -998,12 +1192,203 @@ async def run_story_agent_request(  # noqa: PLR0911
     )
 
 
-async def run_story_agent_from_state(
+async def run_story_patch_agent_request(  # noqa: PLR0911
+    request_payload: StoryInputContext,
+    *,
+    project_id: int,
+    parent_requirement: str,
+    target_story_id: int | None,
+    target_refinement_slot: int,
+) -> dict[str, Any]:
+    """Run the targeted story patch agent and normalize failures."""
+    try:
+        payload = UserStoryWriterInput.model_validate(request_payload)
+    except ValidationError as exc:
+        return _with_failure_metadata(
+            _failure(
+                project_id=project_id,
+                parent_requirement=parent_requirement,
+                input_context=request_payload,
+                failure_stage="input_validation",
+                details=_FailureDetails(
+                    message=f"Story patch input validation failed: {exc}",
+                    validation_errors=_normalize_validation_errors(exc.errors()),
+                    exception=exc,
+                ),
+            ),
+            classification="nonreusable_schema_failure",
+            draft_kind=None,
+            is_reusable=False,
+            request_payload=request_payload,
+        )
+
+    attempt_payload = payload
+    for attempt_index in range(1, MAX_STORY_SCHEMA_REPAIR_ATTEMPTS + 1):
+        attempt_request_payload = _story_input_context_from_model(attempt_payload)
+        try:
+            raw_text = await _invoke_story_patch_agent(attempt_payload)
+        except AgentInvocationError as exc:
+            validation_errors = exc.validation_errors
+            if (
+                validation_errors
+                and attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS
+            ):
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=str(exc),
+                    validation_errors=validation_errors,
+                    schema_name="UserStoryPatchOutput",
+                    required_fields=(
+                        "artifact_kind, parent_requirement, target_refinement_slot, "
+                        "story, is_complete, and clarifying_questions"
+                    ),
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="output_validation"
+                    if validation_errors
+                    else "invocation_exception",
+                    details=_FailureDetails(
+                        message=(
+                            f"Story patch output validation failed: {exc}"
+                            if validation_errors
+                            else f"Story patch runtime failed: {exc}"
+                        ),
+                        raw_text=exc.partial_output,
+                        validation_errors=validation_errors,
+                        exception=exc,
+                    ),
+                ),
+                classification="nonreusable_schema_failure"
+                if validation_errors
+                else "nonreusable_provider_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+        except ValueError as exc:
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="invocation_exception",
+                    details=_FailureDetails(
+                        message=f"Story patch runtime failed: {exc}",
+                        exception=exc,
+                    ),
+                ),
+                classification="nonreusable_provider_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        parsed = parse_json_payload(raw_text)
+        if parsed is None:
+            error = "Story patch response is not valid JSON"
+            if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=error,
+                    schema_name="UserStoryPatchOutput",
+                    required_fields=(
+                        "artifact_kind, parent_requirement, target_refinement_slot, "
+                        "story, is_complete, and clarifying_questions"
+                    ),
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="invalid_json",
+                    details=_FailureDetails(
+                        message=error,
+                        raw_text=raw_text,
+                    ),
+                ),
+                classification="nonreusable_schema_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        try:
+            output_model = UserStoryPatchOutput.model_validate(parsed)
+        except ValidationError as exc:
+            error = f"Story patch output validation failed: {exc}"
+            validation_errors = _normalize_validation_errors(exc.errors())
+            if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
+                attempt_payload = _payload_with_schema_repair_feedback(
+                    attempt_payload,
+                    error=error,
+                    validation_errors=validation_errors,
+                    schema_name="UserStoryPatchOutput",
+                    required_fields=(
+                        "artifact_kind, parent_requirement, target_refinement_slot, "
+                        "story, is_complete, and clarifying_questions"
+                    ),
+                )
+                continue
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=attempt_request_payload,
+                    failure_stage="output_validation",
+                    details=_FailureDetails(
+                        message=error,
+                        raw_text=raw_text,
+                        validation_errors=validation_errors,
+                        exception=exc,
+                    ),
+                ),
+                classification="nonreusable_schema_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=attempt_request_payload,
+            )
+
+        return _story_patch_success_result(
+            output_model,
+            raw_text=raw_text,
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            request_payload=attempt_request_payload,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
+        )
+
+    msg = "Story patch runtime exhausted schema repair attempts."
+    return _with_failure_metadata(
+        _failure(
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            input_context=request_payload,
+            failure_stage="output_validation",
+            details=_FailureDetails(message=msg),
+        ),
+        classification="nonreusable_schema_failure",
+        draft_kind=None,
+        is_reusable=False,
+        request_payload=request_payload,
+    )
+
+
+async def run_story_agent_from_state(  # noqa: PLR0913
     state: dict[str, Any],
     *,
     project_id: int,
     parent_requirement: str,
     user_input: str | None,
+    target_story_id: int | None = None,
+    target_refinement_slot: int | None = None,
 ) -> dict[str, Any]:
     """Build a story request from state and execute it through the story agent."""
     request_payload: StoryInputContext = build_story_request_payload(
@@ -1011,6 +1396,36 @@ async def run_story_agent_from_state(
         parent_requirement=parent_requirement,
         current_user_input=user_input,
     )
+    if target_story_id is not None or target_refinement_slot is not None:
+        if target_refinement_slot is None:
+            msg = "target_refinement_slot is required for targeted Story patch runtime"
+            return _with_failure_metadata(
+                _failure(
+                    project_id=project_id,
+                    parent_requirement=parent_requirement,
+                    input_context=request_payload,
+                    failure_stage="input_validation",
+                    details=_FailureDetails(message=msg),
+                ),
+                classification="nonreusable_schema_failure",
+                draft_kind=None,
+                is_reusable=False,
+                request_payload=request_payload,
+            )
+        patch_payload = _with_story_patch_target_context(
+            request_payload,
+            state,
+            parent_requirement=parent_requirement,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
+        )
+        return await run_story_patch_agent_request(
+            patch_payload,
+            project_id=project_id,
+            parent_requirement=parent_requirement,
+            target_story_id=target_story_id,
+            target_refinement_slot=target_refinement_slot,
+        )
     return await run_story_agent_request(
         request_payload,
         project_id=project_id,

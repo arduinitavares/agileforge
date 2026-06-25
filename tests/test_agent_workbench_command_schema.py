@@ -74,6 +74,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story retry",
     "agileforge story history",
     "agileforge story save",
+    "agileforge story save-patch",
     "agileforge story complete",
     "agileforge story reopen",
     "agileforge story reconcile",
@@ -822,7 +823,7 @@ def test_story_dependency_commands_are_registered_and_available() -> None:
     assert apply_payload["idempotency_required"] is True
 
 
-def test_story_phase_commands_are_registered_and_available() -> None:
+def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: PLR0915
     """Expose Story phase commands as installed CLI capabilities."""
     names = installed_command_names()
     capabilities = _capability_by_name()
@@ -832,6 +833,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "agileforge story retry",
         "agileforge story history",
         "agileforge story save",
+        "agileforge story save-patch",
         "agileforge story complete",
         "agileforge story reopen",
         "agileforge story reconcile",
@@ -849,6 +851,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
     retry = command_schema_payload("agileforge story retry")
     history = command_schema_payload("agileforge story history")
     save = command_schema_payload("agileforge story save")
+    save_patch = command_schema_payload("agileforge story save-patch")
     complete = command_schema_payload("agileforge story complete")
     reopen = command_schema_payload("agileforge story reopen")
     reconcile = command_schema_payload("agileforge story reconcile")
@@ -858,7 +861,12 @@ def test_story_phase_commands_are_registered_and_available() -> None:
     assert pending["input"]["required"] == ["project_id"]
     assert generate["mutates"] is True
     assert generate["input"]["required"] == ["project_id", "parent_requirement"]
-    assert generate["input"]["optional"] == ["input", "force_feedback"]
+    assert generate["input"]["optional"] == [
+        "input",
+        "force_feedback",
+        "target_story_id",
+        "target_refinement_slot",
+    ]
     assert retry["mutates"] is True
     assert retry["input"]["required"] == ["project_id", "parent_requirement"]
     assert history["mutates"] is False
@@ -873,6 +881,20 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         "idempotency_key",
     ]
     assert save["idempotency_required"] is True
+    assert save_patch["mutates"] is True
+    assert save_patch["input"]["required"] == [
+        "project_id",
+        "parent_requirement",
+        "attempt_id",
+        "expected_artifact_fingerprint",
+        "expected_state",
+        "idempotency_key",
+    ]
+    assert save_patch["input"]["optional"] == [
+        "target_story_id",
+        "target_refinement_slot",
+    ]
+    assert save_patch["idempotency_required"] is True
     assert complete["mutates"] is True
     assert complete["input"]["required"] == [
         "project_id",
@@ -918,6 +940,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:
         generate,
         retry,
         save,
+        save_patch,
         complete,
         reopen,
         reconcile,

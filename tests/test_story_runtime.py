@@ -76,6 +76,55 @@ def _valid_story_output(
     )
 
 
+def _valid_story_patch_output(parent_requirement: str) -> str:
+    return json.dumps(
+        {
+            "artifact_kind": "story_patch",
+            "parent_requirement": parent_requirement,
+            "target_refinement_slot": 2,
+            "story": _valid_story("Projection-backed patch story"),
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_story_agent_from_state_target_slot_validates_patch_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Targeted Story runtime uses the one-story patch output contract."""
+    target_slot = 2
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        captured["payload"] = payload
+        return _valid_story_patch_output(payload.parent_requirement)
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_patch_agent", fake_invoke)
+
+    state = _base_state()
+    result = await story_runtime.run_story_agent_from_state(
+        state,
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input="Refine slot 2 only",
+        target_story_id=None,
+        target_refinement_slot=target_slot,
+    )
+
+    assert result["success"] is True
+    assert result["draft_kind"] == "story_patch"
+    assert result["is_reusable"] is True
+    assert result["output_artifact"]["artifact_kind"] == "story_patch"
+    assert result["output_artifact"]["target_refinement_slot"] == target_slot
+    assert result["output_artifact"]["story"]["story_title"] == (
+        "Projection-backed patch story"
+    )
+    assert "user_stories" not in result["output_artifact"]
+    assert "target_refinement_slot" in captured["payload"].requirement_context
+
+
 @pytest.mark.asyncio
 async def test_run_story_agent_from_state_uses_latest_reusable_projection_draft(
     monkeypatch: pytest.MonkeyPatch,

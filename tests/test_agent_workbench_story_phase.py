@@ -683,6 +683,96 @@ def test_story_generate_persists_story_review_for_saveable_draft(
     assert workflow_service.state["fsm_state"] == "STORY_REVIEW"
 
 
+def test_story_generate_passes_target_slot_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story generate forwards targeted refinement selectors to the phase service."""
+    captured: dict[str, Any] = {}
+
+    async def fake_generate_story_draft(**kwargs: object) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": kwargs["parent_requirement"],
+            "data": {
+                "current_draft": {
+                    "kind": "story_patch",
+                    "target_refinement_slot": kwargs["target_refinement_slot"],
+                }
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.generate_story_draft",
+        fake_generate_story_draft,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+        user_input="Refine only slot 2",
+        target_story_id=None,
+        target_refinement_slot=2,
+    )
+
+    assert result["ok"] is True
+    assert captured["target_story_id"] is None
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    assert result["data"]["current_draft"]["kind"] == "story_patch"
+
+
+def test_story_generate_resolves_target_story_id_to_slot(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+) -> None:
+    """Story generate converts a target story id into the patch slot contract."""
+    target_story_id, _prerequisite_story_id = _seed_dependency_rows(session)
+    engine = session.get_bind()
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        lambda: engine,
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_generate_story_draft(**kwargs: object) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "fsm_state": "STORY_REVIEW",
+            "parent_requirement": kwargs["parent_requirement"],
+            "data": {
+                "current_draft": {
+                    "kind": "story_patch",
+                    "target_refinement_slot": kwargs["target_refinement_slot"],
+                }
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.generate_story_draft",
+        fake_generate_story_draft,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="live recommendation",
+        user_input="Refine only this existing story",
+        target_story_id=target_story_id,
+    )
+
+    assert result["ok"] is True
+    assert captured["target_story_id"] is None
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    assert result["data"]["current_draft"]["kind"] == "story_patch"
+
+
 def test_story_generate_blocks_stale_downstream_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1061,6 +1151,56 @@ def test_story_save_passes_guard_fields(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["data"]["artifact_fingerprint"] == "sha256:abc"
     assert result["data"]["fsm_state"] == "STORY_PERSISTENCE"
     assert "data" not in result["data"]
+
+
+def test_story_save_patch_passes_target_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story save-patch passes attempt guards and target selectors."""
+    captured: dict[str, Any] = {}
+
+    async def fake_save_story_patch(**kwargs: object) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "parent_requirement": kwargs["parent_requirement"],
+            "attempt_id": kwargs["attempt_id"],
+            "artifact_fingerprint": kwargs["expected_artifact_fingerprint"],
+            "target_refinement_slot": kwargs["target_refinement_slot"],
+            "fsm_state": "STORY_PERSISTENCE",
+            "data": {"save_result": {"success": True}},
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.save_story_patch",
+        fake_save_story_patch,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.save_patch(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+        attempt_id="attempt-1",
+        expected_artifact_fingerprint="sha256:abc",
+        expected_state="STORY_REVIEW",
+        idempotency_key="save-patch-key",
+        target_story_id=None,
+        target_refinement_slot=2,
+    )
+
+    assert result["ok"] is True
+    assert captured["project_id"] == PROJECT_ID
+    assert captured["parent_requirement"] == "Review match result"
+    assert captured["attempt_id"] == "attempt-1"
+    assert captured["expected_artifact_fingerprint"] == "sha256:abc"
+    assert captured["expected_state"] == "STORY_REVIEW"
+    assert captured["idempotency_key"] == "save-patch-key"
+    assert captured["target_story_id"] is None
+    assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
+    assert captured["save_story_patch_tool"].__name__ == "save_story_patch_tool"
+    assert result["data"]["target_refinement_slot"] == 2  # noqa: PLR2004
 
 
 def test_story_dependency_propose_creates_guarded_attempt(

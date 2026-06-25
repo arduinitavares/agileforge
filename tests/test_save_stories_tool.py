@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import event
 from sqlmodel import Session, select
 
@@ -29,8 +30,10 @@ from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_k
 from orchestrator_agent.agent_tools.user_story_writer_tool import tools as story_tools
 from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     SaveStoriesInput,
+    SaveStoryPatchInput,
     evaluate_dependency_candidates,
     save_stories_tool,
+    save_story_patch_tool,
 )
 
 # ---------------------------------------------------------------------------
@@ -735,6 +738,56 @@ class TestSaveStoriesTool:
         assert len(rows) == 1
         assert len(events) == 1
 
+    def test_save_stories_tool_rejects_patch_event_replay(
+        self, session: Session
+    ) -> None:
+        """Do not replay a targeted patch event as a full-list save."""
+        _seed_product(session)
+        story = UserStory(
+            product_id=1,
+            title="Audit attestation attempts",
+            story_description=(
+                "As a Compliance Officer, I want attestation attempts audited, "
+                "so that unsafe persistence attempts can be reviewed."
+            ),
+            acceptance_criteria=(
+                "- Verify each blocked persistence attempt creates an audit record."
+            ),
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            is_superseded=False,
+            status=StoryStatus.TO_DO,
+            story_points=3,
+        )
+        session.add(story)
+        session.commit()
+        session.refresh(story)
+        patch_story = _alternate_valid_story()
+
+        first = save_story_patch_tool(
+            input_data=SaveStoryPatchInput(
+                product_id=1,
+                parent_requirement="Attestation Gate",
+                idempotency_key="test-cross-operation-replay",
+                target_story_id=story.story_id,
+                story=patch_story,
+            ),
+            tool_context=None,
+        )
+        second = save_stories_tool(
+            input_data=SaveStoriesInput(
+                product_id=1,
+                parent_requirement="Attestation Gate",
+                idempotency_key="test-cross-operation-replay",
+                stories=[patch_story],
+            ),
+            tool_context=None,
+        )
+
+        assert first["success"] is True
+        assert second["success"] is False
+        assert second["error_code"] == "IDEMPOTENCY_KEY_REUSED"
+
     def test_save_stories_tool_rejects_reused_key_for_different_requirement(
         self, session: Session
     ) -> None:
@@ -1193,3 +1246,177 @@ class TestSaveStoriesTool:
         assert refreshed_todo is not None
         assert refreshed_todo.is_refined is True
         assert refreshed_todo.story_points == 5  # noqa: PLR2004
+
+    def test_save_story_patch_updates_target_without_touching_siblings(
+        self, session: Session
+    ) -> None:
+        """Targeted patch updates one To Do story without mutating siblings."""
+        _seed_product(session)
+        completed_story = UserStory(
+            product_id=1,
+            title="Enforce attestation gate",
+            story_description=(
+                "As a System Admin, I want persistence blocked without attestation, "
+                "so that no document is persisted without explicit consent."
+            ),
+            acceptance_criteria=(
+                "- Verify that persistence is blocked when attestation is false."
+            ),
+            persona="System Admin",
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            story_origin="refined",
+            is_refined=True,
+            is_superseded=False,
+            status=StoryStatus.DONE,
+            story_points=3,
+        )
+        todo_story = UserStory(
+            product_id=1,
+            title="Audit attestation attempts",
+            story_description=(
+                "As a Compliance Officer, I want attestation attempts audited, "
+                "so that unsafe persistence attempts can be reviewed."
+            ),
+            acceptance_criteria=(
+                "- Verify each blocked persistence attempt creates an audit record."
+            ),
+            persona="Compliance Officer",
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=2,
+            story_origin="backlog_seed",
+            is_refined=False,
+            is_superseded=False,
+            status=StoryStatus.TO_DO,
+            story_points=3,
+        )
+        session.add(completed_story)
+        session.add(todo_story)
+        session.commit()
+        session.refresh(completed_story)
+        session.refresh(todo_story)
+        completed_story_id = completed_story.story_id
+        todo_story_id = todo_story.story_id
+        completed_ac_updated_at = completed_story.ac_updated_at
+        completed_ac_update_reason = completed_story.ac_update_reason
+
+        patch_story = _alternate_valid_story()
+        patch_story["estimated_effort"] = "L"
+        payload = SaveStoryPatchInput(
+            product_id=1,
+            parent_requirement="Attestation Gate",
+            idempotency_key="test-targeted-story-patch",
+            target_story_id=todo_story_id,
+            story=patch_story,
+        )
+
+        result = save_story_patch_tool(input_data=payload, tool_context=None)
+        assert result["success"] is True, result.get("error")
+        assert result["saved_count"] == 1
+        assert result["updated_story_ids"] == [todo_story_id]
+        assert result["created_story_ids"] == []
+        assert result["superseded_story_ids"] == []
+        assert result["dependency_proposed_count"] == 0
+
+        session.expire_all()
+        refreshed_completed = session.get(UserStory, completed_story_id)
+        refreshed_todo = session.get(UserStory, todo_story_id)
+
+        assert refreshed_completed is not None
+        assert refreshed_completed.status == StoryStatus.DONE
+        assert refreshed_completed.ac_updated_at == completed_ac_updated_at
+        assert refreshed_completed.ac_update_reason == completed_ac_update_reason
+
+        assert refreshed_todo is not None
+        assert refreshed_todo.is_refined is True
+        assert refreshed_todo.story_points == 5  # noqa: PLR2004
+
+    def test_save_story_patch_blocks_progressed_target(
+        self, session: Session
+    ) -> None:
+        """Targeted patch rejects direct edits to progressed stories."""
+        _seed_product(session)
+        completed_story = UserStory(
+            product_id=1,
+            title="Enforce attestation gate",
+            story_description=(
+                "As a System Admin, I want persistence blocked without attestation, "
+                "so that no document is persisted without explicit consent."
+            ),
+            acceptance_criteria=(
+                "- Verify that persistence is blocked when attestation is false."
+            ),
+            source_requirement=normalize_requirement_key("Attestation Gate"),
+            refinement_slot=1,
+            is_superseded=False,
+            status=StoryStatus.DONE,
+            story_points=3,
+        )
+        session.add(completed_story)
+        session.commit()
+        session.refresh(completed_story)
+
+        result = save_story_patch_tool(
+            input_data=SaveStoryPatchInput(
+                product_id=1,
+                parent_requirement="Attestation Gate",
+                idempotency_key="test-targeted-story-patch-protected",
+                target_story_id=completed_story.story_id,
+                story=_valid_story(),
+            ),
+            tool_context=None,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "STORY_REPLACEMENT_UNSAFE"
+        assert result["blockers"][0]["story_id"] == completed_story.story_id
+
+    def test_save_story_patch_rejects_wrong_parent_target(
+        self, session: Session
+    ) -> None:
+        """Targeted patch rejects stories outside the requested parent."""
+        _seed_product(session)
+        story = UserStory(
+            product_id=1,
+            title="Audit attestation attempts",
+            story_description=(
+                "As a Compliance Officer, I want attestation attempts audited, "
+                "so that unsafe persistence attempts can be reviewed."
+            ),
+            acceptance_criteria=(
+                "- Verify each blocked persistence attempt creates an audit record."
+            ),
+            source_requirement=normalize_requirement_key("Other Requirement"),
+            refinement_slot=1,
+            is_superseded=False,
+            status=StoryStatus.TO_DO,
+            story_points=3,
+        )
+        session.add(story)
+        session.commit()
+        session.refresh(story)
+
+        result = save_story_patch_tool(
+            input_data=SaveStoryPatchInput(
+                product_id=1,
+                parent_requirement="Attestation Gate",
+                idempotency_key="test-targeted-story-patch-wrong-parent",
+                target_story_id=story.story_id,
+                story=_alternate_valid_story(),
+            ),
+            tool_context=None,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == "STORY_PATCH_TARGET_MISMATCH"
+        assert result["details"]["target_story_id"] == story.story_id
+
+    def test_save_story_patch_requires_exactly_one_target_selector(self) -> None:
+        """Targeted patch requires one target selector."""
+        with pytest.raises(ValidationError, match="Exactly one"):
+            SaveStoryPatchInput(
+                product_id=1,
+                parent_requirement="Attestation Gate",
+                idempotency_key="test-targeted-story-patch-missing-target",
+                story=_alternate_valid_story(),
+            )

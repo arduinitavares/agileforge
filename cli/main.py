@@ -590,13 +590,15 @@ class _Application(Protocol):
         """Return Story pending roadmap requirements."""
         ...
 
-    def story_generate(
+    def story_generate(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         parent_requirement: str,
         user_input: str | None = None,
         force_feedback: bool = False,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
     ) -> JsonObject:
         """Generate or refine a Story draft."""
         ...
@@ -625,6 +627,21 @@ class _Application(Protocol):
         idempotency_key: str,
     ) -> JsonObject:
         """Persist the current Story draft."""
+        ...
+
+    def story_save_patch(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        attempt_id: str,
+        expected_artifact_fingerprint: str,
+        expected_state: str,
+        idempotency_key: str,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> JsonObject:
+        """Persist one targeted Story draft item."""
         ...
 
     def story_complete(  # noqa: PLR0913
@@ -1945,6 +1962,9 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         action="store_true",
         help="Run Story generation even when feedback quality needs revision.",
     )
+    story_generate_target = story_generate.add_mutually_exclusive_group()
+    story_generate_target.add_argument("--target-story-id", type=int)
+    story_generate_target.add_argument("--target-refinement-slot", type=int)
     story_generate.set_defaults(command_handler=_story_generate)
     story_retry = story_sub.add_parser(
         "retry",
@@ -1968,6 +1988,22 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_save.add_argument("--expected-state", required=True)
     story_save.add_argument("--idempotency-key", required=True)
     story_save.set_defaults(command_handler=_story_save)
+    story_save_patch = story_sub.add_parser(
+        "save-patch",
+        help="Persist one targeted item from a reviewed Story draft.",
+    )
+    story_save_patch.add_argument("--project-id", type=int, required=True)
+    story_save_patch.add_argument("--parent-requirement", required=True)
+    story_save_patch.add_argument("--attempt-id", required=True)
+    story_save_patch.add_argument("--expected-artifact-fingerprint", required=True)
+    story_save_patch.add_argument("--expected-state", required=True)
+    story_save_patch.add_argument("--idempotency-key", required=True)
+    story_save_patch_target = story_save_patch.add_mutually_exclusive_group(
+        required=True
+    )
+    story_save_patch_target.add_argument("--target-story-id", type=int)
+    story_save_patch_target.add_argument("--target-refinement-slot", type=int)
+    story_save_patch.set_defaults(command_handler=_story_save_patch)
     story_complete = story_sub.add_parser(
         "complete",
         help="Complete the Story phase.",
@@ -3778,6 +3814,8 @@ def _story_generate(
         parent_requirement=args.parent_requirement,
         user_input=args.user_input,
         force_feedback=bool(args.force_feedback),
+        target_story_id=args.target_story_id,
+        target_refinement_slot=args.target_refinement_slot,
     )
 
 
@@ -3815,6 +3853,23 @@ def _story_save(
         expected_artifact_fingerprint=args.expected_artifact_fingerprint,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_save_patch(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route targeted Story patch save to the application facade."""
+    return "agileforge story save-patch", application.story_save_patch(
+        project_id=args.project_id,
+        parent_requirement=args.parent_requirement,
+        attempt_id=args.attempt_id,
+        expected_artifact_fingerprint=args.expected_artifact_fingerprint,
+        expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key,
+        target_story_id=args.target_story_id,
+        target_refinement_slot=args.target_refinement_slot,
     )
 
 

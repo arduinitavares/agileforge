@@ -318,3 +318,62 @@ class UserStoryWriterOutput(BaseModel):
         default_factory=list,
         description="Questions for the user if is_complete is False.",
     )
+
+
+class UserStoryPatchOutput(BaseModel):
+    """Structured output payload for one targeted Story refinement patch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_kind: Literal["story_patch"] = Field(
+        default="story_patch",
+        description="Discriminator for targeted Story patch artifacts.",
+    )
+    parent_requirement: Annotated[
+        str,
+        Field(description="Copied verbatim from input for traceability."),
+    ]
+    target_refinement_slot: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Canonical 1-based refinement slot being patched.",
+        ),
+    ]
+    target_story_id: int | None = Field(
+        default=None,
+        description="Existing story ID when host-side target resolution knows it.",
+    )
+    story: Annotated[
+        UserStoryItem,
+        Field(description="The only story item included in a targeted patch artifact."),
+    ]
+    quality_schema_version: Literal["agileforge.story_quality.v1"] = Field(
+        default=STORY_QUALITY_SCHEMA_VERSION,
+        description="Version of the Story draft quality contract.",
+    )
+    coverage_status: Literal["complete", "needs_clarification"] = Field(
+        default="complete",
+        description="Whether this targeted patch fully resolves the requested refinement.",
+    )
+    remaining_scope: list[str] = Field(
+        default_factory=list,
+        description="Concrete uncovered scope when coverage_status is not complete.",
+    )
+    quality_findings: list[StoryQualityFinding] = Field(
+        default_factory=list,
+        description="Machine-readable draft quality findings.",
+    )
+    is_complete: Annotated[
+        bool,
+        Field(
+            description=(
+                "True if the targeted patch passes validation. False if clarification "
+                "is needed."
+            ),
+        ),
+    ]
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description="Questions for the user if is_complete is False.",
+    )
