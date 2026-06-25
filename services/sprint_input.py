@@ -512,6 +512,8 @@ def _merge_sprint_candidate_readiness(
 def _augment_readiness_with_scope_external_dependencies(
     readiness: dict[str, Any],
     candidates: list[dict[str, Any]],
+    *,
+    candidate_story_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Block scoped planning when selected candidates depend on excluded stories."""
     selected_story_ids: set[int] = set()
@@ -519,6 +521,7 @@ def _augment_readiness_with_scope_external_dependencies(
         story_id = normalize_positive_int(candidate.get("story_id"))
         if story_id is not None:
             selected_story_ids.add(story_id)
+    available_story_ids = candidate_story_ids or selected_story_ids
 
     blocking_story_ids: set[int] = set()
     external_dependency_story_ids: set[int] = set()
@@ -534,6 +537,7 @@ def _augment_readiness_with_scope_external_dependencies(
             normalized_dependency_id = normalize_positive_int(dependency_id)
             if (
                 normalized_dependency_id is not None
+                and normalized_dependency_id in available_story_ids
                 and normalized_dependency_id not in selected_story_ids
             ):
                 blocking_story_ids.add(story_id)
@@ -685,6 +689,15 @@ def apply_story_completion_scope_to_candidate_result(
     raw_stories = candidate_result.get("stories")
     if not isinstance(raw_stories, list):
         raw_stories = []
+    candidate_story_ids = {
+        story_id
+        for story_id in (
+            normalize_positive_int(story.get("story_id"))
+            for story in raw_stories
+            if isinstance(story, dict)
+        )
+        if story_id is not None
+    }
 
     filtered: list[dict[str, Any]] = []
     excluded_count = 0
@@ -711,6 +724,7 @@ def apply_story_completion_scope_to_candidate_result(
             filtered,
         ),
         filtered,
+        candidate_story_ids=candidate_story_ids,
     )
     excluded_counts = dict(result.get("excluded_counts") or {})
     if excluded_count:
