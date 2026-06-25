@@ -652,8 +652,12 @@ def test_roadmap_generate_after_extension_save_hydrates_normal_backlog_rows(
             "estimated_effort": "M",
         }
     ]
-    assert "generation_mode" not in captured["input_context"]
+    assert captured["input_context"]["generation_mode"] == "roadmap_reconciliation"
     assert "existing_roadmap_context" not in captured["input_context"]
+    assert captured["input_context"]["locked_roadmap_shape"] == [
+        {"release_name": "Milestone 1", "items": ["Choose weekly squad"]},
+        {"release_name": "Milestone 2", "items": ["Add analyst export"]},
+    ]
     assert captured["input_context"]["backlog_items"] == [
         {
             "priority": 1,

@@ -121,10 +121,20 @@ class RoadmapBuilderInput(BaseModel):
         ),
     ]
     generation_mode: Annotated[
-        Literal["scope_extension"] | None,
+        Literal["scope_extension", "roadmap_reconciliation"] | None,
         Field(
             default=None,
-            description="Optional host mode for append-only scope extension planning.",
+            description="Optional host mode for scope extension or locked-shape reconciliation.",
+        ),
+    ]
+    locked_roadmap_shape: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            default=None,
+            description=(
+                "Read-only roadmap release names and item lists that must be "
+                "preserved during normal reconciliation."
+            ),
         ),
     ]
     existing_roadmap_context: Annotated[

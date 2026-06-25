@@ -243,6 +243,14 @@ async def generate_roadmap_draft(
     output_artifact = dict(roadmap_result.get("output_artifact") or {})
     input_context = dict(roadmap_result.get("input_context") or {})
     input_context.update(_active_reset_provenance(state))
+    if (
+        has_refinable_draft
+        and not is_scope_extension
+        and bool(roadmap_result.get("success"))
+        and bool(roadmap_result.get("is_complete"))
+        and not _has_clarifying_questions(output_artifact)
+    ):
+        output_artifact = _align_reconciled_roadmap_shape(state, output_artifact)
     should_check_coverage = (
         bool(roadmap_result.get("success"))
         and bool(roadmap_result.get("is_complete"))
@@ -514,6 +522,36 @@ def _has_refinable_roadmap_draft(state: dict[str, Any]) -> bool:
     ):
         return True
     return isinstance(state.get("roadmap_releases"), list)
+
+
+def _align_reconciled_roadmap_shape(
+    state: dict[str, Any],
+    output_artifact: dict[str, Any],
+) -> dict[str, Any]:
+    existing_releases = _roadmap_release_rows(state.get("roadmap_releases"))
+    if existing_releases is None:
+        return output_artifact
+    generated_releases = output_artifact.get("roadmap_releases")
+    if not isinstance(generated_releases, list):
+        return output_artifact
+
+    aligned_releases: list[dict[str, Any]] = []
+    for index, existing_release in enumerate(existing_releases):
+        merged = copy.deepcopy(existing_release)
+        generated_release = (
+            generated_releases[index] if index < len(generated_releases) else None
+        )
+        if isinstance(generated_release, Mapping):
+            for key, value in generated_release.items():
+                if isinstance(key, str) and key not in {"release_name", "items"}:
+                    merged[key] = copy.deepcopy(value)
+        merged["release_name"] = existing_release["release_name"]
+        merged["items"] = copy.deepcopy(existing_release["items"])
+        aligned_releases.append(merged)
+
+    aligned = dict(output_artifact)
+    aligned["roadmap_releases"] = aligned_releases
+    return aligned
 
 
 def _has_clarifying_questions(artifact: dict[str, Any]) -> bool:
@@ -936,9 +974,22 @@ def _assert_preserved_roadmap_shape(
 def _roadmap_release_shape(
     releases: object,
 ) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    rows = _roadmap_release_rows(releases)
+    if rows is None:
+        return None
+    return tuple(
+        (
+            cast("str", release["release_name"]),
+            tuple(cast("list[str]", release["items"])),
+        )
+        for release in rows
+    )
+
+
+def _roadmap_release_rows(releases: object) -> list[dict[str, Any]] | None:
     if not isinstance(releases, list) or not releases:
         return None
-    shape: list[tuple[str, tuple[str, ...]]] = []
+    rows: list[dict[str, Any]] = []
     for release in releases:
         if not isinstance(release, Mapping):
             return None
@@ -947,8 +998,15 @@ def _roadmap_release_shape(
         items = release_data.get("items")
         if not isinstance(release_name, str) or not isinstance(items, list):
             return None
-        shape.append((release_name.strip(), _roadmap_items_shape(items)))
-    return tuple(shape)
+        row = {
+            str(key): copy.deepcopy(value)
+            for key, value in release_data.items()
+            if isinstance(key, str)
+        }
+        row["release_name"] = release_name.strip()
+        row["items"] = list(_roadmap_items_shape(items))
+        rows.append(row)
+    return rows
 
 
 def _roadmap_items_shape(items: Sequence[object]) -> tuple[str, ...]:

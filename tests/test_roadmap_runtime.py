@@ -63,3 +63,61 @@ def test_build_roadmap_input_context_strips_refinement_metadata() -> None:
     assert parsed.backlog_items[0].requirement == (
         "Validate Captain-Aware Optimization Contract"
     )
+
+
+def test_build_roadmap_input_context_marks_reconciliation_shape_locked() -> None:
+    """Normal roadmap reconciliation must tell the builder the shape is locked."""
+    existing_roadmap = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Requirement A"],
+            "reasoning": "Existing plan.",
+        },
+        {
+            "release_name": "Milestone 2",
+            "theme": "Value",
+            "focus_area": "User Value",
+            "items": ["Requirement B"],
+            "reasoning": "Existing value loop.",
+        },
+    ]
+    state = {
+        "product_vision_assessment": {
+            "product_vision_statement": "A safe brownfield workflow.",
+        },
+        "pending_spec_content": "SPEC",
+        "compiled_authority_cached": {"authority": True},
+        "roadmap_releases": existing_roadmap,
+        "backlog_items": [
+            {
+                "priority": 1,
+                "requirement": "Requirement A",
+                "value_driver": "Strategic",
+                "justification": "Existing foundation.",
+                "estimated_effort": "M",
+            },
+            {
+                "priority": 2,
+                "requirement": "Requirement B",
+                "value_driver": "Strategic",
+                "justification": "Existing value loop.",
+                "estimated_effort": "M",
+            },
+        ],
+    }
+
+    input_context = build_roadmap_input_context(
+        state,
+        user_input="Reconcile sprint evidence without moving items.",
+    )
+    parsed = RoadmapBuilderInput.model_validate(input_context)
+
+    assert input_context["generation_mode"] == "roadmap_reconciliation"
+    assert input_context["locked_roadmap_shape"] == [
+        {"release_name": "Milestone 1", "items": ["Requirement A"]},
+        {"release_name": "Milestone 2", "items": ["Requirement B"]},
+    ]
+    assert parsed.generation_mode == "roadmap_reconciliation"
+    assert parsed.locked_roadmap_shape == input_context["locked_roadmap_shape"]

@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -138,6 +138,28 @@ def _scope_extension_base_releases(state: Mapping[str, Any]) -> object:
 
     releases = state.get("roadmap_releases")
     return _json_safe_copy(releases) if isinstance(releases, list) else []
+
+
+def _locked_roadmap_shape(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not value:
+        return []
+
+    locked: list[dict[str, object]] = []
+    for release in value:
+        if not isinstance(release, Mapping):
+            return []
+        release_data = cast("Mapping[str, object]", release)
+        release_name = release_data.get("release_name")
+        items = release_data.get("items")
+        if not isinstance(release_name, str) or not isinstance(items, list):
+            return []
+        locked.append(
+            {
+                "release_name": release_name.strip(),
+                "items": _string_list(items),
+            }
+        )
+    return locked
 
 
 def _is_extension_backlog_item(
@@ -293,6 +315,15 @@ def build_roadmap_input_context(
                 "extension_backlog_items": extension_backlog_items,
             }
         )
+    else:
+        locked_shape = _locked_roadmap_shape(state.get("roadmap_releases"))
+        if locked_shape:
+            input_context.update(
+                {
+                    "generation_mode": "roadmap_reconciliation",
+                    "locked_roadmap_shape": locked_shape,
+                }
+            )
     return input_context
 
 

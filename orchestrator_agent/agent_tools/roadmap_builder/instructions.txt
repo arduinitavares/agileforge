@@ -17,7 +17,8 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
   "time_increment": "Milestone-based",
   "prior_roadmap_state": "NO_HISTORY" | { previous roadmap JSON },
   "user_input": "User's specific requests or feedback",
-  "generation_mode": "scope_extension" | null,
+  "generation_mode": "scope_extension" | "roadmap_reconciliation" | null,
+  "locked_roadmap_shape": [ ... immutable release names and item lists ... ],
   "existing_roadmap_context": [ ... read-only existing releases ... ],
   "scope_extension": { ... extension metadata ... },
   "extension_backlog_items": [ ... extension backlog references ... ]
@@ -29,6 +30,7 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
     * If `backlog_items` is empty or missing, set `is_complete: false` and ask for the backlog.
     * If `product_vision` is missing, set `is_complete: false` and ask for the vision.
     * If `prior_roadmap_state` exists (not "NO_HISTORY"), load it and apply user feedback.
+    * If `generation_mode="roadmap_reconciliation"`, locked_roadmap_shape is immutable. Copy each release name and each release's item list exactly. Do not rename releases, reorder releases, add items, remove items, move items, split items, or merge items.
     * If `generation_mode="scope_extension"`, treat `prior_roadmap_state` as "NO_HISTORY" even when `existing_roadmap_context` is present. The existing roadmap is read-only context, not a refinement target.
 
 2.  **Analyze Dependencies (Crucial Step):**
@@ -60,6 +62,7 @@ Your input is the **High-Level Product Backlog** (Stage 1 output) + **Context Do
     * In scope extension mode, output ONLY new extension roadmap releases/items.
     * In scope extension mode, never existing releases/items in `existing_roadmap_context`.
     * Use `scope_extension` and `extension_backlog_items` as provenance hints for the new scope.
+    * When `generation_mode="roadmap_reconciliation"`, output the same release names, release order, and item lists from `locked_roadmap_shape`; update only non-structural fields such as theme, focus_area, reasoning, roadmap_summary, and clarifying_questions.
 
 **OUTPUT FORMAT (JSON ONLY):**
 Return ONLY a JSON object. No Markdown formatting.
@@ -83,3 +86,4 @@ Return ONLY a JSON object. No Markdown formatting.
 * Return JSON ONLY. No prose. No markdown fences.
 * Preserve user's backlog priorities unless dependencies force reordering.
 * When refining (`prior_roadmap_state` provided), apply user feedback incrementally.
+* When reconciling (`generation_mode="roadmap_reconciliation"`), do not change roadmap shape. The host will reject changed release names, release order, or item lists.

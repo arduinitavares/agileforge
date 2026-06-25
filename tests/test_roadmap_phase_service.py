@@ -366,8 +366,11 @@ def test_roadmap_scope_extension_context_deactivates_after_roadmap_save() -> Non
 
     context = build_roadmap_input_context(state, user_input="refine roadmap")
 
-    assert "generation_mode" not in context
+    assert context["generation_mode"] == "roadmap_reconciliation"
     assert "existing_roadmap_context" not in context
+    assert context["locked_roadmap_shape"] == [
+        {"release_name": "Milestone 1", "items": ["Seed backlog item"]}
+    ]
     assert json.loads(str(context["prior_roadmap_state"])) == existing_roadmap
 
 
@@ -408,6 +411,41 @@ def test_roadmap_builder_scope_extension_instruction_contract() -> None:
     assert "existing roadmap is read-only" in instructions
     assert "ONLY new extension roadmap releases/items" in instructions
     assert "never existing releases/items" in instructions
+
+
+def test_roadmap_builder_reconciliation_instruction_contract() -> None:
+    """Prompt and schema must define locked-shape Roadmap reconciliation."""
+    locked_shape = [{"release_name": "Milestone 1", "items": ["Requirement A"]}]
+    payload = RoadmapBuilderInput.model_validate(
+        {
+            "backlog_items": [
+                {
+                    "priority": 1,
+                    "requirement": "Requirement A",
+                    "value_driver": "Strategic",
+                    "justification": "Existing roadmap item.",
+                    "estimated_effort": "M",
+                }
+            ],
+            "product_vision": "Vision",
+            "technical_spec": "Spec",
+            "compiled_authority": "Authority",
+            "generation_mode": "roadmap_reconciliation",
+            "prior_roadmap_state": json.dumps(
+                [{"release_name": "Milestone 1", "items": ["Requirement A"]}]
+            ),
+            "locked_roadmap_shape": locked_shape,
+        }
+    )
+    instructions = Path(
+        "orchestrator_agent/agent_tools/roadmap_builder/instructions.txt"
+    ).read_text(encoding="utf-8")
+
+    assert payload.generation_mode == "roadmap_reconciliation"
+    assert payload.locked_roadmap_shape == locked_shape
+    assert 'generation_mode="roadmap_reconciliation"' in instructions
+    assert "locked_roadmap_shape is immutable" in instructions
+    assert "do not change roadmap shape" in instructions
 
 
 @pytest.mark.asyncio
@@ -988,8 +1026,8 @@ async def test_generate_roadmap_draft_forces_incomplete_on_coverage_mismatch() -
 
 
 @pytest.mark.asyncio
-async def test_generate_roadmap_draft_forces_incomplete_on_shape_mismatch() -> None:
-    """Generation cannot mark a draft complete after moving accepted roadmap items."""
+async def test_generate_roadmap_draft_aligns_shape_for_reconciliation() -> None:
+    """Normal reconciliation keeps accepted Roadmap shape without looping."""
     existing_releases = [
         {
             "release_name": "Milestone 1",
@@ -1030,20 +1068,20 @@ async def test_generate_roadmap_draft_forces_incomplete_on_shape_mismatch() -> N
                 "roadmap_releases": [
                     {
                         "release_name": "Milestone 1",
-                        "theme": "Foundation",
+                        "theme": "Updated foundation",
                         "focus_area": "Technical Foundation",
                         "items": ["Requirement B"],
-                        "reasoning": "Moved item.",
+                        "reasoning": "Reflect Sprint 9 evidence.",
                     },
                     {
                         "release_name": "Milestone 2",
-                        "theme": "Value",
+                        "theme": "Updated value",
                         "focus_area": "User Value",
                         "items": ["Requirement A"],
-                        "reasoning": "Moved item.",
+                        "reasoning": "Reflect remaining value-loop work.",
                     },
                 ],
-                "roadmap_summary": "Same coverage, changed shape",
+                "roadmap_summary": "Updated context, same accepted shape",
                 "is_complete": True,
                 "clarifying_questions": [],
             },
@@ -1060,13 +1098,26 @@ async def test_generate_roadmap_draft_forces_incomplete_on_shape_mismatch() -> N
         user_input="Preserve the accepted roadmap shape.",
     )
 
-    assert payload["is_complete"] is False
-    assert payload["fsm_state"] == "ROADMAP_INTERVIEW"
-    assert payload["output_artifact"]["clarifying_questions"] == [
-        "Roadmap structure mismatch: existing roadmap release names, order, "
-        "and item lists must be preserved during reconciliation."
+    assert payload["is_complete"] is True
+    assert payload["fsm_state"] == "ROADMAP_REVIEW"
+    assert payload["output_artifact"]["roadmap_releases"] == [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Updated foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Requirement A"],
+            "reasoning": "Reflect Sprint 9 evidence.",
+        },
+        {
+            "release_name": "Milestone 2",
+            "theme": "Updated value",
+            "focus_area": "User Value",
+            "items": ["Requirement B"],
+            "reasoning": "Reflect remaining value-loop work.",
+        },
     ]
-    assert saved["state"]["product_roadmap_assessment"]["is_complete"] is False
+    assert payload["output_artifact"]["clarifying_questions"] == []
+    assert saved["state"]["product_roadmap_assessment"]["is_complete"] is True
 
 
 @pytest.mark.asyncio
