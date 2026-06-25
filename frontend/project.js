@@ -6139,7 +6139,7 @@ async function toggleTaskExecution(event, sprintId, taskId) {
             <form onsubmit="submitTaskExecution(event, ${sprintId}, ${taskId})" class="flex flex-col gap-3">
                 <div class="flex gap-2">
                     <label class="flex-1 text-[11px] font-bold text-slate-700 dark:text-slate-300 flex flex-col gap-1">
-                        New Status
+                        <div>New Status <span class="text-rose-500" aria-hidden="true">*</span></div>
                         <select id="task-exc-status-${taskId}" required onchange="toggleTaskExecutionFields(${taskId})" class="p-1.5 rounded form-select text-xs dark:bg-slate-800 dark:border-slate-700 focus:ring-1 focus:ring-indigo-500">
                             <option value="To Do" ${data.current_status === 'To Do' ? 'selected' : ''}>To Do</option>
                             <option value="In Progress" ${data.current_status === 'In Progress' ? 'selected' : ''}>In Progress</option>
@@ -6148,7 +6148,7 @@ async function toggleTaskExecution(event, sprintId, taskId) {
                         </select>
                     </label>
                     <label class="flex-1 text-[11px] font-bold text-slate-700 dark:text-slate-300 flex flex-col gap-1">
-                        Checklist Result
+                        <div>Checklist Result <span class="text-rose-500" aria-hidden="true">*</span></div>
                         <select id="task-exc-acceptance-${taskId}" required class="p-1.5 rounded form-select text-xs dark:bg-slate-800 dark:border-slate-700 focus:ring-1 focus:ring-indigo-500">
                             <option value="not_checked" ${data.latest_entry?.acceptance_result === 'not_checked' ? 'selected' : ''}>Not Checked</option>
                             <option value="partially_met" ${data.latest_entry?.acceptance_result === 'partially_met' ? 'selected' : ''}>Partially Met</option>
@@ -6158,7 +6158,7 @@ async function toggleTaskExecution(event, sprintId, taskId) {
                 </div>
                 
                 <label class="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex flex-col gap-1">
-                    Outcome Summary <span class="font-normal text-slate-500">(Required if Done)</span>
+                    <div>Outcome Summary <span id="task-exc-summary-req-${taskId}" class="text-rose-500 hidden" aria-hidden="true">*</span> <span class="font-normal text-slate-500">(Required if Done)</span></div>
                     <input type="text" id="task-exc-summary-${taskId}" placeholder="e.g. Completed frontend mockup" value="${escapeHtml(data.latest_entry?.outcome_summary || '')}" class="p-1.5 rounded form-input text-xs dark:bg-slate-800 dark:border-slate-700">
                 </label>
                 
@@ -6189,11 +6189,14 @@ async function toggleTaskExecution(event, sprintId, taskId) {
 function toggleTaskExecutionFields(taskId) {
     const statusSel = document.getElementById(`task-exc-status-${taskId}`);
     const summaryInp = document.getElementById(`task-exc-summary-${taskId}`);
+    const summaryReq = document.getElementById(`task-exc-summary-req-${taskId}`);
     if (statusSel && summaryInp) {
         if (statusSel.value === 'Done') {
             summaryInp.required = true;
+            if (summaryReq) summaryReq.classList.remove('hidden');
         } else {
             summaryInp.required = false;
+            if (summaryReq) summaryReq.classList.add('hidden');
         }
     }
 }
@@ -6313,7 +6316,7 @@ async function toggleStoryClose(event, sprintId, storyId) {
             
             <form onsubmit="submitStoryClose(event, ${sprintId}, ${storyId})" class="flex flex-col gap-3">
                 <label class="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex flex-col gap-1">
-                    Resolution Status
+                    <div>Resolution Status <span class="text-rose-500" aria-hidden="true">*</span></div>
                     <select id="story-close-res-${storyId}" required class="p-1.5 rounded form-select text-xs dark:bg-slate-800 dark:border-slate-700 focus:ring-1 focus:ring-emerald-500">
                         <option value="Completed">Completed</option>
                         <option value="Completed with AC changes">Completed (with AC changes)</option>
