@@ -377,6 +377,53 @@ def test_story_reconcile_rejects_completed_story_terminal_actions(
     assert persisted.archive_previous_status is None
 
 
+def test_requirement_reconcile_records_decision_and_audit_event(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requirement reconcile writes session state and audit event."""
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {"success": True, "project_id": product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    session.add(Product(product_id=PROJECT_ID, name="Cartola"))
+    session.commit()
+    workflow = _FakeWorkflowService()
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    result = runner.requirement_reconcile(
+        project_id=PROJECT_ID,
+        requirement="Review match result",
+        action="already-implemented",
+        reason="Delivered in Sprint 7.",
+        idempotency_key="req-rec-runner-1",
+        changed_by="agent",
+        evidence_links=["sprint-7-closeout.md"],
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["requirement"] == "Review match result"
+    assert result["data"]["terminal"] is True
+    stored = workflow.state["requirement_reconciliations"]["review match result"]
+    assert stored["reason"] == "Delivered in Sprint 7."
+    event = session.exec(select(WorkflowEvent)).one()
+    assert event.event_type == WorkflowEventType.STORIES_SAVED
+    assert '"action": "requirement_reconcile"' in (event.event_metadata or "")
+
+
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Story pending returns roadmap requirements grouped by milestone."""
 

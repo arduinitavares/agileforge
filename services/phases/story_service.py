@@ -40,6 +40,42 @@ _EFFORT_TO_STORY_POINTS: dict[str, int] = {
 _INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
 _STORY_QUALITY_SCHEMA_VERSION = "agileforge.story_quality.v1"
 _STORY_COMPLETION_SCOPE_SCHEMA_VERSION = "agileforge.story_completion_scope.v1"
+REQUIREMENT_RECONCILIATION_SCHEMA_VERSION = (
+    "agileforge.requirement_reconciliation.v1"
+)
+REQUIREMENT_RECONCILIATION_STATE_KEY = "requirement_reconciliations"
+REQUIREMENT_RECONCILIATION_HISTORY_KEY = "requirement_reconciliation_history"
+REQUIREMENT_RECONCILIATION_IDEMPOTENCY_KEY = (
+    "requirement_reconciliation_idempotency"
+)
+REQUIREMENT_RECONCILIATION_ACTIONS = frozenset(
+    {
+        "keep",
+        "archive",
+        "defer",
+        "supersede",
+        "already-implemented",
+        "duplicate",
+        "rewrite-needed",
+    }
+)
+REQUIREMENT_RECONCILIATION_SATISFIED_ACTIONS = frozenset(
+    {
+        "archive",
+        "defer",
+        "supersede",
+        "already-implemented",
+        "duplicate",
+    }
+)
+REQUIREMENT_RECONCILIATION_ALLOWED_STATES = frozenset(
+    {
+        OrchestratorState.STORY_INTERVIEW.value,
+        OrchestratorState.STORY_PERSISTENCE.value,
+        OrchestratorState.SPRINT_SETUP.value,
+        OrchestratorState.SPRINT_COMPLETE.value,
+    }
+)
 
 
 class StoryPhaseError(Exception):
@@ -59,6 +95,54 @@ def get_all_roadmap_requirements(state: dict[str, Any]) -> list[str]:
         items = release.get("items") or []
         reqs.extend(items)
     return reqs
+
+
+def requirement_reconciliation_key(requirement: str) -> str:
+    """Return the stable lookup key for one roadmap requirement string."""
+    return " ".join(requirement.strip().split()).casefold()
+
+
+def requirement_reconciliation_for(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> dict[str, Any] | None:
+    """Return the latest requirement reconciliation decision."""
+    reconciliations = state.get(REQUIREMENT_RECONCILIATION_STATE_KEY)
+    if not isinstance(reconciliations, dict):
+        return None
+    candidate = reconciliations.get(requirement_reconciliation_key(parent_requirement))
+    return candidate if isinstance(candidate, dict) else None
+
+
+def requirement_reconciliation_satisfies_story_requirement(
+    state: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> bool:
+    """Return whether a reconciliation means no Story work is required now."""
+    reconciliation = requirement_reconciliation_for(
+        state,
+        parent_requirement=parent_requirement,
+    )
+    if reconciliation is None:
+        return False
+    action = str(reconciliation.get("action") or "").strip().lower()
+    return action in REQUIREMENT_RECONCILIATION_SATISFIED_ACTIONS
+
+
+def _roadmap_requirement_matches(
+    state: dict[str, Any],
+    *,
+    requirement: str,
+) -> list[str]:
+    target_key = requirement_reconciliation_key(requirement)
+    return [
+        item
+        for item in get_all_roadmap_requirements(state)
+        if isinstance(item, str)
+        and requirement_reconciliation_key(item) == target_key
+    ]
 
 
 def _roadmap_milestone_requirements(
@@ -1347,7 +1431,7 @@ def _normalize_story_requirement(
     )
 
 
-def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
+def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0915
     roadmap_releases = state.get("roadmap_releases") or []
     if not isinstance(roadmap_releases, list):
         roadmap_releases = []
@@ -1364,6 +1448,8 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
     grouped_items = []
     total_count = 0
     saved_count = 0
+    merged_count = 0
+    reconciled_count = 0
 
     for release_index, rel in enumerate(roadmap_releases):
         if not isinstance(rel, dict):
@@ -1402,6 +1488,10 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
             attempts = attempts_dict.get(req, [])
             if not isinstance(attempts, list):
                 attempts = []
+            reconciliation = requirement_reconciliation_for(
+                state,
+                parent_requirement=req,
+            )
 
             if _story_saved_for_scope(
                 state,
@@ -1416,6 +1506,13 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
                 extension_metadata=extension_metadata,
             ):
                 status = "Merged"
+                merged_count += 1
+            elif requirement_reconciliation_satisfies_story_requirement(
+                state,
+                parent_requirement=req,
+            ):
+                status = "Reconciled"
+                reconciled_count += 1
             elif story_has_working_state_for_scope(
                 runtime,
                 extension_metadata=extension_metadata,
@@ -1434,14 +1531,22 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
                     and _record_matches_story_scope(attempt, extension_metadata)
                 )
 
-            milestone_group["requirements"].append(
-                {
-                    "requirement": req,
-                    "status": status,
-                    "attempt_count": attempt_count,
-                    **(extension_metadata or {}),
+            item = {
+                "requirement": req,
+                "status": status,
+                "attempt_count": attempt_count,
+                **(extension_metadata or {}),
+            }
+            if reconciliation is not None:
+                item["reconciliation"] = {
+                    "action": reconciliation.get("action"),
+                    "reason": reconciliation.get("reason"),
+                    "evidence_links": reconciliation.get("evidence_links") or [],
+                    "changed_by": reconciliation.get("changed_by"),
+                    "reconciled_at": reconciliation.get("reconciled_at"),
+                    "terminal": bool(reconciliation.get("terminal")),
                 }
-            )
+            milestone_group["requirements"].append(item)
             total_count += 1
 
         grouped_items.append(milestone_group)
@@ -1450,6 +1555,8 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:
         "grouped_items": grouped_items,
         "total_count": total_count,
         "saved_count": saved_count,
+        "reconciled_count": reconciled_count,
+        "handled_count": saved_count + merged_count + reconciled_count,
     }
 
 
@@ -2311,7 +2418,111 @@ async def repair_story_readiness(
     return payload
 
 
-async def complete_story_phase(
+async def reconcile_requirement(
+    *,
+    project_id: int,
+    requirement: str,
+    action: str,
+    reason: str,
+    idempotency_key: str,
+    changed_by: str = "cli-agent",
+    evidence_links: list[str] | None = None,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    now_iso: Callable[[], str],
+) -> dict[str, Any]:
+    """Record a requirement-level reconciliation decision."""
+    normalized_requirement = requirement.strip()
+    normalized_action = action.strip().lower()
+    normalized_reason = reason.strip()
+    normalized_idempotency_key = idempotency_key.strip()
+    if not normalized_requirement:
+        raise StoryPhaseError(
+            "requirement reconcile requires --requirement",
+            status_code=400,
+        )
+    if normalized_action not in REQUIREMENT_RECONCILIATION_ACTIONS:
+        raise StoryPhaseError(
+            "Unsupported requirement reconciliation action.",
+            status_code=400,
+        )
+    if not normalized_reason:
+        raise StoryPhaseError(
+            "requirement reconcile requires --reason",
+            status_code=400,
+        )
+    if not normalized_idempotency_key:
+        raise StoryPhaseError(
+            "requirement reconcile requires --idempotency-key",
+            status_code=400,
+        )
+
+    state = await load_state()
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state not in REQUIREMENT_RECONCILIATION_ALLOWED_STATES:
+        raise StoryPhaseError(
+            "requirement reconcile is only available during Story/Sprint "
+            "planning states.",
+            status_code=409,
+        )
+
+    idempotency_registry = state.get(REQUIREMENT_RECONCILIATION_IDEMPOTENCY_KEY)
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            return dict(existing)
+
+    matches = _roadmap_requirement_matches(state, requirement=normalized_requirement)
+    if not matches:
+        raise StoryPhaseError(
+            "Requirement reconciliation target was not found in saved roadmap "
+            "releases.",
+            status_code=400,
+        )
+    if len(matches) > 1:
+        raise StoryPhaseError(
+            "Requirement reconciliation target is ambiguous in saved roadmap "
+            "releases.",
+            status_code=400,
+        )
+
+    matched_requirement = matches[0]
+    payload: dict[str, Any] = {
+        "schema_version": REQUIREMENT_RECONCILIATION_SCHEMA_VERSION,
+        "project_id": project_id,
+        "requirement": matched_requirement,
+        "action": normalized_action,
+        "reason": normalized_reason,
+        "evidence_links": evidence_links or [],
+        "changed_by": changed_by,
+        "reconciled_at": now_iso(),
+        "idempotency_key": normalized_idempotency_key,
+        "terminal": (
+            normalized_action in REQUIREMENT_RECONCILIATION_SATISFIED_ACTIONS
+        ),
+    }
+
+    reconciliations = state.get(REQUIREMENT_RECONCILIATION_STATE_KEY)
+    if not isinstance(reconciliations, dict):
+        reconciliations = {}
+        state[REQUIREMENT_RECONCILIATION_STATE_KEY] = reconciliations
+    reconciliations[requirement_reconciliation_key(matched_requirement)] = payload
+
+    history = state.get(REQUIREMENT_RECONCILIATION_HISTORY_KEY)
+    if not isinstance(history, list):
+        history = []
+        state[REQUIREMENT_RECONCILIATION_HISTORY_KEY] = history
+    history.append(payload)
+
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        state[REQUIREMENT_RECONCILIATION_IDEMPOTENCY_KEY] = idempotency_registry
+    idempotency_registry[normalized_idempotency_key] = payload
+    save_state(state)
+    return payload
+
+
+async def complete_story_phase(  # noqa: PLR0915
     *,
     expected_state: str | None,
     idempotency_key: str | None,
@@ -2366,6 +2577,7 @@ async def complete_story_phase(
 
     saved_count = 0
     merged_count = 0
+    reconciled_count = 0
     extension_metadata = (
         scope_payload
         if isinstance(scope_payload, dict)
@@ -2388,17 +2600,24 @@ async def complete_story_phase(
             extension_metadata=extension_metadata,
         ):
             merged_count += 1
+            continue
+
+        if requirement_reconciliation_satisfies_story_requirement(
+            state,
+            parent_requirement=requirement,
+        ):
+            reconciled_count += 1
 
     total_count = len(req_names)
-    covered_count = saved_count + merged_count
+    covered_count = saved_count + merged_count + reconciled_count
     if covered_count != total_count:
         scope_prefix = (
             f" for {scope_payload['scope_id']}" if scope_payload is not None else ""
         )
         raise StoryPhaseError(
             f"Story phase cannot complete{scope_prefix}: "
-            f"{covered_count} of {total_count} roadmap requirements are saved "
-            "or merged.",
+            f"{covered_count} of {total_count} roadmap requirements are saved, "
+            "merged, or terminal-reconciled.",
             status_code=409,
         )
 
@@ -2412,13 +2631,16 @@ async def complete_story_phase(
     else:
         state.pop("story_completion_scope", None)
 
+    coverage: dict[str, int] = {
+        "saved": saved_count,
+        "merged": merged_count,
+        "total": total_count,
+    }
+    if reconciled_count:
+        coverage["reconciled"] = reconciled_count
     payload: dict[str, Any] = {
         "fsm_state": OrchestratorState.SPRINT_SETUP.value,
-        "coverage": {
-            "saved": saved_count,
-            "merged": merged_count,
-            "total": total_count,
-        },
+        "coverage": coverage,
         "idempotency_key": normalized_idempotency_key,
     }
     if scope_payload is not None:

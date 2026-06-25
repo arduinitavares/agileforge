@@ -538,6 +538,20 @@ class _StoryPhaseRunner(Protocol):
         """Record a Story reconciliation decision."""
         ...
 
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record a requirement reconciliation decision."""
+        ...
+
     def repair_readiness(
         self,
         *,
@@ -1099,7 +1113,10 @@ class AgentWorkbenchApplication:
             if fsm_state == "SPRINT_SETUP"
             and _sprint_setup_stale_story_scope_blocker(sprint_candidates_for_setup)
             is None
-            and _sprint_setup_story_refinement_blocker(sprint_candidates_for_setup)
+            and _sprint_setup_story_refinement_blocker(
+                sprint_candidates_for_setup,
+                workflow=workflow,
+            )
             is not None
             else None
         )
@@ -2098,6 +2115,28 @@ class AgentWorkbenchApplication:
             superseded_by_story_id=superseded_by_story_id,
         )
 
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record a requirement reconciliation decision."""
+        return self._get_story_runner().requirement_reconcile(
+            project_id=project_id,
+            requirement=requirement,
+            action=action,
+            reason=reason,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+            evidence_links=evidence_links,
+        )
+
     def story_repair_readiness(
         self,
         *,
@@ -2726,9 +2765,19 @@ def _sprint_setup_stale_story_scope_blocker(
 
 def _sprint_setup_story_refinement_blocker(
     candidates: dict[str, Any] | None,
+    *,
+    workflow: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return blocker when Sprint setup has no refined candidate Stories."""
     if _sprint_candidate_count(candidates) != 0:
+        return None
+    state = _envelope_data(workflow or {}).get("state")
+    state_data = state if isinstance(state, dict) else {}
+    if (
+        workflow is not None
+        and _roadmap_requirements_from_state(state_data)
+        and not _uncovered_story_requirements(workflow)
+    ):
         return None
     excluded_counts = _sprint_candidate_excluded_counts(candidates)
     non_refined_count = _positive_int_or_none(excluded_counts.get("non_refined"))
@@ -4196,7 +4245,7 @@ def _saveable_story_review_candidate(
             continue
         if not isinstance(runtime, dict):
             continue
-        if _story_requirement_is_covered(
+        if _story_requirement_is_satisfied(
             state_data,
             parent_requirement=parent_requirement,
         ):
@@ -4287,7 +4336,7 @@ def _covered_existing_story_scope(
     if not requirements:
         return None
     if not all(
-        _story_requirement_is_covered(
+        _story_requirement_is_satisfied(
             state_data,
             parent_requirement=requirement,
         )
@@ -4339,6 +4388,25 @@ def _story_requirement_is_covered(
     )
 
 
+def _story_requirement_is_satisfied(
+    state_data: dict[str, Any],
+    *,
+    parent_requirement: str,
+) -> bool:
+    """Return whether a requirement needs no more Story work now."""
+    from services.phases.story_service import (  # noqa: PLC0415
+        requirement_reconciliation_satisfies_story_requirement,
+    )
+
+    return _story_requirement_is_covered(
+        state_data,
+        parent_requirement=parent_requirement,
+    ) or requirement_reconciliation_satisfies_story_requirement(
+        state_data,
+        parent_requirement=parent_requirement,
+    )
+
+
 def _covered_story_milestone_complete_commands(
     *,
     project_id: int,
@@ -4363,7 +4431,7 @@ def _covered_story_milestone_complete_commands(
         if not requirements:
             continue
         if not all(
-            _story_requirement_is_covered(
+            _story_requirement_is_satisfied(
                 state_data,
                 parent_requirement=requirement,
             )
@@ -4397,7 +4465,7 @@ def _covered_story_selection_complete_command(
     covered_requirements = [
         requirement
         for requirement in requirements
-        if _story_requirement_is_covered(
+        if _story_requirement_is_satisfied(
             state_data,
             parent_requirement=requirement,
         )
@@ -4443,7 +4511,7 @@ def _story_coverage_is_complete(workflow: dict[str, Any]) -> bool:
         return False
 
     return all(
-        _story_requirement_is_covered(
+        _story_requirement_is_satisfied(
             state_data,
             parent_requirement=requirement,
         )
@@ -4458,7 +4526,7 @@ def _uncovered_story_requirements(workflow: dict[str, Any]) -> list[str]:
     return [
         requirement
         for requirement in _roadmap_requirements_from_state(state_data)
-        if not _story_requirement_is_covered(
+        if not _story_requirement_is_satisfied(
             state_data,
             parent_requirement=requirement,
         )
@@ -4706,7 +4774,10 @@ def _sprint_workflow_next(
         else None
     )
     story_refinement_blocker = (
-        _sprint_setup_story_refinement_blocker(sprint_candidates)
+        _sprint_setup_story_refinement_blocker(
+            sprint_candidates,
+            workflow=workflow,
+        )
         if fsm_state == "SPRINT_SETUP" and stale_scope_blocker is None
         else None
     )

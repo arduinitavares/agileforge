@@ -1054,6 +1054,39 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> JsonObject:
+        """Return a requirement reconcile payload."""
+        self.calls.append(
+            (
+                "requirement_reconcile",
+                {
+                    "project_id": project_id,
+                    "requirement": requirement,
+                    "action": action,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "evidence_links": evidence_links,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "requirement": requirement},
+            "warnings": [],
+            "errors": [],
+        }
+
     def story_repair_readiness(
         self,
         *,
@@ -3371,6 +3404,51 @@ def test_cli_routes_roadmap_commands(
     assert rc == 0
     assert _mapping(payload["meta"])["command"] == expected_command
     assert app.calls == [expected_call]
+
+
+def test_cli_routes_requirement_reconcile(capsys: pytest.CaptureFixture[str]) -> None:
+    """Requirement reconcile routes through the agent CLI."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "requirement",
+            "reconcile",
+            "--project-id",
+            str(PROJECT_ID),
+            "--requirement",
+            "Review Storage Durability Hardening",
+            "--action",
+            "already-implemented",
+            "--reason",
+            "Delivered in Sprint 7.",
+            "--idempotency-key",
+            "req-rec-cli-1",
+            "--changed-by",
+            "agent",
+            "--evidence-link",
+            "sprint-7-closeout.md",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge requirement reconcile"
+    assert app.calls == [
+        (
+            "requirement_reconcile",
+            {
+                "project_id": PROJECT_ID,
+                "requirement": "Review Storage Durability Hardening",
+                "action": "already-implemented",
+                "reason": "Delivered in Sprint 7.",
+                "idempotency_key": "req-rec-cli-1",
+                "changed_by": "agent",
+                "evidence_links": ["sprint-7-closeout.md"],
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

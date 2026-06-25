@@ -2110,6 +2110,39 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record requirement reconciliation."""
+        self.calls.append(
+            (
+                "requirement_reconcile",
+                {
+                    "project_id": project_id,
+                    "requirement": requirement,
+                    "action": action,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                    "evidence_links": evidence_links,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "requirement": requirement},
+            "warnings": [],
+            "errors": [],
+        }
+
     def repair_readiness(
         self,
         *,
@@ -4625,6 +4658,91 @@ def test_workflow_next_routes_story_persistence_to_complete_when_covered() -> No
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
+
+
+def test_workflow_next_treats_terminal_requirement_reconciliation_as_complete() -> (
+    None
+):
+    """Terminal requirement decisions allow Story phase completion."""
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "STORY_PERSISTENCE",
+                "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+                "story_saved": {"Requirement A": True},
+                "requirement_reconciliations": {
+                    "requirement b": {
+                        "schema_version": "agileforge.requirement_reconciliation.v1",
+                        "requirement": "Requirement B",
+                        "action": "already-implemented",
+                        "reason": "Delivered earlier.",
+                        "evidence_links": ["sprint-7-closeout.md"],
+                        "changed_by": "agent",
+                        "reconciled_at": "2026-06-25T10:00:00Z",
+                        "idempotency_key": "req-rec-app-1",
+                        "terminal": True,
+                    }
+                },
+            }
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    commands = result["data"]["next_valid_commands"]
+    assert (
+        "agileforge story complete --project-id 7 "
+        "--expected-state STORY_PERSISTENCE "
+        "--idempotency-key <idempotency_key>"
+    ) in commands
+    assert not any(
+        command
+        == (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        )
+        for command in commands
+    )
+
+
+def test_workflow_next_keeps_non_terminal_requirement_reconciliation_pending(
+) -> None:
+    """Keep/rewrite-needed decisions do not satisfy Story coverage."""
+    for action in ("keep", "rewrite-needed"):
+        app = AgentWorkbenchApplication(
+            read_projection=_WorkflowStateReader(
+                {
+                    "fsm_state": "STORY_PERSISTENCE",
+                    "roadmap_releases": [{"items": ["Requirement A"]}],
+                    "requirement_reconciliations": {
+                        "requirement a": {
+                            "schema_version": (
+                                "agileforge.requirement_reconciliation.v1"
+                            ),
+                            "requirement": "Requirement A",
+                            "action": action,
+                            "reason": "Still needs PO work.",
+                            "evidence_links": [],
+                            "changed_by": "agent",
+                            "reconciled_at": "2026-06-25T10:00:00Z",
+                            "idempotency_key": f"req-rec-{action}",
+                            "terminal": False,
+                        }
+                    },
+                }
+            ),
+            authority_projection=_CurrentAuthorityProjection(),
+        )
+
+        result = app.workflow_next(project_id=PROJECT_ID)
+
+        assert result["ok"] is True
+        assert (
+            "agileforge story generate --project-id 7 "
+            "--parent-requirement <parent_requirement>"
+        ) in result["data"]["next_valid_commands"]
 
 
 def test_workflow_next_routes_story_persistence_to_scoped_complete_when_milestone_ready() -> (  # noqa: E501

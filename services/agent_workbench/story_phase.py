@@ -40,6 +40,7 @@ from services.phases.story_service import (
     generate_story_draft,
     get_story_history,
     get_story_pending,
+    reconcile_requirement,
     reopen_story_requirement,
     repair_story_readiness,
     retry_story_draft,
@@ -229,6 +230,29 @@ class StoryPhaseRunner:
             changed_by,
             evidence_links,
             superseded_by_story_id,
+        )
+
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Record a roadmap requirement reconciliation decision."""
+        return anyio.run(
+            self._requirement_reconcile,
+            project_id,
+            requirement,
+            action,
+            reason,
+            idempotency_key,
+            changed_by,
+            evidence_links,
         )
 
     def repair_readiness(
@@ -539,6 +563,68 @@ class StoryPhaseRunner:
         except RuntimeError as exc:
             return _workflow_error(exc)
         return _data_envelope(data)
+
+    async def _requirement_reconcile(  # noqa: PLR0913
+        self,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str,
+        evidence_links: list[str] | None,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            with Session(get_engine()) as session:
+                replay = _requirement_reconcile_replay(
+                    session,
+                    project_id=project_id,
+                    idempotency_key=idempotency_key,
+                )
+                if replay is not None:
+                    return _data_envelope(replay)
+
+            payload = await reconcile_requirement(
+                project_id=project_id,
+                requirement=requirement,
+                action=action,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                changed_by=changed_by,
+                evidence_links=evidence_links,
+                load_state=lambda: self._load_story_state(
+                    str(project_id), project_id, product
+                ),
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                now_iso=_now_iso,
+            )
+            with Session(get_engine()) as session:
+                session.add(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.STORIES_SAVED,
+                        product_id=project_id,
+                        session_id=str(project_id),
+                        event_metadata=json.dumps(
+                            {
+                                "action": "requirement_reconcile",
+                                "idempotency_key": idempotency_key,
+                                "result": payload,
+                            }
+                        ),
+                    )
+                )
+                session.commit()
+        except StoryPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(payload)
 
     async def _reconcile(  # noqa: C901, PLR0911, PLR0913
         self,
@@ -1521,6 +1607,35 @@ def _reconcile_replay(
             continue
         if (
             metadata.get("action") == "story_reconcile"
+            and metadata.get("idempotency_key") == idempotency_key
+            and isinstance(metadata.get("result"), dict)
+        ):
+            return cast("dict[str, Any]", metadata["result"])
+    return None
+
+
+def _requirement_reconcile_replay(
+    session: Session,
+    *,
+    project_id: int,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Return a prior requirement reconciliation result for the same key."""
+    events = session.exec(
+        select(WorkflowEvent).where(
+            WorkflowEvent.product_id == project_id,
+            WorkflowEvent.event_type == WorkflowEventType.STORIES_SAVED,
+        )
+    ).all()
+    for event in reversed(events):
+        if not event.event_metadata:
+            continue
+        try:
+            metadata = json.loads(event.event_metadata)
+        except json.JSONDecodeError:
+            continue
+        if (
+            metadata.get("action") == "requirement_reconcile"
             and metadata.get("idempotency_key") == idempotency_key
             and isinstance(metadata.get("result"), dict)
         ):

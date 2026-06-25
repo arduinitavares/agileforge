@@ -665,6 +665,20 @@ class _Application(Protocol):
         """Record a Story reconciliation decision."""
         ...
 
+    def requirement_reconcile(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        requirement: str,
+        action: str,
+        reason: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+        evidence_links: list[str] | None = None,
+    ) -> JsonObject:
+        """Record a requirement reconciliation decision."""
+        ...
+
     def story_repair_readiness(
         self,
         *,
@@ -1847,6 +1861,45 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     roadmap_save.add_argument("--expected-state", required=True)
     roadmap_save.add_argument("--idempotency-key", required=True)
     roadmap_save.set_defaults(command_handler=_roadmap_save)
+
+    requirement = subparsers.add_parser(
+        "requirement",
+        help="Reconcile roadmap requirements before Story generation.",
+    )
+    requirement_sub = requirement.add_subparsers(
+        dest="requirement_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    requirement_reconcile = requirement_sub.add_parser(
+        "reconcile",
+        help="Record how a pending roadmap requirement should be handled.",
+    )
+    requirement_reconcile.add_argument("--project-id", type=int, required=True)
+    requirement_reconcile.add_argument("--requirement", required=True)
+    requirement_reconcile.add_argument(
+        "--action",
+        choices=[
+            "keep",
+            "archive",
+            "defer",
+            "supersede",
+            "already-implemented",
+            "duplicate",
+            "rewrite-needed",
+        ],
+        required=True,
+    )
+    requirement_reconcile.add_argument("--reason", required=True)
+    requirement_reconcile.add_argument("--idempotency-key", required=True)
+    requirement_reconcile.add_argument("--changed-by", default="cli-agent")
+    requirement_reconcile.add_argument(
+        "--evidence-link",
+        action="append",
+        dest="evidence_links",
+        help="Evidence path or URL for this requirement decision.",
+    )
+    requirement_reconcile.set_defaults(command_handler=_requirement_reconcile)
 
     story = subparsers.add_parser("story", help="Inspect user stories.")
     story_sub = story.add_subparsers(
@@ -3790,6 +3843,22 @@ def _story_reconcile(
         changed_by=args.changed_by,
         evidence_links=args.evidence_links,
         superseded_by_story_id=args.superseded_by_story_id,
+    )
+
+
+def _requirement_reconcile(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route requirement reconcile to the application facade."""
+    return "agileforge requirement reconcile", application.requirement_reconcile(
+        project_id=args.project_id,
+        requirement=args.requirement,
+        action=args.action,
+        reason=args.reason,
+        idempotency_key=args.idempotency_key,
+        changed_by=args.changed_by,
+        evidence_links=args.evidence_links,
     )
 
 

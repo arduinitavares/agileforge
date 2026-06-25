@@ -701,6 +701,26 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         ),
     ),
     CommandMetadata(
+        name="agileforge requirement reconcile",
+        mutates=True,
+        phase="phase_2d",
+        requires_idempotency_key=True,
+        input_required=(
+            "project_id",
+            "requirement",
+            "action",
+            "reason",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by", "evidence_link"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.INVALID_COMMAND.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+            ErrorCode.MUTATION_FAILED.value,
+        ),
+    ),
+    CommandMetadata(
         name="agileforge story pending",
         mutates=False,
         phase="phase_2d",

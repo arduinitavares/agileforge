@@ -454,6 +454,47 @@ async def test_get_story_pending_groups_requirements_by_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_story_pending_marks_requirement_reconciliation_handled() -> (
+    None
+):
+    """Terminal requirement reconciliation is visible and counted as handled."""
+    state = _pending_state()
+    state["requirement_reconciliations"] = {
+        "requirement b": {
+            "schema_version": "agileforge.requirement_reconciliation.v1",
+            "requirement": "Requirement B",
+            "action": "already-implemented",
+            "reason": "Delivered in Sprint 7.",
+            "evidence_links": ["sprint-7-closeout.md"],
+            "changed_by": "agent",
+            "reconciled_at": "2026-06-25T10:00:00Z",
+            "idempotency_key": "req-rec-1",
+            "terminal": True,
+        }
+    }
+
+    payload = await get_story_pending(load_state=lambda: _async_value(state))
+
+    assert payload["total_count"] == 2  # noqa: PLR2004
+    assert payload["saved_count"] == 1
+    assert payload["reconciled_count"] == 1
+    assert payload["handled_count"] == 2  # noqa: PLR2004
+    assert payload["grouped_items"][0]["requirements"][1] == {
+        "requirement": "Requirement B",
+        "status": "Reconciled",
+        "attempt_count": 1,
+        "reconciliation": {
+            "action": "already-implemented",
+            "reason": "Delivered in Sprint 7.",
+            "evidence_links": ["sprint-7-closeout.md"],
+            "changed_by": "agent",
+            "reconciled_at": "2026-06-25T10:00:00Z",
+            "terminal": True,
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_story_pending_scope_extension_filters_appended_requirements() -> (
     None
 ):
@@ -2544,7 +2585,8 @@ async def test_complete_story_phase_blocks_until_all_roadmap_requirements_saved(
 
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert exc_info.value.detail == (
-        "Story phase cannot complete: 1 of 2 roadmap requirements are saved or merged."
+        "Story phase cannot complete: 1 of 2 roadmap requirements are saved, "
+        "merged, or terminal-reconciled."
     )
 
 
@@ -2895,7 +2937,7 @@ async def test_complete_story_phase_rejects_unsaved_selection_requirement() -> N
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert exc_info.value.detail == (
         f"Story phase cannot complete for {expected_scope_id}: "
-        "1 of 2 roadmap requirements are saved or merged."
+        "1 of 2 roadmap requirements are saved, merged, or terminal-reconciled."
     )
     assert state["fsm_state"] == "STORY_PERSISTENCE"
 
@@ -3010,7 +3052,7 @@ async def test_complete_story_phase_blocks_incomplete_milestone_scope() -> None:
     assert exc_info.value.status_code == 409  # noqa: PLR2004
     assert exc_info.value.detail == (
         "Story phase cannot complete for milestone_0: "
-        "1 of 2 roadmap requirements are saved or merged."
+        "1 of 2 roadmap requirements are saved, merged, or terminal-reconciled."
     )
     assert state["fsm_state"] == "STORY_PERSISTENCE"
 
@@ -3072,6 +3114,50 @@ async def test_complete_story_phase_counts_merged_resolution_as_covered() -> Non
 
     assert payload["fsm_state"] == "SPRINT_SETUP"
     assert payload["coverage"] == {"saved": 1, "merged": 1, "total": 2}
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_counts_terminal_requirement_reconciliation() -> (
+    None
+):
+    """Story phase can complete when uncovered requirements are reconciled."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [
+            {"items": ["Requirement A", "Requirement B"]},
+        ],
+        "story_saved": {"Requirement A": True},
+        "requirement_reconciliations": {
+            "requirement b": {
+                "schema_version": "agileforge.requirement_reconciliation.v1",
+                "requirement": "Requirement B",
+                "action": "duplicate",
+                "reason": "Covered by Requirement A.",
+                "evidence_links": ["story-17"],
+                "changed_by": "agent",
+                "reconciled_at": "2026-06-25T10:00:00Z",
+                "idempotency_key": "req-rec-2",
+                "terminal": True,
+            }
+        },
+    }
+    saved_state: JsonDict = {}
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-with-reconciled-req",
+        load_state=lambda: _async_value(state),
+        save_state=saved_state.update,
+        now_iso=lambda: "2026-06-25T10:05:00Z",
+    )
+
+    assert payload["coverage"] == {
+        "saved": 1,
+        "merged": 0,
+        "reconciled": 1,
+        "total": 2,
+    }
+    assert saved_state["fsm_state"] == "SPRINT_SETUP"
 
 
 @pytest.mark.asyncio
