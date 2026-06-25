@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
 from orchestrator_agent.agent_tools.roadmap_builder.schemes import (
@@ -472,13 +472,19 @@ def _roadmap_coverage_mismatch_message(
 ) -> str | None:
     try:
         roadmap_data = RoadmapBuilderOutput.model_validate(output_artifact)
+        extension_context = _roadmap_generation_extension_context(
+            state,
+            input_context=input_context,
+        )
         _assert_exact_backlog_coverage(
             state,
             roadmap_data,
-            extension_context=_roadmap_generation_extension_context(
-                state,
-                input_context=input_context,
-            ),
+            extension_context=extension_context,
+        )
+        _assert_preserved_roadmap_shape(
+            state,
+            roadmap_data,
+            extension_context=extension_context,
         )
     except RoadmapPhaseError as exc:
         return exc.detail
@@ -767,6 +773,11 @@ def _roadmap_data_for_save(
         roadmap_data,
         extension_context=extension_context,
     )
+    _assert_preserved_roadmap_shape(
+        state,
+        roadmap_data,
+        extension_context=extension_context,
+    )
     if extension_context is None:
         return roadmap_data, None
 
@@ -898,6 +909,50 @@ def _assert_exact_backlog_coverage(
             "Roadmap coverage mismatch: "
             f"missing={missing}, unknown={unknown}, duplicate={duplicate}",
         )
+
+
+def _assert_preserved_roadmap_shape(
+    state: dict[str, Any],
+    roadmap_data: RoadmapBuilderOutput,
+    *,
+    extension_context: dict[str, Any] | None,
+) -> None:
+    if extension_context is not None:
+        return
+    expected_shape = _roadmap_release_shape(state.get("roadmap_releases"))
+    if expected_shape is None:
+        return
+    actual_shape = tuple(
+        (release.release_name.strip(), _roadmap_items_shape(release.items))
+        for release in roadmap_data.roadmap_releases
+    )
+    if actual_shape != expected_shape:
+        raise RoadmapPhaseError(
+            "Roadmap structure mismatch: existing roadmap release names, "
+            "order, and item lists must be preserved during reconciliation."
+        )
+
+
+def _roadmap_release_shape(
+    releases: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    if not isinstance(releases, list) or not releases:
+        return None
+    shape: list[tuple[str, tuple[str, ...]]] = []
+    for release in releases:
+        if not isinstance(release, Mapping):
+            return None
+        release_data = cast("Mapping[str, object]", release)
+        release_name = release_data.get("release_name")
+        items = release_data.get("items")
+        if not isinstance(release_name, str) or not isinstance(items, list):
+            return None
+        shape.append((release_name.strip(), _roadmap_items_shape(items)))
+    return tuple(shape)
+
+
+def _roadmap_items_shape(items: Sequence[object]) -> tuple[str, ...]:
+    return tuple(item.strip() for item in items if isinstance(item, str))
 
 
 def _active_backlog_requirement_names(

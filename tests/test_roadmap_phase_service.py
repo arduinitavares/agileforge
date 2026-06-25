@@ -988,6 +988,88 @@ async def test_generate_roadmap_draft_forces_incomplete_on_coverage_mismatch() -
 
 
 @pytest.mark.asyncio
+async def test_generate_roadmap_draft_forces_incomplete_on_shape_mismatch() -> None:
+    """Generation cannot mark a draft complete after moving accepted roadmap items."""
+    existing_releases = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Requirement A"],
+            "reasoning": "Start here",
+        },
+        {
+            "release_name": "Milestone 2",
+            "theme": "Value",
+            "focus_area": "User Value",
+            "items": ["Requirement B"],
+            "reasoning": "Then deliver value",
+        },
+    ]
+    state: JsonDict = {
+        "fsm_state": "ROADMAP_INTERVIEW",
+        "backlog_items": [
+            {"requirement": "Requirement A"},
+            {"requirement": "Requirement B"},
+        ],
+        "roadmap_releases": existing_releases,
+    }
+    saved: JsonDict = {}
+
+    async def load_state() -> JsonDict:
+        return state
+
+    async def fake_run_roadmap_agent_from_state(
+        state: object, *, project_id: int, user_input: str | None
+    ) -> JsonDict:
+        del state, project_id, user_input
+        return {
+            "success": True,
+            "input_context": {},
+            "output_artifact": {
+                "roadmap_releases": [
+                    {
+                        "release_name": "Milestone 1",
+                        "theme": "Foundation",
+                        "focus_area": "Technical Foundation",
+                        "items": ["Requirement B"],
+                        "reasoning": "Moved item.",
+                    },
+                    {
+                        "release_name": "Milestone 2",
+                        "theme": "Value",
+                        "focus_area": "User Value",
+                        "items": ["Requirement A"],
+                        "reasoning": "Moved item.",
+                    },
+                ],
+                "roadmap_summary": "Same coverage, changed shape",
+                "is_complete": True,
+                "clarifying_questions": [],
+            },
+            "is_complete": True,
+            "error": None,
+        }
+
+    payload = await generate_roadmap_draft(
+        project_id=7,
+        load_state=load_state,
+        save_state=lambda updated: saved.update({"state": dict(updated)}),
+        now_iso=lambda: "2026-04-04T00:00:00Z",
+        run_roadmap_agent=fake_run_roadmap_agent_from_state,
+        user_input="Preserve the accepted roadmap shape.",
+    )
+
+    assert payload["is_complete"] is False
+    assert payload["fsm_state"] == "ROADMAP_INTERVIEW"
+    assert payload["output_artifact"]["clarifying_questions"] == [
+        "Roadmap structure mismatch: existing roadmap release names, order, "
+        "and item lists must be preserved during reconciliation."
+    ]
+    assert saved["state"]["product_roadmap_assessment"]["is_complete"] is False
+
+
+@pytest.mark.asyncio
 async def test_generate_roadmap_draft_requires_feedback_after_first_attempt() -> None:
     """Verify generate roadmap draft requires feedback after first attempt."""
     state: JsonDict = {
@@ -1599,6 +1681,74 @@ async def test_save_roadmap_draft_rejects_missing_backlog_coverage() -> None:
         )
 
     assert "missing=['Projection dashboard']" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_save_roadmap_draft_rejects_existing_roadmap_item_movement() -> None:
+    """Refinement cannot silently move accepted roadmap items between milestones."""
+    existing_releases = [
+        {
+            "release_name": "Milestone 1",
+            "theme": "Foundation",
+            "focus_area": "Technical Foundation",
+            "items": ["Requirement A"],
+            "reasoning": "Start here",
+        },
+        {
+            "release_name": "Milestone 2",
+            "theme": "Value",
+            "focus_area": "User Value",
+            "items": ["Requirement B"],
+            "reasoning": "Then deliver value",
+        },
+    ]
+    state = _state_for_guarded_save(
+        artifact={
+            "roadmap_releases": [
+                {
+                    "release_name": "Milestone 1",
+                    "theme": "Foundation",
+                    "focus_area": "Technical Foundation",
+                    "items": ["Requirement B"],
+                    "reasoning": "Moved item.",
+                },
+                {
+                    "release_name": "Milestone 2",
+                    "theme": "Value",
+                    "focus_area": "User Value",
+                    "items": ["Requirement A"],
+                    "reasoning": "Moved item.",
+                },
+            ],
+            "roadmap_summary": "Same coverage, changed shape",
+            "is_complete": True,
+            "clarifying_questions": [],
+        },
+        backlog_items=[
+            {"requirement": "Requirement A"},
+            {"requirement": "Requirement B"},
+        ],
+    )
+    state["roadmap_releases"] = existing_releases
+
+    async def hydrate_context() -> object:
+        return SimpleNamespace(state=dict(state))
+
+    with pytest.raises(RoadmapPhaseError) as exc_info:
+        await save_roadmap_draft(
+            project_id=7,
+            attempt_id="roadmap-attempt-1",
+            expected_artifact_fingerprint=_fingerprint_from_state(state),
+            expected_state="ROADMAP_REVIEW",
+            idempotency_key="save-roadmap-1",
+            save_state=lambda _state: None,
+            now_iso=lambda: "2026-04-04T00:00:00Z",
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_roadmap_tool=_fake_save_roadmap_tool,
+        )
+
+    assert "Roadmap structure mismatch" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
