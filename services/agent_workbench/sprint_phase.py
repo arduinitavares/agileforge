@@ -100,6 +100,7 @@ else:
 _DEPENDENCY_ORDER_FALLBACK_INDEX = 1_000_000
 _DEPENDENCY_RISK_MIN_MATCHED_TERMS = 2
 _DEPENDENCY_RISK_MIN_TERM_LENGTH = 5
+_COMPLETED_STORY_STATUSES = {StoryStatus.DONE, StoryStatus.ACCEPTED}
 _SPRINT_TASK_UPDATE_COMMAND = "agileforge sprint task update"
 _SPRINT_TASK_UPDATE_LEASE_OWNER = "agileforge-cli:sprint-task-update"
 _SPRINT_STORY_CLOSE_COMMAND = "agileforge sprint story close"
@@ -3541,11 +3542,16 @@ def _story_dependency_metadata(
         if story_id is None:
             continue
         direct_blocked_by = sorted(context.active_edges.get(story_id, set()))
-        closure = _dependency_closure(story_id, context.active_edges)
+        closure = _dependency_closure(
+            story_id,
+            context.active_edges,
+            story_statuses=context.story_statuses,
+        )
         blocked_by = sorted(
             prerequisite_id
             for prerequisite_id in closure
-            if context.story_statuses.get(prerequisite_id) != StoryStatus.DONE
+            if context.story_statuses.get(prerequisite_id)
+            not in _COMPLETED_STORY_STATUSES
         )
         unblocks = sorted(
             context.downstream_edges.get(story_id, set()),
@@ -3578,7 +3584,10 @@ def _story_dependency_risk_metadata(
     metadata_by_story_id: dict[int, dict[str, Any]] = {}
     for dependent in stories:
         dependent_id = dependent.story_id
-        if dependent_id is None or story_statuses.get(dependent_id) == StoryStatus.DONE:
+        if (
+            dependent_id is None
+            or story_statuses.get(dependent_id) in _COMPLETED_STORY_STATUSES
+        ):
             continue
         dependent_title = _normalize_dependency_text(str(dependent.title or ""))
         dependent_text = _dependency_risk_story_text(dependent)
@@ -3595,7 +3604,7 @@ def _story_dependency_risk_metadata(
                 prerequisite_id is None
                 or prerequisite_id == dependent_id
                 or prerequisite_id in covered_prerequisite_ids
-                or story_statuses.get(prerequisite_id) == StoryStatus.DONE
+                or story_statuses.get(prerequisite_id) in _COMPLETED_STORY_STATUSES
                 or not _candidate_can_be_missing_prerequisite(dependent, prerequisite)
             ):
                 continue
@@ -3731,6 +3740,8 @@ def _dependency_title_terms(title: str) -> set[str]:
 def _dependency_closure(
     story_id: int,
     active_edges: dict[int, set[int]],
+    *,
+    story_statuses: dict[int, StoryStatus] | None = None,
 ) -> set[int]:
     """Return all transitive prerequisites for one story, cycle-safe."""
     closure: set[int] = set()
@@ -3741,6 +3752,11 @@ def _dependency_closure(
         for prerequisite_id in sorted(active_edges.get(current_id, set())):
             if prerequisite_id not in closure:
                 closure.add(prerequisite_id)
+            if (
+                story_statuses is not None
+                and story_statuses.get(prerequisite_id) in _COMPLETED_STORY_STATUSES
+            ):
+                continue
             if prerequisite_id in visiting:
                 continue
             visit(prerequisite_id)

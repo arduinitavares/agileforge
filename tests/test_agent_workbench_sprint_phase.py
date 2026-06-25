@@ -1274,6 +1274,106 @@ def test_sprint_task_next_skips_story_with_missing_semantic_dependency(
     assert next_ticket["data"]["task_ticket"]["story"]["story_id"] == capture.story_id
 
 
+def test_sprint_task_next_stops_dependency_blockers_at_completed_story(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task next should not inherit blockers through a completed prerequisite."""
+    product = Product(name="Completed Chain Product")
+    team = Team(name="Completed Chain Team")
+    session.add_all([product, team])
+    session.flush()
+    assert product.product_id is not None
+    assert team.team_id is not None
+
+    stale_duplicate = UserStory(
+        product_id=product.product_id,
+        title="Duplicate integration story",
+        story_points=2,
+        rank="101",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    completed_prerequisite = UserStory(
+        product_id=product.product_id,
+        title="Completed prerequisite",
+        story_points=2,
+        rank="102",
+        status=StoryStatus.DONE,
+        is_refined=True,
+    )
+    runnable_story = UserStory(
+        product_id=product.product_id,
+        title="Runnable downstream story",
+        story_points=3,
+        rank="103",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+    )
+    session.add_all([stale_duplicate, completed_prerequisite, runnable_story])
+    session.flush()
+    assert stale_duplicate.story_id is not None
+    assert completed_prerequisite.story_id is not None
+    assert runnable_story.story_id is not None
+
+    session.add_all(
+        [
+            UserStoryDependency(
+                product_id=product.product_id,
+                dependent_story_id=completed_prerequisite.story_id,
+                prerequisite_story_id=stale_duplicate.story_id,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+            ),
+            UserStoryDependency(
+                product_id=product.product_id,
+                dependent_story_id=runnable_story.story_id,
+                prerequisite_story_id=completed_prerequisite.story_id,
+                status="active",
+                source="manual_review",
+                confidence="reviewed",
+            ),
+        ]
+    )
+    sprint = Sprint(
+        product_id=product.product_id,
+        team_id=team.team_id,
+        goal="Continue after completed prerequisite",
+        start_date=date(2026, 5, 26),
+        end_date=date(2026, 6, 9),
+        status=SprintStatus.ACTIVE,
+    )
+    session.add(sprint)
+    session.flush()
+    assert sprint.sprint_id is not None
+    session.add(
+        SprintStory(sprint_id=sprint.sprint_id, story_id=runnable_story.story_id)
+    )
+    task = Task(story_id=runnable_story.story_id, description="Run downstream work")
+    session.add(task)
+    session.commit()
+    assert task.task_id is not None
+
+    monkeypatch.setattr(sprint_phase_module, "get_engine", session.get_bind)
+    runner = SprintPhaseRunner(
+        product_repo=cast("Any", _FakeProductRepository()),
+        workflow_service=cast("Any", _FakeWorkflowService()),
+    )
+
+    tasks = runner.tasks(project_id=product.product_id)
+    next_ticket = runner.task_next(project_id=product.product_id)
+
+    task_row = tasks["data"]["tasks"][0]
+    assert task_row["story_id"] == runnable_story.story_id
+    assert task_row["direct_blocked_by_story_ids"] == [completed_prerequisite.story_id]
+    assert task_row["blocked_by_story_ids"] == []
+    assert task_row["is_blocked"] is False
+    assert tasks["data"]["dependency_summary"]["blocked_story_count"] == 0
+    assert next_ticket["data"]["task_ticket"]["task"]["task_id"] == task.task_id
+    assert next_ticket["data"]["reason"] == "next_unblocked_todo"
+
+
 def test_sprint_task_next_returns_in_progress_ticket_before_new_todo(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
