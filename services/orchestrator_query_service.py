@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from models.core import Product, Sprint, SprintStory, UserStory
 from models.db import get_engine
 from models.enums import SprintStatus, StoryStatus
+from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
 from services.story_dependencies import load_story_dependency_graph
 from utils.spec_schemas import ValidationEvidence
 
@@ -192,23 +193,9 @@ def refresh_projects_cache(
     return count, projects
 
 
-def fetch_sprint_candidates_from_session(
-    session: Session,
-    product_id: int,
-) -> dict[str, Any]:
-    """
-    Fetch sprint-eligible stories for a product using an existing session.
-
-    Eligibility rule:
-    - status == TO_DO
-    - is_refined == True
-    - is_superseded == False
-    """
-    logger.debug(
-        "Fetching refined sprint candidates for product_id=%s",
-        product_id,
-    )
-    open_sprint_story_ids = {
+def get_open_sprint_story_ids(session: Session, product_id: int) -> set[int]:
+    """Get the set of story IDs that are in open (PLANNED or ACTIVE) sprints."""
+    return {
         int(story_id)
         for story_id in session.exec(
             select(SprintStory.story_id)
@@ -225,6 +212,120 @@ def fetch_sprint_candidates_from_session(
         ).all()
         if story_id is not None
     }
+
+
+def is_sprint_candidate_story(
+    story: UserStory,
+    open_sprint_story_ids: set[int],
+) -> bool:
+    """
+    Check if a user story is a valid candidate for sprint planning.
+
+    Eligibility rules:
+    - Status is TO_DO
+    - Story is refined (is_refined == True)
+    - Story is not superseded (is_superseded == False)
+    - Story is not archived (archived_reason is None)
+    - Story is not linked to any open/active sprints
+    """
+    story_id_val = story.story_id
+    if story_id_val is None:
+        return False
+    return (
+        story.status == StoryStatus.TO_DO
+        and bool(story.is_refined)
+        and not bool(story.is_superseded)
+        and story.archived_reason is None
+        and int(story_id_val) not in open_sprint_story_ids
+    )
+
+
+def query_requirement_stories_and_eligibility(
+    session: Session,
+    project_id: int,
+) -> dict[str, Any]:
+    """Fetch per-requirement story metadata and sprint eligibility facts."""
+    stories = list(
+        session.exec(
+            select(UserStory)
+            .where(UserStory.product_id == project_id)
+            .where(cast("Any", UserStory.archived_reason).is_(None))
+            .order_by(cast("Any", UserStory.story_id))
+        ).all()
+    )
+    open_sprint_story_ids = get_open_sprint_story_ids(session, project_id)
+
+    stories_by_req: dict[str, list[UserStory]] = {}
+    for story in stories:
+        if story.source_requirement:
+            norm_key = normalize_requirement_key(story.source_requirement)
+            stories_by_req.setdefault(norm_key, []).append(story)
+
+    result: dict[str, Any] = {}
+    completed_statuses = {StoryStatus.DONE, StoryStatus.ACCEPTED}
+    for norm_key, req_stories in stories_by_req.items():
+        story_list = [
+            {
+                "story_id": story.story_id,
+                "title": story.title,
+                "story_description": story.story_description,
+                "acceptance_criteria": story.acceptance_criteria,
+                "status": (
+                    story.status.value
+                    if hasattr(story.status, "value")
+                    else str(story.status)
+                ),
+                "story_points": story.story_points,
+                "rank": story.rank,
+                "refinement_slot": story.refinement_slot,
+                "is_refined": bool(story.is_refined),
+                "is_superseded": bool(story.is_superseded),
+                "in_open_sprint": story.story_id in open_sprint_story_ids,
+            }
+            for story in req_stories
+        ]
+        active_stories = [story for story in req_stories if not story.is_superseded]
+        candidates = [
+            story
+            for story in req_stories
+            if is_sprint_candidate_story(story, open_sprint_story_ids)
+        ]
+
+        result[norm_key] = {
+            "stories": story_list,
+            "story_ids": [
+                story.story_id for story in req_stories if story.story_id is not None
+            ],
+            "has_candidates": bool(candidates),
+            "all_completed": bool(active_stories)
+            and all(story.status in completed_statuses for story in active_stories),
+            "all_superseded": bool(req_stories)
+            and all(bool(story.is_superseded) for story in req_stories),
+            "all_in_active_sprint": bool(active_stories)
+            and all(
+                story.story_id in open_sprint_story_ids for story in active_stories
+            ),
+        }
+    return result
+
+
+def fetch_sprint_candidates_from_session(
+    session: Session,
+    product_id: int,
+) -> dict[str, Any]:
+    """
+    Fetch sprint-eligible stories for a product using an existing session.
+
+    Eligibility rule:
+    - status == TO_DO
+    - is_refined == True
+    - is_superseded == False
+    """
+    logger.debug(
+        "Fetching refined sprint candidates for product_id=%s",
+        product_id,
+    )
+    open_sprint_story_ids = get_open_sprint_story_ids(session, product_id)
     stories = list(
         session.exec(
             select(UserStory)
@@ -258,6 +359,8 @@ def fetch_sprint_candidates_from_session(
     excluded_open_sprint = 0
 
     for story in stories:
+        if story.archived_reason is not None:
+            continue
         if bool(story.is_superseded):
             excluded_superseded += 1
             continue

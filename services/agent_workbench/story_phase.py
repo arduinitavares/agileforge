@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from itertools import pairwise
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import anyio
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from models.core import Sprint, SprintStory, Task, UserStory, UserStoryDependency
@@ -33,6 +35,9 @@ from services.interview_runtime import (
     promote_reusable_draft,
     reset_subject_working_set,
     set_request_projection,
+)
+from services.orchestrator_query_service import (
+    query_requirement_stories_and_eligibility,
 )
 from services.phases.sprint_service import reset_sprint_planner_working_set
 from services.phases.story_service import (
@@ -60,6 +65,8 @@ from services.workflow import WorkflowService
 from tools.orchestrator_tools import select_project
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from google.adk.tools import ToolContext
 
     from models.core import Product
@@ -79,6 +86,7 @@ _MAX_DEPENDENCY_ATTEMPTS = 20
 _MANUAL_EDGE_PART_COUNT = 2
 _RECONCILE_TERMINAL_ACTIONS = {"archive", "defer", "rewrite-needed", "supersede"}
 _RECONCILE_ACTIONS = {"keep", *_RECONCILE_TERMINAL_ACTIONS}
+logger: logging.Logger = logging.getLogger(name=__name__)
 
 
 class _ManualDependencyEdgeError(RuntimeError):
@@ -103,6 +111,11 @@ class _WorkflowServiceLike(Protocol):
     ) -> None: ...
 
 
+def _load_requirement_stories_metadata(project_id: int) -> dict[str, Any]:
+    with Session(get_engine()) as session:
+        return query_requirement_stories_and_eligibility(session, project_id)
+
+
 class StoryPhaseRunner:
     """Run Story phase commands through the same service boundary as the API."""
 
@@ -111,10 +124,14 @@ class StoryPhaseRunner:
         *,
         product_repo: ProductRepository | _ProductRepositoryLike | None = None,
         workflow_service: WorkflowService | _WorkflowServiceLike | None = None,
+        load_stories_metadata: Callable[[int], dict[str, Any] | None] | None = None,
     ) -> None:
         """Initialize repositories for CLI Story commands."""
         self._product_repo = product_repo or ProductRepository()
         self._workflow_service = workflow_service or WorkflowService()
+        self._load_stories_metadata = (
+            load_stories_metadata or _load_requirement_stories_metadata
+        )
 
     def pending(self, *, project_id: int) -> dict[str, Any]:
         """Return roadmap requirements grouped by Story completion status."""
@@ -347,10 +364,19 @@ class StoryPhaseRunner:
             return product
 
         try:
+            stories_metadata = self._load_stories_metadata(project_id)
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to enrich story pending payload for project %s", project_id
+            )
+            stories_metadata = None
+
+        try:
             data = await get_story_pending(
                 load_state=lambda: self._load_story_state(
                     str(project_id), project_id, product
-                )
+                ),
+                stories_metadata=stories_metadata,
             )
         except StoryPhaseError as exc:
             return _phase_error(exc)

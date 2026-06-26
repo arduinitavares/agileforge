@@ -98,6 +98,8 @@ let roadmapAttemptCount = 0;
 let storyRequirements = []; // Array of { requirement, status, attempt_count }
 let selectedStoryScopeRequirements = new Set();
 let activeStoryReq = null;
+let activeRequirementStoryId = null;
+let activeRequirementStoryMetadata = null;
 let activeStoryAttemptCount = 0;
 let activeStoryIsComplete = false;
 let activeStoryRetryAvailable = false;
@@ -254,7 +256,7 @@ function isConsumedStoryRequirement(requirement) {
 function isSelectableStoryScopeRequirement(req) {
     return Boolean(
         req
-        && isResolvedStoryStatus(req.status)
+        && req.sprint_eligible
         && !isConsumedStoryRequirement(req.requirement)
     );
 }
@@ -3388,6 +3390,7 @@ async function loadStoryRequirements() {
                 Array.from(selectedStoryScopeRequirements)
                     .filter(requirement => selectableRequirementNames.has(requirement)),
             );
+            syncActiveRequirementStoryMetadata();
 
             renderStoryRequirementsList();
             updateCompleteStoryPhaseButton();
@@ -3402,6 +3405,90 @@ async function loadStoryRequirements() {
     } catch (e) {
         console.error("Failed to load story requirements:", e);
     }
+}
+
+function syncActiveRequirementStoryMetadata() {
+    if (!activeStoryReq || activeRequirementStoryId === null) {
+        return;
+    }
+
+    const activeRequirement = storyRequirements.find(req => req.requirement === activeStoryReq);
+    const freshStory = activeRequirement && Array.isArray(activeRequirement.stories)
+        ? activeRequirement.stories.find(item => Number(item.story_id) === activeRequirementStoryId)
+        : null;
+
+    if (!freshStory) {
+        activeRequirementStoryId = null;
+        activeRequirementStoryMetadata = null;
+    } else {
+        activeRequirementStoryMetadata = freshStory;
+    }
+    renderSelectedRequirementStoryDetail();
+}
+
+function storyDetailText(value) {
+    if (Array.isArray(value)) {
+        return value.filter(item => item !== null && item !== undefined && String(item).trim()).join('\n');
+    }
+    if (value === null || value === undefined) return '';
+    return String(value).trim();
+}
+
+function renderSelectedRequirementStoryDetail() {
+    const container = document.getElementById('story-selected-story-detail');
+    if (!container) return;
+
+    const story = activeRequirementStoryMetadata;
+    if (!story) {
+        container.innerHTML = '';
+        container.classList.add('hidden');
+        return;
+    }
+
+    const storyId = story.story_id ?? activeRequirementStoryId;
+    const title = story.title || story.story_title || `Story ${storyId}`;
+    const description = storyDetailText(story.story_description || story.description);
+    const acceptanceCriteria = storyDetailText(story.acceptance_criteria);
+    const storyPoints = story.story_points ?? story.effort ?? null;
+    const refinementSlot = story.refinement_slot ?? story.rank ?? null;
+    const statusText = story.status || 'Unknown';
+    const openSprintText = story.in_open_sprint ? 'Open sprint' : '';
+    const supersededText = story.is_superseded ? 'Superseded' : '';
+    const pointsText = storyPoints !== null && storyPoints !== undefined ? `${storyPoints} pts` : '';
+    const slotText = refinementSlot !== null && refinementSlot !== undefined ? `Slot ${refinementSlot}` : '';
+    const metaItems = [statusText, pointsText, slotText, openSprintText, supersededText].filter(Boolean);
+
+    container.innerHTML = `
+        <div class="rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-700 dark:bg-slate-900/70">
+            <div class="mb-1 flex flex-wrap items-center gap-1.5">
+                <span class="text-[10px] font-mono font-bold uppercase tracking-wide text-orange-600 dark:text-orange-400">Story ${escapeHtml(String(storyId))}</span>
+                ${metaItems.map(item => `<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-300">${escapeHtml(item)}</span>`).join('')}
+            </div>
+            <div class="text-xs font-bold text-slate-800 dark:text-slate-100">${escapeHtml(title)}</div>
+            ${description ? `<p class="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">${escapeHtml(description)}</p>` : ''}
+            ${acceptanceCriteria ? `
+                <div class="mt-2">
+                    <div class="text-[9px] font-bold uppercase tracking-wide text-slate-400">Acceptance Criteria</div>
+                    <p class="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">${escapeHtml(acceptanceCriteria)}</p>
+                </div>
+            ` : ''}
+        </div>
+    `;
+    container.classList.remove('hidden');
+}
+
+async function selectStoryRequirementStory(reqName, story, event) {
+    if (event) event.stopPropagation();
+    activeRequirementStoryId = Number(story.story_id);
+    activeRequirementStoryMetadata = story;
+
+    if (activeStoryReq !== reqName) {
+        await selectStoryRequirement(reqName, { preserveSelectedStory: true });
+        return;
+    }
+
+    renderStoryRequirementsList();
+    renderSelectedRequirementStoryDetail();
 }
 
 function renderStoryRequirementsList() {
@@ -3431,7 +3518,9 @@ function renderStoryRequirementsList() {
         const itemsContainer = document.createElement('div');
         itemsContainer.className = 'space-y-1.5 ml-2 border-l-2 border-slate-100 dark:border-slate-800 pl-3';
 
-        group.requirements.forEach(req => {
+        group.requirements.forEach((req, reqIndex) => {
+            const posLabel = `M${index + 1}.${reqIndex + 1}`;
+
             let statusColor = 'bg-slate-200 dark:bg-slate-700'; // Default: Pending
             let statusIcon = 'circle';
 
@@ -3441,6 +3530,9 @@ function renderStoryRequirementsList() {
             } else if (req.status === 'Merged') {
                 statusColor = 'bg-sky-500';
                 statusIcon = 'merge';
+            } else if (req.status === 'Reconciled') {
+                statusColor = 'bg-purple-500';
+                statusIcon = 'assignment_turned_in';
             } else if (req.status === 'Attempted') {
                 statusColor = 'bg-amber-500';
                 statusIcon = 'hourglass_bottom';
@@ -3450,26 +3542,70 @@ function renderStoryRequirementsList() {
             const isConsumedForScope = isConsumedStoryRequirement(req.requirement);
             const isSelectableForScope = isSelectableStoryScopeRequirement(req);
             const isScopeSelected = isSelectableForScope && selectedStoryScopeRequirements.has(req.requirement);
-            const selectionTitle = isSelectableForScope
-                ? `${isScopeSelected ? 'Remove' : 'Add'} "${req.requirement}" ${isScopeSelected ? 'from' : 'to'} sprint planning selection.`
-                : (isConsumedForScope
-                    ? 'This requirement is already included in the current Story completion scope.'
-                    : 'Save or merge this requirement before selecting it for sprint planning.');
+
+            let selectionTitle = `Add "${req.requirement}" to sprint planning selection.`;
+            if (isSelectableForScope) {
+                if (isScopeSelected) {
+                    selectionTitle = `Remove "${req.requirement}" from sprint planning selection.`;
+                }
+            } else {
+                if (isConsumedForScope) {
+                    selectionTitle = 'This requirement is already included in the current Story completion scope.';
+                } else if (req.sprint_eligibility_reason === 'all_stories_completed') {
+                    selectionTitle = 'All stories for this requirement are already completed (Done/Accepted).';
+                } else if (req.sprint_eligibility_reason === 'in_active_sprint') {
+                    selectionTitle = 'Stories for this requirement are already planned in a sprint.';
+                } else if (req.sprint_eligibility_reason === 'reconciled') {
+                    selectionTitle = 'This requirement is reconciled without code and does not need stories.';
+                } else if (req.sprint_eligibility_reason === 'all_stories_superseded') {
+                    selectionTitle = 'All stories for this requirement are superseded.';
+                } else if (req.sprint_eligibility_reason === 'pending_refinement') {
+                    selectionTitle = 'Refine this requirement and save stories before selecting it for sprint planning.';
+                } else if (req.sprint_eligibility_reason === 'attempt_in_progress') {
+                    selectionTitle = 'Save or merge this requirement before selecting it for sprint planning.';
+                } else {
+                    selectionTitle = 'Stories for this requirement are not eligible for sprint planning.';
+                }
+            }
+
             const selectionClasses = isSelectableForScope
                 ? (isScopeSelected
                     ? 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-primary bg-primary text-white transition-colors'
                     : 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-400 transition-colors hover:border-primary hover:text-primary dark:border-slate-600 dark:bg-slate-900')
                 : 'mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-md border border-slate-200 bg-slate-100 text-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-600';
+
             const selectionControl = isSelectableForScope
                 ? `<button type="button" data-story-scope-toggle class="${selectionClasses}" title="${escapeAttribute(selectionTitle)}" aria-label="${escapeAttribute(selectionTitle)}" aria-pressed="${isScopeSelected ? 'true' : 'false'}">
                         <span class="material-symbols-outlined text-[14px]">${isScopeSelected ? 'check_box' : 'check_box_outline_blank'}</span>
                     </button>`
-                : `<span class="${selectionClasses}" title="${escapeAttribute(selectionTitle)}" aria-hidden="true">
+                : `<span class="${selectionClasses}" title="${escapeAttribute(selectionTitle)}" aria-hidden="true" style="cursor: not-allowed;">
                         <span class="material-symbols-outlined text-[14px]">check_box_outline_blank</span>
                     </span>`;
+
             const selectedClasses = isSelected
                 ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/30 shadow-sm'
                 : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-orange-300 dark:hover:border-orange-700 cursor-pointer';
+
+            let storiesHtml = '';
+            if (Array.isArray(req.stories) && req.stories.length > 0) {
+                storiesHtml = `
+                    <div class="mt-1.5 flex flex-wrap gap-1">
+                        ${req.stories.map(s => {
+                            const storyId = Number(s.story_id);
+                            const isStorySelected = activeStoryReq === req.requirement && activeRequirementStoryId === storyId;
+                            const extraClass = [
+                                s.is_superseded ? 'line-through opacity-60' : '',
+                                isStorySelected ? 'border-orange-400 bg-orange-100 text-orange-700 dark:border-orange-500 dark:bg-orange-900/40 dark:text-orange-200' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700',
+                            ].filter(Boolean).join(' ');
+                            return `
+                                <button type="button" data-story-badge data-story-id="${escapeAttribute(String(s.story_id))}" class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border transition-colors hover:border-orange-300 hover:text-orange-700 dark:hover:border-orange-600 dark:hover:text-orange-200 ${extraClass}" title="${escapeAttribute(s.title || `Story ${s.story_id}`)}" aria-label="View Story ${escapeAttribute(String(s.story_id))} details">
+                                    Story ${escapeHtml(String(s.story_id))} (${escapeHtml(s.status || 'Unknown')})
+                                </button>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+            }
 
             const row = document.createElement('div');
             row.className = `p-2.5 rounded-lg border transition-all ${selectedClasses}`;
@@ -3484,11 +3620,15 @@ function renderStoryRequirementsList() {
                         <span class="material-symbols-outlined text-[8px] text-white font-bold">${statusIcon}</span>
                     </div>
                     <div class="flex-1 min-w-0">
-                        <p class="text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate" title="${escapeAttribute(req.requirement)}">${escapeHtml(req.requirement)}</p>
+                        <p class="text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate" title="${escapeAttribute(req.requirement)}">
+                            <span class="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 mr-1.5">${posLabel}</span>
+                            ${escapeHtml(req.requirement)}
+                        </p>
                         <div class="flex items-center justify-between mt-1">
                             <span class="text-[9px] text-slate-500">${escapeHtml(req.status)}</span>
                             <span class="text-[9px] font-bold px-1.5 py-0 bg-slate-100 dark:bg-slate-700 text-slate-500 rounded">${escapeHtml(String(req.attempt_count ?? 0))} runs</span>
                         </div>
+                        ${storiesHtml}
                     </div>
                 </div>
             `;
@@ -3499,6 +3639,15 @@ function renderStoryRequirementsList() {
                     toggleStorySelectionRequirement(req.requirement);
                 });
             }
+            row.querySelectorAll('[data-story-badge]').forEach(storyBadge => {
+                storyBadge.addEventListener('click', (event) => {
+                    const storyId = Number(storyBadge.dataset.storyId);
+                    const story = Array.isArray(req.stories)
+                        ? req.stories.find(item => Number(item.story_id) === storyId)
+                        : null;
+                    if (story) selectStoryRequirementStory(req.requirement, story, event);
+                });
+            });
             itemsContainer.appendChild(row);
         });
 
@@ -3506,8 +3655,12 @@ function renderStoryRequirementsList() {
     });
 }
 
-async function selectStoryRequirement(reqName) {
+async function selectStoryRequirement(reqName, options = {}) {
     activeStoryReq = reqName;
+    if (!options.preserveSelectedStory) {
+        activeRequirementStoryId = null;
+        activeRequirementStoryMetadata = null;
+    }
     renderStoryRequirementsList(); // update active styling
 
     // Toggle UI panels
@@ -3515,6 +3668,7 @@ async function selectStoryRequirement(reqName) {
     document.getElementById('story-detail-active').classList.remove('opacity-0', 'pointer-events-none');
 
     document.getElementById('story-active-req-title').innerText = reqName;
+    renderSelectedRequirementStoryDetail();
 
     // Clear input
     const input = document.getElementById('story-user-input');

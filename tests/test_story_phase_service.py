@@ -522,6 +522,15 @@ async def test_get_story_history_returns_attempts_and_projection_summary() -> No
     assert data["save"] == {"available": True}
 
 
+def _pending_selection_fields(*, eligible: bool, reason: str) -> JsonDict:
+    return {
+        "sprint_eligible": eligible,
+        "sprint_eligibility_reason": reason,
+        "stories": [],
+        "story_ids": [],
+    }
+
+
 @pytest.mark.asyncio
 async def test_get_story_pending_groups_requirements_by_status() -> None:
     """Verify get story pending groups requirements by status."""
@@ -537,18 +546,26 @@ async def test_get_story_pending_groups_requirements_by_status() -> None:
             "theme": "Milestone 1",
             "reasoning": "First slice",
             "requirements": [
-                {
-                    "requirement": "Requirement A",
-                    "status": "Saved",
-                    "attempt_count": 1,
-                },
-                {
-                    "requirement": "Requirement B",
-                    "status": "Attempted",
-                    "attempt_count": 1,
-                },
-            ],
-        }
+                    {
+                        "requirement": "Requirement A",
+                        "status": "Saved",
+                        "attempt_count": 1,
+                        **_pending_selection_fields(
+                            eligible=True,
+                            reason="eligible",
+                        ),
+                    },
+                    {
+                        "requirement": "Requirement B",
+                        "status": "Attempted",
+                        "attempt_count": 1,
+                        **_pending_selection_fields(
+                            eligible=False,
+                            reason="attempt_in_progress",
+                        ),
+                    },
+                ],
+            }
     ]
 
 
@@ -582,6 +599,10 @@ async def test_get_story_pending_marks_requirement_reconciliation_handled() -> (
         "requirement": "Requirement B",
         "status": "Reconciled",
         "attempt_count": 1,
+        **_pending_selection_fields(
+            eligible=False,
+            reason="reconciled",
+        ),
         "reconciliation": {
             "action": "already-implemented",
             "reason": "Delivered in Sprint 7.",
@@ -640,12 +661,16 @@ async def test_get_story_pending_scope_extension_filters_appended_requirements()
                     "requirement": "Extension requirement",
                     "status": "Pending",
                     "attempt_count": 0,
-                    "extension_scope": True,
-                    "accepted_spec_version_id": 12,
-                    "source_item_ids": ["SRC-NEW"],
-                }
-            ],
-        }
+                        "extension_scope": True,
+                        "accepted_spec_version_id": 12,
+                        "source_item_ids": ["SRC-NEW"],
+                        **_pending_selection_fields(
+                            eligible=False,
+                            reason="pending_refinement",
+                        ),
+                    }
+                ],
+            }
     ]
 
 
@@ -695,12 +720,16 @@ async def test_get_story_pending_scope_extension_does_not_use_legacy_same_name_s
                     "requirement": "Shared requirement",
                     "status": "Pending",
                     "attempt_count": 0,
-                    "extension_scope": True,
-                    "accepted_spec_version_id": 12,
-                    "source_item_ids": ["SRC-NEW"],
-                }
-            ],
-        }
+                        "extension_scope": True,
+                        "accepted_spec_version_id": 12,
+                        "source_item_ids": ["SRC-NEW"],
+                        **_pending_selection_fields(
+                            eligible=False,
+                            reason="pending_refinement",
+                        ),
+                    }
+                ],
+            }
     ]
 
 
@@ -727,12 +756,16 @@ async def test_get_story_pending_scope_extension_does_not_use_legacy_same_name_d
                     "requirement": "Shared requirement",
                     "status": "Pending",
                     "attempt_count": 0,
-                    "extension_scope": True,
-                    "accepted_spec_version_id": 12,
-                    "source_item_ids": ["SRC-NEW"],
-                }
-            ],
-        }
+                        "extension_scope": True,
+                        "accepted_spec_version_id": 12,
+                        "source_item_ids": ["SRC-NEW"],
+                        **_pending_selection_fields(
+                            eligible=False,
+                            reason="pending_refinement",
+                        ),
+                    }
+                ],
+            }
     ]
 
 
@@ -4238,3 +4271,113 @@ def _reset_subject_working_set(
 
 async def _async_value[T](value: T) -> T:
     return value
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_with_metadata() -> None:
+    """Verify get_story_pending incorporates stories_metadata correctly."""
+    story_id = 101
+    state = {
+        "roadmap_releases": [
+            {
+                "theme": "Milestone 1",
+                "items": ["Requirement A"],
+            }
+        ],
+        "story_saved": {
+            "Requirement A": True
+        },
+    }
+
+    stories_metadata = {
+        "requirement a": {
+            "stories": [
+                {
+                    "story_id": story_id,
+                    "title": "A story",
+                    "status": "To Do",
+                    "is_refined": True,
+                    "is_superseded": False,
+                }
+            ],
+            "story_ids": [story_id],
+            "has_candidates": True,
+        }
+    }
+
+    payload = await get_story_pending(
+        load_state=lambda: _async_value(state),
+        stories_metadata=stories_metadata,
+    )
+
+    req = payload["grouped_items"][0]["requirements"][0]
+    assert req["requirement"] == "Requirement A"
+    assert req["status"] == "Saved"
+    assert req["sprint_eligible"] is True
+    assert req["sprint_eligibility_reason"] == "eligible"
+    assert req["story_ids"] == [story_id]
+    assert len(req["stories"]) == 1
+    assert req["stories"][0]["story_id"] == story_id
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_fallback_includes_selection_metadata() -> None:
+    """Fallback pending payload should still expose selector metadata."""
+    state = {
+        "roadmap_releases": [
+            {
+                "theme": "Milestone 1",
+                "items": ["Requirement A"],
+            }
+        ],
+        "story_saved": {"Requirement A": True},
+    }
+
+    payload = await get_story_pending(load_state=lambda: _async_value(state))
+
+    req = payload["grouped_items"][0]["requirements"][0]
+    assert req["sprint_eligible"] is True
+    assert req["sprint_eligibility_reason"] == "eligible"
+    assert req["stories"] == []
+    assert req["story_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_story_pending_prioritizes_superseded_reason() -> None:
+    """All-superseded requirements should not be reported as completed."""
+    story_id = 276
+    state = {
+        "roadmap_releases": [
+            {
+                "theme": "Milestone 1",
+                "items": ["Requirement A"],
+            }
+        ],
+        "story_saved": {"Requirement A": True},
+    }
+    stories_metadata = {
+        "requirement a": {
+            "stories": [
+                {
+                    "story_id": story_id,
+                    "title": "Duplicate story",
+                    "status": "To Do",
+                    "is_refined": True,
+                    "is_superseded": True,
+                }
+            ],
+            "story_ids": [story_id],
+            "has_candidates": False,
+            "all_completed": True,
+            "all_superseded": True,
+        }
+    }
+
+    payload = await get_story_pending(
+        load_state=lambda: _async_value(state),
+        stories_metadata=stories_metadata,
+    )
+
+    req = payload["grouped_items"][0]["requirements"][0]
+    assert req["sprint_eligible"] is False
+    assert req["sprint_eligibility_reason"] == "all_stories_superseded"

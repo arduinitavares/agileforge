@@ -89,6 +89,56 @@ test('Story selection excludes requirements consumed by the current scope', () =
     assert.match(renderSource, /already included in the current Story completion scope/);
 });
 
+test('Story selection uses backend sprint eligibility metadata', () => {
+    const selectableSource = functionSource('isSelectableStoryScopeRequirement');
+    const renderSource = functionSource('renderStoryRequirementsList');
+
+    assert.match(selectableSource, /req\.sprint_eligible/);
+    assert.doesNotMatch(selectableSource, /isResolvedStoryStatus\(req\.status\)/);
+    assert.match(renderSource, /sprint_eligibility_reason === 'all_stories_completed'/);
+    assert.match(renderSource, /sprint_eligibility_reason === 'all_stories_superseded'/);
+    assert.match(renderSource, /sprint_eligibility_reason === 'pending_refinement'/);
+});
+
+test('Story requirement rows render status, position, and story id badges', () => {
+    const renderSource = functionSource('renderStoryRequirementsList');
+
+    assert.match(renderSource, /req\.status === 'Reconciled'/);
+    assert.match(renderSource, /assignment_turned_in/);
+    assert.match(renderSource, /const posLabel = `M\$\{index \+ 1\}\.\$\{reqIndex \+ 1\}`/);
+    assert.match(renderSource, /Story \$\{escapeHtml\(String\(s\.story_id\)\)\}/);
+    assert.match(renderSource, /line-through opacity-60/);
+});
+
+test('Story id badges can select an individual story detail', () => {
+    const renderSource = functionSource('renderStoryRequirementsList');
+    const selectSource = functionSource('selectStoryRequirementStory');
+    const detailSource = functionSource('renderSelectedRequirementStoryDetail');
+
+    assert.match(projectHtmlSource, /story-selected-story-detail/);
+    assert.match(renderSource, /<button type="button" data-story-badge/);
+    assert.match(renderSource, /data-story-id="\$\{escapeAttribute\(String\(s\.story_id\)\)\}"/);
+    assert.match(renderSource, /row\.querySelectorAll\('\[data-story-badge\]'\)/);
+    assert.match(renderSource, /selectStoryRequirementStory\(req\.requirement, story, event\)/);
+    assert.match(selectSource, /event\.stopPropagation\(\)/);
+    assert.match(selectSource, /activeRequirementStoryMetadata = story/);
+    assert.match(selectSource, /renderSelectedRequirementStoryDetail\(\)/);
+    assert.match(detailSource, /story\.story_description/);
+    assert.match(detailSource, /story\.acceptance_criteria/);
+});
+
+test('Story requirement reload refreshes the selected story detail metadata', () => {
+    const loadSource = functionSource('loadStoryRequirements');
+    const syncSource = functionSource('syncActiveRequirementStoryMetadata');
+
+    assert.match(loadSource, /syncActiveRequirementStoryMetadata\(\)/);
+    assert.match(syncSource, /activeRequirementStoryId === null/);
+    assert.match(syncSource, /storyRequirements\.find\(req => req\.requirement === activeStoryReq\)/);
+    assert.match(syncSource, /Number\(item\.story_id\) === activeRequirementStoryId/);
+    assert.match(syncSource, /activeRequirementStoryMetadata = freshStory/);
+    assert.match(syncSource, /renderSelectedRequirementStoryDetail\(\)/);
+});
+
 test('unresolved Story rows render non-intercepting selection placeholders', () => {
     const source = functionSource('renderStoryRequirementsList');
 

@@ -1670,7 +1670,67 @@ def _normalize_story_requirement(
     )
 
 
-def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0915
+def _story_pending_selection_metadata(
+    *,
+    status: str,
+    is_consumed: bool,
+    stories_metadata: dict[str, Any] | None,
+    normalized_requirement_key: str,
+) -> dict[str, Any]:
+    """Return sprint selection metadata for a Story pending requirement row."""
+    req_meta = (
+        (stories_metadata or {}).get(normalized_requirement_key)
+        if stories_metadata is not None
+        else {}
+    )
+    if not isinstance(req_meta, dict):
+        req_meta = {}
+    req_stories = req_meta.get("stories") if stories_metadata is not None else []
+    story_ids = req_meta.get("story_ids") if stories_metadata is not None else []
+    if not isinstance(req_stories, list):
+        req_stories = []
+    if not isinstance(story_ids, list):
+        story_ids = []
+
+    sprint_eligible = False
+    sprint_eligibility_reason = "pending_refinement"
+    if status == "Reconciled":
+        sprint_eligibility_reason = "reconciled"
+    elif status == "Attempted":
+        sprint_eligibility_reason = "attempt_in_progress"
+    elif status == "Pending":
+        sprint_eligibility_reason = "pending_refinement"
+    elif is_consumed:
+        sprint_eligibility_reason = "already_consumed"
+    elif stories_metadata is None:
+        sprint_eligible = status in ("Saved", "Merged")
+        sprint_eligibility_reason = "eligible" if sprint_eligible else "no_stories"
+    elif not req_stories:
+        sprint_eligibility_reason = "no_stories"
+    elif req_meta.get("has_candidates"):
+        sprint_eligible = True
+        sprint_eligibility_reason = "eligible"
+    elif req_meta.get("all_superseded"):
+        sprint_eligibility_reason = "all_stories_superseded"
+    elif req_meta.get("all_completed"):
+        sprint_eligibility_reason = "all_stories_completed"
+    elif req_meta.get("all_in_active_sprint"):
+        sprint_eligibility_reason = "in_active_sprint"
+    else:
+        sprint_eligibility_reason = "no_backlog_stories"
+
+    return {
+        "sprint_eligible": sprint_eligible,
+        "sprint_eligibility_reason": sprint_eligibility_reason,
+        "stories": req_stories,
+        "story_ids": story_ids,
+    }
+
+
+def _story_pending_items(  # noqa: PLR0915
+    state: dict[str, Any],
+    stories_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     roadmap_releases = state.get("roadmap_releases") or []
     if not isinstance(roadmap_releases, list):
         roadmap_releases = []
@@ -1732,6 +1792,20 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0
                 parent_requirement=req,
             )
 
+            # Get normalized key for mapping stories
+            norm_key = normalize_requirement_key(req)
+
+            # Check completed/consumed scope from state
+            is_consumed = False
+            scope_data = state.get("story_completion_scope")
+            if isinstance(scope_data, dict):
+                scope_reqs = scope_data.get("requirements") or []
+                if isinstance(scope_reqs, list):
+                    is_consumed = any(
+                        normalize_requirement_key(str(r)) == norm_key
+                        for r in scope_reqs
+                    )
+
             if _story_saved_for_scope(
                 state,
                 parent_requirement=req,
@@ -1776,6 +1850,14 @@ def _story_pending_items(state: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0
                 "attempt_count": attempt_count,
                 **(extension_metadata or {}),
             }
+            item.update(
+                _story_pending_selection_metadata(
+                    status=status,
+                    is_consumed=is_consumed,
+                    stories_metadata=stories_metadata,
+                    normalized_requirement_key=norm_key,
+                )
+            )
             if reconciliation is not None:
                 item["reconciliation"] = {
                     "action": reconciliation.get("action"),
@@ -1888,9 +1970,10 @@ def _normalize_fsm_state(value: str | None) -> str:
 async def get_story_pending(
     *,
     load_state: Callable[[], Awaitable[dict[str, Any]]],
+    stories_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = await load_state()
-    return _story_pending_items(state)
+    return _story_pending_items(state, stories_metadata=stories_metadata)
 
 
 async def generate_story_draft(  # noqa: PLR0915

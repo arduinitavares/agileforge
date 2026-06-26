@@ -39,6 +39,15 @@ EXPECTED_FAILURE_ATTEMPT_COUNT = 2
 OWNED_SPRINT_ID = 42
 
 
+def _pending_selection_fields(*, eligible: bool, reason: str) -> dict[str, Any]:
+    return {
+        "sprint_eligible": eligible,
+        "sprint_eligibility_reason": reason,
+        "stories": [],
+        "story_ids": [],
+    }
+
+
 def test_invalidate_unsaved_sprint_working_set_clears_draft_state() -> None:
     """Unsaved Sprint draft state is cleared after upstream Story changes."""
     state: dict[str, Any] = {
@@ -440,6 +449,7 @@ def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) ->
     runner = StoryPhaseRunner(
         product_repo=_FakeProductRepo(),
         workflow_service=_FakeWorkflowService(),
+        load_stories_metadata=lambda _project_id: None,
     )
 
     result = runner.pending(project_id=PROJECT_ID)
@@ -453,11 +463,19 @@ def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) ->
             "requirement": "Choose weekly squad",
             "status": "Saved",
             "attempt_count": 0,
+            **_pending_selection_fields(
+                eligible=True,
+                reason="eligible",
+            ),
         },
         {
             "requirement": "Review match result",
             "status": "Pending",
             "attempt_count": 1,
+            **_pending_selection_fields(
+                eligible=False,
+                reason="pending_refinement",
+            ),
         },
     ]
 
@@ -493,6 +511,7 @@ def test_story_pending_hydrates_roadmap_from_product_json_when_state_missing(
     runner = StoryPhaseRunner(
         product_repo=_FakeProductRepo(roadmap=persisted_roadmap),
         workflow_service=workflow_service,
+        load_stories_metadata=lambda _project_id: None,
     )
 
     result = runner.pending(project_id=PROJECT_ID)
@@ -504,6 +523,10 @@ def test_story_pending_hydrates_roadmap_from_product_json_when_state_missing(
             "requirement": "Review match result",
             "status": "Pending",
             "attempt_count": 1,
+            **_pending_selection_fields(
+                eligible=False,
+                reason="pending_refinement",
+            ),
         }
     ]
 

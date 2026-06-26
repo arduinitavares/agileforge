@@ -33,6 +33,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import desc
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import QueryableAttribute
 from sqlmodel import Session, select
@@ -97,6 +98,9 @@ from services.interview_runtime import (
     promote_reusable_draft,
     reset_subject_working_set,
     set_request_projection,
+)
+from services.orchestrator_query_service import (
+    query_requirement_stories_and_eligibility,
 )
 from services.packet_renderer import render_packet
 from services.packets.packet_service import (
@@ -3230,9 +3234,21 @@ async def get_project_story_pending(project_id: int) -> dict[str, Any]:
     if not product:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    try:
+        with Session(get_engine()) as session:
+            stories_metadata = query_requirement_stories_and_eligibility(
+                session, project_id
+            )
+    except SQLAlchemyError:
+        logger.exception(
+            "Failed to enrich story pending payload for project %d", project_id
+        )
+        stories_metadata = None
+
     session_id = str(project_id)
     data = await get_story_pending_service(
         load_state=lambda: _ensure_session(session_id),
+        stories_metadata=stories_metadata,
     )
 
     return {

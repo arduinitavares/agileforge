@@ -14,6 +14,9 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Team
+from services.orchestrator_query_service import (
+    query_requirement_stories_and_eligibility,
+)
 from tests.typing_helpers import require_id
 
 if TYPE_CHECKING:
@@ -289,3 +292,74 @@ def test_query_service_get_real_business_state_returns_idle_snapshot(
     assert by_name["Beta"]["user_stories_count"] == 0
     assert by_name["Beta"]["sprint_count"] == 0
     assert by_name["Beta"]["vision"] == "(No vision set)"
+
+
+def test_query_requirement_stories_and_eligibility(
+    session: Session,
+) -> None:
+    """Requirement stories should be grouped with sprint eligibility facts."""
+    expected_requirement_a_story_count = 2
+    expected_story_points = 3
+    expected_refinement_slot = 1
+
+    product = Product(name="Stories Eligibility Product", vision="Vision")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+
+    story_eligible = UserStory(
+        product_id=product_id,
+        title="Story Eligible",
+        story_description="Eligible story details",
+        acceptance_criteria="- First acceptance criterion",
+        status=StoryStatus.TO_DO,
+        story_points=expected_story_points,
+        is_refined=True,
+        is_superseded=False,
+        source_requirement="Requirement A",
+        refinement_slot=expected_refinement_slot,
+        rank="1",
+    )
+    story_superseded = UserStory(
+        product_id=product_id,
+        title="Story Superseded",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=True,
+        source_requirement="Requirement A",
+        rank="2",
+    )
+    story_completed = UserStory(
+        product_id=product_id,
+        title="Story Completed",
+        status=StoryStatus.DONE,
+        is_refined=True,
+        is_superseded=False,
+        source_requirement="Requirement B",
+        rank="3",
+    )
+    session.add_all([story_eligible, story_superseded, story_completed])
+    session.commit()
+
+    meta = query_requirement_stories_and_eligibility(session, product_id)
+
+    assert "requirement a" in meta
+    req_a = meta["requirement a"]
+    assert req_a["has_candidates"] is True
+    assert req_a["all_completed"] is False
+    assert req_a["all_superseded"] is False
+    assert len(req_a["stories"]) == expected_requirement_a_story_count
+    eligible_story = req_a["stories"][0]
+    assert eligible_story["story_description"] == "Eligible story details"
+    assert eligible_story["acceptance_criteria"] == "- First acceptance criterion"
+    assert eligible_story["story_points"] == expected_story_points
+    assert eligible_story["refinement_slot"] == expected_refinement_slot
+    assert eligible_story["rank"] == "1"
+
+    assert "requirement b" in meta
+    req_b = meta["requirement b"]
+    assert req_b["has_candidates"] is False
+    assert req_b["all_completed"] is True
+    assert req_b["all_superseded"] is False
+    assert len(req_b["stories"]) == 1
