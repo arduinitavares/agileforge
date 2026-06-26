@@ -41,6 +41,7 @@ from services.orchestrator_query_service import (
 )
 from services.phases.sprint_service import reset_sprint_planner_working_set
 from services.phases.story_service import (
+    STORY_IDEMPOTENCY_REUSED_MESSAGE,
     StoryPhaseError,
     complete_story_phase,
     generate_story_draft,
@@ -49,6 +50,8 @@ from services.phases.story_service import (
     reconcile_requirement,
     reopen_story_requirement,
     repair_story_readiness,
+    requirement_reconciliation_payload_identity,
+    requirement_reconciliation_request_identity,
     retry_story_draft,
     save_story_draft,
     save_story_patch,
@@ -708,11 +711,19 @@ class StoryPhaseRunner:
             return product
 
         try:
+            request_identity = requirement_reconciliation_request_identity(
+                requirement=requirement,
+                action=action,
+                reason=reason,
+                changed_by=changed_by,
+                evidence_links=evidence_links,
+            )
             with Session(get_engine()) as session:
                 replay = _requirement_reconcile_replay(
                     session,
                     project_id=project_id,
                     idempotency_key=idempotency_key,
+                    request_identity=request_identity,
                 )
                 if replay is not None:
                     return _data_envelope(replay)
@@ -1748,6 +1759,7 @@ def _requirement_reconcile_replay(
     *,
     project_id: int,
     idempotency_key: str,
+    request_identity: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Return a prior requirement reconciliation result for the same key."""
     events = session.exec(
@@ -1768,7 +1780,13 @@ def _requirement_reconcile_replay(
             and metadata.get("idempotency_key") == idempotency_key
             and isinstance(metadata.get("result"), dict)
         ):
-            return cast("dict[str, Any]", metadata["result"])
+            result = cast("dict[str, Any]", metadata["result"])
+            if requirement_reconciliation_payload_identity(result) != request_identity:
+                raise StoryPhaseError(
+                    STORY_IDEMPOTENCY_REUSED_MESSAGE,
+                    status_code=409,
+                )
+            return result
     return None
 
 
@@ -2098,6 +2116,8 @@ def _phase_error(exc: StoryPhaseError) -> dict[str, Any]:
     code = (
         ErrorCode.AUTHORITY_NOT_ACCEPTED
         if message.startswith("Setup required")
+        else ErrorCode.IDEMPOTENCY_KEY_REUSED
+        if message == STORY_IDEMPOTENCY_REUSED_MESSAGE
         else ErrorCode.INVALID_COMMAND
     )
     return _error_envelope(code, message)

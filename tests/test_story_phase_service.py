@@ -3083,6 +3083,55 @@ async def test_merge_story_resolution_persists_merged_projection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_requirement_reused_key_with_changed_request_fails_without_side_effects() -> None:  # noqa: E501
+    """Requirement reconciliation keys can replay only the same request."""
+    state: JsonDict = {
+        "fsm_state": "STORY_INTERVIEW",
+        "roadmap_releases": [{"items": ["Requirement A", "Requirement B"]}],
+    }
+    saved_states: list[JsonDict] = []
+
+    first = await story_service.reconcile_requirement(
+        project_id=1,
+        requirement="Requirement A",
+        action="already-implemented",
+        reason="Delivered earlier.",
+        idempotency_key="req-rec-reused",
+        changed_by="agent",
+        evidence_links=["evidence-a.md"],
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-26T10:00:00Z",
+    )
+
+    assert first["requirement"] == "Requirement A"
+    assert first["action"] == "already-implemented"
+    assert list(state["requirement_reconciliations"]) == ["requirement a"]
+    assert len(state["requirement_reconciliation_history"]) == 1
+    assert len(saved_states) == 1
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await story_service.reconcile_requirement(
+            project_id=1,
+            requirement="Requirement B",
+            action="duplicate",
+            reason="Covered elsewhere.",
+            idempotency_key="req-rec-reused",
+            changed_by="agent",
+            evidence_links=["evidence-b.md"],
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: saved_states.append(dict(updated)),
+            now_iso=lambda: "2026-06-26T10:01:00Z",
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert "idempotency" in exc_info.value.detail.lower()
+    assert list(state["requirement_reconciliations"]) == ["requirement a"]
+    assert len(state["requirement_reconciliation_history"]) == 1
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
 async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_saved() -> None:  # noqa: E501
     """Verify complete story phase moves to sprint setup once all stories are saved."""
     state: JsonDict = {
@@ -3262,6 +3311,54 @@ async def test_complete_story_phase_allows_saved_milestone_scope_with_pending_la
     )
 
     assert replay_payload == payload
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_reused_key_with_changed_scope_fails_without_side_effects() -> None:  # noqa: E501
+    """Story completion idempotency keys cannot move to a different scope."""
+    state: JsonDict = {
+        "fsm_state": "STORY_PERSISTENCE",
+        "roadmap_releases": [
+            {"items": ["Enable login", "Reset password"]},
+            {"items": ["Invite teammates"]},
+        ],
+        "story_saved": {
+            "Enable login": True,
+            "Reset password": True,
+            "Invite teammates": True,
+        },
+    }
+    saved_states: list[JsonDict] = []
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-story-reused-scope",
+        scope="milestone",
+        scope_id="milestone_0",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-03T12:00:00Z",
+    )
+
+    assert payload["story_completion_scope"]["scope_id"] == "milestone_0"
+    assert state["story_completion_scope"]["scope_id"] == "milestone_0"
+    assert len(saved_states) == 1
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await complete_story_phase(
+            expected_state="STORY_PERSISTENCE",
+            idempotency_key="complete-story-reused-scope",
+            scope="milestone",
+            scope_id="milestone_1",
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: saved_states.append(dict(updated)),
+            now_iso=lambda: "2026-06-03T12:01:00Z",
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert "idempotency" in exc_info.value.detail.lower()
+    assert state["story_completion_scope"]["scope_id"] == "milestone_0"
     assert len(saved_states) == 1
 
 
@@ -3883,6 +3980,54 @@ async def test_reopen_story_requirement_clears_saved_projection_before_sprint_wo
     runtime = state["interview_runtime"]["story"][parent_requirement]
     assert runtime["draft_projection"] == {}
     assert saved_states
+
+
+@pytest.mark.asyncio
+async def test_reopen_story_requirement_reused_key_with_changed_requirement_fails_without_side_effects() -> None:  # noqa: E501
+    """Story reopen keys can replay only the same parent requirement."""
+    first_requirement = "Live Pre-Lock Recommendation Workflow"
+    second_requirement = "Risk-Audited Artifact"
+    state: dict[str, Any] = {
+        "fsm_state": "SPRINT_SETUP",
+        "roadmap_releases": [{"items": [first_requirement, second_requirement]}],
+        "story_saved": {
+            first_requirement: True,
+            second_requirement: True,
+        },
+    }
+    saved_states: list[dict[str, Any]] = []
+
+    first = await story_service.reopen_story_requirement(
+        parent_requirement=first_requirement,
+        expected_state="SPRINT_SETUP",
+        idempotency_key="reopen-story-reused",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-05-23T12:00:00Z",
+        assert_reopen_safe=lambda _normalized_requirement: None,
+        reset_subject_working_set=reset_subject_working_set,
+    )
+
+    assert first["parent_requirement"] == first_requirement
+    assert state["story_saved"] == {second_requirement: True}
+    assert len(saved_states) == 1
+
+    with pytest.raises(StoryPhaseError) as exc_info:
+        await story_service.reopen_story_requirement(
+            parent_requirement=second_requirement,
+            expected_state="SPRINT_SETUP",
+            idempotency_key="reopen-story-reused",
+            load_state=lambda: _async_value(state),
+            save_state=lambda updated: saved_states.append(dict(updated)),
+            now_iso=lambda: "2026-05-23T12:01:00Z",
+            assert_reopen_safe=lambda _normalized_requirement: None,
+            reset_subject_working_set=reset_subject_working_set,
+        )
+
+    assert exc_info.value.status_code == 409  # noqa: PLR2004
+    assert "idempotency" in exc_info.value.detail.lower()
+    assert state["story_saved"] == {second_requirement: True}
+    assert len(saved_states) == 1
 
 
 @pytest.mark.asyncio

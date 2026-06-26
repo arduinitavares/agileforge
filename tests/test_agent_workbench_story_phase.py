@@ -433,6 +433,64 @@ def test_requirement_reconcile_records_decision_and_audit_event(
     assert '"action": "requirement_reconcile"' in (event.event_metadata or "")
 
 
+def test_requirement_reconcile_reused_key_with_changed_request_returns_idempotency_error(  # noqa: E501
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requirement reconcile event replay must fail closed on changed requests."""
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        del tool_context
+        return {"success": True, "project_id": product_id}
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.get_engine",
+        session.get_bind,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.select_project",
+        fake_select_project,
+    )
+    session.add(Product(product_id=PROJECT_ID, name="Cartola"))
+    session.commit()
+    workflow = _FakeWorkflowService()
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow,
+    )
+
+    first = runner.requirement_reconcile(
+        project_id=PROJECT_ID,
+        requirement="Choose weekly squad",
+        action="already-implemented",
+        reason="Delivered earlier.",
+        idempotency_key="req-rec-reused",
+        changed_by="agent",
+        evidence_links=["evidence-a.md"],
+    )
+
+    assert first["ok"] is True
+    assert first["data"]["requirement"] == "Choose weekly squad"
+
+    second = runner.requirement_reconcile(
+        project_id=PROJECT_ID,
+        requirement="Review match result",
+        action="duplicate",
+        reason="Covered elsewhere.",
+        idempotency_key="req-rec-reused",
+        changed_by="agent",
+        evidence_links=["evidence-b.md"],
+    )
+
+    assert second["ok"] is False
+    assert second["errors"][0]["code"] == "IDEMPOTENCY_KEY_REUSED"
+    assert list(workflow.state["requirement_reconciliations"]) == [
+        "choose weekly squad"
+    ]
+    assert len(session.exec(select(WorkflowEvent)).all()) == 1
+
+
 def test_story_pending_returns_grouped_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Story pending returns roadmap requirements grouped by milestone."""
 

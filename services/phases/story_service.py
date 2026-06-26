@@ -78,6 +78,9 @@ REQUIREMENT_RECONCILIATION_ALLOWED_STATES = frozenset(
         OrchestratorState.SPRINT_COMPLETE.value,
     }
 )
+STORY_IDEMPOTENCY_REUSED_MESSAGE = (
+    "Story phase idempotency key reused with different request"
+)
 
 
 class StoryPhaseError(Exception):
@@ -102,6 +105,58 @@ def get_all_roadmap_requirements(state: dict[str, Any]) -> list[str]:
 def requirement_reconciliation_key(requirement: str) -> str:
     """Return the stable lookup key for one roadmap requirement string."""
     return " ".join(requirement.strip().split()).casefold()
+
+
+def _idempotency_evidence_links(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _raise_story_idempotency_reused() -> None:
+    raise StoryPhaseError(STORY_IDEMPOTENCY_REUSED_MESSAGE, status_code=409)
+
+
+def _ensure_idempotency_identity_matches(
+    *,
+    existing_identity: dict[str, Any],
+    current_identity: dict[str, Any],
+) -> None:
+    if existing_identity != current_identity:
+        _raise_story_idempotency_reused()
+
+
+def requirement_reconciliation_request_identity(
+    *,
+    requirement: str,
+    action: str,
+    reason: str,
+    changed_by: str,
+    evidence_links: list[str] | None,
+) -> dict[str, Any]:
+    """Return the canonical request identity for requirement reconciliation."""
+    return {
+        "requirement_key": requirement_reconciliation_key(requirement),
+        "action": action.strip().lower(),
+        "reason": reason.strip(),
+        "changed_by": changed_by.strip(),
+        "evidence_links": _idempotency_evidence_links(evidence_links or []),
+    }
+
+
+def requirement_reconciliation_payload_identity(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the canonical idempotency identity represented by a payload."""
+    return {
+        "requirement_key": requirement_reconciliation_key(
+            str(payload.get("requirement", ""))
+        ),
+        "action": str(payload.get("action", "")).strip().lower(),
+        "reason": str(payload.get("reason", "")).strip(),
+        "changed_by": str(payload.get("changed_by", "")).strip(),
+        "evidence_links": _idempotency_evidence_links(payload.get("evidence_links")),
+    }
 
 
 def requirement_reconciliation_for(
@@ -438,6 +493,22 @@ def _story_completion_scope_requirements(
         "scope_id": normalized_scope_id,
         "requirements": requirements,
         **(extension_metadata or {}),
+    }
+
+
+def _story_completion_scope_identity(
+    scope_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(scope_payload, dict):
+        return {
+            "scope": None,
+            "scope_id": None,
+            "requirements": [],
+        }
+    return {
+        "scope": scope_payload.get("scope"),
+        "scope_id": scope_payload.get("scope_id"),
+        "requirements": _string_list(scope_payload.get("requirements")),
     }
 
 
@@ -2833,6 +2904,22 @@ async def reopen_story_requirement(
     if isinstance(idempotency_registry, dict):
         existing = idempotency_registry.get(normalized_idempotency_key)
         if isinstance(existing, dict):
+            normalized_parent_requirement = _normalize_story_requirement(
+                state,
+                parent_requirement,
+            )
+            _ensure_idempotency_identity_matches(
+                existing_identity={
+                    "parent_requirement_key": requirement_reconciliation_key(
+                        str(existing.get("parent_requirement", ""))
+                    )
+                },
+                current_identity={
+                    "parent_requirement_key": requirement_reconciliation_key(
+                        normalized_parent_requirement
+                    )
+                },
+            )
             return dict(existing)
 
     current_state = _normalize_fsm_state(state.get("fsm_state"))
@@ -3005,12 +3092,6 @@ async def reconcile_requirement(
             status_code=409,
         )
 
-    idempotency_registry = state.get(REQUIREMENT_RECONCILIATION_IDEMPOTENCY_KEY)
-    if isinstance(idempotency_registry, dict):
-        existing = idempotency_registry.get(normalized_idempotency_key)
-        if isinstance(existing, dict):
-            return dict(existing)
-
     matches = _roadmap_requirement_matches(state, requirement=normalized_requirement)
     if not matches:
         raise StoryPhaseError(
@@ -3026,14 +3107,31 @@ async def reconcile_requirement(
         )
 
     matched_requirement = matches[0]
+    request_identity = requirement_reconciliation_request_identity(
+        requirement=matched_requirement,
+        action=normalized_action,
+        reason=normalized_reason,
+        changed_by=changed_by,
+        evidence_links=evidence_links,
+    )
+    idempotency_registry = state.get(REQUIREMENT_RECONCILIATION_IDEMPOTENCY_KEY)
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            _ensure_idempotency_identity_matches(
+                existing_identity=requirement_reconciliation_payload_identity(existing),
+                current_identity=request_identity,
+            )
+            return dict(existing)
+
     payload: dict[str, Any] = {
         "schema_version": REQUIREMENT_RECONCILIATION_SCHEMA_VERSION,
         "project_id": project_id,
         "requirement": matched_requirement,
         "action": normalized_action,
         "reason": normalized_reason,
-        "evidence_links": evidence_links or [],
-        "changed_by": changed_by,
+        "evidence_links": request_identity["evidence_links"],
+        "changed_by": request_identity["changed_by"],
         "reconciled_at": now_iso(),
         "idempotency_key": normalized_idempotency_key,
         "terminal": (
@@ -3095,6 +3193,25 @@ async def complete_story_phase(  # noqa: PLR0915
     if isinstance(idempotency_registry, dict):
         existing = idempotency_registry.get(normalized_idempotency_key)
         if isinstance(existing, dict):
+            _, replay_scope_payload = _story_completion_scope_requirements(
+                state,
+                scope=scope,
+                scope_id=scope_id,
+                parent_requirements=parent_requirements,
+            )
+            existing_scope_payload = existing.get("story_completion_scope")
+            existing_scope = (
+                existing_scope_payload
+                if isinstance(existing_scope_payload, dict)
+                else None
+            )
+            existing_scope_identity = _story_completion_scope_identity(
+                existing_scope
+            )
+            _ensure_idempotency_identity_matches(
+                existing_identity=existing_scope_identity,
+                current_identity=_story_completion_scope_identity(replay_scope_payload),
+            )
             return dict(existing)
 
     current_state = _normalize_fsm_state(state.get("fsm_state"))
