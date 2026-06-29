@@ -107,6 +107,7 @@ EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
     "agileforge discovery prd draft record",
     "agileforge discovery prd accept",
     "agileforge discovery prd reject",
+    "agileforge discovery spec-amendment draft record",
 }
 
 EXPECTED_BROWNFIELD_COMMAND_NAMES = {
@@ -1438,3 +1439,38 @@ def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
             ErrorCode.PRD_REVIEW_STATE_INVALID.value,
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
         }.issubset(set(review["errors"]))
+
+
+def test_scope_discovery_spec_amendment_command_publishes_cli_schema() -> None:
+    """Publish the Spec Amendment Draft recording command contract."""
+    capabilities = _capability_by_name()
+    spec_amendment_command_name = "agileforge discovery spec-amendment draft record"
+    assert command_is_available(spec_amendment_command_name) is True
+    assert spec_amendment_command_name in capabilities
+    assert capabilities[spec_amendment_command_name]["installed"] is True
+
+    spec_amendment = command_schema_payload(spec_amendment_command_name)
+
+    assert spec_amendment["mutates"] is True
+    assert capabilities[spec_amendment_command_name]["phase"] == "scope_discovery"
+    assert spec_amendment["idempotency_required"] is True
+    assert spec_amendment["idempotency_policy"]["non_dry_run"] == "required"
+    assert spec_amendment["input"]["required"] == [
+        "project_id",
+        "prd_id",
+        "amendment_file",
+        "idempotency_key",
+    ]
+    assert spec_amendment["input"]["optional"] == [
+        "base_spec_version_id",
+        "changed_by",
+    ]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.PRD_NOT_FOUND.value,
+        ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED.value,
+        ErrorCode.SPEC_FILE_NOT_FOUND.value,
+        ErrorCode.SPEC_FILE_INVALID.value,
+        ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+        ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+    }.issubset(set(spec_amendment["errors"]))

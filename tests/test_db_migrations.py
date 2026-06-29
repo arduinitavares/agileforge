@@ -263,6 +263,36 @@ def test_authority_curation_migration_is_idempotent(tmp_path: Path) -> None:
     )
 
 
+def test_spec_amendment_draft_migration_creates_storage(tmp_path: Path) -> None:
+    """Fresh migration creates Scope Discovery Spec Amendment Draft storage."""
+    engine = _create_min_runtime_schema(
+        f"sqlite:///{(tmp_path / 'spec-amendment-drafts.sqlite3').as_posix()}"
+    )
+
+    ensure_schema_current(engine)
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    assert "discovery_spec_amendment_drafts" in table_names
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("discovery_spec_amendment_drafts")
+    }
+    assert {
+        "spec_amendment_draft_id",
+        "project_id",
+        "prd_id",
+        "challenge_artifact_id",
+        "status",
+        "amendment_file",
+        "content_json",
+        "validation_json",
+        "artifact_fingerprint",
+        "request_hash",
+        "idempotency_key",
+    }.issubset(columns)
+
+
 def test_authority_curation_migration_repairs_legacy_feedback_index(
     tmp_path: Path,
 ) -> None:

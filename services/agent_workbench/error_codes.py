@@ -97,6 +97,9 @@ class ErrorCode(StrEnum):
     PRD_ACCEPTED_IMMUTABLE = "PRD_ACCEPTED_IMMUTABLE"
     PRD_SUPERSEDES_NOT_FOUND = "PRD_SUPERSEDES_NOT_FOUND"
     PRD_SUPERSEDES_NOT_ACCEPTED = "PRD_SUPERSEDES_NOT_ACCEPTED"
+    SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED = (
+        "SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED"
+    )
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -562,6 +565,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="Superseded PRD must be accepted.",
+    ),
+    ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED: ErrorMetadata(
+        code=ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Spec Amendment Drafts require an accepted PRD.",
     ),
 }
 

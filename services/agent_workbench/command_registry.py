@@ -1310,6 +1310,29 @@ _SCOPE_DISCOVERY_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge discovery spec-amendment draft record",
+        mutates=True,
+        phase="scope_discovery",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "prd_id",
+            "amendment_file",
+            "idempotency_key",
+        ),
+        input_optional=("base_spec_version_id", "changed_by"),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.PRD_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED.value,
+            ErrorCode.SPEC_FILE_NOT_FOUND.value,
+            ErrorCode.SPEC_FILE_INVALID.value,
+            ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
 )
 
 

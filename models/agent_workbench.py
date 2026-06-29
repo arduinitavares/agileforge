@@ -118,3 +118,37 @@ class DiscoveryPrd(SQLModel, table=True):
     changed_by: str = Field(default="cli-agent", index=True)
     created_at: datetime = Field(default_factory=_utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class DiscoverySpecAmendmentDraft(SQLModel, table=True):
+    """Saved Scope Discovery Spec Amendment Draft."""
+
+    __tablename__ = "discovery_spec_amendment_drafts"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_discovery_spec_amendment_project_idempotency",
+        ),
+    )
+
+    spec_amendment_draft_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    prd_id: int = Field(foreign_key="discovery_prds.prd_id", index=True)
+    challenge_artifact_id: int = Field(
+        foreign_key="discovery_challenge_artifacts.challenge_artifact_id",
+        index=True,
+    )
+    status: str = Field(index=True)
+    amendment_file: str = Field(sa_type=Text)
+    content_json: str = Field(sa_type=Text)
+    validation_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    base_spec_version_id: int | None = Field(default=None, index=True)
+    base_spec_hash: str | None = Field(default=None, index=True)
+    amended_spec_hash: str | None = Field(default=None, index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)

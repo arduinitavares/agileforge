@@ -12,20 +12,37 @@ from typing import Any, cast
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from models.agent_workbench import DiscoveryChallengeArtifact, DiscoveryPrd
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.agent_workbench.scope_extension import (
+    ScopeExtensionRunner,
+    ScopeExtensionValidateRequest,
+    load_structured_spec_file,
+)
 
 CHALLENGE_RECORD_COMMAND: str = "agileforge discovery challenge record"
 PRD_DRAFT_RECORD_COMMAND: str = "agileforge discovery prd draft record"
 PRD_ACCEPT_COMMAND: str = "agileforge discovery prd accept"
 PRD_REJECT_COMMAND: str = "agileforge discovery prd reject"
+SPEC_AMENDMENT_DRAFT_RECORD_COMMAND: str = (
+    "agileforge discovery spec-amendment draft record"
+)
 CHALLENGE_PRODUCER: str = "grill-with-docs"
 PRD_PRODUCER: str = "to-prd"
 PRD_STATUS_DRAFT: str = "draft"
 PRD_STATUS_ACCEPTED: str = "accepted"
 PRD_STATUS_REJECTED: str = "rejected"
+SPEC_AMENDMENT_DRAFT_READY: str = "ready_for_amendment_acceptance"
+SPEC_AMENDMENT_DRAFT_VALIDATION_FAILED: str = "validation_failed"
+SPEC_AMENDMENT_DRAFT_INVALID_REMEDIATION: tuple[str, ...] = (
+    "Revise the Spec Amendment Draft so it only adds new accepted source items.",
+)
 CHALLENGE_READINESS_VALUES: frozenset[str] = frozenset(
     {"blocked", "needs_answers", "ready_for_prd"}
 )
@@ -79,6 +96,35 @@ class PrdReviewRequest(BaseModel):
     notes: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
+
+
+class SpecAmendmentDraftRecordRequest(BaseModel):
+    """Validated request for recording a Spec Amendment Draft."""
+
+    project_id: int
+    prd_id: int
+    amendment_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    base_spec_version_id: int | None = None
+    changed_by: str = "cli-agent"
+
+
+class _ReadOnlyScopeExtensionWorkflowService:
+    """Minimal workflow adapter for read-only scope-extension validation."""
+
+    def get_session_status(self, session_id: str) -> dict[str, Any]:
+        _ = session_id
+        return {}
+
+    def update_session_status(
+        self,
+        session_id: str,
+        partial_update: dict[str, Any],
+    ) -> None:
+        _ = session_id
+        _ = partial_update
+        message = "Spec Amendment Draft recording cannot mutate workflow state."
+        raise RuntimeError(message)
 
 
 class ScopeDiscoveryRunner:
@@ -210,6 +256,84 @@ class ScopeDiscoveryRunner:
 
         return _success(_prd_data(prd))
 
+    def record_spec_amendment_draft(
+        self,
+        request: SpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record and validate an agent-generated Spec Amendment Draft."""
+        prd, source_error = self._validated_spec_amendment_source_prd(request)
+        if source_error is not None:
+            return source_error
+        prd = cast("DiscoveryPrd", prd)
+
+        content_json, amended_spec_hash, load_error = _load_spec_amendment_content(
+            request.amendment_file
+        )
+        if load_error is not None:
+            return load_error
+        content_json = cast("str", content_json)
+        amended_spec_hash = cast("str", amended_spec_hash)
+
+        validation_result = ScopeExtensionRunner(
+            session=self._session,
+            workflow_service=_ReadOnlyScopeExtensionWorkflowService(),
+        ).validate(
+            ScopeExtensionValidateRequest(
+                project_id=request.project_id,
+                spec_file=request.amendment_file,
+                base_spec_version_id=request.base_spec_version_id,
+            )
+        )
+        if not validation_result["ok"]:
+            return validation_result
+
+        validation = cast("dict[str, Any]", validation_result["data"])
+        status = (
+            SPEC_AMENDMENT_DRAFT_READY
+            if validation["valid"]
+            else SPEC_AMENDMENT_DRAFT_VALIDATION_FAILED
+        )
+        artifact_fingerprint = amended_spec_hash
+        request_hash = _spec_amendment_draft_request_hash(
+            request=request,
+            prd=prd,
+            artifact_fingerprint=artifact_fingerprint,
+        )
+        existing = self._session.exec(
+            select(DiscoverySpecAmendmentDraft).where(
+                DiscoverySpecAmendmentDraft.project_id == request.project_id,
+                DiscoverySpecAmendmentDraft.idempotency_key == request.idempotency_key,
+            )
+        ).first()
+        if existing is not None:
+            return _existing_spec_amendment_draft_result(
+                draft=existing,
+                request=request,
+                request_hash=request_hash,
+            )
+
+        draft = DiscoverySpecAmendmentDraft(
+            project_id=request.project_id,
+            prd_id=request.prd_id,
+            challenge_artifact_id=prd.challenge_artifact_id,
+            status=status,
+            amendment_file=request.amendment_file,
+            content_json=content_json,
+            validation_json=canonical_json(validation),
+            artifact_fingerprint=artifact_fingerprint,
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            base_spec_version_id=cast("int | None", validation["base_spec_version_id"]),
+            base_spec_hash=cast("str | None", validation["base_spec_hash"]),
+            amended_spec_hash=amended_spec_hash,
+            changed_by=request.changed_by,
+        )
+        self._session.add(draft)
+        self._session.commit()
+        self._session.refresh(draft)
+
+        return _success(_spec_amendment_draft_data(draft))
+
     def _validated_prd_draft_record_inputs(
         self,
         request: PrdDraftRecordRequest,
@@ -230,6 +354,46 @@ class ScopeDiscoveryRunner:
             ),
             None,
         )
+
+    def _validated_spec_amendment_source_prd(
+        self,
+        request: SpecAmendmentDraftRecordRequest,
+    ) -> tuple[DiscoveryPrd | None, dict[str, Any] | None]:
+        project_error = _project_exists_error(self._session, request.project_id)
+        if project_error is not None:
+            return None, project_error
+
+        prd = self._session.get(DiscoveryPrd, request.prd_id)
+        if prd is None or prd.project_id != request.project_id:
+            return (
+                None,
+                _error(
+                    ErrorCode.PRD_NOT_FOUND,
+                    details={
+                        "project_id": request.project_id,
+                        "prd_id": request.prd_id,
+                    },
+                    remediation=[
+                        "Accept a PRD before recording a Spec Amendment Draft."
+                    ],
+                ),
+            )
+        if prd.status != PRD_STATUS_ACCEPTED:
+            return (
+                None,
+                _error(
+                    ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED,
+                    details={
+                        "project_id": request.project_id,
+                        "prd_id": request.prd_id,
+                        "status": prd.status,
+                    },
+                    remediation=[
+                        "Accept the PRD before recording a Spec Amendment Draft."
+                    ],
+                ),
+            )
+        return prd, None
 
     def _validate_prd_draft_record_state(
         self,
@@ -460,6 +624,24 @@ def _existing_prd_result(
     return _success(_prd_data(prd))
 
 
+def _existing_spec_amendment_draft_result(
+    *,
+    draft: DiscoverySpecAmendmentDraft,
+    request: SpecAmendmentDraftRecordRequest,
+    request_hash: str,
+) -> dict[str, Any]:
+    if draft.request_hash != request_hash:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            details={
+                "project_id": request.project_id,
+                "idempotency_key": request.idempotency_key,
+            },
+            remediation=["Retry with a fresh --idempotency-key."],
+        )
+    return _success(_spec_amendment_draft_data(draft))
+
+
 def _prd_draft_request_hash(
     *,
     request: PrdDraftRecordRequest,
@@ -474,6 +656,25 @@ def _prd_draft_request_hash(
     }
     if request.supersedes_prd_id is not None:
         request_data["supersedes_prd_id"] = request.supersedes_prd_id
+    return canonical_hash(request_data)
+
+
+def _spec_amendment_draft_request_hash(
+    *,
+    request: SpecAmendmentDraftRecordRequest,
+    prd: DiscoveryPrd,
+    artifact_fingerprint: str,
+) -> str:
+    request_data: dict[str, object] = {
+        "command": SPEC_AMENDMENT_DRAFT_RECORD_COMMAND,
+        "project_id": request.project_id,
+        "prd_id": request.prd_id,
+        "challenge_artifact_id": prd.challenge_artifact_id,
+        "artifact_fingerprint": artifact_fingerprint,
+        "changed_by": request.changed_by,
+    }
+    if request.base_spec_version_id is not None:
+        request_data["base_spec_version_id"] = request.base_spec_version_id
     return canonical_hash(request_data)
 
 
@@ -547,6 +748,34 @@ def _load_prd_payload(
             ),
         )
     return payload, None
+
+
+def _load_spec_amendment_content(
+    amendment_file: str,
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    try:
+        _artifact, content_json, spec_hash = load_structured_spec_file(amendment_file)
+    except FileNotFoundError:
+        return (
+            None,
+            None,
+            _error(
+                ErrorCode.SPEC_FILE_NOT_FOUND,
+                details={"amendment_file": amendment_file},
+                remediation=["Pass an existing --amendment-file path."],
+            ),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return (
+            None,
+            None,
+            _error(
+                ErrorCode.SPEC_FILE_INVALID,
+                details={"amendment_file": amendment_file, "error": str(exc)},
+                remediation=["Pass a valid structured AgileForge spec file."],
+            ),
+        )
+    return content_json, spec_hash, None
 
 
 def _validate_prd_source_challenge(
@@ -931,6 +1160,40 @@ def _prd_next_action(status: str) -> str:
     if status == PRD_STATUS_REJECTED:
         return "revise_prd"
     return "accept_prd"
+
+
+def _spec_amendment_draft_data(
+    draft: DiscoverySpecAmendmentDraft,
+) -> dict[str, Any]:
+    validation = json.loads(draft.validation_json)
+    blocking_issues = validation.get("blocking_issues", [])
+    remediation = (
+        SPEC_AMENDMENT_DRAFT_INVALID_REMEDIATION
+        if draft.status == SPEC_AMENDMENT_DRAFT_VALIDATION_FAILED
+        else []
+    )
+    return {
+        "spec_amendment_draft_id": draft.spec_amendment_draft_id,
+        "project_id": draft.project_id,
+        "prd_id": draft.prd_id,
+        "challenge_artifact_id": draft.challenge_artifact_id,
+        "status": draft.status,
+        "amendment_file": draft.amendment_file,
+        "artifact_fingerprint": draft.artifact_fingerprint,
+        "base_spec_version_id": draft.base_spec_version_id,
+        "base_spec_hash": draft.base_spec_hash,
+        "amended_spec_hash": draft.amended_spec_hash,
+        "validation": validation,
+        "blocking_issues": blocking_issues,
+        "remediation": list(remediation),
+        "next_action": _spec_amendment_draft_next_action(draft.status),
+    }
+
+
+def _spec_amendment_draft_next_action(status: str) -> str:
+    if status == SPEC_AMENDMENT_DRAFT_READY:
+        return "accept_spec_amendment"
+    return "revise_spec_amendment_draft"
 
 
 def _next_prd_version(superseded_prd: DiscoveryPrd | None) -> str:

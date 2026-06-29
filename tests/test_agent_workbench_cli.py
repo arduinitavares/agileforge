@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess  # nosec B404
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,9 +14,11 @@ import pytest
 
 from cli.main import main
 from models.core import Product
+from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
+from services.specs.profile_content import normalize_spec_content_for_registry
 
 type JsonObject = dict[str, Any]
 PROJECT_ID = 7
@@ -300,6 +303,40 @@ class _FakeApplication:
         return {
             "ok": True,
             "data": {"project_id": project_id, "status": "rejected"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_spec_amendment_draft_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        amendment_file: str,
+        idempotency_key: str,
+        base_spec_version_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery Spec Amendment Draft record payload."""
+        self.calls.append(
+            (
+                "discovery_spec_amendment_draft_record",
+                {
+                    "project_id": project_id,
+                    "prd_id": prd_id,
+                    "amendment_file": amendment_file,
+                    "idempotency_key": idempotency_key,
+                    "base_spec_version_id": base_spec_version_id,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "status": "ready_for_amendment_acceptance",
+            },
             "warnings": [],
             "errors": [],
         }
@@ -2561,6 +2598,54 @@ def test_discovery_prd_reject_cli_routes_to_application(
     ]
 
 
+def test_discovery_spec_amendment_draft_record_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery Spec Amendment Draft record routes guarded args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            "55",
+            "--amendment-file",
+            "artifacts/spec-amendment.json",
+            "--base-spec-version-id",
+            "3",
+            "--idempotency-key",
+            "spec-amendment-draft-record-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery spec-amendment draft record"
+    )
+    assert app.calls == [
+        (
+            "discovery_spec_amendment_draft_record",
+            {
+                "project_id": PROJECT_ID,
+                "prd_id": 55,
+                "amendment_file": "artifacts/spec-amendment.json",
+                "base_spec_version_id": 3,
+                "idempotency_key": "spec-amendment-draft-record-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
 def _write_cli_challenge_artifact(
     tmp_path: Path,
     *,
@@ -2608,6 +2693,121 @@ def _write_cli_prd_draft(
         payload["prd_id"] = prd_id
     path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
+
+
+def _cli_base_spec_artifact() -> JsonObject:
+    """Build a minimal structured spec fixture for CLI discovery tests."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.scope-discovery-cli",
+        "title": "Scope Discovery CLI Fixture",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-06-29",
+        "updated_at": "2026-06-29",
+        "summary": "Exercise CLI Spec Amendment Draft recording.",
+        "problem_statement": "A project needs additive new scope.",
+        "items": [
+            {
+                "id": "GOAL.existing",
+                "type": "GOAL",
+                "status": "accepted",
+                "title": "Existing goal",
+                "statement": "Preserve existing accepted goal.",
+            },
+            {
+                "id": "REQ.existing-capability",
+                "type": "REQ",
+                "status": "accepted",
+                "title": "Existing capability",
+                "statement": "The system MUST preserve existing capability.",
+                "level": "MUST",
+                "verification": "acceptance-test",
+                "acceptance": ["Existing capability remains available."],
+            },
+        ],
+        "relations": [
+            {
+                "from": "REQ.existing-capability",
+                "type": "satisfies",
+                "to": "GOAL.existing",
+                "rationale": "Requirement satisfies the existing goal.",
+            }
+        ],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {"markdown_profile": "agileforge.spec_markdown.v1"},
+    }
+
+
+def _cli_with_added_scope(base: JsonObject) -> JsonObject:
+    """Return a CLI spec amendment fixture with additive scope."""
+    amended = deepcopy(base)
+    items = cast("list[JsonObject]", amended["items"])
+    items.append(
+        {
+            "id": "REQ.cli-new-reporting",
+            "type": "REQ",
+            "status": "accepted",
+            "title": "CLI new reporting",
+            "statement": "The system MUST support CLI-tested reporting scope.",
+            "level": "MUST",
+            "verification": "acceptance-test",
+            "acceptance": ["CLI-tested reporting scope is available."],
+        }
+    )
+    return amended
+
+
+def _cli_with_modified_scope(base: JsonObject) -> JsonObject:
+    """Return a CLI spec amendment fixture that modifies accepted scope."""
+    amended = deepcopy(base)
+    items = cast("list[JsonObject]", amended["items"])
+    items[1]["statement"] = "The system MUST replace existing behavior."
+    return amended
+
+
+def _write_cli_spec_amendment(
+    tmp_path: Path,
+    *,
+    artifact: JsonObject,
+    name: str,
+) -> str:
+    """Write a CLI Spec Amendment Draft fixture."""
+    path = tmp_path / name
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    return str(path)
+
+
+def _accepted_cli_base_spec(session: Session, artifact: JsonObject) -> int:
+    """Persist an accepted base spec for CLI Spec Amendment Draft tests."""
+    normalized = normalize_spec_content_for_registry(json.dumps(artifact))
+    spec = SpecRegistry(
+        product_id=PROJECT_ID,
+        spec_hash=normalized.spec_hash,
+        content=normalized.content,
+        content_ref="accepted-base.json",
+        status="approved",
+        approved_by="test",
+        approval_notes="accepted for tests",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    acceptance = SpecAuthorityAcceptance(
+        product_id=PROJECT_ID,
+        spec_version_id=spec.spec_version_id or 0,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        compiler_version="test",
+        prompt_hash="prompt",
+        spec_hash=spec.spec_hash,
+    )
+    session.add(acceptance)
+    session.commit()
+    assert spec.spec_version_id is not None
+    return spec.spec_version_id
 
 
 def _cli_rich_content(**overrides: object) -> JsonObject:
@@ -3015,6 +3215,166 @@ def test_discovery_prd_reject_cli_rejects_draft_prd(
     assert data["next_action"] == "revise_prd"
 
 
+def test_discovery_spec_amendment_draft_record_cli_records_valid_draft(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI records a valid Spec Amendment Draft from an accepted PRD."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-spec-amendment-cli-001",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-spec-amendment-cli-001",
+    )
+    prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+    accept_rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Approved for spec amendment draft recording.",
+            "--idempotency-key",
+            "prd-accept-spec-amendment-cli-001",
+        ],
+        application=app,
+    )
+    _stdout_payload(capsys)
+    base = _cli_base_spec_artifact()
+    base_spec_version_id = _accepted_cli_base_spec(session, base)
+    amendment_file = _write_cli_spec_amendment(
+        tmp_path,
+        artifact=_cli_with_added_scope(base),
+        name="valid-spec-amendment-cli.json",
+    )
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--amendment-file",
+            amendment_file,
+            "--base-spec-version-id",
+            str(base_spec_version_id),
+            "--idempotency-key",
+            "spec-amendment-valid-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    data = _mapping(payload["data"])
+    validation = _mapping(data["validation"])
+
+    assert accept_rc == 0
+    assert rc == 0
+    assert payload["ok"] is True
+    assert data["status"] == "ready_for_amendment_acceptance"
+    assert validation["valid"] is True
+    assert data["next_action"] == "accept_spec_amendment"
+
+
+def test_discovery_spec_amendment_draft_record_cli_returns_validation_blockers(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI records invalid Spec Amendment Drafts with validation blockers."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-spec-amendment-cli-002",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-spec-amendment-cli-002",
+    )
+    prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+    accept_rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Approved before invalid amendment test.",
+            "--idempotency-key",
+            "prd-accept-spec-amendment-cli-002",
+        ],
+        application=app,
+    )
+    _stdout_payload(capsys)
+    base = _cli_base_spec_artifact()
+    amendment_file = _write_cli_spec_amendment(
+        tmp_path,
+        artifact=_cli_with_modified_scope(base),
+        name="invalid-spec-amendment-cli.json",
+    )
+    _accepted_cli_base_spec(session, base)
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--amendment-file",
+            amendment_file,
+            "--idempotency-key",
+            "spec-amendment-invalid-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    data = _mapping(payload["data"])
+    validation = _mapping(data["validation"])
+    blockers = _sequence(data["blocking_issues"])
+
+    assert accept_rc == 0
+    assert rc == 0
+    assert payload["ok"] is True
+    assert data["status"] == "validation_failed"
+    assert validation["valid"] is False
+    assert blockers
+    assert data["next_action"] == "revise_spec_amendment_draft"
+
+
 def test_discovery_prd_draft_record_cli_rejects_in_place_accepted_edit(
     capsys: pytest.CaptureFixture[str],
     session: Session,
@@ -3212,6 +3572,42 @@ def test_discovery_prd_draft_record_cli_rejects_blank_idempotency_key(
     assert payload["ok"] is False
     assert _mapping(payload["meta"])["command"] == (
         "agileforge discovery prd draft record"
+    )
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_discovery_spec_amendment_draft_record_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope discovery Spec Amendment Draft record requires idempotency."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            "55",
+            "--amendment-file",
+            "artifacts/spec-amendment.json",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery spec-amendment draft record"
     )
     assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
     assert app.calls == []

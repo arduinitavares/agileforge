@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         ChallengeArtifactRecordRequest,
         PrdDraftRecordRequest,
         PrdReviewRequest,
+        SpecAmendmentDraftRecordRequest,
     )
     from services.agent_workbench.scope_extension import (
         ScopeExtensionStartRequest,
@@ -1605,6 +1606,22 @@ class _FakeScopeDiscoveryRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "rejected"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def record_spec_amendment_draft(
+        self,
+        request: SpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record Spec Amendment Draft requests."""
+        self.calls.append(("record_spec_amendment_draft", request))
+        return {
+            "ok": True,
+            "data": {
+                "project_id": request.project_id,
+                "status": "ready_for_amendment_acceptance",
+            },
             "warnings": [],
             "errors": [],
         }
@@ -3225,6 +3242,31 @@ def test_application_discovery_prd_reject_passes_request_data_to_runner() -> Non
     assert request.reviewer == "Ada"
     assert request.notes == "Missing non-goal clarity."
     assert request.idempotency_key == "prd-reject-001"
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_spec_amendment_draft_record_passes_request() -> None:
+    """Verify discovery facade builds a Spec Amendment Draft record request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_spec_amendment_draft_record(
+        project_id=PROJECT_ID,
+        prd_id=PRD_ID,
+        amendment_file="artifacts/spec-amendment.json",
+        idempotency_key="spec-amendment-draft-record-001",
+        base_spec_version_id=SPEC_VERSION_ID,
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "record_spec_amendment_draft"
+    request = cast("SpecAmendmentDraftRecordRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.prd_id == PRD_ID
+    assert request.amendment_file == "artifacts/spec-amendment.json"
+    assert request.idempotency_key == "spec-amendment-draft-record-001"
+    assert request.base_spec_version_id == SPEC_VERSION_ID
     assert request.changed_by == "test-agent"
 
 

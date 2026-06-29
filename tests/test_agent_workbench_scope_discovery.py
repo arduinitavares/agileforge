@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from models.agent_workbench import DiscoveryChallengeArtifact, DiscoveryPrd
+from sqlmodel import select
+
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product
+from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
     PrdDraftRecordRequest,
     PrdReviewRequest,
     ScopeDiscoveryRunner,
+    SpecAmendmentDraftRecordRequest,
 )
+from services.specs.profile_content import normalize_spec_content_for_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,6 +147,24 @@ def _prd_review_request(
     )
 
 
+def _spec_amendment_request(
+    amendment_file: str,
+    *,
+    prd_id: int,
+    idempotency_key: str = "spec-amendment-draft-record-001",
+    base_spec_version_id: int | None = None,
+) -> SpecAmendmentDraftRecordRequest:
+    """Build a Spec Amendment Draft record request."""
+    return SpecAmendmentDraftRecordRequest(
+        project_id=PROJECT_ID,
+        prd_id=prd_id,
+        amendment_file=amendment_file,
+        idempotency_key=idempotency_key,
+        base_spec_version_id=base_spec_version_id,
+        changed_by="test-agent",
+    )
+
+
 def _write_prd_draft(
     tmp_path: Path,
     *,
@@ -168,6 +196,149 @@ def _write_prd_draft(
         encoding="utf-8",
     )
     return str(path)
+
+
+def _base_spec_artifact() -> dict[str, Any]:
+    """Build a minimal accepted structured spec fixture."""
+    return {
+        "schema_version": "agileforge.spec.v1",
+        "artifact_id": "SPEC.scope-discovery",
+        "title": "Scope Discovery Fixture",
+        "status": "draft",
+        "version": "0.1",
+        "created_at": "2026-06-29",
+        "updated_at": "2026-06-29",
+        "summary": "Exercise Spec Amendment Draft validation.",
+        "problem_statement": "A project needs additive new scope.",
+        "items": [
+            {
+                "id": "GOAL.existing",
+                "type": "GOAL",
+                "status": "accepted",
+                "title": "Existing goal",
+                "statement": "Preserve existing accepted goal.",
+            },
+            {
+                "id": "REQ.existing-capability",
+                "type": "REQ",
+                "status": "accepted",
+                "title": "Existing capability",
+                "statement": "The system MUST preserve existing capability.",
+                "level": "MUST",
+                "verification": "acceptance-test",
+                "acceptance": ["Existing capability remains available."],
+            },
+        ],
+        "relations": [
+            {
+                "from": "REQ.existing-capability",
+                "type": "satisfies",
+                "to": "GOAL.existing",
+                "rationale": "Requirement satisfies the existing goal.",
+            }
+        ],
+        "controlled_terms": [],
+        "external_references": [],
+        "rendering": {"markdown_profile": "agileforge.spec_markdown.v1"},
+    }
+
+
+def _with_added_scope(base: dict[str, Any]) -> dict[str, Any]:
+    """Return an amended spec with one additive accepted source item."""
+    amended = deepcopy(base)
+    amended["items"].append(
+        {
+            "id": "REQ.new-reporting",
+            "type": "REQ",
+            "status": "accepted",
+            "title": "New reporting",
+            "statement": "The system MUST support new product reporting.",
+            "level": "MUST",
+            "verification": "acceptance-test",
+            "acceptance": ["New reporting is available."],
+        }
+    )
+    return amended
+
+
+def _with_modified_existing_scope(base: dict[str, Any]) -> dict[str, Any]:
+    """Return an amended spec that illegally modifies accepted source scope."""
+    amended = deepcopy(base)
+    amended["items"][1]["statement"] = "The system MUST replace existing behavior."
+    return amended
+
+
+def _write_spec_amendment(
+    tmp_path: Path,
+    *,
+    artifact: dict[str, Any],
+    name: str = "spec-amendment.json",
+) -> str:
+    """Write a structured spec amendment fixture and return its path."""
+    path = tmp_path / name
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    return str(path)
+
+
+def _accepted_base_spec(
+    session: Session,
+    *,
+    artifact: dict[str, Any],
+) -> SpecRegistry:
+    """Persist an accepted base spec for additive validation."""
+    normalized = normalize_spec_content_for_registry(json.dumps(artifact))
+    spec = SpecRegistry(
+        product_id=PROJECT_ID,
+        spec_hash=normalized.spec_hash,
+        content=normalized.content,
+        content_ref="accepted-base.json",
+        status="approved",
+        approved_by="test",
+        approval_notes="accepted for tests",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    acceptance = SpecAuthorityAcceptance(
+        product_id=PROJECT_ID,
+        spec_version_id=spec.spec_version_id or 0,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        compiler_version="test",
+        prompt_hash="prompt",
+        spec_hash=spec.spec_hash,
+    )
+    session.add(acceptance)
+    session.commit()
+    session.refresh(spec)
+    return spec
+
+
+def _spec_rows(session: Session) -> list[SpecRegistry]:
+    """Return spec rows for the discovery project."""
+    return list(
+        session.exec(
+            select(SpecRegistry).where(SpecRegistry.product_id == PROJECT_ID)
+        ).all()
+    )
+
+
+def _record_accepted_prd(session: Session, tmp_path: Path) -> tuple[int, int]:
+    """Record and accept a PRD sourced from a ready Challenge Artifact."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+    accepted = runner.accept_prd(_prd_review_request(prd_id=prd_id))
+    assert accepted["ok"] is True
+    return challenge_artifact_id, prd_id
 
 
 def _record_challenge_artifact(
@@ -860,3 +1031,198 @@ def test_record_prd_draft_creates_superseding_version_without_mutating_accepted_
     assert accepted_after is not None
     assert accepted_after.status == "accepted"
     assert accepted_after.content_json == accepted_content_json
+
+
+def test_record_spec_amendment_draft_from_accepted_prd_validates_ready(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A valid agent draft from an accepted PRD is ready for human acceptance."""
+    challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    accepted_base = _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+    initial_spec_rows = _spec_rows(session)
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_spec_amendment_draft(
+        _spec_amendment_request(
+            amendment_file,
+            prd_id=prd_id,
+            base_spec_version_id=accepted_base.spec_version_id,
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["project_id"] == PROJECT_ID
+    assert data["prd_id"] == prd_id
+    assert data["challenge_artifact_id"] == challenge_artifact_id
+    assert data["status"] == "ready_for_amendment_acceptance"
+    assert data["validation"]["valid"] is True
+    assert data["validation"]["base_spec_version_id"] == accepted_base.spec_version_id
+    assert data["next_action"] == "accept_spec_amendment"
+    assert _spec_rows(session) == initial_spec_rows
+    draft = session.get(
+        DiscoverySpecAmendmentDraft,
+        data["spec_amendment_draft_id"],
+    )
+    assert draft is not None
+    assert draft.project_id == PROJECT_ID
+    assert draft.prd_id == prd_id
+    assert draft.challenge_artifact_id == challenge_artifact_id
+    assert draft.status == "ready_for_amendment_acceptance"
+    assert draft.amendment_file == amendment_file
+    assert draft.changed_by == "test-agent"
+    saved_validation = json.loads(draft.validation_json)
+    assert saved_validation["valid"] is True
+
+
+def test_record_spec_amendment_draft_requires_accepted_prd(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Draft PRDs cannot produce Spec Amendment Drafts."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+
+    result = runner.record_spec_amendment_draft(
+        _spec_amendment_request(amendment_file, prd_id=prd_id)
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED.value in _error_codes(
+        result
+    )
+
+
+def test_record_spec_amendment_draft_persists_validation_blockers(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Invalid amendment drafts keep blockers without creating accepted scope."""
+    challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_modified_existing_scope(base),
+        name="invalid-spec-amendment.json",
+    )
+    initial_spec_rows = _spec_rows(session)
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_spec_amendment_draft(
+        _spec_amendment_request(
+            amendment_file,
+            prd_id=prd_id,
+            idempotency_key="spec-amendment-invalid-001",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["prd_id"] == prd_id
+    assert data["challenge_artifact_id"] == challenge_artifact_id
+    assert data["status"] == "validation_failed"
+    assert data["validation"]["valid"] is False
+    assert data["validation"]["modified_source_item_ids"] == [
+        "REQ.existing-capability"
+    ]
+    assert data["blocking_issues"]
+    assert data["remediation"] == [
+        "Revise the Spec Amendment Draft so it only adds new accepted source items."
+    ]
+    assert data["next_action"] == "revise_spec_amendment_draft"
+    assert _spec_rows(session) == initial_spec_rows
+    saved = session.get(
+        DiscoverySpecAmendmentDraft,
+        data["spec_amendment_draft_id"],
+    )
+    assert saved is not None
+    assert saved.status == "validation_failed"
+    assert json.loads(saved.validation_json)["valid"] is False
+
+
+def test_record_spec_amendment_draft_replays_same_idempotency_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Retrying the same Spec Amendment Draft request returns the first draft."""
+    _challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    request = _spec_amendment_request(
+        amendment_file,
+        prd_id=prd_id,
+        idempotency_key="spec-amendment-replay-001",
+    )
+
+    first = runner.record_spec_amendment_draft(request)
+    second = runner.record_spec_amendment_draft(request)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["data"]["spec_amendment_draft_id"] == (
+        first["data"]["spec_amendment_draft_id"]
+    )
+
+
+def test_record_spec_amendment_draft_rejects_idempotency_key_reuse(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """The same idempotency key cannot record different amendment drafts."""
+    _challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    first_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+    second_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_modified_existing_scope(base),
+        name="different-spec-amendment.json",
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    assert runner.record_spec_amendment_draft(
+        _spec_amendment_request(
+            first_file,
+            prd_id=prd_id,
+            idempotency_key="spec-amendment-reuse-001",
+        )
+    )["ok"] is True
+    result = runner.record_spec_amendment_draft(
+        _spec_amendment_request(
+            second_file,
+            prd_id=prd_id,
+            idempotency_key="spec-amendment-reuse-001",
+        )
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in _error_codes(result)

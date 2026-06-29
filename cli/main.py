@@ -296,6 +296,19 @@ class _Application(Protocol):
         """Reject a Scope Discovery PRD."""
         ...
 
+    def discovery_spec_amendment_draft_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        amendment_file: str,
+        idempotency_key: str,
+        base_spec_version_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a Scope Discovery Spec Amendment Draft."""
+        ...
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -1500,6 +1513,61 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     discovery_prd_reject.add_argument("--idempotency-key", required=True)
     discovery_prd_reject.add_argument("--changed-by", default="cli-agent")
     discovery_prd_reject.set_defaults(command_handler=_discovery_prd_reject)
+    discovery_spec_amendment = discovery_sub.add_parser(
+        "spec-amendment",
+        help="Manage Spec Amendment Draft artifacts.",
+    )
+    discovery_spec_amendment_sub = discovery_spec_amendment.add_subparsers(
+        dest="spec_amendment_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_spec_amendment_draft = discovery_spec_amendment_sub.add_parser(
+        "draft",
+        help="Manage Spec Amendment Draft records.",
+    )
+    discovery_spec_amendment_draft_sub = (
+        discovery_spec_amendment_draft.add_subparsers(
+            dest="spec_amendment_draft_action",
+            required=True,
+            parser_class=_WorkbenchArgumentParser,
+        )
+    )
+    discovery_spec_amendment_draft_record = (
+        discovery_spec_amendment_draft_sub.add_parser(
+            "record",
+            help="Record an agent-generated Spec Amendment Draft.",
+        )
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--project-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--prd-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--amendment-file",
+        required=True,
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--base-spec-version-id",
+        type=int,
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_spec_amendment_draft_record.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_spec_amendment_draft_record.set_defaults(
+        command_handler=_discovery_spec_amendment_draft_record
+    )
 
     scope = subparsers.add_parser(
         "scope",
@@ -2825,6 +2893,32 @@ def _discovery_prd_reject(
         reviewer=args.reviewer,
         rejection_notes=args.rejection_notes,
         idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_spec_amendment_draft_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery Spec Amendment Draft recording to the app."""
+    command = "agileforge discovery spec-amendment draft record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            (
+                "Discovery Spec Amendment Draft record requires a non-blank "
+                "idempotency key."
+            ),
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_spec_amendment_draft_record(
+        project_id=args.project_id,
+        prd_id=args.prd_id,
+        amendment_file=args.amendment_file,
+        idempotency_key=args.idempotency_key.strip(),
+        base_spec_version_id=args.base_spec_version_id,
         changed_by=args.changed_by,
     )
 

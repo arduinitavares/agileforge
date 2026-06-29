@@ -62,6 +62,7 @@ from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
     PrdDraftRecordRequest,
     PrdReviewRequest,
+    SpecAmendmentDraftRecordRequest,
 )
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
@@ -265,6 +266,13 @@ class _ScopeDiscoveryRunner(Protocol):
         """Reject a PRD."""
         ...
 
+    def record_spec_amendment_draft(
+        self,
+        request: SpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a Spec Amendment Draft."""
+        ...
+
 
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
@@ -323,6 +331,20 @@ class _DefaultScopeDiscoveryRunner:
 
         with Session(get_engine()) as session:
             return ScopeDiscoveryRunner(session=session).reject_prd(request)
+
+    def record_spec_amendment_draft(
+        self,
+        request: SpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).record_spec_amendment_draft(
+                request
+            )
 
 
 class _DefaultScopeExtensionRunner:
@@ -1785,6 +1807,27 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
         return self._get_scope_discovery_runner().reject_prd(request)
+
+    def discovery_spec_amendment_draft_record(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        amendment_file: str,
+        idempotency_key: str,
+        base_spec_version_id: int | None = None,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a Scope Discovery Spec Amendment Draft through the runner."""
+        request = SpecAmendmentDraftRecordRequest(
+            project_id=project_id,
+            prd_id=prd_id,
+            amendment_file=amendment_file,
+            idempotency_key=idempotency_key,
+            base_spec_version_id=base_spec_version_id,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().record_spec_amendment_draft(request)
 
     def scope_extension_start(  # noqa: PLR0913
         self,

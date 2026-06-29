@@ -40,6 +40,7 @@ from services.agent_workbench.scope_extension import (
     ScopeExtensionValidateRequest,
     evaluate_scope_extension_preconditions,
 )
+from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
     TechnicalSpecArtifact,
@@ -1065,7 +1066,7 @@ def _cli_payload(
     assert meta["command_version"] == "1"
     assert isinstance(meta["agileforge_version"], str)
     assert meta["agileforge_version"]
-    assert meta["storage_schema_version"] == "6"
+    assert meta["storage_schema_version"] == STORAGE_SCHEMA_VERSION
     assert isinstance(meta["correlation_id"], str)
     assert meta["correlation_id"]
     assert isinstance(meta["generated_at"], str)

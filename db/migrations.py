@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "6"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "7"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1632,6 +1632,31 @@ CREATE TABLE IF NOT EXISTS discovery_prds (
 )
 """
 
+DISCOVERY_SPEC_AMENDMENT_DRAFTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS discovery_spec_amendment_drafts (
+    spec_amendment_draft_id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES products(product_id),
+    prd_id INTEGER NOT NULL REFERENCES discovery_prds(prd_id),
+    challenge_artifact_id INTEGER NOT NULL
+        REFERENCES discovery_challenge_artifacts(challenge_artifact_id),
+    status VARCHAR NOT NULL,
+    amendment_file TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    validation_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    base_spec_version_id INTEGER,
+    base_spec_hash VARCHAR,
+    amended_spec_hash VARCHAR,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_discovery_spec_amendment_project_idempotency
+        UNIQUE (project_id, idempotency_key)
+)
+"""
+
 AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
     feedback_row_id INTEGER PRIMARY KEY,
@@ -1703,6 +1728,7 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     actions.extend(_ensure_cli_mutation_ledger_storage(engine))
     actions.extend(_ensure_discovery_challenge_artifact_storage(engine))
     actions.extend(_ensure_discovery_prd_storage(engine))
+    actions.extend(_ensure_discovery_spec_amendment_draft_storage(engine))
     _record_agent_workbench_schema_version(engine)
 
     return actions
@@ -1839,6 +1865,47 @@ def _ensure_discovery_prd_storage(engine: Engine) -> list[str]:
         "ix_discovery_prds_changed_by": ["changed_by"],
     }.items():
         if _ensure_index_exists(engine, "discovery_prds", index_name, columns):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _ensure_discovery_spec_amendment_draft_storage(engine: Engine) -> list[str]:
+    """Ensure Scope Discovery Spec Amendment Draft storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "discovery_spec_amendment_drafts",
+        DISCOVERY_SPEC_AMENDMENT_DRAFTS_CREATE_SQL,
+    ):
+        actions.append("created table: discovery_spec_amendment_drafts")
+
+    for index_name, columns in {
+        "ix_discovery_spec_amendment_drafts_project_id": ["project_id"],
+        "ix_discovery_spec_amendment_drafts_prd_id": ["prd_id"],
+        "ix_discovery_spec_amendment_drafts_challenge_artifact_id": [
+            "challenge_artifact_id"
+        ],
+        "ix_discovery_spec_amendment_drafts_status": ["status"],
+        "ix_discovery_spec_amendment_drafts_artifact_fingerprint": [
+            "artifact_fingerprint"
+        ],
+        "ix_discovery_spec_amendment_drafts_request_hash": ["request_hash"],
+        "ix_discovery_spec_amendment_drafts_idempotency_key": ["idempotency_key"],
+        "ix_discovery_spec_amendment_drafts_base_spec_version_id": [
+            "base_spec_version_id"
+        ],
+        "ix_discovery_spec_amendment_drafts_base_spec_hash": ["base_spec_hash"],
+        "ix_discovery_spec_amendment_drafts_amended_spec_hash": [
+            "amended_spec_hash"
+        ],
+        "ix_discovery_spec_amendment_drafts_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "discovery_spec_amendment_drafts",
+            index_name,
+            columns,
+        ):
             actions.append(f"created index: {index_name}")
     return actions
 
