@@ -10,13 +10,15 @@ from typing import Any, cast
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from models.agent_workbench import DiscoveryChallengeArtifact
+from models.agent_workbench import DiscoveryChallengeArtifact, DiscoveryPrd
 from models.core import Product
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 
 CHALLENGE_RECORD_COMMAND: str = "agileforge discovery challenge record"
+PRD_DRAFT_RECORD_COMMAND: str = "agileforge discovery prd draft record"
 CHALLENGE_PRODUCER: str = "grill-with-docs"
+PRD_PRODUCER: str = "to-prd"
 CHALLENGE_READINESS_VALUES: frozenset[str] = frozenset(
     {"blocked", "needs_answers", "ready_for_prd"}
 )
@@ -38,6 +40,16 @@ class ChallengeArtifactRecordRequest(BaseModel):
 
     project_id: int
     artifact_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class PrdDraftRecordRequest(BaseModel):
+    """Validated request for recording a PRD draft."""
+
+    project_id: int
+    challenge_artifact_id: int
+    prd_file: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
 
@@ -119,6 +131,84 @@ class ScopeDiscoveryRunner:
 
         return _success(_artifact_data(artifact))
 
+    def record_prd_draft(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a draft PRD produced by to-prd."""
+        payload, load_error = _load_prd_payload(request.prd_file)
+        if load_error is not None:
+            return load_error
+        payload = cast("Mapping[str, Any]", payload)
+
+        project = self._session.get(Product, request.project_id)
+        if project is None:
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": request.project_id},
+                remediation=["Pass an existing --project-id."],
+            )
+
+        challenge = self._session.get(
+            DiscoveryChallengeArtifact,
+            request.challenge_artifact_id,
+        )
+        challenge_error = _validate_prd_source_challenge(
+            challenge=challenge,
+            request=request,
+        )
+        if challenge_error is not None:
+            return challenge_error
+
+        validation_error = _validate_prd_payload(payload, request)
+        if validation_error is not None:
+            return validation_error
+
+        producer = str(payload["producer"])
+        title = str(payload["title"]).strip()
+        content_json = canonical_json(payload)
+        artifact_fingerprint = canonical_hash(payload)
+        request_hash = canonical_hash(
+            {
+                "command": PRD_DRAFT_RECORD_COMMAND,
+                "project_id": request.project_id,
+                "challenge_artifact_id": request.challenge_artifact_id,
+                "artifact_fingerprint": artifact_fingerprint,
+                "changed_by": request.changed_by,
+            }
+        )
+        existing = self._session.exec(
+            select(DiscoveryPrd).where(
+                DiscoveryPrd.project_id == request.project_id,
+                DiscoveryPrd.idempotency_key == request.idempotency_key,
+            )
+        ).first()
+        if existing is not None:
+            return _existing_prd_result(
+                prd=existing,
+                request=request,
+                request_hash=request_hash,
+            )
+
+        prd = DiscoveryPrd(
+            project_id=request.project_id,
+            challenge_artifact_id=request.challenge_artifact_id,
+            producer=producer,
+            status="draft",
+            version="1",
+            title=title,
+            content_json=content_json,
+            artifact_fingerprint=artifact_fingerprint,
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            changed_by=request.changed_by,
+        )
+        self._session.add(prd)
+        self._session.commit()
+        self._session.refresh(prd)
+
+        return _success(_prd_data(prd))
+
 
 def _existing_artifact_result(
     *,
@@ -136,6 +226,24 @@ def _existing_artifact_result(
             remediation=["Retry with a fresh --idempotency-key."],
         )
     return _success(_artifact_data(artifact))
+
+
+def _existing_prd_result(
+    *,
+    prd: DiscoveryPrd,
+    request: PrdDraftRecordRequest,
+    request_hash: str,
+) -> dict[str, Any]:
+    if prd.request_hash != request_hash:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            details={
+                "project_id": request.project_id,
+                "idempotency_key": request.idempotency_key,
+            },
+            remediation=["Retry with a fresh --idempotency-key."],
+        )
+    return _success(_prd_data(prd))
 
 
 def _load_challenge_payload(
@@ -172,6 +280,122 @@ def _load_challenge_payload(
             ),
         )
     return payload, None
+
+
+def _load_prd_payload(
+    prd_file: str,
+) -> tuple[Mapping[str, Any] | None, dict[str, Any] | None]:
+    path = Path(prd_file).expanduser()
+    if not path.exists():
+        return (
+            None,
+            _error(
+                ErrorCode.PRD_FILE_NOT_FOUND,
+                details={"prd_file": prd_file},
+                remediation=["Pass an existing --prd-file path."],
+            ),
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (
+            None,
+            _error(
+                ErrorCode.PRD_DRAFT_INVALID,
+                details={"prd_file": prd_file, "error": str(exc)},
+                remediation=["Pass a valid JSON PRD draft file."],
+            ),
+        )
+    if not isinstance(payload, Mapping):
+        return (
+            None,
+            _error(
+                ErrorCode.PRD_DRAFT_INVALID,
+                details={"prd_file": prd_file},
+                remediation=["Pass a JSON object PRD draft file."],
+            ),
+        )
+    return payload, None
+
+
+def _validate_prd_source_challenge(
+    *,
+    challenge: DiscoveryChallengeArtifact | None,
+    request: PrdDraftRecordRequest,
+) -> dict[str, Any] | None:
+    if challenge is None or challenge.project_id != request.project_id:
+        return _error(
+            ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND,
+            details={
+                "project_id": request.project_id,
+                "challenge_artifact_id": request.challenge_artifact_id,
+            },
+            remediation=["Record a ready Challenge Artifact before recording a PRD."],
+        )
+    if challenge.readiness != "ready_for_prd":
+        return _error(
+            ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY,
+            details={
+                "challenge_artifact_id": request.challenge_artifact_id,
+                "readiness": challenge.readiness,
+            },
+            remediation=["Continue discovery until the artifact is ready_for_prd."],
+        )
+    return None
+
+
+def _validate_prd_payload(
+    payload: Mapping[str, Any],
+    request: PrdDraftRecordRequest,
+) -> dict[str, Any] | None:
+    missing = [
+        field
+        for field in ("producer", "source_challenge_artifact_id", "title", "content")
+        if field not in payload
+    ]
+    if missing:
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"missing": missing},
+            remediation=[
+                "Include producer, source_challenge_artifact_id, title, and content."
+            ],
+        )
+    if str(payload["producer"]) != PRD_PRODUCER:
+        return _error(
+            ErrorCode.PRD_PRODUCER_INVALID,
+            details={
+                "producer": str(payload["producer"]),
+                "required_producer": PRD_PRODUCER,
+            },
+            remediation=["Run to-prd and record that PRD draft output."],
+        )
+    if payload["source_challenge_artifact_id"] != request.challenge_artifact_id:
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={
+                "source_challenge_artifact_id": payload[
+                    "source_challenge_artifact_id"
+                ],
+                "expected_challenge_artifact_id": request.challenge_artifact_id,
+            },
+            remediation=[
+                "Record the PRD against its declared source Challenge Artifact."
+            ],
+        )
+    if not str(payload["title"]).strip():
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"blank": ["title"]},
+            remediation=["Include a non-blank PRD title."],
+        )
+    if not isinstance(payload["content"], Mapping):
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"field": "content", "reason": "not_object"},
+            remediation=["Include a JSON object in content."],
+        )
+    return None
 
 
 def _validate_minimal_challenge_payload(
@@ -442,6 +666,19 @@ def _artifact_data(artifact: DiscoveryChallengeArtifact) -> dict[str, Any]:
             if artifact.readiness == "ready_for_prd"
             else "continue_challenge"
         ),
+    }
+
+
+def _prd_data(prd: DiscoveryPrd) -> dict[str, Any]:
+    return {
+        "prd_id": prd.prd_id,
+        "project_id": prd.project_id,
+        "challenge_artifact_id": prd.challenge_artifact_id,
+        "producer": prd.producer,
+        "status": prd.status,
+        "version": prd.version,
+        "artifact_fingerprint": prd.artifact_fingerprint,
+        "next_action": "accept_prd",
     }
 
 

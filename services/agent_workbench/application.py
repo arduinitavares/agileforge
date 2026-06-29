@@ -58,7 +58,10 @@ from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
 )
-from services.agent_workbench.scope_discovery import ChallengeArtifactRecordRequest
+from services.agent_workbench.scope_discovery import (
+    ChallengeArtifactRecordRequest,
+    PrdDraftRecordRequest,
+)
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
     ScopeExtensionRunner,
@@ -240,6 +243,13 @@ class _ScopeDiscoveryRunner(Protocol):
         """Record a Challenge Artifact."""
         ...
 
+    def record_prd_draft(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a PRD draft."""
+        ...
+
 
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
@@ -262,6 +272,18 @@ class _DefaultScopeDiscoveryRunner:
             return ScopeDiscoveryRunner(session=session).record_challenge_artifact(
                 request
             )
+
+    def record_prd_draft(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a PRD draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).record_prd_draft(request)
 
 
 class _DefaultScopeExtensionRunner:
@@ -1661,6 +1683,25 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
         return self._get_scope_discovery_runner().record_challenge_artifact(request)
+
+    def discovery_prd_draft_record(
+        self,
+        *,
+        project_id: int,
+        challenge_artifact_id: int,
+        prd_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a Scope Discovery PRD draft through the runner."""
+        request = PrdDraftRecordRequest(
+            project_id=project_id,
+            challenge_artifact_id=challenge_artifact_id,
+            prd_file=prd_file,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().record_prd_draft(request)
 
     def scope_extension_start(  # noqa: PLR0913
         self,

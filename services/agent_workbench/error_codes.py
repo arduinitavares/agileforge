@@ -87,6 +87,11 @@ class ErrorCode(StrEnum):
     CHALLENGE_ARTIFACT_FILE_NOT_FOUND = "CHALLENGE_ARTIFACT_FILE_NOT_FOUND"
     CHALLENGE_ARTIFACT_INVALID = "CHALLENGE_ARTIFACT_INVALID"
     CHALLENGE_PRODUCER_INVALID = "CHALLENGE_PRODUCER_INVALID"
+    PRD_FILE_NOT_FOUND = "PRD_FILE_NOT_FOUND"
+    PRD_DRAFT_INVALID = "PRD_DRAFT_INVALID"
+    PRD_PRODUCER_INVALID = "PRD_PRODUCER_INVALID"
+    PRD_SOURCE_CHALLENGE_NOT_FOUND = "PRD_SOURCE_CHALLENGE_NOT_FOUND"
+    PRD_SOURCE_CHALLENGE_NOT_READY = "PRD_SOURCE_CHALLENGE_NOT_READY"
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -492,6 +497,36 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="Challenge artifact producer is not allowed.",
+    ),
+    ErrorCode.PRD_FILE_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.PRD_FILE_NOT_FOUND.value,
+        default_exit_code=2,
+        retryable=False,
+        description="PRD draft file was not found.",
+    ),
+    ErrorCode.PRD_DRAFT_INVALID: ErrorMetadata(
+        code=ErrorCode.PRD_DRAFT_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="PRD draft payload is invalid.",
+    ),
+    ErrorCode.PRD_PRODUCER_INVALID: ErrorMetadata(
+        code=ErrorCode.PRD_PRODUCER_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="PRD draft producer is not allowed.",
+    ),
+    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Source Challenge Artifact was not found.",
+    ),
+    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY: ErrorMetadata(
+        code=ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Source Challenge Artifact is not ready for PRD drafting.",
     ),
 }
 

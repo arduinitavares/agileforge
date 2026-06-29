@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "4"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "5"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1604,6 +1604,28 @@ CREATE TABLE IF NOT EXISTS discovery_challenge_artifacts (
 )
 """
 
+DISCOVERY_PRDS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS discovery_prds (
+    prd_id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES products(product_id),
+    challenge_artifact_id INTEGER NOT NULL
+        REFERENCES discovery_challenge_artifacts(challenge_artifact_id),
+    producer VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    version VARCHAR NOT NULL,
+    title VARCHAR NOT NULL,
+    content_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_discovery_prd_project_idempotency
+        UNIQUE (project_id, idempotency_key)
+)
+"""
+
 AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
     feedback_row_id INTEGER PRIMARY KEY,
@@ -1671,13 +1693,30 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     """Ensure CLI contract hardening persistence tables exist."""
     actions: list[str] = []
 
+    actions.extend(_ensure_agent_workbench_schema_version_table(engine))
+    actions.extend(_ensure_cli_mutation_ledger_storage(engine))
+    actions.extend(_ensure_discovery_challenge_artifact_storage(engine))
+    actions.extend(_ensure_discovery_prd_storage(engine))
+    _record_agent_workbench_schema_version(engine)
+
+    return actions
+
+
+def _ensure_agent_workbench_schema_version_table(engine: Engine) -> list[str]:
+    """Ensure the agent workbench schema version table exists."""
+    actions: list[str] = []
     if _ensure_table_exists(
         engine,
         "agent_workbench_schema_versions",
         AGENT_WORKBENCH_SCHEMA_VERSIONS_CREATE_SQL,
     ):
         actions.append("created table: agent_workbench_schema_versions")
+    return actions
 
+
+def _ensure_cli_mutation_ledger_storage(engine: Engine) -> list[str]:
+    """Ensure CLI mutation ledger storage exists."""
+    actions: list[str] = []
     if _ensure_table_exists(
         engine,
         "cli_mutation_ledger",
@@ -1717,7 +1756,12 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     }.items():
         if _ensure_index_exists(engine, "cli_mutation_ledger", index_name, columns):
             actions.append(f"created index: {index_name}")
+    return actions
 
+
+def _ensure_discovery_challenge_artifact_storage(engine: Engine) -> list[str]:
+    """Ensure Scope Discovery Challenge Artifact storage exists."""
+    actions: list[str] = []
     if _ensure_table_exists(
         engine,
         "discovery_challenge_artifacts",
@@ -1743,7 +1787,38 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
             columns,
         ):
             actions.append(f"created index: {index_name}")
+    return actions
 
+
+def _ensure_discovery_prd_storage(engine: Engine) -> list[str]:
+    """Ensure Scope Discovery PRD storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "discovery_prds",
+        DISCOVERY_PRDS_CREATE_SQL,
+    ):
+        actions.append("created table: discovery_prds")
+
+    for index_name, columns in {
+        "ix_discovery_prds_project_id": ["project_id"],
+        "ix_discovery_prds_challenge_artifact_id": ["challenge_artifact_id"],
+        "ix_discovery_prds_producer": ["producer"],
+        "ix_discovery_prds_status": ["status"],
+        "ix_discovery_prds_version": ["version"],
+        "ix_discovery_prds_title": ["title"],
+        "ix_discovery_prds_artifact_fingerprint": ["artifact_fingerprint"],
+        "ix_discovery_prds_request_hash": ["request_hash"],
+        "ix_discovery_prds_idempotency_key": ["idempotency_key"],
+        "ix_discovery_prds_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(engine, "discovery_prds", index_name, columns):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _record_agent_workbench_schema_version(engine: Engine) -> None:
+    """Record the current agent workbench schema version."""
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -1757,8 +1832,6 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
             ),
             {"version": AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION},
         )
-
-    return actions
 
 
 def _ensure_authority_curation_indexes(

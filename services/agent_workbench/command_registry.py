@@ -1242,6 +1242,29 @@ _SCOPE_DISCOVERY_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge discovery prd draft record",
+        mutates=True,
+        phase="scope_discovery",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "challenge_artifact_id",
+            "prd_file",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.PRD_FILE_NOT_FOUND.value,
+            ErrorCode.PRD_DRAFT_INVALID.value,
+            ErrorCode.PRD_PRODUCER_INVALID.value,
+            ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value,
+            ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
 )
 
 

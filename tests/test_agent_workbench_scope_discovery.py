@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from models.agent_workbench import DiscoveryChallengeArtifact
+from models.agent_workbench import DiscoveryChallengeArtifact, DiscoveryPrd
 from models.core import Product
 from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
+    PrdDraftRecordRequest,
     ScopeDiscoveryRunner,
 )
 
@@ -97,6 +98,82 @@ def _request(
         idempotency_key=idempotency_key,
         changed_by="test-agent",
     )
+
+
+def _prd_request(
+    prd_file: str,
+    *,
+    challenge_artifact_id: int,
+    idempotency_key: str = "prd-draft-record-001",
+) -> PrdDraftRecordRequest:
+    """Build a PRD draft record request."""
+    return PrdDraftRecordRequest(
+        project_id=PROJECT_ID,
+        challenge_artifact_id=challenge_artifact_id,
+        prd_file=prd_file,
+        idempotency_key=idempotency_key,
+        changed_by="test-agent",
+    )
+
+
+def _write_prd_draft(
+    tmp_path: Path,
+    *,
+    challenge_artifact_id: int,
+    producer: str = "to-prd",
+    title: str = "Product Reporting PRD",
+) -> str:
+    """Write a PRD draft payload and return its path."""
+    path = tmp_path / f"prd-{challenge_artifact_id}-{abs(hash(title))}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "producer": producer,
+                "source_challenge_artifact_id": challenge_artifact_id,
+                "title": title,
+                "content": {
+                    "problem_statement": "Users need product reporting.",
+                    "solution": "Add reporting generated from accepted scope.",
+                    "user_stories": [
+                        "As a user, I can view product reporting."
+                    ],
+                },
+                "markdown_export": {
+                    "path": "docs/prds/product-reporting.md",
+                    "authoritative": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _record_challenge_artifact(
+    session: Session,
+    tmp_path: Path,
+    *,
+    readiness: str = "ready_for_prd",
+) -> int:
+    """Record a challenge artifact and return its ID."""
+    session.add(Product(product_id=PROJECT_ID, name="Scope Discovery"))
+    session.commit()
+    runner = ScopeDiscoveryRunner(session=session)
+    artifact_file = _write_challenge_artifact(
+        tmp_path,
+        readiness=readiness,
+        content=(
+            _rich_content()
+            if readiness == "ready_for_prd"
+            else {
+                "blocking_reasons": ["More answers needed."],
+                "remediation": ["Continue grilling."],
+            }
+        ),
+    )
+    result = runner.record_challenge_artifact(_request(artifact_file))
+    assert result["ok"] is True
+    return int(result["data"]["challenge_artifact_id"])
 
 
 def _error_codes(result: dict[str, Any]) -> list[str]:
@@ -385,3 +462,156 @@ def test_record_challenge_artifact_rejects_unknown_project(
 
     assert result["ok"] is False
     assert ErrorCode.PROJECT_NOT_FOUND.value in _error_codes(result)
+
+
+def test_record_prd_draft_persists_to_prd_output_from_ready_challenge(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Persist a draft PRD linked to a ready Challenge Artifact."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["project_id"] == PROJECT_ID
+    assert data["challenge_artifact_id"] == challenge_artifact_id
+    assert data["producer"] == "to-prd"
+    assert data["status"] == "draft"
+    assert data["version"] == "1"
+    assert data["next_action"] == "accept_prd"
+    prd = session.get(DiscoveryPrd, data["prd_id"])
+    assert prd is not None
+    assert prd.project_id == PROJECT_ID
+    assert prd.challenge_artifact_id == challenge_artifact_id
+    assert prd.producer == "to-prd"
+    assert prd.status == "draft"
+    assert prd.version == "1"
+    assert prd.changed_by == "test-agent"
+    saved = json.loads(prd.content_json)
+    assert saved["source_challenge_artifact_id"] == challenge_artifact_id
+    assert saved["markdown_export"]["authoritative"] is False
+
+
+def test_record_prd_draft_rejects_missing_challenge_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """PRD drafts require an existing source Challenge Artifact."""
+    session.add(Product(product_id=PROJECT_ID, name="Scope Discovery"))
+    session.commit()
+    missing_challenge_id = 404
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=missing_challenge_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=missing_challenge_id)
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value in _error_codes(result)
+
+
+def test_record_prd_draft_rejects_non_ready_challenge_artifact(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """PRD drafts require a ready_for_prd source Challenge Artifact."""
+    challenge_artifact_id = _record_challenge_artifact(
+        session,
+        tmp_path,
+        readiness="needs_answers",
+    )
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value in _error_codes(result)
+
+
+def test_record_prd_draft_requires_to_prd_producer(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """PRD drafts must declare to-prd producer provenance."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        producer="manual",
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    result = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.PRD_PRODUCER_INVALID.value in _error_codes(result)
+
+
+def test_record_prd_draft_replays_same_idempotency_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Retrying the same PRD draft request returns the first PRD."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    request = _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+
+    first = runner.record_prd_draft(request)
+    second = runner.record_prd_draft(request)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["data"]["prd_id"] == first["data"]["prd_id"]
+
+
+def test_record_prd_draft_rejects_idempotency_key_reuse(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """The same idempotency key cannot record different PRD drafts."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    first_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    second_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        title="Different PRD",
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+
+    assert runner.record_prd_draft(
+        _prd_request(first_file, challenge_artifact_id=challenge_artifact_id)
+    )["ok"] is True
+    result = runner.record_prd_draft(
+        _prd_request(second_file, challenge_artifact_id=challenge_artifact_id)
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in _error_codes(result)

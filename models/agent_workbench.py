@@ -77,3 +77,34 @@ class DiscoveryChallengeArtifact(SQLModel, table=True):
     changed_by: str = Field(default="cli-agent", index=True)
     created_at: datetime = Field(default_factory=_utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class DiscoveryPrd(SQLModel, table=True):
+    """Saved Scope Discovery PRD."""
+
+    __tablename__ = "discovery_prds"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_discovery_prd_project_idempotency",
+        ),
+    )
+
+    prd_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    challenge_artifact_id: int = Field(
+        foreign_key="discovery_challenge_artifacts.challenge_artifact_id",
+        index=True,
+    )
+    producer: str = Field(index=True)
+    status: str = Field(index=True)
+    version: str = Field(index=True)
+    title: str = Field(index=True)
+    content_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
