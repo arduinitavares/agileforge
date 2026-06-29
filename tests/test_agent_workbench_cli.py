@@ -160,8 +160,9 @@ class _FakeApplication:
         self,
         *,
         project_id: int,
-        spec_file: str,
-        base_spec_version_id: int,
+        spec_file: str | None = None,
+        base_spec_version_id: int | None = None,
+        spec_amendment_draft_id: int | None = None,
         expected_state: str,
         idempotency_key: str,
         changed_by: str = "cli-agent",
@@ -174,6 +175,7 @@ class _FakeApplication:
                     "project_id": project_id,
                     "spec_file": spec_file,
                     "base_spec_version_id": base_spec_version_id,
+                    "spec_amendment_draft_id": spec_amendment_draft_id,
                     "expected_state": expected_state,
                     "idempotency_key": idempotency_key,
                     "changed_by": changed_by,
@@ -337,6 +339,68 @@ class _FakeApplication:
                 "project_id": project_id,
                 "status": "ready_for_amendment_acceptance",
             },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_spec_amendment_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery Spec Amendment acceptance payload."""
+        self.calls.append(
+            (
+                "discovery_spec_amendment_accept",
+                {
+                    "project_id": project_id,
+                    "spec_amendment_draft_id": spec_amendment_draft_id,
+                    "reviewer": reviewer,
+                    "acceptance_notes": acceptance_notes,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_spec_amendment_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery Spec Amendment rejection payload."""
+        self.calls.append(
+            (
+                "discovery_spec_amendment_reject",
+                {
+                    "project_id": project_id,
+                    "spec_amendment_draft_id": spec_amendment_draft_id,
+                    "reviewer": reviewer,
+                    "rejection_notes": rejection_notes,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "rejected"},
             "warnings": [],
             "errors": [],
         }
@@ -2677,6 +2741,100 @@ def test_discovery_spec_amendment_draft_record_cli_routes_to_application(
     ]
 
 
+def test_discovery_spec_amendment_accept_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spec Amendment acceptance routes guarded args to the application."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-amendment-draft-id",
+            "77",
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Accepted for scope extension start.",
+            "--idempotency-key",
+            "spec-amendment-accept-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery spec-amendment accept"
+    )
+    assert app.calls == [
+        (
+            "discovery_spec_amendment_accept",
+            {
+                "project_id": PROJECT_ID,
+                "spec_amendment_draft_id": 77,
+                "reviewer": "Ada",
+                "acceptance_notes": "Accepted for scope extension start.",
+                "idempotency_key": "spec-amendment-accept-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+def test_discovery_spec_amendment_reject_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spec Amendment rejection routes guarded args to the application."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "spec-amendment",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-amendment-draft-id",
+            "77",
+            "--reviewer",
+            "Ada",
+            "--rejection-notes",
+            "Rejected pending clearer risk language.",
+            "--idempotency-key",
+            "spec-amendment-reject-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery spec-amendment reject"
+    )
+    assert app.calls == [
+        (
+            "discovery_spec_amendment_reject",
+            {
+                "project_id": PROJECT_ID,
+                "spec_amendment_draft_id": 77,
+                "reviewer": "Ada",
+                "rejection_notes": "Rejected pending clearer risk language.",
+                "idempotency_key": "spec-amendment-reject-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
 def _write_cli_challenge_artifact(
     tmp_path: Path,
     *,
@@ -3682,10 +3840,10 @@ def test_scope_extension_validate_cli_routes_to_application(
     ]
 
 
-def test_scope_extension_start_cli_routes_to_application(
+def test_scope_extension_start_cli_routes_spec_amendment_id_to_application(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Scope extension start routes guarded mutation args."""
+    """Scope extension start can consume an accepted discovery amendment ID."""
     app = _FakeApplication()
 
     rc = main(
@@ -3695,14 +3853,12 @@ def test_scope_extension_start_cli_routes_to_application(
             "start",
             "--project-id",
             str(PROJECT_ID),
-            "--spec-file",
-            "specs/amended.json",
-            "--base-spec-version-id",
-            str(SPEC_VERSION_ID),
+            "--spec-amendment-draft-id",
+            "77",
             "--expected-state",
             "SPRINT_COMPLETE",
             "--idempotency-key",
-            "scope-extension-start-001",
+            "scope-extension-start-amendment-001",
             "--changed-by",
             "test-agent",
         ],
@@ -3719,10 +3875,11 @@ def test_scope_extension_start_cli_routes_to_application(
             "scope_extension_start",
             {
                 "project_id": PROJECT_ID,
-                "spec_file": "specs/amended.json",
-                "base_spec_version_id": SPEC_VERSION_ID,
+                "spec_file": None,
+                "base_spec_version_id": None,
+                "spec_amendment_draft_id": 77,
                 "expected_state": "SPRINT_COMPLETE",
-                "idempotency_key": "scope-extension-start-001",
+                "idempotency_key": "scope-extension-start-amendment-001",
                 "changed_by": "test-agent",
             },
         )
@@ -3744,10 +3901,8 @@ def test_scope_extension_start_cli_rejects_blank_idempotency_key(
             "start",
             "--project-id",
             str(PROJECT_ID),
-            "--spec-file",
-            "specs/amended.json",
-            "--base-spec-version-id",
-            str(SPEC_VERSION_ID),
+            "--spec-amendment-draft-id",
+            "77",
             "--expected-state",
             "SPRINT_COMPLETE",
             "--idempotency-key",

@@ -1352,6 +1352,48 @@ _SCOPE_DISCOVERY_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge discovery spec-amendment accept",
+        mutates=True,
+        phase="scope_discovery",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "spec_amendment_draft_id",
+            "reviewer",
+            "acceptance_notes",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
+    CommandMetadata(
+        name="agileforge discovery spec-amendment reject",
+        mutates=True,
+        phase="scope_discovery",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "spec_amendment_draft_id",
+            "reviewer",
+            "rejection_notes",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
 )
 
 
@@ -1380,8 +1422,7 @@ _SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
         idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
         input_required=(
             "project_id",
-            "spec_file",
-            "base_spec_version_id",
+            "spec_amendment_draft_id",
             "expected_state",
             "idempotency_key",
         ),
@@ -1397,6 +1438,7 @@ _SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
             ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
             ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
+            ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
             ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
             ErrorCode.MUTATION_FAILED.value,
             ErrorCode.MUTATION_IN_PROGRESS.value,

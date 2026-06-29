@@ -109,6 +109,8 @@ EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
     "agileforge discovery prd accept",
     "agileforge discovery prd reject",
     "agileforge discovery spec-amendment draft record",
+    "agileforge discovery spec-amendment accept",
+    "agileforge discovery spec-amendment reject",
 }
 
 EXPECTED_BROWNFIELD_COMMAND_NAMES = {
@@ -1327,8 +1329,7 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
     assert "expected_state" in start["guard_policy"]
     assert start["input"]["required"] == [
         "project_id",
-        "spec_file",
-        "base_spec_version_id",
+        "spec_amendment_draft_id",
         "expected_state",
         "idempotency_key",
     ]
@@ -1344,6 +1345,7 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
         ErrorCode.SCOPE_EXTENSION_UNRESOLVED_WORK.value,
         ErrorCode.SCOPE_EXTENSION_NOT_ADDITIVE.value,
         ErrorCode.SCOPE_EXTENSION_NO_ADDED_ITEMS.value,
+        ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
         ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
         ErrorCode.MUTATION_FAILED.value,
         ErrorCode.MUTATION_IN_PROGRESS.value,
@@ -1488,3 +1490,32 @@ def test_scope_discovery_spec_amendment_command_publishes_cli_schema() -> None:
         ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
         ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
     }.issubset(set(spec_amendment["errors"]))
+
+    review_commands = {
+        "agileforge discovery spec-amendment accept": "acceptance_notes",
+        "agileforge discovery spec-amendment reject": "rejection_notes",
+    }
+    for review_command_name, notes_field in review_commands.items():
+        assert command_is_available(review_command_name) is True
+        assert review_command_name in capabilities
+        assert capabilities[review_command_name]["installed"] is True
+        review = command_schema_payload(review_command_name)
+
+        assert review["mutates"] is True
+        assert capabilities[review_command_name]["phase"] == "scope_discovery"
+        assert review["idempotency_required"] is True
+        assert review["idempotency_policy"]["non_dry_run"] == "required"
+        assert review["input"]["required"] == [
+            "project_id",
+            "spec_amendment_draft_id",
+            "reviewer",
+            notes_field,
+            "idempotency_key",
+        ]
+        assert review["input"]["optional"] == ["changed_by"]
+        assert {
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
+            ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        }.issubset(set(review["errors"]))

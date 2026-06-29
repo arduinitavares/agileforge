@@ -33,6 +33,8 @@ PRD_REJECT_COMMAND: str = "agileforge discovery prd reject"
 SPEC_AMENDMENT_DRAFT_RECORD_COMMAND: str = (
     "agileforge discovery spec-amendment draft record"
 )
+SPEC_AMENDMENT_ACCEPT_COMMAND: str = "agileforge discovery spec-amendment accept"
+SPEC_AMENDMENT_REJECT_COMMAND: str = "agileforge discovery spec-amendment reject"
 CHALLENGE_PRODUCER: str = "grill-with-docs"
 PRD_PRODUCER: str = "to-prd"
 PRD_STATUS_DRAFT: str = "draft"
@@ -40,6 +42,8 @@ PRD_STATUS_ACCEPTED: str = "accepted"
 PRD_STATUS_REJECTED: str = "rejected"
 SPEC_AMENDMENT_DRAFT_READY: str = "ready_for_amendment_acceptance"
 SPEC_AMENDMENT_DRAFT_VALIDATION_FAILED: str = "validation_failed"
+SPEC_AMENDMENT_DRAFT_ACCEPTED: str = "accepted"
+SPEC_AMENDMENT_DRAFT_REJECTED: str = "rejected"
 SPEC_AMENDMENT_DRAFT_INVALID_REMEDIATION: tuple[str, ...] = (
     "Revise the Spec Amendment Draft so it only adds new accepted source items.",
 )
@@ -106,6 +110,17 @@ class SpecAmendmentDraftRecordRequest(BaseModel):
     amendment_file: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     base_spec_version_id: int | None = None
+    changed_by: str = "cli-agent"
+
+
+class SpecAmendmentReviewRequest(BaseModel):
+    """Validated request for reviewing a Spec Amendment Draft."""
+
+    project_id: int
+    spec_amendment_draft_id: int
+    reviewer: str = Field(min_length=1)
+    notes: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
 
 
@@ -333,6 +348,129 @@ class ScopeDiscoveryRunner:
         self._session.refresh(draft)
 
         return _success(_spec_amendment_draft_data(draft))
+
+    def accept_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a validated Spec Amendment Draft."""
+        return self._review_spec_amendment(
+            request=request,
+            command=SPEC_AMENDMENT_ACCEPT_COMMAND,
+            target_status=SPEC_AMENDMENT_DRAFT_ACCEPTED,
+        )
+
+    def reject_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a validated Spec Amendment Draft."""
+        return self._review_spec_amendment(
+            request=request,
+            command=SPEC_AMENDMENT_REJECT_COMMAND,
+            target_status=SPEC_AMENDMENT_DRAFT_REJECTED,
+        )
+
+    def _review_spec_amendment(
+        self,
+        *,
+        request: SpecAmendmentReviewRequest,
+        command: str,
+        target_status: str,
+    ) -> dict[str, Any]:
+        project = self._session.get(Product, request.project_id)
+        if project is None:
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": request.project_id},
+                remediation=["Pass an existing --project-id."],
+            )
+
+        request_hash = canonical_hash(
+            {
+                "command": command,
+                "project_id": request.project_id,
+                "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                "reviewer": request.reviewer,
+                "notes": request.notes,
+                "changed_by": request.changed_by,
+            }
+        )
+        idempotency_error = self._spec_amendment_review_idempotency_error(
+            request=request,
+            request_hash=request_hash,
+        )
+        if idempotency_error is not None:
+            return idempotency_error
+
+        draft = self._session.get(
+            DiscoverySpecAmendmentDraft,
+            request.spec_amendment_draft_id,
+        )
+        if draft is None or draft.project_id != request.project_id:
+            return _error(
+                ErrorCode.SPEC_AMENDMENT_NOT_FOUND,
+                details={
+                    "project_id": request.project_id,
+                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                },
+                remediation=[
+                    "Pass an existing Spec Amendment Draft ID for this project."
+                ],
+            )
+        if draft.status != SPEC_AMENDMENT_DRAFT_READY:
+            return _error(
+                ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID,
+                details={
+                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                    "status": draft.status,
+                },
+                remediation=[
+                    "Review only validated Spec Amendment Drafts "
+                    "that are ready for acceptance."
+                ],
+            )
+
+        now = datetime.now(UTC)
+        draft.status = target_status
+        draft.reviewed_by = request.reviewer
+        draft.review_notes = request.notes
+        draft.reviewed_at = now
+        draft.review_request_hash = request_hash
+        draft.review_idempotency_key = request.idempotency_key
+        draft.changed_by = request.changed_by
+        draft.updated_at = now
+        self._session.add(draft)
+        self._session.commit()
+        self._session.refresh(draft)
+
+        return _success(_spec_amendment_draft_data(draft))
+
+    def _spec_amendment_review_idempotency_error(
+        self,
+        *,
+        request: SpecAmendmentReviewRequest,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        existing = self._session.exec(
+            select(DiscoverySpecAmendmentDraft).where(
+                DiscoverySpecAmendmentDraft.project_id == request.project_id,
+                DiscoverySpecAmendmentDraft.review_idempotency_key
+                == request.idempotency_key,
+            )
+        ).first()
+        if existing is None:
+            return None
+        if existing.review_request_hash != request_hash:
+            return _error(
+                ErrorCode.IDEMPOTENCY_KEY_REUSED,
+                details={
+                    "project_id": request.project_id,
+                    "idempotency_key": request.idempotency_key,
+                },
+                remediation=["Retry with a fresh --idempotency-key."],
+            )
+        return _success(_spec_amendment_draft_data(existing))
 
     def _validated_prd_draft_record_inputs(
         self,
@@ -1191,6 +1329,8 @@ def _spec_amendment_draft_data(
 
 
 def _spec_amendment_draft_next_action(status: str) -> str:
+    if status == SPEC_AMENDMENT_DRAFT_ACCEPTED:
+        return "start_scope_extension"
     if status == SPEC_AMENDMENT_DRAFT_READY:
         return "accept_spec_amendment"
     return "revise_spec_amendment_draft"

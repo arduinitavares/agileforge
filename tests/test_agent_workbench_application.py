@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         PrdDraftRecordRequest,
         PrdReviewRequest,
         SpecAmendmentDraftRecordRequest,
+        SpecAmendmentReviewRequest,
     )
     from services.agent_workbench.scope_extension import (
         ScopeExtensionStartRequest,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
 PROJECT_ID = 7
 CHALLENGE_ARTIFACT_ID = 42
 PRD_ID = 55
+SPEC_AMENDMENT_DRAFT_ID = 77
 SUPERSEDES_PRD_ID = 99
 RECONCILED_STORY_ID = 17
 SPRINT_ID = 11
@@ -1626,6 +1628,32 @@ class _FakeScopeDiscoveryRunner:
             "errors": [],
         }
 
+    def accept_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Record Spec Amendment accept requests."""
+        self.calls.append(("accept_spec_amendment", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reject_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Record Spec Amendment reject requests."""
+        self.calls.append(("reject_spec_amendment", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "rejected"},
+            "warnings": [],
+            "errors": [],
+        }
+
 
 class _FakeVisionRunner:
     """Fake Vision runner used to verify facade delegation."""
@@ -3156,8 +3184,33 @@ def test_application_scope_extension_facades_pass_request_data_to_runner() -> No
     assert start_request.project_id == PROJECT_ID
     assert start_request.spec_file == "specs/amended.md"
     assert start_request.base_spec_version_id == SPEC_VERSION_ID
+    assert start_request.spec_amendment_draft_id is None
     assert start_request.expected_state == "SPRINT_COMPLETE"
     assert start_request.idempotency_key == "scope-extension-start-001"
+    assert start_request.changed_by == "test-agent"
+
+
+def test_application_scope_extension_start_passes_spec_amendment_id_to_runner() -> None:
+    """Verify scope extension start can target an accepted Spec Amendment artifact."""
+    runner = _FakeScopeExtensionRunner()
+    app = AgentWorkbenchApplication(scope_extension_runner=runner)
+
+    result = app.scope_extension_start(
+        project_id=PROJECT_ID,
+        spec_amendment_draft_id=SPEC_AMENDMENT_DRAFT_ID,
+        expected_state="SPRINT_COMPLETE",
+        idempotency_key="scope-extension-start-amendment-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    start_request = cast("ScopeExtensionStartRequest", runner.calls[0][1])
+    assert start_request.project_id == PROJECT_ID
+    assert start_request.spec_file is None
+    assert start_request.base_spec_version_id is None
+    assert start_request.spec_amendment_draft_id == SPEC_AMENDMENT_DRAFT_ID
+    assert start_request.expected_state == "SPRINT_COMPLETE"
+    assert start_request.idempotency_key == "scope-extension-start-amendment-001"
     assert start_request.changed_by == "test-agent"
 
 
@@ -3298,6 +3351,56 @@ def test_application_discovery_spec_amendment_draft_record_passes_request() -> N
     assert request.amendment_file == "artifacts/spec-amendment.json"
     assert request.idempotency_key == "spec-amendment-draft-record-001"
     assert request.base_spec_version_id == SPEC_VERSION_ID
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_spec_amendment_accept_passes_request() -> None:
+    """Verify discovery facade builds a Spec Amendment accept request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_spec_amendment_accept(
+        project_id=PROJECT_ID,
+        spec_amendment_draft_id=SPEC_AMENDMENT_DRAFT_ID,
+        reviewer="Ada",
+        acceptance_notes="Accepted for scope extension start.",
+        idempotency_key="spec-amendment-accept-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "accept_spec_amendment"
+    request = cast("SpecAmendmentReviewRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.spec_amendment_draft_id == SPEC_AMENDMENT_DRAFT_ID
+    assert request.reviewer == "Ada"
+    assert request.notes == "Accepted for scope extension start."
+    assert request.idempotency_key == "spec-amendment-accept-001"
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_spec_amendment_reject_passes_request() -> None:
+    """Verify discovery facade builds a Spec Amendment reject request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_spec_amendment_reject(
+        project_id=PROJECT_ID,
+        spec_amendment_draft_id=SPEC_AMENDMENT_DRAFT_ID,
+        reviewer="Ada",
+        rejection_notes="Rejected pending revision.",
+        idempotency_key="spec-amendment-reject-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "reject_spec_amendment"
+    request = cast("SpecAmendmentReviewRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.spec_amendment_draft_id == SPEC_AMENDMENT_DRAFT_ID
+    assert request.reviewer == "Ada"
+    assert request.notes == "Rejected pending revision."
+    assert request.idempotency_key == "spec-amendment-reject-001"
     assert request.changed_by == "test-agent"
 
 

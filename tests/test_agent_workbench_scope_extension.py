@@ -8,9 +8,15 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import select
 
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product, Sprint, Team, UserStory
 from models.enums import SprintStatus, StoryStatus
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
+from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.scope_extension import (
     ERR_SCOPE_EXTENSION_BASE_SPEC_MISMATCH,
@@ -250,6 +256,64 @@ def _spec_rows(session: Session, product_id: int) -> list[SpecRegistry]:
             select(SpecRegistry).where(SpecRegistry.product_id == product_id)
         ).all()
     )
+
+
+def _accepted_discovery_spec_amendment(
+    session: Session,
+    product_id: int,
+    *,
+    amendment_file: Path,
+    base_spec: SpecRegistry,
+    status: str = "accepted",
+) -> DiscoverySpecAmendmentDraft:
+    """Persist a discovery amendment artifact with provenance for scope start."""
+    artifact = DiscoveryChallengeArtifact(
+        project_id=product_id,
+        producer="grill-with-docs",
+        readiness="ready_for_prd",
+        original_idea="Add scope through discovery.",
+        content_json="{}",
+        artifact_fingerprint="challenge-fingerprint",
+        request_hash="challenge-request",
+        idempotency_key="challenge-for-amendment",
+    )
+    session.add(artifact)
+    session.commit()
+    session.refresh(artifact)
+    prd = DiscoveryPrd(
+        project_id=product_id,
+        challenge_artifact_id=artifact.challenge_artifact_id or 0,
+        producer="to-prd",
+        status="accepted",
+        version="1",
+        title="Scope Extension PRD",
+        content_json="{}",
+        artifact_fingerprint="prd-fingerprint",
+        request_hash="prd-request",
+        idempotency_key="prd-for-amendment",
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    draft = DiscoverySpecAmendmentDraft(
+        project_id=product_id,
+        prd_id=prd.prd_id or 0,
+        challenge_artifact_id=artifact.challenge_artifact_id or 0,
+        status=status,
+        amendment_file=str(amendment_file),
+        content_json=amendment_file.read_text(encoding="utf-8"),
+        validation_json=json.dumps({"valid": True, "blocking_issues": []}),
+        artifact_fingerprint="amendment-fingerprint",
+        request_hash="amendment-request",
+        idempotency_key=f"amendment-{status}",
+        base_spec_version_id=base_spec.spec_version_id,
+        base_spec_hash=base_spec.spec_hash,
+        amended_spec_hash="amendment-hash",
+    )
+    session.add(draft)
+    session.commit()
+    session.refresh(draft)
+    return draft
 
 
 def test_scope_extension_preconditions_available_when_sprint_complete_and_no_open_work(
@@ -690,6 +754,84 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
         ),
         "spec_file": str(amended_file.resolve()),
     }
+
+
+def test_runner_start_consumes_accepted_spec_amendment_and_preserves_provenance(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Accepted discovery amendments can start scope extension without raw spec args."""
+    product = _product(session)
+    product_id = _product_id(product)
+    base_spec = _accepted_base_spec(session, product_id)
+    amended_file = _write_spec_file(
+        tmp_path,
+        "accepted-amendment.json",
+        _with_new_item(_artifact()),
+    )
+    amendment = _accepted_discovery_spec_amendment(
+        session,
+        product_id,
+        amendment_file=amended_file,
+        base_spec=base_spec,
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+
+    result = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=product_id,
+            spec_amendment_draft_id=amendment.spec_amendment_draft_id,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-accepted-amendment",
+        )
+    )
+
+    assert result["ok"] is True
+    context = result["data"]["scope_extension_context"]
+    assert context["spec_amendment_draft_id"] == amendment.spec_amendment_draft_id
+    assert context["prd_id"] == amendment.prd_id
+    assert context["challenge_artifact_id"] == amendment.challenge_artifact_id
+    assert context["spec_file"] == str(amended_file.resolve())
+    assert workflow.state["setup_status"] == "authority_compile_required"
+
+
+def test_runner_start_rejects_spec_amendment_that_is_not_accepted(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Validated-but-unaccepted amendments cannot bypass human acceptance."""
+    product = _product(session)
+    product_id = _product_id(product)
+    base_spec = _accepted_base_spec(session, product_id)
+    amended_file = _write_spec_file(
+        tmp_path,
+        "ready-amendment.json",
+        _with_new_item(_artifact()),
+    )
+    amendment = _accepted_discovery_spec_amendment(
+        session,
+        product_id,
+        amendment_file=amended_file,
+        base_spec=base_spec,
+        status="ready_for_amendment_acceptance",
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+
+    result = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=product_id,
+            spec_amendment_draft_id=amendment.spec_amendment_draft_id,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-ready-amendment",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value
+    assert workflow.updates == []
+    assert len(_spec_rows(session, product_id)) == 1
 
 
 def test_runner_start_blocks_active_sprint_without_pending_spec_registration(

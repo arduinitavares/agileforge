@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "7"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "8"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1649,6 +1649,11 @@ CREATE TABLE IF NOT EXISTS discovery_spec_amendment_drafts (
     base_spec_version_id INTEGER,
     base_spec_hash VARCHAR,
     amended_spec_hash VARCHAR,
+    reviewed_by VARCHAR,
+    review_notes TEXT,
+    reviewed_at DATETIME,
+    review_request_hash VARCHAR,
+    review_idempotency_key VARCHAR,
     changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
@@ -1879,6 +1884,23 @@ def _ensure_discovery_spec_amendment_draft_storage(engine: Engine) -> list[str]:
     ):
         actions.append("created table: discovery_spec_amendment_drafts")
 
+    for column_name, column_definition in {
+        "reviewed_by": "VARCHAR",
+        "review_notes": "TEXT",
+        "reviewed_at": "DATETIME",
+        "review_request_hash": "VARCHAR",
+        "review_idempotency_key": "VARCHAR",
+    }.items():
+        if _ensure_column_exists(
+            engine,
+            "discovery_spec_amendment_drafts",
+            column_name,
+            column_definition,
+        ):
+            actions.append(
+                f"added column: discovery_spec_amendment_drafts.{column_name}"
+            )
+
     for index_name, columns in {
         "ix_discovery_spec_amendment_drafts_project_id": ["project_id"],
         "ix_discovery_spec_amendment_drafts_prd_id": ["prd_id"],
@@ -1897,6 +1919,13 @@ def _ensure_discovery_spec_amendment_draft_storage(engine: Engine) -> list[str]:
         "ix_discovery_spec_amendment_drafts_base_spec_hash": ["base_spec_hash"],
         "ix_discovery_spec_amendment_drafts_amended_spec_hash": [
             "amended_spec_hash"
+        ],
+        "ix_discovery_spec_amendment_drafts_reviewed_by": ["reviewed_by"],
+        "ix_discovery_spec_amendment_drafts_review_request_hash": [
+            "review_request_hash"
+        ],
+        "ix_discovery_spec_amendment_drafts_review_idempotency_key": [
+            "review_idempotency_key"
         ],
         "ix_discovery_spec_amendment_drafts_changed_by": ["changed_by"],
     }.items():
