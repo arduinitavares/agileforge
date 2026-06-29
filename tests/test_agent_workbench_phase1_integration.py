@@ -1306,12 +1306,13 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
         capsys=capsys,
     )
     next_before_data = _mapping(next_before["data"])
-    validate_command = (
-        f"agileforge scope extension validate --project-id {project_id} "
-        "--spec-file <amended_spec_file>"
+    challenge_command = (
+        f"agileforge discovery challenge record --project-id {project_id} "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
     )
-    assert next_before_data["status"] == "project_scope_extension_available"
-    assert validate_command in _sequence(next_before_data["next_valid_commands"])
+    assert next_before_data["status"] == "scope_discovery_challenge_artifact_missing"
+    assert challenge_command in _sequence(next_before_data["next_valid_commands"])
 
     validate_payload = _cli_payload(
         [

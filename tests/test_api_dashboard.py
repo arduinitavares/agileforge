@@ -973,10 +973,10 @@ def test_get_projects_uses_batch_session_lookup(
     assert workflow.single_calls == []
 
 
-def test_scope_extension_available_projects_sprint_runtime_primary_action(
+def test_scope_discovery_projects_sprint_runtime_primary_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dashboard runtime projection exposes exhausted-scope extension action."""
+    """Dashboard runtime projection exposes exhausted-scope discovery action."""
     project_id = 10
 
     def workflow_next(*, project_id: int) -> dict[str, object]:
@@ -984,17 +984,20 @@ def test_scope_extension_available_projects_sprint_runtime_primary_action(
             "ok": True,
             "data": {
                 "project_id": project_id,
-                "status": "project_scope_extension_available",
+                "status": "scope_discovery_challenge_artifact_missing",
                 "next_actions": [
                     {
                         "command": (
-                            "agileforge scope extension validate --project-id 10 "
-                            "--spec-file <amended_spec_file>"
+                            "agileforge discovery challenge record "
+                            "--project-id 10 "
+                            "--artifact-file <challenge_artifact_file> "
+                            "--idempotency-key <idempotency_key>"
                         ),
-                        "status": "project_scope_extension_available",
+                        "status": "scope_discovery_challenge_artifact_missing",
                         "reason": (
-                            "The current execution scope is exhausted; validate an "
-                            "amended spec before generating new work."
+                            "The current execution scope is exhausted; record a "
+                            "grill-with-docs Challenge Artifact before drafting a "
+                            "PRD."
                         ),
                     }
                 ],
@@ -1016,10 +1019,10 @@ def test_scope_extension_available_projects_sprint_runtime_primary_action(
     runtime = payload["sprint_runtime"]
     assert isinstance(runtime, dict)
 
-    assert runtime["status"] == "project_scope_extension_available"
-    assert runtime["primary_action"]["label"] == "Extend Project Scope"
+    assert runtime["status"] == "scope_discovery_challenge_artifact_missing"
+    assert runtime["primary_action"]["label"] == "Record Challenge Artifact"
     assert runtime["primary_action"]["command"].startswith(
-        "agileforge scope extension validate"
+        "agileforge discovery challenge record"
     )
     assert runtime["next_actions"] == [runtime["primary_action"]]
     assert runtime["scope_extension_actions"] == [
