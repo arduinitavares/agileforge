@@ -104,6 +104,7 @@ EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
 
 EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
     "agileforge discovery challenge record",
+    "agileforge discovery prd draft record",
 }
 
 EXPECTED_BROWNFIELD_COMMAND_NAMES = {
@@ -1335,7 +1336,7 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
 
 
 def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
-    """Publish scope-discovery Challenge Artifact command contract."""
+    """Publish scope-discovery artifact command contracts."""
     names = installed_command_names()
     capabilities = _capability_by_name()
 
@@ -1364,3 +1365,31 @@ def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
         ErrorCode.CHALLENGE_PRODUCER_INVALID.value,
         ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
     }.issubset(set(record["errors"]))
+
+    prd_command_name = "agileforge discovery prd draft record"
+    assert command_is_available(prd_command_name) is True
+    assert prd_command_name in capabilities
+    assert capabilities[prd_command_name]["installed"] is True
+
+    prd_record = command_schema_payload(prd_command_name)
+
+    assert prd_record["mutates"] is True
+    assert capabilities[prd_command_name]["phase"] == "scope_discovery"
+    assert prd_record["idempotency_required"] is True
+    assert prd_record["idempotency_policy"]["non_dry_run"] == "required"
+    assert prd_record["input"]["required"] == [
+        "project_id",
+        "challenge_artifact_id",
+        "prd_file",
+        "idempotency_key",
+    ]
+    assert prd_record["input"]["optional"] == ["changed_by"]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.PRD_FILE_NOT_FOUND.value,
+        ErrorCode.PRD_DRAFT_INVALID.value,
+        ErrorCode.PRD_PRODUCER_INVALID.value,
+        ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value,
+        ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value,
+        ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+    }.issubset(set(prd_record["errors"]))

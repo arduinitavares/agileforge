@@ -57,13 +57,17 @@ if TYPE_CHECKING:
         ProjectCreateRequest,
         ProjectSetupRetryRequest,
     )
-    from services.agent_workbench.scope_discovery import ChallengeArtifactRecordRequest
+    from services.agent_workbench.scope_discovery import (
+        ChallengeArtifactRecordRequest,
+        PrdDraftRecordRequest,
+    )
     from services.agent_workbench.scope_extension import (
         ScopeExtensionStartRequest,
         ScopeExtensionValidateRequest,
     )
 
 PROJECT_ID = 7
+CHALLENGE_ARTIFACT_ID = 42
 RECONCILED_STORY_ID = 17
 SPRINT_ID = 11
 SPEC_VERSION_ID = 3
@@ -1559,6 +1563,19 @@ class _FakeScopeDiscoveryRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "recorded"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def record_prd_draft(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record PRD draft requests."""
+        self.calls.append(("record_prd_draft", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "draft"},
             "warnings": [],
             "errors": [],
         }
@@ -3085,6 +3102,29 @@ def test_application_discovery_challenge_record_passes_request_data_to_runner() 
     assert request.project_id == PROJECT_ID
     assert request.artifact_file == "artifacts/challenge.json"
     assert request.idempotency_key == "challenge-record-001"
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_prd_draft_record_passes_request_data_to_runner() -> None:
+    """Verify scope discovery facade builds a PRD draft record request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_prd_draft_record(
+        project_id=PROJECT_ID,
+        challenge_artifact_id=CHALLENGE_ARTIFACT_ID,
+        prd_file="artifacts/prd.json",
+        idempotency_key="prd-draft-record-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "record_prd_draft"
+    request = cast("PrdDraftRecordRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.challenge_artifact_id == CHALLENGE_ARTIFACT_ID
+    assert request.prd_file == "artifacts/prd.json"
+    assert request.idempotency_key == "prd-draft-record-001"
     assert request.changed_by == "test-agent"
 
 

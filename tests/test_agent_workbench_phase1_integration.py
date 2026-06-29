@@ -1065,7 +1065,7 @@ def _cli_payload(
     assert meta["command_version"] == "1"
     assert isinstance(meta["agileforge_version"], str)
     assert meta["agileforge_version"]
-    assert meta["storage_schema_version"] == "4"
+    assert meta["storage_schema_version"] == "5"
     assert isinstance(meta["correlation_id"], str)
     assert meta["correlation_id"]
     assert isinstance(meta["generated_at"], str)

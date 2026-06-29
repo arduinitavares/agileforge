@@ -210,6 +210,35 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def discovery_prd_draft_record(
+        self,
+        *,
+        project_id: int,
+        challenge_artifact_id: int,
+        prd_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery PRD draft record payload."""
+        self.calls.append(
+            (
+                "discovery_prd_draft_record",
+                {
+                    "project_id": project_id,
+                    "challenge_artifact_id": challenge_artifact_id,
+                    "prd_file": prd_file,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "draft"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -2331,6 +2360,51 @@ def test_discovery_challenge_record_cli_routes_to_application(
     ]
 
 
+def test_discovery_prd_draft_record_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery PRD draft record routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--challenge-artifact-id",
+            "42",
+            "--prd-file",
+            "artifacts/prd.json",
+            "--idempotency-key",
+            "prd-draft-record-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery prd draft record"
+    )
+    assert app.calls == [
+        (
+            "discovery_prd_draft_record",
+            {
+                "project_id": PROJECT_ID,
+                "challenge_artifact_id": 42,
+                "prd_file": "artifacts/prd.json",
+                "idempotency_key": "prd-draft-record-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
 def _write_cli_challenge_artifact(
     tmp_path: Path,
     *,
@@ -2344,6 +2418,37 @@ def _write_cli_challenge_artifact(
                 "readiness": "ready_for_prd",
                 "original_idea": "Require discovery before new scope.",
                 "content": content if content is not None else _cli_rich_content(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _write_cli_prd_draft(
+    tmp_path: Path,
+    *,
+    challenge_artifact_id: int,
+    producer: str = "to-prd",
+) -> str:
+    path = tmp_path / "prd-draft.json"
+    path.write_text(
+        json.dumps(
+            {
+                "producer": producer,
+                "source_challenge_artifact_id": challenge_artifact_id,
+                "title": "Scope Discovery PRD",
+                "content": {
+                    "problem_statement": "New scope must pass discovery.",
+                    "solution": "Record PRDs from ready Challenge Artifacts.",
+                    "user_stories": [
+                        "As an agent, I can record a draft PRD."
+                    ],
+                },
+                "markdown_export": {
+                    "path": "docs/prds/scope-discovery.md",
+                    "authoritative": False,
+                },
             }
         ),
         encoding="utf-8",
@@ -2461,6 +2566,128 @@ def test_discovery_challenge_record_cli_reports_ready_artifact_blockers(
     )
 
 
+def test_discovery_prd_draft_record_cli_records_valid_prd(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI records a to-prd draft sourced from a ready Challenge Artifact."""
+    app = _scope_discovery_app(session)
+    artifact_file = _write_cli_challenge_artifact(tmp_path)
+
+    challenge_rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            artifact_file,
+            "--idempotency-key",
+            "challenge-record-prd-cli-001",
+        ],
+        application=app,
+    )
+    challenge_payload = _stdout_payload(capsys)
+    challenge_artifact_id = int(
+        _mapping(challenge_payload["data"])["challenge_artifact_id"]
+    )
+    prd_file = _write_cli_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--challenge-artifact-id",
+            str(challenge_artifact_id),
+            "--prd-file",
+            prd_file,
+            "--idempotency-key",
+            "prd-draft-record-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert challenge_rc == 0
+    assert rc == 0
+    assert payload["ok"] is True
+    data = _mapping(payload["data"])
+    assert data["challenge_artifact_id"] == challenge_artifact_id
+    assert data["producer"] == "to-prd"
+    assert data["status"] == "draft"
+    assert data["version"] == "1"
+    assert data["next_action"] == "accept_prd"
+
+
+def test_discovery_prd_draft_record_cli_reports_invalid_producer(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI returns structured errors when the PRD draft was not from to-prd."""
+    app = _scope_discovery_app(session)
+    artifact_file = _write_cli_challenge_artifact(tmp_path)
+
+    challenge_rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            artifact_file,
+            "--idempotency-key",
+            "challenge-record-prd-cli-002",
+        ],
+        application=app,
+    )
+    challenge_payload = _stdout_payload(capsys)
+    challenge_artifact_id = int(
+        _mapping(challenge_payload["data"])["challenge_artifact_id"]
+    )
+    prd_file = _write_cli_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        producer="manual",
+    )
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--challenge-artifact-id",
+            str(challenge_artifact_id),
+            "--prd-file",
+            prd_file,
+            "--idempotency-key",
+            "prd-draft-record-cli-002",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+
+    assert challenge_rc == 0
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.PRD_PRODUCER_INVALID.value
+
+
 @pytest.mark.parametrize("idempotency_key", ["", "   "])
 def test_discovery_challenge_record_cli_rejects_blank_idempotency_key(
     capsys: pytest.CaptureFixture[str],
@@ -2489,6 +2716,42 @@ def test_discovery_challenge_record_cli_rejects_blank_idempotency_key(
     assert payload["ok"] is False
     assert _mapping(payload["meta"])["command"] == (
         "agileforge discovery challenge record"
+    )
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_discovery_prd_draft_record_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope discovery PRD draft record requires idempotency."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--challenge-artifact-id",
+            "42",
+            "--prd-file",
+            "artifacts/prd.json",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery prd draft record"
     )
     assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
     assert app.calls == []

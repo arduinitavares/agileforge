@@ -257,6 +257,18 @@ class _Application(Protocol):
         """Record a Scope Discovery Challenge Artifact."""
         ...
 
+    def discovery_prd_draft_record(
+        self,
+        *,
+        project_id: int,
+        challenge_artifact_id: int,
+        prd_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a Scope Discovery PRD draft."""
+        ...
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -1403,6 +1415,40 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     discovery_challenge_record.add_argument("--changed-by", default="cli-agent")
     discovery_challenge_record.set_defaults(
         command_handler=_discovery_challenge_record
+    )
+    discovery_prd = discovery_sub.add_parser(
+        "prd",
+        help="Manage PRD drafts.",
+    )
+    discovery_prd_sub = discovery_prd.add_subparsers(
+        dest="prd_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_prd_draft = discovery_prd_sub.add_parser(
+        "draft",
+        help="Manage PRD draft artifacts.",
+    )
+    discovery_prd_draft_sub = discovery_prd_draft.add_subparsers(
+        dest="prd_draft_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_prd_draft_record = discovery_prd_draft_sub.add_parser(
+        "record",
+        help="Record a to-prd PRD draft.",
+    )
+    discovery_prd_draft_record.add_argument("--project-id", type=int, required=True)
+    discovery_prd_draft_record.add_argument(
+        "--challenge-artifact-id",
+        type=int,
+        required=True,
+    )
+    discovery_prd_draft_record.add_argument("--prd-file", required=True)
+    discovery_prd_draft_record.add_argument("--idempotency-key", required=True)
+    discovery_prd_draft_record.add_argument("--changed-by", default="cli-agent")
+    discovery_prd_draft_record.set_defaults(
+        command_handler=_discovery_prd_draft_record
     )
 
     scope = subparsers.add_parser(
@@ -2659,6 +2705,28 @@ def _discovery_challenge_record(
     return command, application.discovery_challenge_record(
         project_id=args.project_id,
         artifact_file=args.artifact_file,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_prd_draft_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery PRD draft recording to the application."""
+    command = "agileforge discovery prd draft record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Discovery PRD draft record requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_prd_draft_record(
+        project_id=args.project_id,
+        challenge_artifact_id=args.challenge_artifact_id,
+        prd_file=args.prd_file,
         idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,
     )
