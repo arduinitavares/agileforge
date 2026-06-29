@@ -51,3 +51,8 @@ agileforge.spec.v1.schema.json
 agileforge.spec.v1.schema.pretty.json
 entities.json
 mempalace.yaml
+
+# Local agent skill caches
+.agents/
+agent/
+skills-lock.json
