@@ -1,0 +1,28 @@
+{
+  "producer": "grill-with-docs",
+  "readiness": "ready_for_prd",
+  "original_idea": "Require scope discovery before AgileForge accepts new project scope.",
+  "content": {
+    "context_file": "CONTEXT.md",
+    "source_documents": [
+      "docs/prds/2026-06-26-required-scope-discovery-prd.md",
+      "docs/adr/0001-require-grill-with-docs-for-new-scope.md",
+      "docs/adr/0002-store-discovery-artifacts-in-agileforge-state.md"
+    ],
+    "summary": "Codex runs grill-with-docs and to-prd. AgileForge stores artifacts, validates producer provenance, and gates promotion into accepted scope.",
+    "settled_decisions": [
+      "grill-with-docs is the required challenge producer for new scope.",
+      "to-prd is the required PRD producer after challenge readiness.",
+      "Challenge Artifacts and PRDs are stored in AgileForge-owned state, not treated as loose markdown workflow state.",
+      "Accepted Authority remains the only source for executable backlog, roadmap, story, task, and sprint work."
+    ],
+    "open_questions": [],
+    "non_goals": [
+      "Do not use Matt Pocock's to-issues to generate AgileForge executable work.",
+      "Do not let PRD drafts or Spec Amendment Drafts bypass human acceptance gates."
+    ],
+    "risks": [
+      "AgileForge core should validate required producer provenance without embedding interactive skill execution."
+    ]
+  }
+}

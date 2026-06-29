@@ -84,6 +84,9 @@ class ErrorCode(StrEnum):
     SCOPE_EXTENSION_UNRESOLVED_WORK = "SCOPE_EXTENSION_UNRESOLVED_WORK"
     SCOPE_EXTENSION_NOT_ADDITIVE = "SCOPE_EXTENSION_NOT_ADDITIVE"
     SCOPE_EXTENSION_NO_ADDED_ITEMS = "SCOPE_EXTENSION_NO_ADDED_ITEMS"
+    CHALLENGE_ARTIFACT_FILE_NOT_FOUND = "CHALLENGE_ARTIFACT_FILE_NOT_FOUND"
+    CHALLENGE_ARTIFACT_INVALID = "CHALLENGE_ARTIFACT_INVALID"
+    CHALLENGE_PRODUCER_INVALID = "CHALLENGE_PRODUCER_INVALID"
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -471,6 +474,24 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=2,
         retryable=False,
         description="Scope extension amendment adds no source items.",
+    ),
+    ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Challenge artifact file was not found.",
+    ),
+    ErrorCode.CHALLENGE_ARTIFACT_INVALID: ErrorMetadata(
+        code=ErrorCode.CHALLENGE_ARTIFACT_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Challenge artifact payload is invalid.",
+    ),
+    ErrorCode.CHALLENGE_PRODUCER_INVALID: ErrorMetadata(
+        code=ErrorCode.CHALLENGE_PRODUCER_INVALID.value,
+        default_exit_code=2,
+        retryable=False,
+        description="Challenge artifact producer is not allowed.",
     ),
 }
 

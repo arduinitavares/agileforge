@@ -102,6 +102,10 @@ EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
     "agileforge scope extension start",
 }
 
+EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
+    "agileforge discovery challenge record",
+}
+
 EXPECTED_BROWNFIELD_COMMAND_NAMES = {
     "agileforge brownfield source import",
     "agileforge brownfield scan",
@@ -189,6 +193,7 @@ def test_command_schema_payloads_are_available() -> None:
         | EXPECTED_PHASE_2D_COMMAND_NAMES
         | EXPECTED_PHASE_2E_COMMAND_NAMES
         | EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES
+        | EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES
         | EXPECTED_BROWNFIELD_COMMAND_NAMES
     )
 
@@ -1327,3 +1332,35 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
         ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
         ErrorCode.WORKFLOW_SESSION_FAILED.value,
     }.issubset(set(start["errors"]))
+
+
+def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
+    """Publish scope-discovery Challenge Artifact command contract."""
+    names = installed_command_names()
+    capabilities = _capability_by_name()
+
+    assert EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES.issubset(names)
+    command_name = "agileforge discovery challenge record"
+    assert command_is_available(command_name) is True
+    assert command_name in capabilities
+    assert capabilities[command_name]["installed"] is True
+
+    record = command_schema_payload(command_name)
+
+    assert record["mutates"] is True
+    assert capabilities[command_name]["phase"] == "scope_discovery"
+    assert record["idempotency_required"] is True
+    assert record["idempotency_policy"]["non_dry_run"] == "required"
+    assert record["input"]["required"] == [
+        "project_id",
+        "artifact_file",
+        "idempotency_key",
+    ]
+    assert record["input"]["optional"] == ["changed_by"]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND.value,
+        ErrorCode.CHALLENGE_ARTIFACT_INVALID.value,
+        ErrorCode.CHALLENGE_PRODUCER_INVALID.value,
+        ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+    }.issubset(set(record["errors"]))

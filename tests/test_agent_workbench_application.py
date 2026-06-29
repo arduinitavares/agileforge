@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         ProjectCreateRequest,
         ProjectSetupRetryRequest,
     )
+    from services.agent_workbench.scope_discovery import ChallengeArtifactRecordRequest
     from services.agent_workbench.scope_extension import (
         ScopeExtensionStartRequest,
         ScopeExtensionValidateRequest,
@@ -1538,6 +1539,26 @@ class _FakeScopeExtensionRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "started"},
+            "warnings": [],
+            "errors": [],
+        }
+
+
+class _FakeScopeDiscoveryRunner:
+    """Fake scope discovery runner used to verify facade delegation."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def record_challenge_artifact(
+        self,
+        request: ChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record Challenge Artifact requests."""
+        self.calls.append(("record_challenge_artifact", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "recorded"},
             "warnings": [],
             "errors": [],
         }
@@ -3044,6 +3065,27 @@ def test_application_scope_extension_facades_pass_request_data_to_runner() -> No
     assert start_request.expected_state == "SPRINT_COMPLETE"
     assert start_request.idempotency_key == "scope-extension-start-001"
     assert start_request.changed_by == "test-agent"
+
+
+def test_application_discovery_challenge_record_passes_request_data_to_runner() -> None:
+    """Verify scope discovery facade builds a Challenge Artifact record request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_challenge_record(
+        project_id=PROJECT_ID,
+        artifact_file="artifacts/challenge.json",
+        idempotency_key="challenge-record-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "record_challenge_artifact"
+    request = cast("ChallengeArtifactRecordRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.artifact_file == "artifacts/challenge.json"
+    assert request.idempotency_key == "challenge-record-001"
+    assert request.changed_by == "test-agent"
 
 
 def test_application_default_scope_extension_runner_evaluates_preconditions(

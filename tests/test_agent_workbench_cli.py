@@ -177,6 +177,33 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def discovery_challenge_record(
+        self,
+        *,
+        project_id: int,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery Challenge Artifact record payload."""
+        self.calls.append(
+            (
+                "discovery_challenge_record",
+                {
+                    "project_id": project_id,
+                    "artifact_file": artifact_file,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "recorded"},
+            "warnings": [],
+            "errors": [],
+        }
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -2255,6 +2282,80 @@ def test_cli_generates_auto_idempotency_key_when_omitted() -> None:
     key = call_args["idempotency_key"]
     assert isinstance(key, str)
     assert key.startswith("auto-")
+
+
+def test_discovery_challenge_record_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery Challenge Artifact record routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            "artifacts/challenge.json",
+            "--idempotency-key",
+            "challenge-record-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery challenge record"
+    )
+    assert app.calls == [
+        (
+            "discovery_challenge_record",
+            {
+                "project_id": PROJECT_ID,
+                "artifact_file": "artifacts/challenge.json",
+                "idempotency_key": "challenge-record-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_discovery_challenge_record_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope discovery Challenge Artifact record requires idempotency."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            "artifacts/challenge.json",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery challenge record"
+    )
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
 
 
 def test_scope_extension_validate_cli_routes_to_application(

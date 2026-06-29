@@ -58,6 +58,7 @@ from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
     check_schema_readiness,
 )
+from services.agent_workbench.scope_discovery import ChallengeArtifactRecordRequest
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
     ScopeExtensionRunner,
@@ -229,9 +230,38 @@ class _ScopeExtensionRunner(Protocol):
         ...
 
 
+class _ScopeDiscoveryRunner(Protocol):
+    """Scope discovery runner methods exposed through the facade."""
+
+    def record_challenge_artifact(
+        self,
+        request: ChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a Challenge Artifact."""
+        ...
+
+
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
     return 0
+
+
+class _DefaultScopeDiscoveryRunner:
+    """Session-scoped adapter for scope discovery operations."""
+
+    def record_challenge_artifact(
+        self,
+        request: ChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a Challenge Artifact with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).record_challenge_artifact(
+                request
+            )
 
 
 class _DefaultScopeExtensionRunner:
@@ -925,6 +955,7 @@ class AgentWorkbenchApplication:
         authority_decision_runner: _AuthorityDecisionRunner | None = None,
         authority_regenerate_runner: _AuthorityRegenerateRunner | None = None,
         authority_curation_runner: _AuthorityCurationRunner | None = None,
+        scope_discovery_runner: _ScopeDiscoveryRunner | None = None,
         scope_extension_runner: _ScopeExtensionRunner | None = None,
         vision_runner: _VisionPhaseRunner | None = None,
         backlog_runner: _BacklogPhaseRunner | None = None,
@@ -943,6 +974,7 @@ class AgentWorkbenchApplication:
         self._authority_decision_runner = authority_decision_runner
         self._authority_regenerate_runner = authority_regenerate_runner
         self._authority_curation_runner = authority_curation_runner
+        self._scope_discovery_runner = scope_discovery_runner
         self._scope_extension_runner = scope_extension_runner
         self._vision_runner = vision_runner
         self._backlog_runner = backlog_runner
@@ -1612,6 +1644,23 @@ class AgentWorkbenchApplication:
             base_spec_version_id=base_spec_version_id,
         )
         return self._get_scope_extension_runner().validate(request)
+
+    def discovery_challenge_record(
+        self,
+        *,
+        project_id: int,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a Scope Discovery Challenge Artifact through the runner."""
+        request = ChallengeArtifactRecordRequest(
+            project_id=project_id,
+            artifact_file=artifact_file,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().record_challenge_artifact(request)
 
     def scope_extension_start(  # noqa: PLR0913
         self,
@@ -2618,6 +2667,12 @@ class AgentWorkbenchApplication:
                 )
             )
         return self._scope_extension_runner
+
+    def _get_scope_discovery_runner(self) -> _ScopeDiscoveryRunner:
+        """Return the scope discovery runner, constructing the default lazily."""
+        if self._scope_discovery_runner is None:
+            self._scope_discovery_runner = _DefaultScopeDiscoveryRunner()
+        return self._scope_discovery_runner
 
     def _scope_extension_sprint_candidate_count(self, project_id: int) -> int:
         """Resolve candidate count from the same read projection as workflow-next."""
