@@ -15,7 +15,12 @@ import services.workflow as workflow_mod
 import utils.authority_curation_trace as trace_mod
 from db.migrations import ensure_schema_current
 from models import db as model_db
-from models.agent_workbench import CliMutationLedger
+from models.agent_workbench import (
+    CliMutationLedger,
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product, Sprint, SprintStory, Team, UserStory
 from models.enums import SprintStatus
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
@@ -86,6 +91,85 @@ CANDIDATES_FINGERPRINT = "sha256:" + "2" * 64
 AUTHORITY_FINGERPRINT = "sha256:" + "3" * 64
 PROJECT_FINGERPRINT = "sha256:" + "4" * 64
 REVIEW_TOKEN_FIXTURE = "review-token-123"  # noqa: S105  # nosec B105
+
+
+def _discovery_challenge_artifact(
+    session: Session,
+    *,
+    readiness: str = "ready_for_prd",
+) -> DiscoveryChallengeArtifact:
+    """Persist a Scope Discovery Challenge Artifact fixture."""
+    if session.get(Product, PROJECT_ID) is None:
+        session.add(Product(product_id=PROJECT_ID, name="Scope Discovery Project"))
+        session.commit()
+    artifact = DiscoveryChallengeArtifact(
+        project_id=PROJECT_ID,
+        producer="grill-with-docs",
+        readiness=readiness,
+        original_idea="Extend the exhausted project scope.",
+        content_json="{}",
+        artifact_fingerprint=f"sha256:challenge-{readiness}",
+        request_hash=f"sha256:challenge-request-{readiness}",
+        idempotency_key=f"challenge-{readiness}",
+    )
+    session.add(artifact)
+    session.commit()
+    session.refresh(artifact)
+    return artifact
+
+
+def _discovery_prd(
+    session: Session,
+    *,
+    challenge_artifact_id: int,
+    status: str = "draft",
+) -> DiscoveryPrd:
+    """Persist a Scope Discovery PRD fixture."""
+    prd = DiscoveryPrd(
+        project_id=PROJECT_ID,
+        challenge_artifact_id=challenge_artifact_id,
+        producer="to-prd",
+        status=status,
+        version="1",
+        title="Scope Extension PRD",
+        content_json="{}",
+        artifact_fingerprint=f"sha256:prd-{status}",
+        request_hash=f"sha256:prd-request-{status}",
+        idempotency_key=f"prd-{status}",
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    return prd
+
+
+def _discovery_spec_amendment_draft(
+    session: Session,
+    *,
+    prd: DiscoveryPrd,
+    challenge_artifact_id: int,
+    status: str = "ready_for_amendment_acceptance",
+) -> DiscoverySpecAmendmentDraft:
+    """Persist a Scope Discovery Spec Amendment Draft fixture."""
+    draft = DiscoverySpecAmendmentDraft(
+        project_id=PROJECT_ID,
+        prd_id=prd.prd_id or 0,
+        challenge_artifact_id=challenge_artifact_id,
+        status=status,
+        amendment_file="/workspace/amended-spec.json",
+        content_json="{}",
+        validation_json="{}",
+        artifact_fingerprint=f"sha256:amendment-{status}",
+        request_hash=f"sha256:amendment-request-{status}",
+        idempotency_key=f"spec-amendment-{status}",
+        base_spec_version_id=SPEC_VERSION_ID,
+        base_spec_hash="sha256:base-spec",
+        amended_spec_hash=f"sha256:amended-spec-{status}",
+    )
+    session.add(draft)
+    session.commit()
+    session.refresh(draft)
+    return draft
 
 
 def _structured_spec_payload() -> dict[str, Any]:
@@ -5843,10 +5927,13 @@ def test_workflow_next_routes_impact_none_with_no_candidates_to_story_generation
     ]
 
 
-def test_workflow_next_routes_exhausted_default_app_to_scope_extension(
+def test_workflow_next_routes_exhausted_default_app_to_scope_discovery(
+    engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default app routes exhausted saved stories to scope extension."""
+    """Default app routes exhausted saved stories to Scope Discovery."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
     monkeypatch.setattr(
         post_sprint_triage_module,
         "canonical_hash",
@@ -5863,28 +5950,27 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_extension(
 
     assert result["ok"] is True
     data = result["data"]
-    validate_command = (
-        "agileforge scope extension validate --project-id 7 "
-        "--spec-file <amended_spec_file>"
+    challenge_command = (
+        "agileforge discovery challenge record --project-id 7 "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
     )
-    assert data["status"] == "project_scope_extension_available"
+    assert data["status"] == "scope_discovery_challenge_artifact_missing"
     assert data["next_valid_commands"] == [
-        validate_command,
+        challenge_command,
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert validate_command not in data["blocked_future_commands"]
     assert (
         "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
     )
-    assert data["blocked_commands"] == []
     assert data["next_actions"] == [
         {
-            "command": validate_command,
-            "status": "project_scope_extension_available",
+            "command": challenge_command,
+            "status": "scope_discovery_challenge_artifact_missing",
             "reason": (
-                "The current execution scope is exhausted; validate an amended spec "
-                "before generating new work."
+                "The current execution scope is exhausted; record a grill-with-docs "
+                "Challenge Artifact before drafting a PRD."
             ),
             "runnable": True,
             "installed": True,
@@ -5916,26 +6002,559 @@ def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
 
     assert result["ok"] is True
     data = result["data"]
-    validate_command = (
-        "agileforge scope extension validate --project-id 7 "
-        "--spec-file <amended_spec_file>"
+    challenge_command = (
+        "agileforge discovery challenge record --project-id 7 "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
     )
-    assert data["status"] == "project_scope_extension_available"
+    assert data["status"] == "scope_discovery_challenge_artifact_missing"
     assert data["next_valid_commands"] == [
-        validate_command,
+        challenge_command,
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert validate_command not in data["blocked_future_commands"]
     assert (
         "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
     )
     assert data["next_actions"][0] == {
-        "command": validate_command,
-        "status": "project_scope_extension_available",
+        "command": challenge_command,
+        "status": "scope_discovery_challenge_artifact_missing",
         "reason": (
-            "The current execution scope is exhausted; validate an amended spec "
-            "before generating new work."
+            "The current execution scope is exhausted; record a grill-with-docs "
+            "Challenge Artifact before drafting a PRD."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_exhausted_project_to_challenge_artifact(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require Scope Discovery before scope extension validation."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    challenge_command = (
+        "agileforge discovery challenge record --project-id 7 "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_challenge_artifact_missing"
+    assert data["next_valid_commands"][0] == challenge_command
+    assert not any(
+        command.startswith("agileforge scope extension validate")
+        for command in data["next_valid_commands"]
+    )
+    assert data["next_actions"][0] == {
+        "command": challenge_command,
+        "status": "scope_discovery_challenge_artifact_missing",
+        "reason": (
+            "The current execution scope is exhausted; record a grill-with-docs "
+            "Challenge Artifact before drafting a PRD."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_blocks_prd_until_challenge_artifact_is_ready(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinguish missing Challenge Artifact from recorded-but-not-ready."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(
+            session,
+            readiness="needs_answers",
+        )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    challenge_command = (
+        "agileforge discovery challenge record --project-id 7 "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_challenge_artifact_not_ready"
+    assert data["next_valid_commands"][0] == challenge_command
+    assert {
+        "command": "agileforge discovery prd draft record",
+        "reason": "CHALLENGE_ARTIFACT_NOT_READY",
+        "message": (
+            "PRD drafting is blocked until the latest Challenge Artifact reaches "
+            "ready_for_prd."
+        ),
+        "challenge_artifact_id": artifact.challenge_artifact_id,
+        "readiness": "needs_answers",
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": challenge_command,
+        "status": "scope_discovery_challenge_artifact_not_ready",
+        "reason": (
+            "Continue grill-with-docs until the Challenge Artifact reaches "
+            "ready_for_prd, then record the updated artifact."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_ready_challenge_to_prd_draft(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require a PRD draft after the Challenge Artifact is ready."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    prd_command = (
+        "agileforge discovery prd draft record --project-id 7 "
+        f"--challenge-artifact-id {artifact.challenge_artifact_id} "
+        "--prd-file <prd_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_prd_missing"
+    assert data["next_valid_commands"][0] == prd_command
+    assert {
+        "command": "agileforge scope extension start",
+        "reason": "PRD_MISSING",
+        "message": (
+            "Scope extension is blocked until a to-prd PRD draft is recorded "
+            "and accepted."
+        ),
+        "challenge_artifact_id": artifact.challenge_artifact_id,
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": prd_command,
+        "status": "scope_discovery_prd_missing",
+        "reason": (
+            "Record a to-prd PRD draft from the ready Challenge Artifact before "
+            "drafting a Spec Amendment."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_draft_prd_to_prd_acceptance(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require human PRD acceptance before Spec Amendment drafting."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="draft",
+        )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    accept_command = (
+        "agileforge discovery prd accept --project-id 7 "
+        f"--prd-id {prd.prd_id} "
+        "--reviewer <reviewer> "
+        "--acceptance-notes <acceptance_notes> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_prd_pending_acceptance"
+    assert data["next_valid_commands"][0] == accept_command
+    assert {
+        "command": "agileforge discovery spec-amendment draft record",
+        "reason": "PRD_NOT_ACCEPTED",
+        "message": (
+            "Spec Amendment drafting is blocked until the PRD is accepted."
+        ),
+        "prd_id": prd.prd_id,
+        "prd_status": "draft",
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": accept_command,
+        "status": "scope_discovery_prd_pending_acceptance",
+        "reason": (
+            "Review and accept the PRD before recording a Spec Amendment Draft."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_rejected_prd_to_new_prd_draft(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not advertise PRD acceptance for a rejected PRD."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="rejected",
+        )
+        artifact_id = artifact.challenge_artifact_id
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    prd_command = (
+        "agileforge discovery prd draft record --project-id 7 "
+        f"--challenge-artifact-id {artifact_id} "
+        "--prd-file <prd_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_prd_rejected"
+    assert data["next_valid_commands"][0] == prd_command
+    assert not any(
+        command.startswith("agileforge discovery prd accept")
+        for command in data["next_valid_commands"]
+    )
+    assert {
+        "command": "agileforge discovery spec-amendment draft record",
+        "reason": "PRD_REJECTED",
+        "message": (
+            "Spec Amendment drafting is blocked until a replacement PRD is "
+            "recorded and accepted."
+        ),
+        "prd_id": prd.prd_id,
+        "prd_status": "rejected",
+    } in data["blocked_commands"]
+
+
+def test_workflow_next_routes_accepted_prd_to_spec_amendment_draft(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require a Spec Amendment Draft after PRD acceptance."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    draft_command = (
+        "agileforge discovery spec-amendment draft record --project-id 7 "
+        f"--prd-id {prd.prd_id} "
+        "--amendment-file <amendment_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_spec_amendment_missing"
+    assert data["next_valid_commands"][0] == draft_command
+    assert {
+        "command": "agileforge scope extension start",
+        "reason": "SPEC_AMENDMENT_DRAFT_MISSING",
+        "message": (
+            "Scope extension is blocked until a validated Spec Amendment Draft "
+            "is recorded and accepted."
+        ),
+        "prd_id": prd.prd_id,
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": draft_command,
+        "status": "scope_discovery_spec_amendment_missing",
+        "reason": (
+            "Record an agent-generated Spec Amendment Draft from the accepted PRD."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_invalid_spec_amendment_to_revision(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinguish invalid Spec Amendment Drafts from missing drafts."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft = _discovery_spec_amendment_draft(
+            session,
+            prd=prd,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="validation_failed",
+        )
+        prd_id = prd.prd_id
+        draft_id = draft.spec_amendment_draft_id
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    draft_command = (
+        "agileforge discovery spec-amendment draft record --project-id 7 "
+        f"--prd-id {prd_id} "
+        "--amendment-file <amendment_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_spec_amendment_invalid"
+    assert data["next_valid_commands"][0] == draft_command
+    assert {
+        "command": "agileforge discovery spec-amendment accept",
+        "reason": "SPEC_AMENDMENT_DRAFT_INVALID",
+        "message": (
+            "Spec Amendment acceptance is blocked until validation succeeds."
+        ),
+        "spec_amendment_draft_id": draft_id,
+        "spec_amendment_status": "validation_failed",
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": draft_command,
+        "status": "scope_discovery_spec_amendment_invalid",
+        "reason": (
+            "Revise and record a Spec Amendment Draft that passes additive "
+            "validation."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_ready_spec_amendment_to_acceptance(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require Spec Amendment Draft acceptance before scope extension start."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft = _discovery_spec_amendment_draft(
+            session,
+            prd=prd,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="ready_for_amendment_acceptance",
+        )
+        draft_id = draft.spec_amendment_draft_id
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    accept_command = (
+        "agileforge discovery spec-amendment accept --project-id 7 "
+        f"--spec-amendment-draft-id {draft_id} "
+        "--reviewer <reviewer> "
+        "--acceptance-notes <acceptance_notes> "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_spec_amendment_pending_acceptance"
+    assert data["next_valid_commands"][0] == accept_command
+    assert {
+        "command": "agileforge scope extension start",
+        "reason": "SPEC_AMENDMENT_DRAFT_NOT_ACCEPTED",
+        "message": (
+            "Scope extension is blocked until the validated Spec Amendment Draft "
+            "is accepted."
+        ),
+        "spec_amendment_draft_id": draft_id,
+        "spec_amendment_status": "ready_for_amendment_acceptance",
+    } in data["blocked_commands"]
+    assert data["next_actions"][0] == {
+        "command": accept_command,
+        "status": "scope_discovery_spec_amendment_pending_acceptance",
+        "reason": (
+            "Review and accept the validated Spec Amendment Draft before starting "
+            "scope extension."
+        ),
+        "runnable": True,
+        "installed": True,
+        "requires_cli_installation": False,
+    }
+
+
+def test_workflow_next_routes_accepted_spec_amendment_to_scope_start(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start scope extension only from the accepted Spec Amendment Draft."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft = _discovery_spec_amendment_draft(
+            session,
+            prd=prd,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft_id = draft.spec_amendment_draft_id
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    start_command = (
+        "agileforge scope extension start --project-id 7 "
+        f"--spec-amendment-draft-id {draft_id} "
+        "--expected-state SPRINT_COMPLETE "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_discovery_ready_for_scope_extension_start"
+    assert data["next_valid_commands"][0] == start_command
+    assert not any(
+        command.startswith("agileforge scope extension validate")
+        for command in data["next_valid_commands"]
+    )
+    assert data["blocked_commands"] == []
+    assert data["next_actions"][0] == {
+        "command": start_command,
+        "status": "scope_discovery_ready_for_scope_extension_start",
+        "reason": (
+            "Start guarded scope extension from the accepted Spec Amendment Draft."
         ),
         "runnable": True,
         "installed": True,

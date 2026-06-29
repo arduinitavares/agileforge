@@ -1242,8 +1242,37 @@ def _load_sprint_generation_blocker(
     return _sprint_generation_candidate_blocker(candidate_summary)
 
 
-def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | None:
-    """Return scope-extension workflow projection fields when available."""
+def _scope_extension_runtime_label(status: str) -> str:
+    """Return the dashboard label for scope-discovery/extension actions."""
+    labels = {
+        "scope_discovery_challenge_artifact_missing": "Record Challenge Artifact",
+        "scope_discovery_challenge_artifact_not_ready": (
+            "Record Challenge Artifact"
+        ),
+        "scope_discovery_prd_missing": "Record PRD Draft",
+        "scope_discovery_prd_pending_acceptance": "Accept PRD",
+        "scope_discovery_prd_rejected": "Record PRD Draft",
+        "scope_discovery_spec_amendment_missing": "Record Spec Amendment Draft",
+        "scope_discovery_spec_amendment_invalid": "Record Spec Amendment Draft",
+        "scope_discovery_spec_amendment_pending_acceptance": (
+            "Accept Spec Amendment"
+        ),
+        "scope_discovery_ready_for_scope_extension_start": "Start Scope Extension",
+        "project_scope_extension_blocked": "Scope Extension Blocked",
+    }
+    return labels.get(status, "Extend Project Scope")
+
+
+def _is_scope_extension_runtime_status(status: str) -> bool:
+    """Return whether workflow-next status belongs in sprint runtime projection."""
+    return status.startswith("scope_discovery_") or status in {
+        "project_scope_extension_available",
+        "project_scope_extension_blocked",
+    }
+
+
+def _scope_extension_workflow_next_data(project_id: int) -> dict[str, Any] | None:
+    """Return workflow-next data for scope runtime projection."""
     try:
         result = _workbench_application().workflow_next(project_id=project_id)
     except Exception:
@@ -1255,15 +1284,22 @@ def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | Non
     data = result.get("data")
     if not isinstance(data, dict):
         return None
+    return data
+
+
+def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | None:
+    """Return scope-extension workflow projection fields when available."""
+    data = _scope_extension_workflow_next_data(project_id)
+    if data is None:
+        return None
     status = data.get("status")
-    if status not in {
-        "project_scope_extension_available",
-        "project_scope_extension_blocked",
-    }:
+    if not isinstance(status, str):
+        return None
+    if not _is_scope_extension_runtime_status(status):
         return None
 
     default_primary_action = {
-        "label": "Extend Project Scope",
+        "label": _scope_extension_runtime_label(status),
         "command": (
             f"agileforge scope extension validate --project-id {project_id} "
             "--spec-file <amended_spec_file>"
@@ -1309,7 +1345,11 @@ def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | Non
         "primary_action": primary_action,
         "workflow_next_status": status,
         "scope_extension_status": status,
-        "scope_extension_available": status == "project_scope_extension_available",
+        "scope_extension_available": status
+        in {
+            "project_scope_extension_available",
+            "scope_discovery_ready_for_scope_extension_start",
+        },
         "scope_extension_actions": actions,
         "scope_extension_primary_action": primary_action,
         "scope_extension_blocked_reasons": blocked_reasons,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -26,6 +27,11 @@ if TYPE_CHECKING:
     from services.agent_workbench.authority_regenerate import AuthorityRegenerateRequest
     from services.agent_workbench.context_pack import ContextPackService
 
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from services.agent_workbench.command_registry import (
     command_is_available,
     installed_command_names,
@@ -76,6 +82,17 @@ STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
 AUTHORITY_CURATE_COMMAND: Final[str] = "agileforge authority curate"
 AUTHORITY_REGENERATE_COMMAND: Final[str] = "agileforge authority regenerate"
+
+
+@dataclass(frozen=True)
+class _ScopeDiscoveryNextCommand:
+    """Command metadata for one Scope Discovery workflow-next response."""
+
+    command_name: str
+    command_text: str
+    status: str
+    reason: str
+    blocked_commands: list[dict[str, Any]]
 
 
 def get_engine() -> Engine:
@@ -5638,6 +5655,15 @@ def _post_sprint_scope_extension_next(
 ) -> dict[str, Any]:
     """Return exhausted-project routing through scope extension."""
     next_valid_commands, blocked_future_commands = _installed_command_texts(commands)
+    if scope_extension_preconditions.available:
+        discovery_next = _scope_discovery_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+        )
+        if discovery_next is not None:
+            return discovery_next
+
     validate_command = (
         f"agileforge scope extension validate --project-id {project_id} "
         "--spec-file <amended_spec_file>"
@@ -5706,6 +5732,529 @@ def _post_sprint_scope_extension_next(
         ],
     )
 
+
+def _scope_discovery_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+) -> dict[str, Any] | None:
+    """Return the next required Scope Discovery gate for exhausted projects."""
+    response: dict[str, Any] | None = None
+    with Session(get_engine()) as session:
+        challenge_artifact = session.exec(
+            select(DiscoveryChallengeArtifact)
+            .where(DiscoveryChallengeArtifact.project_id == project_id)
+            .order_by(
+                cast("Any", DiscoveryChallengeArtifact.challenge_artifact_id).desc()
+            )
+        ).first()
+        prd = (
+            None
+            if challenge_artifact is None
+            else session.exec(
+                select(DiscoveryPrd)
+                .where(
+                    DiscoveryPrd.project_id == project_id,
+                    DiscoveryPrd.challenge_artifact_id
+                    == challenge_artifact.challenge_artifact_id,
+                )
+                .order_by(cast("Any", DiscoveryPrd.prd_id).desc())
+            ).first()
+        )
+        spec_amendment = (
+            None
+            if prd is None
+            else session.exec(
+                select(DiscoverySpecAmendmentDraft)
+                .where(
+                    DiscoverySpecAmendmentDraft.project_id == project_id,
+                    DiscoverySpecAmendmentDraft.prd_id == prd.prd_id,
+                )
+                .order_by(
+                    cast(
+                        "Any",
+                        DiscoverySpecAmendmentDraft.spec_amendment_draft_id,
+                    ).desc()
+                )
+            ).first()
+        )
+    if challenge_artifact is None:
+        response = _scope_discovery_missing_challenge_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+        )
+    elif challenge_artifact.readiness != "ready_for_prd":
+        response = _scope_discovery_challenge_not_ready_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            challenge_artifact=challenge_artifact,
+        )
+    elif prd is None:
+        response = _scope_discovery_prd_missing_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            challenge_artifact=challenge_artifact,
+        )
+    elif prd.status == "draft":
+        response = _scope_discovery_prd_not_accepted_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            prd=prd,
+        )
+    elif prd.status != "accepted":
+        response = _scope_discovery_prd_rejected_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            challenge_artifact=challenge_artifact,
+            prd=prd,
+        )
+    elif spec_amendment is None:
+        response = _scope_discovery_spec_amendment_missing_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            prd=prd,
+        )
+    elif spec_amendment.status not in {"ready_for_amendment_acceptance", "accepted"}:
+        response = _scope_discovery_spec_amendment_invalid_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            prd=prd,
+            spec_amendment=spec_amendment,
+        )
+    elif spec_amendment.status == "ready_for_amendment_acceptance":
+        response = _scope_discovery_spec_amendment_pending_acceptance_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            spec_amendment=spec_amendment,
+        )
+    elif spec_amendment.status == "accepted":
+        response = _scope_discovery_scope_extension_start_next_response(
+            project_id=project_id,
+            workflow=workflow,
+            commands=commands,
+            spec_amendment=spec_amendment,
+        )
+    return response
+
+
+def _scope_discovery_command_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    next_command: _ScopeDiscoveryNextCommand,
+) -> dict[str, Any]:
+    """Return a workflow-next response for one Scope Discovery command."""
+    next_valid_commands, blocked_future_commands = _installed_command_texts(
+        [(next_command.command_name, next_command.command_text), *commands]
+    )
+    command_installed = command_is_available(next_command.command_name)
+    return _sprint_complete_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        next_valid_commands=next_valid_commands,
+        blocked_commands=next_command.blocked_commands,
+        blocked_future_commands=blocked_future_commands,
+        status=next_command.status,
+        next_actions=[
+            {
+                "command": next_command.command_text,
+                "status": next_command.status,
+                "reason": next_command.reason,
+                "runnable": command_installed,
+                "installed": command_installed,
+                "requires_cli_installation": not command_installed,
+            }
+        ],
+    )
+
+
+def _scope_discovery_missing_challenge_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Return guidance for recording the first Challenge Artifact."""
+    status = "scope_discovery_challenge_artifact_missing"
+    challenge_command = _scope_discovery_challenge_record_command(project_id)
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery challenge record",
+            command_text=challenge_command,
+            status=status,
+            reason=(
+                "The current execution scope is exhausted; record a grill-with-docs "
+                "Challenge Artifact before drafting a PRD."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge scope extension start",
+                    "reason": "CHALLENGE_ARTIFACT_MISSING",
+                    "message": (
+                        "Scope extension is blocked until a grill-with-docs "
+                        "Challenge Artifact is recorded."
+                    ),
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_challenge_not_ready_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    challenge_artifact: DiscoveryChallengeArtifact,
+) -> dict[str, Any]:
+    """Return guidance for a recorded Challenge Artifact that is not ready."""
+    status = "scope_discovery_challenge_artifact_not_ready"
+    challenge_command = _scope_discovery_challenge_record_command(project_id)
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery challenge record",
+            command_text=challenge_command,
+            status=status,
+            reason=(
+                "Continue grill-with-docs until the Challenge Artifact reaches "
+                "ready_for_prd, then record the updated artifact."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge discovery prd draft record",
+                    "reason": "CHALLENGE_ARTIFACT_NOT_READY",
+                    "message": (
+                        "PRD drafting is blocked until the latest Challenge Artifact "
+                        "reaches ready_for_prd."
+                    ),
+                    "challenge_artifact_id": challenge_artifact.challenge_artifact_id,
+                    "readiness": challenge_artifact.readiness,
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_challenge_record_command(project_id: int) -> str:
+    """Return the guarded Challenge Artifact record command template."""
+    return (
+        f"agileforge discovery challenge record --project-id {project_id} "
+        "--artifact-file <challenge_artifact_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _scope_discovery_prd_missing_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    challenge_artifact: DiscoveryChallengeArtifact,
+) -> dict[str, Any]:
+    """Return guidance for recording the PRD draft."""
+    status = "scope_discovery_prd_missing"
+    prd_command = (
+        f"agileforge discovery prd draft record --project-id {project_id} "
+        f"--challenge-artifact-id {challenge_artifact.challenge_artifact_id} "
+        "--prd-file <prd_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery prd draft record",
+            command_text=prd_command,
+            status=status,
+            reason=(
+                "Record a to-prd PRD draft from the ready Challenge Artifact "
+                "before drafting a Spec Amendment."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge scope extension start",
+                    "reason": "PRD_MISSING",
+                    "message": (
+                        "Scope extension is blocked until a to-prd PRD draft is "
+                        "recorded and accepted."
+                    ),
+                    "challenge_artifact_id": challenge_artifact.challenge_artifact_id,
+                }
+            ],
+        ),
+    )
+
+def _scope_discovery_scope_extension_start_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    spec_amendment: DiscoverySpecAmendmentDraft,
+) -> dict[str, Any]:
+    """Return guidance for starting scope extension from accepted discovery."""
+    status = "scope_discovery_ready_for_scope_extension_start"
+    start_command = (
+        f"agileforge scope extension start --project-id {project_id} "
+        f"--spec-amendment-draft-id {spec_amendment.spec_amendment_draft_id} "
+        "--expected-state SPRINT_COMPLETE "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge scope extension start",
+            command_text=start_command,
+            status=status,
+            reason=(
+                "Start guarded scope extension from the accepted Spec Amendment "
+                "Draft."
+            ),
+            blocked_commands=[],
+        ),
+    )
+
+
+def _scope_discovery_spec_amendment_pending_acceptance_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    spec_amendment: DiscoverySpecAmendmentDraft,
+) -> dict[str, Any]:
+    """Return guidance for accepting the validated Spec Amendment Draft."""
+    status = "scope_discovery_spec_amendment_pending_acceptance"
+    accept_command = (
+        "agileforge discovery spec-amendment accept "
+        f"--project-id {project_id} "
+        f"--spec-amendment-draft-id {spec_amendment.spec_amendment_draft_id} "
+        "--reviewer <reviewer> "
+        "--acceptance-notes <acceptance_notes> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery spec-amendment accept",
+            command_text=accept_command,
+            status=status,
+            reason=(
+                "Review and accept the validated Spec Amendment Draft before "
+                "starting scope extension."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge scope extension start",
+                    "reason": "SPEC_AMENDMENT_DRAFT_NOT_ACCEPTED",
+                    "message": (
+                        "Scope extension is blocked until the validated Spec "
+                        "Amendment Draft is accepted."
+                    ),
+                    "spec_amendment_draft_id": (
+                        spec_amendment.spec_amendment_draft_id
+                    ),
+                    "spec_amendment_status": spec_amendment.status,
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_spec_amendment_invalid_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    prd: DiscoveryPrd,
+    spec_amendment: DiscoverySpecAmendmentDraft,
+) -> dict[str, Any]:
+    """Return guidance for revising an invalid Spec Amendment Draft."""
+    status = "scope_discovery_spec_amendment_invalid"
+    draft_command = (
+        "agileforge discovery spec-amendment draft record "
+        f"--project-id {project_id} "
+        f"--prd-id {prd.prd_id} "
+        "--amendment-file <amendment_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery spec-amendment draft record",
+            command_text=draft_command,
+            status=status,
+            reason=(
+                "Revise and record a Spec Amendment Draft that passes additive "
+                "validation."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge discovery spec-amendment accept",
+                    "reason": "SPEC_AMENDMENT_DRAFT_INVALID",
+                    "message": (
+                        "Spec Amendment acceptance is blocked until validation "
+                        "succeeds."
+                    ),
+                    "spec_amendment_draft_id": (
+                        spec_amendment.spec_amendment_draft_id
+                    ),
+                    "spec_amendment_status": spec_amendment.status,
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_spec_amendment_missing_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    prd: DiscoveryPrd,
+) -> dict[str, Any]:
+    """Return guidance for recording the Spec Amendment Draft."""
+    status = "scope_discovery_spec_amendment_missing"
+    draft_command = (
+        "agileforge discovery spec-amendment draft record "
+        f"--project-id {project_id} "
+        f"--prd-id {prd.prd_id} "
+        "--amendment-file <amendment_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery spec-amendment draft record",
+            command_text=draft_command,
+            status=status,
+            reason=(
+                "Record an agent-generated Spec Amendment Draft from the accepted "
+                "PRD."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge scope extension start",
+                    "reason": "SPEC_AMENDMENT_DRAFT_MISSING",
+                    "message": (
+                        "Scope extension is blocked until a validated Spec Amendment "
+                        "Draft is recorded and accepted."
+                    ),
+                    "prd_id": prd.prd_id,
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_prd_rejected_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    challenge_artifact: DiscoveryChallengeArtifact,
+    prd: DiscoveryPrd,
+) -> dict[str, Any]:
+    """Return guidance for replacing a rejected PRD."""
+    status = "scope_discovery_prd_rejected"
+    prd_command = (
+        f"agileforge discovery prd draft record --project-id {project_id} "
+        f"--challenge-artifact-id {challenge_artifact.challenge_artifact_id} "
+        "--prd-file <prd_file> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery prd draft record",
+            command_text=prd_command,
+            status=status,
+            reason=(
+                "Record a replacement to-prd PRD draft from the ready Challenge "
+                "Artifact."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge discovery spec-amendment draft record",
+                    "reason": "PRD_REJECTED",
+                    "message": (
+                        "Spec Amendment drafting is blocked until a replacement PRD "
+                        "is recorded and accepted."
+                    ),
+                    "prd_id": prd.prd_id,
+                    "prd_status": prd.status,
+                }
+            ],
+        ),
+    )
+
+
+def _scope_discovery_prd_not_accepted_next_response(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    commands: list[tuple[str, str]],
+    prd: DiscoveryPrd,
+) -> dict[str, Any]:
+    """Return guidance for accepting the current PRD."""
+    status = "scope_discovery_prd_pending_acceptance"
+    accept_command = (
+        f"agileforge discovery prd accept --project-id {project_id} "
+        f"--prd-id {prd.prd_id} "
+        "--reviewer <reviewer> "
+        "--acceptance-notes <acceptance_notes> "
+        "--idempotency-key <idempotency_key>"
+    )
+    return _scope_discovery_command_next_response(
+        project_id=project_id,
+        workflow=workflow,
+        commands=commands,
+        next_command=_ScopeDiscoveryNextCommand(
+            command_name="agileforge discovery prd accept",
+            command_text=accept_command,
+            status=status,
+            reason=(
+                "Review and accept the PRD before recording a Spec Amendment Draft."
+            ),
+            blocked_commands=[
+                {
+                    "command": "agileforge discovery spec-amendment draft record",
+                    "reason": "PRD_NOT_ACCEPTED",
+                    "message": (
+                        "Spec Amendment drafting is blocked until the PRD is "
+                        "accepted."
+                    ),
+                    "prd_id": prd.prd_id,
+                    "prd_status": prd.status,
+                }
+            ],
+        ),
+    )
 
 def _planned_sprint_id(workflow: dict[str, Any]) -> int | None:
     """Return the planned Sprint id from workflow state, if present."""
