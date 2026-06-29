@@ -51,3 +51,29 @@ class CliMutationLedger(SQLModel, table=True):
     last_error_json: str | None = Field(default=None, sa_type=Text)
     created_at: datetime = Field(default_factory=_utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class DiscoveryChallengeArtifact(SQLModel, table=True):
+    """Saved Scope Discovery challenge artifact."""
+
+    __tablename__ = "discovery_challenge_artifacts"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_discovery_challenge_project_idempotency",
+        ),
+    )
+
+    challenge_artifact_id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="products.product_id", index=True)
+    producer: str = Field(index=True)
+    readiness: str = Field(index=True)
+    original_idea: str = Field(sa_type=Text)
+    content_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)

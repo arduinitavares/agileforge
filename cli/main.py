@@ -246,6 +246,17 @@ class _Application(Protocol):
         """Start guarded scope extension through the runner."""
         ...
 
+    def discovery_challenge_record(
+        self,
+        *,
+        project_id: int,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a Scope Discovery Challenge Artifact."""
+        ...
+
     def authority_compile(  # noqa: PLR0913
         self,
         *,
@@ -1363,6 +1374,36 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     workflow_next = workflow_sub.add_parser("next", help="Show next commands.")
     workflow_next.add_argument("--project-id", type=int, required=True)
     workflow_next.set_defaults(command_handler=_workflow_next)
+
+    discovery = subparsers.add_parser(
+        "discovery",
+        help="Record scope discovery artifacts.",
+    )
+    discovery_sub = discovery.add_subparsers(
+        dest="action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_challenge = discovery_sub.add_parser(
+        "challenge",
+        help="Manage Challenge Artifacts.",
+    )
+    discovery_challenge_sub = discovery_challenge.add_subparsers(
+        dest="challenge_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_challenge_record = discovery_challenge_sub.add_parser(
+        "record",
+        help="Record a grill-with-docs Challenge Artifact.",
+    )
+    discovery_challenge_record.add_argument("--project-id", type=int, required=True)
+    discovery_challenge_record.add_argument("--artifact-file", required=True)
+    discovery_challenge_record.add_argument("--idempotency-key", required=True)
+    discovery_challenge_record.add_argument("--changed-by", default="cli-agent")
+    discovery_challenge_record.set_defaults(
+        command_handler=_discovery_challenge_record
+    )
 
     scope = subparsers.add_parser(
         "scope",
@@ -2598,6 +2639,27 @@ def _project_setup_retry(
         dry_run=args.dry_run,
         dry_run_id=args.dry_run_id,
         correlation_id=args.correlation_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_challenge_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery Challenge Artifact recording to the application."""
+    command = "agileforge discovery challenge record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Discovery challenge record requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_challenge_record(
+        project_id=args.project_id,
+        artifact_file=args.artifact_file,
+        idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,
     )
 

@@ -7,12 +7,15 @@ import shutil
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from cli.main import main
+from models.core import Product
+from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.error_codes import ErrorCode
+from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
 
 type JsonObject = dict[str, Any]
 PROJECT_ID = 7
@@ -22,6 +25,9 @@ RECOMMENDED_SPRINT_POINTS = 5
 ERROR_EXIT_CODE = 5
 INVALID_COMMAND_EXIT_CODE = 2
 COMMAND_EXCEPTION_EXIT_CODE = 1
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
 
 
 class _FakeApplication:
@@ -173,6 +179,33 @@ class _FakeApplication:
         return {
             "ok": True,
             "data": {"project_id": project_id, "fsm_state": "STORY_INTERVIEW"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_challenge_record(
+        self,
+        *,
+        project_id: int,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery Challenge Artifact record payload."""
+        self.calls.append(
+            (
+                "discovery_challenge_record",
+                {
+                    "project_id": project_id,
+                    "artifact_file": artifact_file,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "recorded"},
             "warnings": [],
             "errors": [],
         }
@@ -2255,6 +2288,210 @@ def test_cli_generates_auto_idempotency_key_when_omitted() -> None:
     key = call_args["idempotency_key"]
     assert isinstance(key, str)
     assert key.startswith("auto-")
+
+
+def test_discovery_challenge_record_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery Challenge Artifact record routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            "artifacts/challenge.json",
+            "--idempotency-key",
+            "challenge-record-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery challenge record"
+    )
+    assert app.calls == [
+        (
+            "discovery_challenge_record",
+            {
+                "project_id": PROJECT_ID,
+                "artifact_file": "artifacts/challenge.json",
+                "idempotency_key": "challenge-record-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+def _write_cli_challenge_artifact(
+    tmp_path: Path,
+    *,
+    content: JsonObject | None = None,
+) -> str:
+    path = tmp_path / "challenge-artifact.json"
+    path.write_text(
+        json.dumps(
+            {
+                "producer": "grill-with-docs",
+                "readiness": "ready_for_prd",
+                "original_idea": "Require discovery before new scope.",
+                "content": content if content is not None else _cli_rich_content(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _cli_rich_content(**overrides: object) -> JsonObject:
+    content: JsonObject = {
+        "questions": [
+            {
+                "question": "What is the new scope?",
+                "answer": "Add a scope discovery gate.",
+            }
+        ],
+        "reviewed_evidence": [
+            {"source": "CONTEXT.md", "summary": "Defines Challenge Artifact."}
+        ],
+        "evidence_conflicts": [],
+        "assumptions": ["Agents generate artifacts outside AgileForge."],
+        "non_goals": ["Do not run grill-with-docs inside AgileForge."],
+        "risks": [{"risk": "Untracked chat state.", "mitigation": "Persist artifact."}],
+        "open_questions": [],
+        "glossary_changes": [
+            {
+                "term": "Challenge Artifact",
+                "change": "Stored discovery artifact.",
+                "committed_to_project_glossary": True,
+                "evidence": "CONTEXT.md",
+            }
+        ],
+    }
+    content.update(overrides)
+    return content
+
+
+def _scope_discovery_app(session: Session) -> AgentWorkbenchApplication:
+    session.add(Product(product_id=PROJECT_ID, name="Scope Discovery"))
+    session.commit()
+    return AgentWorkbenchApplication(
+        scope_discovery_runner=ScopeDiscoveryRunner(session=session)
+    )
+
+
+def test_discovery_challenge_record_cli_records_valid_rich_artifact(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI records a rich ready Challenge Artifact through the real runner."""
+    app = _scope_discovery_app(session)
+    artifact_file = _write_cli_challenge_artifact(tmp_path)
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            artifact_file,
+            "--idempotency-key",
+            "challenge-record-rich-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert _mapping(payload["data"])["next_action"] == "record_prd"
+
+
+def test_discovery_challenge_record_cli_reports_ready_artifact_blockers(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI returns structured blockers for invalid ready Challenge Artifacts."""
+    app = _scope_discovery_app(session)
+    artifact_file = _write_cli_challenge_artifact(
+        tmp_path,
+        content=_cli_rich_content(
+            open_questions=[{"question": "Who accepts the PRD?", "blocking": True}]
+        ),
+    )
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            artifact_file,
+            "--idempotency-key",
+            "challenge-record-rich-cli-002",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+    details = _mapping(error["details"])
+    blockers = _sequence(details["blockers"])
+
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.CHALLENGE_ARTIFACT_INVALID.value
+    assert any(
+        _mapping(blocker)["field"] == "content.open_questions"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_discovery_challenge_record_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope discovery Challenge Artifact record requires idempotency."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            "artifacts/challenge.json",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge discovery challenge record"
+    )
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
 
 
 def test_scope_extension_validate_cli_routes_to_application(

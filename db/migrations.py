@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "3"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "4"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1585,6 +1585,25 @@ CREATE TABLE IF NOT EXISTS cli_mutation_ledger (
 )
 """
 
+DISCOVERY_CHALLENGE_ARTIFACTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS discovery_challenge_artifacts (
+    challenge_artifact_id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES products(product_id),
+    producer VARCHAR NOT NULL,
+    readiness VARCHAR NOT NULL,
+    original_idea TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_discovery_challenge_project_idempotency
+        UNIQUE (project_id, idempotency_key)
+)
+"""
+
 AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
     feedback_row_id INTEGER PRIMARY KEY,
@@ -1697,6 +1716,32 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
         ],
     }.items():
         if _ensure_index_exists(engine, "cli_mutation_ledger", index_name, columns):
+            actions.append(f"created index: {index_name}")
+
+    if _ensure_table_exists(
+        engine,
+        "discovery_challenge_artifacts",
+        DISCOVERY_CHALLENGE_ARTIFACTS_CREATE_SQL,
+    ):
+        actions.append("created table: discovery_challenge_artifacts")
+
+    for index_name, columns in {
+        "ix_discovery_challenge_artifacts_project_id": ["project_id"],
+        "ix_discovery_challenge_artifacts_producer": ["producer"],
+        "ix_discovery_challenge_artifacts_readiness": ["readiness"],
+        "ix_discovery_challenge_artifacts_artifact_fingerprint": [
+            "artifact_fingerprint"
+        ],
+        "ix_discovery_challenge_artifacts_request_hash": ["request_hash"],
+        "ix_discovery_challenge_artifacts_idempotency_key": ["idempotency_key"],
+        "ix_discovery_challenge_artifacts_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "discovery_challenge_artifacts",
+            index_name,
+            columns,
+        ):
             actions.append(f"created index: {index_name}")
 
     with engine.begin() as conn:

@@ -1225,6 +1225,26 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
 )
 
 
+_SCOPE_DISCOVERY_COMMANDS: tuple[CommandMetadata, ...] = (
+    CommandMetadata(
+        name="agileforge discovery challenge record",
+        mutates=True,
+        phase="scope_discovery",
+        requires_idempotency_key=True,
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=("project_id", "artifact_file", "idempotency_key"),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.CHALLENGE_ARTIFACT_FILE_NOT_FOUND.value,
+            ErrorCode.CHALLENGE_ARTIFACT_INVALID.value,
+            ErrorCode.CHALLENGE_PRODUCER_INVALID.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ),
+    ),
+)
+
+
 _SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
     CommandMetadata(
         name="agileforge scope extension validate",
@@ -1485,6 +1505,7 @@ def command_contracts() -> tuple[CommandMetadata, ...]:
         *_PHASE_2B_COMMANDS,
         *_PHASE_2C_COMMANDS,
         *_PHASE_2D_COMMANDS,
+        *_SCOPE_DISCOVERY_COMMANDS,
         *_SCOPE_EXTENSION_COMMANDS,
         *_BROWNFIELD_COMMANDS,
         *_PHASE_2E_COMMANDS,
