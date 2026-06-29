@@ -17,6 +17,8 @@ class DependencyGraphIssue:
     story_ids: list[int]
     edge_status: str | None = None
     dependency_id: int | None = None
+    dependent_story_id: int | None = None
+    prerequisite_story_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,8 @@ def _edge_issue(
             story_ids=[edge.dependent_story_id],
             edge_status=edge.status,
             dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
         )
 
     missing_story_ids = [
@@ -255,6 +259,8 @@ def _edge_issue(
             story_ids=missing_story_ids,
             edge_status=edge.status,
             dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
         )
 
     dependent = stories_by_id[edge.dependent_story_id]
@@ -271,6 +277,8 @@ def _edge_issue(
             story_ids=cross_project_ids,
             edge_status=edge.status,
             dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
         )
 
     superseded_story_ids = [
@@ -285,6 +293,8 @@ def _edge_issue(
             story_ids=superseded_story_ids,
             edge_status=edge.status,
             dependency_id=edge.dependency_id,
+            dependent_story_id=edge.dependent_story_id,
+            prerequisite_story_id=edge.prerequisite_story_id,
         )
 
     return None
@@ -323,13 +333,18 @@ def _edge_payloads(
 
 
 def _issue_payload(issue: DependencyGraphIssue) -> dict[str, Any]:
-    return {
+    payload = {
         "code": issue.code,
         "message": issue.message,
         "story_ids": issue.story_ids,
         "edge_status": issue.edge_status,
         "dependency_id": issue.dependency_id,
     }
+    if issue.dependent_story_id is not None:
+        payload["dependent_story_id"] = issue.dependent_story_id
+    if issue.prerequisite_story_id is not None:
+        payload["prerequisite_story_id"] = issue.prerequisite_story_id
+    return payload
 
 
 def _story_title(

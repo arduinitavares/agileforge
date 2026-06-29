@@ -13,7 +13,7 @@ from agile_sqlmodel import (
     StoryStatus,
     UserStory,
 )
-from models.core import Team
+from models.core import Team, UserStoryDependency
 from services.orchestrator_query_service import (
     query_requirement_stories_and_eligibility,
 )
@@ -237,6 +237,127 @@ def test_query_service_session_helper_matches_fetch_sprint_candidates(
     from_engine = fetch_sprint_candidates(product_id)
 
     assert from_session == from_engine
+
+
+def test_query_service_ignores_superseded_dependency_issues_outside_candidates(
+    session: Session,
+) -> None:
+    """Old superseded-only dependency edges should not poison current candidates."""
+    from services.orchestrator_query_service import (  # noqa: PLC0415
+        fetch_sprint_candidates_from_session,
+    )
+
+    product = Product(name="Stale Dependency Product", vision="Vision")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+
+    current = UserStory(
+        product_id=product_id,
+        title="Current ready story",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=False,
+        story_points=2,
+        rank="1",
+    )
+    old_root = UserStory(
+        product_id=product_id,
+        title="Old root",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=True,
+        story_points=2,
+        rank="2",
+    )
+    old_dependent = UserStory(
+        product_id=product_id,
+        title="Old dependent",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=True,
+        story_points=2,
+        rank="3",
+    )
+    session.add_all([current, old_root, old_dependent])
+    session.flush()
+    session.add(
+        UserStoryDependency(
+            product_id=product_id,
+            dependent_story_id=require_id(old_dependent.story_id, "old_dependent_id"),
+            prerequisite_story_id=require_id(old_root.story_id, "old_root_id"),
+            status="active",
+        )
+    )
+    session.commit()
+
+    result = fetch_sprint_candidates_from_session(session, product_id)
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [current.story_id]
+    assert result["readiness"]["status"] == "ready"
+    assert "STORY_DEPENDENCY_SUPERSEDED_STORY" not in result["readiness"][
+        "blocking_codes"
+    ]
+
+
+def test_query_service_blocks_current_candidate_with_superseded_prerequisite(
+    session: Session,
+) -> None:
+    """A current candidate still cannot depend on a superseded prerequisite."""
+    from services.orchestrator_query_service import (  # noqa: PLC0415
+        fetch_sprint_candidates_from_session,
+    )
+
+    product = Product(name="Current Dependency Product", vision="Vision")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+
+    current = UserStory(
+        product_id=product_id,
+        title="Current blocked story",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=False,
+        story_points=2,
+        rank="1",
+    )
+    old_prerequisite = UserStory(
+        product_id=product_id,
+        title="Old prerequisite",
+        status=StoryStatus.TO_DO,
+        is_refined=True,
+        is_superseded=True,
+        story_points=2,
+        rank="2",
+    )
+    session.add_all([current, old_prerequisite])
+    session.flush()
+    session.add(
+        UserStoryDependency(
+            product_id=product_id,
+            dependent_story_id=require_id(current.story_id, "current_story_id"),
+            prerequisite_story_id=require_id(
+                old_prerequisite.story_id,
+                "old_prerequisite_id",
+            ),
+            status="active",
+        )
+    )
+    session.commit()
+
+    result = fetch_sprint_candidates_from_session(session, product_id)
+
+    assert result["success"] is True
+    assert [story["story_id"] for story in result["stories"]] == [current.story_id]
+    assert result["readiness"]["status"] == "blocked"
+    assert result["readiness"]["blocking_codes"] == [
+        "STORY_DEPENDENCY_SUPERSEDED_STORY"
+    ]
+    assert result["readiness"]["blocking_story_ids"] == [current.story_id]
 
 
 def test_query_service_get_real_business_state_returns_idle_snapshot(

@@ -14,7 +14,10 @@ from models.core import Product, Sprint, SprintStory, UserStory
 from models.db import get_engine
 from models.enums import SprintStatus, StoryStatus
 from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
-from services.story_dependencies import load_story_dependency_graph
+from services.story_dependencies import (
+    DependencyGraphIssue,
+    load_story_dependency_graph,
+)
 from utils.spec_schemas import ValidationEvidence
 
 CACHE_TTL_MINUTES: int = 5
@@ -127,7 +130,11 @@ def _augment_readiness_with_dependency_issues(
         code = str(getattr(issue, "code", "STORY_DEPENDENCY_INVALID"))
         if code not in blocking_codes:
             blocking_codes.append(code)
-        blocking_story_ids.update(int(story_id) for story_id in issue.story_ids)
+        dependent_story_id = getattr(issue, "dependent_story_id", None)
+        if isinstance(dependent_story_id, int):
+            blocking_story_ids.add(dependent_story_id)
+        else:
+            blocking_story_ids.update(int(story_id) for story_id in issue.story_ids)
     readiness["blocking_codes"] = blocking_codes
     readiness["blocking_story_ids"] = sorted(blocking_story_ids)
     readiness["dependency_issue_count"] = len(dependency_issues)
@@ -135,6 +142,22 @@ def _augment_readiness_with_dependency_issues(
     if blocking_codes:
         readiness["status"] = "blocked"
     return readiness
+
+
+def _dependency_issue_blocks_candidate(
+    issue: DependencyGraphIssue,
+    *,
+    candidate_story_ids: set[int],
+) -> bool:
+    """Return whether a dependency graph issue affects current Sprint candidates."""
+    if issue.code == "STORY_DEPENDENCY_CYCLE":
+        return any(story_id in candidate_story_ids for story_id in issue.story_ids)
+    if issue.edge_status != "active":
+        return False
+    dependent_story_id = issue.dependent_story_id
+    if dependent_story_id is None:
+        return any(story_id in candidate_story_ids for story_id in issue.story_ids)
+    return dependent_story_id in candidate_story_ids
 
 
 def _build_projects_payload(
@@ -374,14 +397,17 @@ def fetch_sprint_candidates_from_session(
 
     refined.sort(key=_story_order_key)
     dependency_graph = load_story_dependency_graph(session, project_id=product_id)
-    active_dependency_issues = [
-        issue
-        for issue in dependency_graph.issues
-        if issue.edge_status == "active" or issue.code == "STORY_DEPENDENCY_CYCLE"
-    ]
     refined_story_ids = {
         int(story.story_id) for story in refined if story.story_id is not None
     }
+    active_dependency_issues = [
+        issue
+        for issue in dependency_graph.issues
+        if _dependency_issue_blocks_candidate(
+            issue,
+            candidate_story_ids=refined_story_ids,
+        )
+    ]
 
     candidate_list: list[dict[str, Any]] = [
         {
