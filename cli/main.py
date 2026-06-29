@@ -257,16 +257,43 @@ class _Application(Protocol):
         """Record a Scope Discovery Challenge Artifact."""
         ...
 
-    def discovery_prd_draft_record(
+    def discovery_prd_draft_record(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         challenge_artifact_id: int,
         prd_file: str,
         idempotency_key: str,
+        supersedes_prd_id: int | None = None,
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Record a Scope Discovery PRD draft."""
+        ...
+
+    def discovery_prd_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Accept a Scope Discovery PRD."""
+        ...
+
+    def discovery_prd_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Reject a Scope Discovery PRD."""
         ...
 
     def authority_compile(  # noqa: PLR0913
@@ -1446,10 +1473,33 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     discovery_prd_draft_record.add_argument("--prd-file", required=True)
     discovery_prd_draft_record.add_argument("--idempotency-key", required=True)
+    discovery_prd_draft_record.add_argument("--supersedes-prd-id", type=int)
     discovery_prd_draft_record.add_argument("--changed-by", default="cli-agent")
     discovery_prd_draft_record.set_defaults(
         command_handler=_discovery_prd_draft_record
     )
+    discovery_prd_accept = discovery_prd_sub.add_parser(
+        "accept",
+        help="Accept a draft PRD.",
+    )
+    discovery_prd_accept.add_argument("--project-id", type=int, required=True)
+    discovery_prd_accept.add_argument("--prd-id", type=int, required=True)
+    discovery_prd_accept.add_argument("--reviewer", required=True)
+    discovery_prd_accept.add_argument("--acceptance-notes", required=True)
+    discovery_prd_accept.add_argument("--idempotency-key", required=True)
+    discovery_prd_accept.add_argument("--changed-by", default="cli-agent")
+    discovery_prd_accept.set_defaults(command_handler=_discovery_prd_accept)
+    discovery_prd_reject = discovery_prd_sub.add_parser(
+        "reject",
+        help="Reject a draft PRD.",
+    )
+    discovery_prd_reject.add_argument("--project-id", type=int, required=True)
+    discovery_prd_reject.add_argument("--prd-id", type=int, required=True)
+    discovery_prd_reject.add_argument("--reviewer", required=True)
+    discovery_prd_reject.add_argument("--rejection-notes", required=True)
+    discovery_prd_reject.add_argument("--idempotency-key", required=True)
+    discovery_prd_reject.add_argument("--changed-by", default="cli-agent")
+    discovery_prd_reject.set_defaults(command_handler=_discovery_prd_reject)
 
     scope = subparsers.add_parser(
         "scope",
@@ -2727,6 +2777,53 @@ def _discovery_prd_draft_record(
         project_id=args.project_id,
         challenge_artifact_id=args.challenge_artifact_id,
         prd_file=args.prd_file,
+        idempotency_key=args.idempotency_key.strip(),
+        supersedes_prd_id=args.supersedes_prd_id,
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_prd_accept(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery PRD acceptance to the application."""
+    command = "agileforge discovery prd accept"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Discovery PRD accept requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_prd_accept(
+        project_id=args.project_id,
+        prd_id=args.prd_id,
+        reviewer=args.reviewer,
+        acceptance_notes=args.acceptance_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_prd_reject(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery PRD rejection to the application."""
+    command = "agileforge discovery prd reject"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Discovery PRD reject requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_prd_reject(
+        project_id=args.project_id,
+        prd_id=args.prd_id,
+        reviewer=args.reviewer,
+        rejection_notes=args.rejection_notes,
         idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,
     )

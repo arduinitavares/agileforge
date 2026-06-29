@@ -24,6 +24,7 @@ STORY_ID = 42
 RECOMMENDED_SPRINT_POINTS = 5
 ERROR_EXIT_CODE = 5
 INVALID_COMMAND_EXIT_CODE = 2
+STATE_BLOCKED_EXIT_CODE = 4
 COMMAND_EXCEPTION_EXIT_CODE = 1
 
 if TYPE_CHECKING:
@@ -210,13 +211,14 @@ class _FakeApplication:
             "errors": [],
         }
 
-    def discovery_prd_draft_record(
+    def discovery_prd_draft_record(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         challenge_artifact_id: int,
         prd_file: str,
         idempotency_key: str,
+        supersedes_prd_id: int | None = None,
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Return a scope discovery PRD draft record payload."""
@@ -228,6 +230,7 @@ class _FakeApplication:
                     "challenge_artifact_id": challenge_artifact_id,
                     "prd_file": prd_file,
                     "idempotency_key": idempotency_key,
+                    "supersedes_prd_id": supersedes_prd_id,
                     "changed_by": changed_by,
                 },
             )
@@ -235,6 +238,68 @@ class _FakeApplication:
         return {
             "ok": True,
             "data": {"project_id": project_id, "status": "draft"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_prd_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery PRD accept payload."""
+        self.calls.append(
+            (
+                "discovery_prd_accept",
+                {
+                    "project_id": project_id,
+                    "prd_id": prd_id,
+                    "reviewer": reviewer,
+                    "acceptance_notes": acceptance_notes,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def discovery_prd_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope discovery PRD reject payload."""
+        self.calls.append(
+            (
+                "discovery_prd_reject",
+                {
+                    "project_id": project_id,
+                    "prd_id": prd_id,
+                    "reviewer": reviewer,
+                    "rejection_notes": rejection_notes,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {"project_id": project_id, "status": "rejected"},
             "warnings": [],
             "errors": [],
         }
@@ -2399,6 +2464,97 @@ def test_discovery_prd_draft_record_cli_routes_to_application(
                 "challenge_artifact_id": 42,
                 "prd_file": "artifacts/prd.json",
                 "idempotency_key": "prd-draft-record-001",
+                "supersedes_prd_id": None,
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+def test_discovery_prd_accept_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery PRD accept routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            "55",
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Ready for spec amendment drafting.",
+            "--idempotency-key",
+            "prd-accept-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge discovery prd accept"
+    assert app.calls == [
+        (
+            "discovery_prd_accept",
+            {
+                "project_id": PROJECT_ID,
+                "prd_id": 55,
+                "reviewer": "Ada",
+                "acceptance_notes": "Ready for spec amendment drafting.",
+                "idempotency_key": "prd-accept-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+def test_discovery_prd_reject_cli_routes_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope discovery PRD reject routes guarded mutation args."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            "55",
+            "--reviewer",
+            "Ada",
+            "--rejection-notes",
+            "Needs clearer non-goals.",
+            "--idempotency-key",
+            "prd-reject-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge discovery prd reject"
+    assert app.calls == [
+        (
+            "discovery_prd_reject",
+            {
+                "project_id": PROJECT_ID,
+                "prd_id": 55,
+                "reviewer": "Ada",
+                "rejection_notes": "Needs clearer non-goals.",
+                "idempotency_key": "prd-reject-001",
                 "changed_by": "test-agent",
             },
         )
@@ -2430,29 +2586,27 @@ def _write_cli_prd_draft(
     *,
     challenge_artifact_id: int,
     producer: str = "to-prd",
+    title: str = "Scope Discovery PRD",
+    prd_id: int | None = None,
 ) -> str:
-    path = tmp_path / "prd-draft.json"
-    path.write_text(
-        json.dumps(
-            {
-                "producer": producer,
-                "source_challenge_artifact_id": challenge_artifact_id,
-                "title": "Scope Discovery PRD",
-                "content": {
-                    "problem_statement": "New scope must pass discovery.",
-                    "solution": "Record PRDs from ready Challenge Artifacts.",
-                    "user_stories": [
-                        "As an agent, I can record a draft PRD."
-                    ],
-                },
-                "markdown_export": {
-                    "path": "docs/prds/scope-discovery.md",
-                    "authoritative": False,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    path = tmp_path / f"prd-draft-{abs(hash(title))}.json"
+    payload: JsonObject = {
+        "producer": producer,
+        "source_challenge_artifact_id": challenge_artifact_id,
+        "title": title,
+        "content": {
+            "problem_statement": "New scope must pass discovery.",
+            "solution": "Record PRDs from ready Challenge Artifacts.",
+            "user_stories": ["As an agent, I can record a draft PRD."],
+        },
+        "markdown_export": {
+            "path": "docs/prds/scope-discovery.md",
+            "authoritative": False,
+        },
+    }
+    if prd_id is not None:
+        payload["prd_id"] = prd_id
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
 
 
@@ -2491,6 +2645,78 @@ def _scope_discovery_app(session: Session) -> AgentWorkbenchApplication:
     return AgentWorkbenchApplication(
         scope_discovery_runner=ScopeDiscoveryRunner(session=session)
     )
+
+
+def _record_cli_ready_challenge(
+    capsys: pytest.CaptureFixture[str],
+    app: AgentWorkbenchApplication,
+    tmp_path: Path,
+    *,
+    idempotency_key: str,
+) -> int:
+    """Record a ready Challenge Artifact through the CLI and return its ID."""
+    artifact_file = _write_cli_challenge_artifact(tmp_path)
+
+    rc = main(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--artifact-file",
+            artifact_file,
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+    payload = _stdout_payload(capsys)
+
+    assert rc == 0
+    return int(_mapping(payload["data"])["challenge_artifact_id"])
+
+
+def _record_cli_prd_draft(  # noqa: PLR0913
+    capsys: pytest.CaptureFixture[str],
+    app: AgentWorkbenchApplication,
+    tmp_path: Path,
+    *,
+    challenge_artifact_id: int,
+    idempotency_key: str,
+    title: str = "Scope Discovery PRD",
+    prd_id: int | None = None,
+    supersedes_prd_id: int | None = None,
+) -> JsonObject:
+    """Record a PRD draft through the CLI and return the output payload."""
+    prd_file = _write_cli_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        title=title,
+        prd_id=prd_id,
+    )
+    argv = [
+        "discovery",
+        "prd",
+        "draft",
+        "record",
+        "--project-id",
+        str(PROJECT_ID),
+        "--challenge-artifact-id",
+        str(challenge_artifact_id),
+        "--prd-file",
+        prd_file,
+        "--idempotency-key",
+        idempotency_key,
+    ]
+    if supersedes_prd_id is not None:
+        argv.extend(["--supersedes-prd-id", str(supersedes_prd_id)])
+
+    rc = main(argv, application=app)
+    payload = _stdout_payload(capsys)
+
+    assert rc == 0
+    return payload
 
 
 def test_discovery_challenge_record_cli_records_valid_rich_artifact(
@@ -2686,6 +2912,240 @@ def test_discovery_prd_draft_record_cli_reports_invalid_producer(
     assert rc == INVALID_COMMAND_EXIT_CODE
     assert payload["ok"] is False
     assert error["code"] == ErrorCode.PRD_PRODUCER_INVALID.value
+
+
+def test_discovery_prd_accept_cli_accepts_draft_prd(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI accepts a draft PRD and reports the next explicit transition."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-prd-accept-cli-001",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-accept-cli-001",
+    )
+    prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Approved for spec amendment drafting.",
+            "--idempotency-key",
+            "prd-accept-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    data = _mapping(payload["data"])
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert data["status"] == "accepted"
+    assert data["next_action"] == "record_spec_amendment_draft"
+    assert "spec_amendment_draft_id" not in data
+
+
+def test_discovery_prd_reject_cli_rejects_draft_prd(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI rejects a draft PRD and does not route it toward spec amendment."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-prd-reject-cli-001",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-reject-cli-001",
+    )
+    prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "reject",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "Ada",
+            "--rejection-notes",
+            "Needs clearer non-goals.",
+            "--idempotency-key",
+            "prd-reject-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    data = _mapping(payload["data"])
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert data["status"] == "rejected"
+    assert data["next_action"] == "revise_prd"
+
+
+def test_discovery_prd_draft_record_cli_rejects_in_place_accepted_edit(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI rejects PRD draft payloads that try to edit an accepted PRD ID."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-prd-edit-cli-001",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-edit-cli-001",
+    )
+    prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+    accept_rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Accepted before attempted edit.",
+            "--idempotency-key",
+            "prd-accept-edit-cli-001",
+        ],
+        application=app,
+    )
+    _stdout_payload(capsys)
+    prd_file = _write_cli_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        title="Edited Accepted PRD",
+        prd_id=prd_id,
+    )
+
+    rc = main(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(PROJECT_ID),
+            "--challenge-artifact-id",
+            str(challenge_artifact_id),
+            "--prd-file",
+            prd_file,
+            "--idempotency-key",
+            "prd-edit-accepted-cli-001",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    error = _first_mapping(payload["errors"])
+
+    assert accept_rc == 0
+    assert rc == STATE_BLOCKED_EXIT_CODE
+    assert payload["ok"] is False
+    assert error["code"] == ErrorCode.PRD_ACCEPTED_IMMUTABLE.value
+
+
+def test_discovery_prd_draft_record_cli_creates_superseding_version(
+    capsys: pytest.CaptureFixture[str],
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """CLI records a new draft version that may supersede an accepted PRD."""
+    app = _scope_discovery_app(session)
+    challenge_artifact_id = _record_cli_ready_challenge(
+        capsys,
+        app,
+        tmp_path,
+        idempotency_key="challenge-record-prd-v2-cli-001",
+    )
+    draft_payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-v1-cli-001",
+    )
+    accepted_prd_id = int(_mapping(draft_payload["data"])["prd_id"])
+    accept_rc = main(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(PROJECT_ID),
+            "--prd-id",
+            str(accepted_prd_id),
+            "--reviewer",
+            "Ada",
+            "--acceptance-notes",
+            "Accepted v1.",
+            "--idempotency-key",
+            "prd-accept-v1-cli-001",
+        ],
+        application=app,
+    )
+    _stdout_payload(capsys)
+
+    payload = _record_cli_prd_draft(
+        capsys,
+        app,
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        idempotency_key="prd-draft-v2-cli-001",
+        title="Scope Discovery PRD v2",
+        supersedes_prd_id=accepted_prd_id,
+    )
+    data = _mapping(payload["data"])
+
+    assert accept_rc == 0
+    assert data["status"] == "draft"
+    assert data["version"] == "2"
+    assert data["supersedes_prd_id"] == accepted_prd_id
+    assert data["next_action"] == "accept_prd"
 
 
 @pytest.mark.parametrize("idempotency_key", ["", "   "])

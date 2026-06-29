@@ -105,6 +105,8 @@ EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
 EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
     "agileforge discovery challenge record",
     "agileforge discovery prd draft record",
+    "agileforge discovery prd accept",
+    "agileforge discovery prd reject",
 }
 
 EXPECTED_BROWNFIELD_COMMAND_NAMES = {
@@ -1383,7 +1385,10 @@ def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
         "prd_file",
         "idempotency_key",
     ]
-    assert prd_record["input"]["optional"] == ["changed_by"]
+    assert prd_record["input"]["optional"] == [
+        "supersedes_prd_id",
+        "changed_by",
+    ]
     assert {
         ErrorCode.PROJECT_NOT_FOUND.value,
         ErrorCode.PRD_FILE_NOT_FOUND.value,
@@ -1391,5 +1396,45 @@ def test_scope_discovery_commands_publish_expected_cli_schema() -> None:
         ErrorCode.PRD_PRODUCER_INVALID.value,
         ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND.value,
         ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY.value,
+        ErrorCode.PRD_ACCEPTED_IMMUTABLE.value,
+        ErrorCode.PRD_SUPERSEDES_NOT_FOUND.value,
+        ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED.value,
         ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
     }.issubset(set(prd_record["errors"]))
+
+    accept_command_name = "agileforge discovery prd accept"
+    reject_command_name = "agileforge discovery prd reject"
+    review_required_inputs = {
+        accept_command_name: [
+            "project_id",
+            "prd_id",
+            "reviewer",
+            "acceptance_notes",
+            "idempotency_key",
+        ],
+        reject_command_name: [
+            "project_id",
+            "prd_id",
+            "reviewer",
+            "rejection_notes",
+            "idempotency_key",
+        ],
+    }
+    for review_command_name, required_inputs in review_required_inputs.items():
+        assert command_is_available(review_command_name) is True
+        assert review_command_name in capabilities
+        assert capabilities[review_command_name]["installed"] is True
+        review = command_schema_payload(review_command_name)
+
+        assert review["mutates"] is True
+        assert capabilities[review_command_name]["phase"] == "scope_discovery"
+        assert review["idempotency_required"] is True
+        assert review["idempotency_policy"]["non_dry_run"] == "required"
+        assert review["input"]["required"] == required_inputs
+        assert review["input"]["optional"] == ["changed_by"]
+        assert {
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.PRD_NOT_FOUND.value,
+            ErrorCode.PRD_REVIEW_STATE_INVALID.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        }.issubset(set(review["errors"]))

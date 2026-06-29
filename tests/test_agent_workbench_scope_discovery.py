@@ -11,6 +11,7 @@ from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
     PrdDraftRecordRequest,
+    PrdReviewRequest,
     ScopeDiscoveryRunner,
 )
 
@@ -105,12 +106,32 @@ def _prd_request(
     *,
     challenge_artifact_id: int,
     idempotency_key: str = "prd-draft-record-001",
+    supersedes_prd_id: int | None = None,
 ) -> PrdDraftRecordRequest:
     """Build a PRD draft record request."""
     return PrdDraftRecordRequest(
         project_id=PROJECT_ID,
         challenge_artifact_id=challenge_artifact_id,
         prd_file=prd_file,
+        idempotency_key=idempotency_key,
+        supersedes_prd_id=supersedes_prd_id,
+        changed_by="test-agent",
+    )
+
+
+def _prd_review_request(
+    *,
+    prd_id: int,
+    idempotency_key: str = "prd-review-001",
+    reviewer: str = "product-owner",
+    notes: str = "Approved for spec amendment drafting.",
+) -> PrdReviewRequest:
+    """Build a PRD review request."""
+    return PrdReviewRequest(
+        project_id=PROJECT_ID,
+        prd_id=prd_id,
+        reviewer=reviewer,
+        notes=notes,
         idempotency_key=idempotency_key,
         changed_by="test-agent",
     )
@@ -122,28 +143,28 @@ def _write_prd_draft(
     challenge_artifact_id: int,
     producer: str = "to-prd",
     title: str = "Product Reporting PRD",
+    prd_id: int | None = None,
 ) -> str:
     """Write a PRD draft payload and return its path."""
     path = tmp_path / f"prd-{challenge_artifact_id}-{abs(hash(title))}.json"
+    payload: dict[str, object] = {
+        "producer": producer,
+        "source_challenge_artifact_id": challenge_artifact_id,
+        "title": title,
+        "content": {
+            "problem_statement": "Users need product reporting.",
+            "solution": "Add reporting generated from accepted scope.",
+            "user_stories": ["As a user, I can view product reporting."],
+        },
+        "markdown_export": {
+            "path": "docs/prds/product-reporting.md",
+            "authoritative": False,
+        },
+    }
+    if prd_id is not None:
+        payload["prd_id"] = prd_id
     path.write_text(
-        json.dumps(
-            {
-                "producer": producer,
-                "source_challenge_artifact_id": challenge_artifact_id,
-                "title": title,
-                "content": {
-                    "problem_statement": "Users need product reporting.",
-                    "solution": "Add reporting generated from accepted scope.",
-                    "user_stories": [
-                        "As a user, I can view product reporting."
-                    ],
-                },
-                "markdown_export": {
-                    "path": "docs/prds/product-reporting.md",
-                    "authoritative": False,
-                },
-            }
-        ),
+        json.dumps(payload),
         encoding="utf-8",
     )
     return str(path)
@@ -615,3 +636,227 @@ def test_record_prd_draft_rejects_idempotency_key_reuse(
 
     assert result["ok"] is False
     assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in _error_codes(result)
+
+
+def test_accept_prd_draft_records_reviewer_notes(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A draft PRD can be accepted with reviewer identity and notes."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+
+    result = runner.accept_prd(
+        _prd_review_request(
+            prd_id=prd_id,
+            reviewer="Ada",
+            notes="Ready to become a Spec Amendment Draft.",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["prd_id"] == prd_id
+    assert data["status"] == "accepted"
+    assert data["version"] == "1"
+    assert data["supersedes_prd_id"] is None
+    assert data["superseded_by_prd_id"] is None
+    assert data["next_action"] == "record_spec_amendment_draft"
+    assert "spec_amendment_draft_id" not in data
+    prd = session.get(DiscoveryPrd, prd_id)
+    assert prd is not None
+    assert prd.status == "accepted"
+    assert prd.reviewed_by == "Ada"
+    assert prd.review_notes == "Ready to become a Spec Amendment Draft."
+    assert prd.reviewed_at is not None
+
+
+def test_reject_prd_draft_records_reviewer_notes(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A draft PRD can be rejected with reviewer identity and notes."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+
+    result = runner.reject_prd(
+        _prd_review_request(
+            prd_id=prd_id,
+            reviewer="Ada",
+            notes="Needs clearer out-of-scope decisions.",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["prd_id"] == prd_id
+    assert data["status"] == "rejected"
+    assert data["version"] == "1"
+    assert data["next_action"] == "revise_prd"
+    prd = session.get(DiscoveryPrd, prd_id)
+    assert prd is not None
+    assert prd.status == "rejected"
+    assert prd.reviewed_by == "Ada"
+    assert prd.review_notes == "Needs clearer out-of-scope decisions."
+
+
+def test_accept_prd_replays_same_idempotency_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Retrying the same PRD accept request returns the accepted PRD."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    request = _prd_review_request(prd_id=int(draft["data"]["prd_id"]))
+
+    first = runner.accept_prd(request)
+    second = runner.accept_prd(request)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["data"]["prd_id"] == first["data"]["prd_id"]
+    assert second["data"]["status"] == "accepted"
+
+
+def test_prd_review_rejects_conflicting_repeated_decision(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Review idempotency keys cannot be reused for a different decision."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    prd_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(prd_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+
+    assert runner.accept_prd(_prd_review_request(prd_id=prd_id))["ok"] is True
+    result = runner.reject_prd(
+        _prd_review_request(
+            prd_id=prd_id,
+            idempotency_key="prd-review-001",
+            notes="Reject with reused key.",
+        )
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.IDEMPOTENCY_KEY_REUSED.value in _error_codes(result)
+
+
+def test_record_prd_draft_rejects_in_place_edit_of_accepted_prd(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Accepted PRDs cannot be edited in place by recording over their PRD ID."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    first_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(first_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    prd_id = int(draft["data"]["prd_id"])
+    assert runner.accept_prd(_prd_review_request(prd_id=prd_id))["ok"] is True
+    attempted_edit_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        title="Edited Accepted PRD",
+        prd_id=prd_id,
+    )
+    before = session.get(DiscoveryPrd, prd_id)
+    assert before is not None
+    before_content_json = before.content_json
+
+    result = runner.record_prd_draft(
+        _prd_request(
+            attempted_edit_file,
+            challenge_artifact_id=challenge_artifact_id,
+            idempotency_key="prd-edit-accepted-001",
+        )
+    )
+
+    after = session.get(DiscoveryPrd, prd_id)
+    assert result["ok"] is False
+    assert ErrorCode.PRD_ACCEPTED_IMMUTABLE.value in _error_codes(result)
+    assert after is not None
+    assert after.status == "accepted"
+    assert after.content_json == before_content_json
+
+
+def test_record_prd_draft_creates_superseding_version_without_mutating_accepted_prd(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Changes after acceptance create a linked draft version."""
+    challenge_artifact_id = _record_challenge_artifact(session, tmp_path)
+    first_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    draft = runner.record_prd_draft(
+        _prd_request(first_file, challenge_artifact_id=challenge_artifact_id)
+    )
+    accepted_prd_id = int(draft["data"]["prd_id"])
+    assert runner.accept_prd(
+        _prd_review_request(prd_id=accepted_prd_id)
+    )["ok"] is True
+    accepted_before = session.get(DiscoveryPrd, accepted_prd_id)
+    assert accepted_before is not None
+    accepted_content_json = accepted_before.content_json
+    second_file = _write_prd_draft(
+        tmp_path,
+        challenge_artifact_id=challenge_artifact_id,
+        title="Product Reporting PRD v2",
+    )
+
+    result = runner.record_prd_draft(
+        _prd_request(
+            second_file,
+            challenge_artifact_id=challenge_artifact_id,
+            idempotency_key="prd-draft-record-v2-001",
+            supersedes_prd_id=accepted_prd_id,
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "draft"
+    assert data["version"] == "2"
+    assert data["supersedes_prd_id"] == accepted_prd_id
+    assert data["superseded_by_prd_id"] is None
+    assert data["next_action"] == "accept_prd"
+    assert data["prd_id"] != accepted_prd_id
+    accepted_after = session.get(DiscoveryPrd, accepted_prd_id)
+    assert accepted_after is not None
+    assert accepted_after.status == "accepted"
+    assert accepted_after.content_json == accepted_content_json

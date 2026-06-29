@@ -61,6 +61,7 @@ from services.agent_workbench.schema_readiness import (
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
     PrdDraftRecordRequest,
+    PrdReviewRequest,
 )
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
@@ -250,6 +251,20 @@ class _ScopeDiscoveryRunner(Protocol):
         """Record a PRD draft."""
         ...
 
+    def accept_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a PRD."""
+        ...
+
+    def reject_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a PRD."""
+        ...
+
 
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
@@ -284,6 +299,30 @@ class _DefaultScopeDiscoveryRunner:
 
         with Session(get_engine()) as session:
             return ScopeDiscoveryRunner(session=session).record_prd_draft(request)
+
+    def accept_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a PRD with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).accept_prd(request)
+
+    def reject_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a PRD with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).reject_prd(request)
 
 
 class _DefaultScopeExtensionRunner:
@@ -1684,13 +1723,14 @@ class AgentWorkbenchApplication:
         )
         return self._get_scope_discovery_runner().record_challenge_artifact(request)
 
-    def discovery_prd_draft_record(
+    def discovery_prd_draft_record(  # noqa: PLR0913
         self,
         *,
         project_id: int,
         challenge_artifact_id: int,
         prd_file: str,
         idempotency_key: str,
+        supersedes_prd_id: int | None = None,
         changed_by: str = "cli-agent",
     ) -> dict[str, Any]:
         """Record a Scope Discovery PRD draft through the runner."""
@@ -1699,9 +1739,52 @@ class AgentWorkbenchApplication:
             challenge_artifact_id=challenge_artifact_id,
             prd_file=prd_file,
             idempotency_key=idempotency_key,
+            supersedes_prd_id=supersedes_prd_id,
             changed_by=changed_by,
         )
         return self._get_scope_discovery_runner().record_prd_draft(request)
+
+    def discovery_prd_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Accept a Scope Discovery PRD through the runner."""
+        request = PrdReviewRequest(
+            project_id=project_id,
+            prd_id=prd_id,
+            reviewer=reviewer,
+            notes=acceptance_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().accept_prd(request)
+
+    def discovery_prd_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        prd_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Reject a Scope Discovery PRD through the runner."""
+        request = PrdReviewRequest(
+            project_id=project_id,
+            prd_id=prd_id,
+            reviewer=reviewer,
+            notes=rejection_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().reject_prd(request)
 
     def scope_extension_start(  # noqa: PLR0913
         self,

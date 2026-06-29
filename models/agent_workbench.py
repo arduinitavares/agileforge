@@ -102,9 +102,19 @@ class DiscoveryPrd(SQLModel, table=True):
     version: str = Field(index=True)
     title: str = Field(index=True)
     content_json: str = Field(sa_type=Text)
+    supersedes_prd_id: int | None = Field(
+        default=None,
+        foreign_key="discovery_prds.prd_id",
+        index=True,
+    )
     artifact_fingerprint: str = Field(index=True)
     request_hash: str = Field(index=True)
     idempotency_key: str = Field(index=True)
+    reviewed_by: str | None = Field(default=None, index=True)
+    review_notes: str | None = Field(default=None, sa_type=Text)
+    reviewed_at: datetime | None = Field(default=None, nullable=True)
+    review_request_hash: str | None = Field(default=None, index=True)
+    review_idempotency_key: str | None = Field(default=None, index=True)
     changed_by: str = Field(default="cli-agent", index=True)
     created_at: datetime = Field(default_factory=_utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=_utc_now, nullable=False)

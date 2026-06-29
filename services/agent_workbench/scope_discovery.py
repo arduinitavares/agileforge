@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,8 +19,13 @@ from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 
 CHALLENGE_RECORD_COMMAND: str = "agileforge discovery challenge record"
 PRD_DRAFT_RECORD_COMMAND: str = "agileforge discovery prd draft record"
+PRD_ACCEPT_COMMAND: str = "agileforge discovery prd accept"
+PRD_REJECT_COMMAND: str = "agileforge discovery prd reject"
 CHALLENGE_PRODUCER: str = "grill-with-docs"
 PRD_PRODUCER: str = "to-prd"
+PRD_STATUS_DRAFT: str = "draft"
+PRD_STATUS_ACCEPTED: str = "accepted"
+PRD_STATUS_REJECTED: str = "rejected"
 CHALLENGE_READINESS_VALUES: frozenset[str] = frozenset(
     {"blocked", "needs_answers", "ready_for_prd"}
 )
@@ -33,6 +40,14 @@ READY_FOR_PRD_REQUIRED_CONTENT_FIELDS: tuple[str, ...] = (
     "glossary_changes",
 )
 type ChallengePayloadValidator = Callable[[Mapping[str, Any]], dict[str, Any] | None]
+
+
+@dataclass(frozen=True)
+class _PrdDraftRecordInputs:
+    """Validated PRD draft record inputs."""
+
+    payload: Mapping[str, Any]
+    superseded_prd: DiscoveryPrd | None
 
 
 class ChallengeArtifactRecordRequest(BaseModel):
@@ -50,6 +65,18 @@ class PrdDraftRecordRequest(BaseModel):
     project_id: int
     challenge_artifact_id: int
     prd_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    supersedes_prd_id: int | None = None
+    changed_by: str = "cli-agent"
+
+
+class PrdReviewRequest(BaseModel):
+    """Validated request for accepting or rejecting a PRD."""
+
+    project_id: int
+    prd_id: int
+    reviewer: str = Field(min_length=1)
+    notes: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
 
@@ -136,46 +163,19 @@ class ScopeDiscoveryRunner:
         request: PrdDraftRecordRequest,
     ) -> dict[str, Any]:
         """Record a draft PRD produced by to-prd."""
-        payload, load_error = _load_prd_payload(request.prd_file)
-        if load_error is not None:
-            return load_error
-        payload = cast("Mapping[str, Any]", payload)
-
-        project = self._session.get(Product, request.project_id)
-        if project is None:
-            return _error(
-                ErrorCode.PROJECT_NOT_FOUND,
-                details={"project_id": request.project_id},
-                remediation=["Pass an existing --project-id."],
-            )
-
-        challenge = self._session.get(
-            DiscoveryChallengeArtifact,
-            request.challenge_artifact_id,
-        )
-        challenge_error = _validate_prd_source_challenge(
-            challenge=challenge,
-            request=request,
-        )
-        if challenge_error is not None:
-            return challenge_error
-
-        validation_error = _validate_prd_payload(payload, request)
+        inputs, validation_error = self._validated_prd_draft_record_inputs(request)
         if validation_error is not None:
             return validation_error
+        inputs = cast("_PrdDraftRecordInputs", inputs)
+        payload = inputs.payload
 
         producer = str(payload["producer"])
         title = str(payload["title"]).strip()
         content_json = canonical_json(payload)
         artifact_fingerprint = canonical_hash(payload)
-        request_hash = canonical_hash(
-            {
-                "command": PRD_DRAFT_RECORD_COMMAND,
-                "project_id": request.project_id,
-                "challenge_artifact_id": request.challenge_artifact_id,
-                "artifact_fingerprint": artifact_fingerprint,
-                "changed_by": request.changed_by,
-            }
+        request_hash = _prd_draft_request_hash(
+            request=request,
+            artifact_fingerprint=artifact_fingerprint,
         )
         existing = self._session.exec(
             select(DiscoveryPrd).where(
@@ -194,10 +194,11 @@ class ScopeDiscoveryRunner:
             project_id=request.project_id,
             challenge_artifact_id=request.challenge_artifact_id,
             producer=producer,
-            status="draft",
-            version="1",
+            status=PRD_STATUS_DRAFT,
+            version=_next_prd_version(inputs.superseded_prd),
             title=title,
             content_json=content_json,
+            supersedes_prd_id=request.supersedes_prd_id,
             artifact_fingerprint=artifact_fingerprint,
             request_hash=request_hash,
             idempotency_key=request.idempotency_key,
@@ -208,6 +209,219 @@ class ScopeDiscoveryRunner:
         self._session.refresh(prd)
 
         return _success(_prd_data(prd))
+
+    def _validated_prd_draft_record_inputs(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> tuple[_PrdDraftRecordInputs | None, dict[str, Any] | None]:
+        payload, error = _load_prd_payload(request.prd_file)
+        superseded_prd: DiscoveryPrd | None = None
+        if error is None:
+            payload = cast("Mapping[str, Any]", payload)
+            error = self._validate_prd_draft_record_state(payload, request)
+        if error is None:
+            superseded_prd, error = self._validated_superseded_prd(request)
+        if error is not None:
+            return None, error
+        return (
+            _PrdDraftRecordInputs(
+                payload=cast("Mapping[str, Any]", payload),
+                superseded_prd=superseded_prd,
+            ),
+            None,
+        )
+
+    def _validate_prd_draft_record_state(
+        self,
+        payload: Mapping[str, Any],
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any] | None:
+        validators: tuple[Callable[[], dict[str, Any] | None], ...] = (
+            lambda: _project_exists_error(self._session, request.project_id),
+            lambda: _validate_prd_source_challenge(
+                challenge=self._session.get(
+                    DiscoveryChallengeArtifact,
+                    request.challenge_artifact_id,
+                ),
+                request=request,
+            ),
+            lambda: _validate_prd_payload(payload, request),
+            lambda: self._validate_prd_record_target(payload, request),
+        )
+        for validator in validators:
+            error = validator()
+            if error is not None:
+                return error
+        return None
+
+    def accept_prd(self, request: PrdReviewRequest) -> dict[str, Any]:
+        """Accept a draft PRD."""
+        return self._review_prd(
+            request=request,
+            command=PRD_ACCEPT_COMMAND,
+            target_status=PRD_STATUS_ACCEPTED,
+        )
+
+    def reject_prd(self, request: PrdReviewRequest) -> dict[str, Any]:
+        """Reject a draft PRD."""
+        return self._review_prd(
+            request=request,
+            command=PRD_REJECT_COMMAND,
+            target_status=PRD_STATUS_REJECTED,
+        )
+
+    def _review_prd(
+        self,
+        *,
+        request: PrdReviewRequest,
+        command: str,
+        target_status: str,
+    ) -> dict[str, Any]:
+        project = self._session.get(Product, request.project_id)
+        if project is None:
+            return _error(
+                ErrorCode.PROJECT_NOT_FOUND,
+                details={"project_id": request.project_id},
+                remediation=["Pass an existing --project-id."],
+            )
+
+        request_hash = canonical_hash(
+            {
+                "command": command,
+                "project_id": request.project_id,
+                "prd_id": request.prd_id,
+                "reviewer": request.reviewer,
+                "notes": request.notes,
+                "changed_by": request.changed_by,
+            }
+        )
+        idempotency_error = self._prd_review_idempotency_error(
+            request=request,
+            request_hash=request_hash,
+        )
+        if idempotency_error is not None:
+            return idempotency_error
+
+        prd = self._session.get(DiscoveryPrd, request.prd_id)
+        if prd is None or prd.project_id != request.project_id:
+            return _error(
+                ErrorCode.PRD_NOT_FOUND,
+                details={"project_id": request.project_id, "prd_id": request.prd_id},
+                remediation=["Pass an existing PRD ID for this project."],
+            )
+        if prd.status != PRD_STATUS_DRAFT:
+            return _error(
+                ErrorCode.PRD_REVIEW_STATE_INVALID,
+                details={"prd_id": request.prd_id, "status": prd.status},
+                remediation=["Review only draft PRDs."],
+            )
+
+        now = datetime.now(UTC)
+        prd.status = target_status
+        prd.reviewed_by = request.reviewer
+        prd.review_notes = request.notes
+        prd.reviewed_at = now
+        prd.review_request_hash = request_hash
+        prd.review_idempotency_key = request.idempotency_key
+        prd.changed_by = request.changed_by
+        prd.updated_at = now
+        self._session.add(prd)
+        self._session.commit()
+        self._session.refresh(prd)
+
+        return _success(_prd_data(prd))
+
+    def _prd_review_idempotency_error(
+        self,
+        *,
+        request: PrdReviewRequest,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        existing = self._session.exec(
+            select(DiscoveryPrd).where(
+                DiscoveryPrd.project_id == request.project_id,
+                DiscoveryPrd.review_idempotency_key == request.idempotency_key,
+            )
+        ).first()
+        if existing is None:
+            return None
+        if existing.review_request_hash != request_hash:
+            return _error(
+                ErrorCode.IDEMPOTENCY_KEY_REUSED,
+                details={
+                    "project_id": request.project_id,
+                    "idempotency_key": request.idempotency_key,
+                },
+                remediation=["Retry with a fresh --idempotency-key."],
+            )
+        return _success(_prd_data(existing))
+
+    def _validate_prd_record_target(
+        self,
+        payload: Mapping[str, Any],
+        request: PrdDraftRecordRequest,
+    ) -> dict[str, Any] | None:
+        if "prd_id" not in payload:
+            return None
+        try:
+            target_prd_id = int(str(payload["prd_id"]))
+        except ValueError:
+            return _error(
+                ErrorCode.PRD_DRAFT_INVALID,
+                details={"field": "prd_id", "reason": "not_integer"},
+                remediation=["Omit prd_id when recording a new PRD draft."],
+            )
+        target = self._session.get(DiscoveryPrd, target_prd_id)
+        if (
+            target is not None
+            and target.project_id == request.project_id
+            and target.status == PRD_STATUS_ACCEPTED
+        ):
+            return _error(
+                ErrorCode.PRD_ACCEPTED_IMMUTABLE,
+                details={"prd_id": target_prd_id, "status": target.status},
+                remediation=[
+                    "Create a new draft with --supersedes-prd-id instead."
+                ],
+            )
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"field": "prd_id", "reason": "in_place_target_forbidden"},
+            remediation=["Omit prd_id when recording a new PRD draft."],
+        )
+
+    def _validated_superseded_prd(
+        self,
+        request: PrdDraftRecordRequest,
+    ) -> tuple[DiscoveryPrd | None, dict[str, Any] | None]:
+        if request.supersedes_prd_id is None:
+            return None, None
+        superseded = self._session.get(DiscoveryPrd, request.supersedes_prd_id)
+        if superseded is None or superseded.project_id != request.project_id:
+            return (
+                None,
+                _error(
+                    ErrorCode.PRD_SUPERSEDES_NOT_FOUND,
+                    details={
+                        "project_id": request.project_id,
+                        "supersedes_prd_id": request.supersedes_prd_id,
+                    },
+                    remediation=["Pass an accepted PRD from the same project."],
+                ),
+            )
+        if superseded.status != PRD_STATUS_ACCEPTED:
+            return (
+                None,
+                _error(
+                    ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED,
+                    details={
+                        "supersedes_prd_id": request.supersedes_prd_id,
+                        "status": superseded.status,
+                    },
+                    remediation=["Only accepted PRDs can be superseded."],
+                ),
+            )
+        return superseded, None
 
 
 def _existing_artifact_result(
@@ -244,6 +458,23 @@ def _existing_prd_result(
             remediation=["Retry with a fresh --idempotency-key."],
         )
     return _success(_prd_data(prd))
+
+
+def _prd_draft_request_hash(
+    *,
+    request: PrdDraftRecordRequest,
+    artifact_fingerprint: str,
+) -> str:
+    request_data: dict[str, object] = {
+        "command": PRD_DRAFT_RECORD_COMMAND,
+        "project_id": request.project_id,
+        "challenge_artifact_id": request.challenge_artifact_id,
+        "artifact_fingerprint": artifact_fingerprint,
+        "changed_by": request.changed_by,
+    }
+    if request.supersedes_prd_id is not None:
+        request_data["supersedes_prd_id"] = request.supersedes_prd_id
+    return canonical_hash(request_data)
 
 
 def _load_challenge_payload(
@@ -340,6 +571,16 @@ def _validate_prd_source_challenge(
                 "readiness": challenge.readiness,
             },
             remediation=["Continue discovery until the artifact is ready_for_prd."],
+        )
+    return None
+
+
+def _project_exists_error(session: Session, project_id: int) -> dict[str, Any] | None:
+    if session.get(Product, project_id) is None:
+        return _error(
+            ErrorCode.PROJECT_NOT_FOUND,
+            details={"project_id": project_id},
+            remediation=["Pass an existing --project-id."],
         )
     return None
 
@@ -677,9 +918,28 @@ def _prd_data(prd: DiscoveryPrd) -> dict[str, Any]:
         "producer": prd.producer,
         "status": prd.status,
         "version": prd.version,
+        "supersedes_prd_id": prd.supersedes_prd_id,
+        "superseded_by_prd_id": None,
         "artifact_fingerprint": prd.artifact_fingerprint,
-        "next_action": "accept_prd",
+        "next_action": _prd_next_action(prd.status),
     }
+
+
+def _prd_next_action(status: str) -> str:
+    if status == PRD_STATUS_ACCEPTED:
+        return "record_spec_amendment_draft"
+    if status == PRD_STATUS_REJECTED:
+        return "revise_prd"
+    return "accept_prd"
+
+
+def _next_prd_version(superseded_prd: DiscoveryPrd | None) -> str:
+    if superseded_prd is None:
+        return "1"
+    try:
+        return str(int(superseded_prd.version) + 1)
+    except ValueError:
+        return f"{superseded_prd.version}.1"
 
 
 def _success(data: dict[str, Any]) -> dict[str, Any]:

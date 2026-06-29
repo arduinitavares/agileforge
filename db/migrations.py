@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "5"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "6"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1615,9 +1615,15 @@ CREATE TABLE IF NOT EXISTS discovery_prds (
     version VARCHAR NOT NULL,
     title VARCHAR NOT NULL,
     content_json TEXT NOT NULL,
+    supersedes_prd_id INTEGER REFERENCES discovery_prds(prd_id),
     artifact_fingerprint VARCHAR NOT NULL,
     request_hash VARCHAR NOT NULL,
     idempotency_key VARCHAR NOT NULL,
+    reviewed_by VARCHAR,
+    review_notes TEXT,
+    reviewed_at DATETIME,
+    review_request_hash VARCHAR,
+    review_idempotency_key VARCHAR,
     changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
@@ -1800,6 +1806,22 @@ def _ensure_discovery_prd_storage(engine: Engine) -> list[str]:
     ):
         actions.append("created table: discovery_prds")
 
+    for column_name, column_definition in {
+        "supersedes_prd_id": "INTEGER REFERENCES discovery_prds(prd_id)",
+        "reviewed_by": "VARCHAR",
+        "review_notes": "TEXT",
+        "reviewed_at": "DATETIME",
+        "review_request_hash": "VARCHAR",
+        "review_idempotency_key": "VARCHAR",
+    }.items():
+        if _ensure_column_exists(
+            engine,
+            "discovery_prds",
+            column_name,
+            column_definition,
+        ):
+            actions.append(f"added column: discovery_prds.{column_name}")
+
     for index_name, columns in {
         "ix_discovery_prds_project_id": ["project_id"],
         "ix_discovery_prds_challenge_artifact_id": ["challenge_artifact_id"],
@@ -1807,9 +1829,13 @@ def _ensure_discovery_prd_storage(engine: Engine) -> list[str]:
         "ix_discovery_prds_status": ["status"],
         "ix_discovery_prds_version": ["version"],
         "ix_discovery_prds_title": ["title"],
+        "ix_discovery_prds_supersedes_prd_id": ["supersedes_prd_id"],
         "ix_discovery_prds_artifact_fingerprint": ["artifact_fingerprint"],
         "ix_discovery_prds_request_hash": ["request_hash"],
         "ix_discovery_prds_idempotency_key": ["idempotency_key"],
+        "ix_discovery_prds_reviewed_by": ["reviewed_by"],
+        "ix_discovery_prds_review_request_hash": ["review_request_hash"],
+        "ix_discovery_prds_review_idempotency_key": ["review_idempotency_key"],
         "ix_discovery_prds_changed_by": ["changed_by"],
     }.items():
         if _ensure_index_exists(engine, "discovery_prds", index_name, columns):
