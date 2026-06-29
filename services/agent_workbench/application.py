@@ -61,6 +61,7 @@ from services.agent_workbench.scope_discovery import (
     PrdDraftRecordRequest,
     PrdReviewRequest,
     SpecAmendmentDraftRecordRequest,
+    SpecAmendmentReviewRequest,
 )
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
@@ -271,6 +272,20 @@ class _ScopeDiscoveryRunner(Protocol):
         """Record a Spec Amendment Draft."""
         ...
 
+    def accept_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a Spec Amendment Draft."""
+        ...
+
+    def reject_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a Spec Amendment Draft."""
+        ...
+
 
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
@@ -343,6 +358,30 @@ class _DefaultScopeDiscoveryRunner:
             return ScopeDiscoveryRunner(session=session).record_spec_amendment_draft(
                 request
             )
+
+    def accept_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).accept_spec_amendment(request)
+
+    def reject_spec_amendment(
+        self,
+        request: SpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).reject_spec_amendment(request)
 
 
 class _DefaultScopeExtensionRunner:
@@ -1838,12 +1877,55 @@ class AgentWorkbenchApplication:
         )
         return self._get_scope_discovery_runner().record_spec_amendment_draft(request)
 
+    def discovery_spec_amendment_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Accept a Scope Discovery Spec Amendment Draft through the runner."""
+        request = SpecAmendmentReviewRequest(
+            project_id=project_id,
+            spec_amendment_draft_id=spec_amendment_draft_id,
+            reviewer=reviewer,
+            notes=acceptance_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().accept_spec_amendment(request)
+
+    def discovery_spec_amendment_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Reject a Scope Discovery Spec Amendment Draft through the runner."""
+        request = SpecAmendmentReviewRequest(
+            project_id=project_id,
+            spec_amendment_draft_id=spec_amendment_draft_id,
+            reviewer=reviewer,
+            notes=rejection_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().reject_spec_amendment(request)
+
     def scope_extension_start(  # noqa: PLR0913
         self,
         *,
         project_id: int,
-        spec_file: str,
-        base_spec_version_id: int,
+        spec_file: str | None = None,
+        base_spec_version_id: int | None = None,
+        spec_amendment_draft_id: int | None = None,
         expected_state: str,
         idempotency_key: str,
         changed_by: str = "cli-agent",
@@ -1853,6 +1935,7 @@ class AgentWorkbenchApplication:
             project_id=project_id,
             spec_file=spec_file,
             base_spec_version_id=base_spec_version_id,
+            spec_amendment_draft_id=spec_amendment_draft_id,
             expected_state=expected_state,
             idempotency_key=idempotency_key,
             changed_by=changed_by,

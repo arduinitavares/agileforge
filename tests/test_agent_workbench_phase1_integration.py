@@ -33,6 +33,7 @@ from services.agent_workbench.evidence_collect import (
 )
 from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.read_projection import ReadProjectionService
+from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
 from services.agent_workbench.scope_extension import (
     ScopeExtensionPreconditions,
     ScopeExtensionRunner,
@@ -1282,6 +1283,7 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
             session=session,
             workflow=workflow,
         ),
+        scope_discovery_runner=ScopeDiscoveryRunner(session=session),
         backlog_runner=cast(
             "_BacklogPhaseRunner",
             _ExtensionBacklogRunner(session=session, workflow=workflow),
@@ -1332,6 +1334,165 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
         "REQ.scope-extension-follow-up"
     ]
 
+    challenge_file = tmp_path / "artifacts" / "challenge.json"
+    challenge_file.parent.mkdir(parents=True, exist_ok=True)
+    challenge_file.write_text(
+        json.dumps(
+            {
+                "producer": "grill-with-docs",
+                "readiness": "ready_for_prd",
+                "original_idea": "Add follow-up scope after completing baseline.",
+                "content": {
+                    "questions": [{"question": "What changed?", "answer": "Scope."}],
+                    "reviewed_evidence": [
+                        {
+                            "source": "CONTEXT.md",
+                            "summary": "Completed scope needs additive extension.",
+                        }
+                    ],
+                    "evidence_conflicts": [],
+                    "assumptions": [],
+                    "non_goals": [],
+                    "risks": [],
+                    "open_questions": [],
+                    "glossary_changes": [
+                        {
+                            "term": "Scope Extension",
+                            "change": "Use accepted amendments as the start source.",
+                            "committed_to_project_glossary": True,
+                            "evidence": "CONTEXT.md",
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    challenge_payload = _cli_payload(
+        [
+            "discovery",
+            "challenge",
+            "record",
+            "--project-id",
+            str(project_id),
+            "--artifact-file",
+            str(challenge_file),
+            "--idempotency-key",
+            "scope-extension-e2e-challenge",
+        ],
+        app=app,
+        capsys=capsys,
+    )
+    challenge_artifact_id_value = _mapping(challenge_payload["data"])[
+        "challenge_artifact_id"
+    ]
+    assert isinstance(challenge_artifact_id_value, int)
+    challenge_artifact_id = challenge_artifact_id_value
+    prd_file = tmp_path / "artifacts" / "prd.json"
+    prd_file.write_text(
+        json.dumps(
+            {
+                "producer": "to-prd",
+                "source_challenge_artifact_id": challenge_artifact_id,
+                "title": "Scope Extension PRD",
+                "content": {
+                    "problem_statement": "Completed project needs additive scope.",
+                    "solution": "Add follow-up requirement through a spec amendment.",
+                    "user_stories": ["As a user, I can use the new follow-up scope."],
+                    "implementation_decisions": [],
+                    "testing_decisions": [],
+                    "out_of_scope": [],
+                    "further_notes": [],
+                    "major_modules": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    prd_payload = _cli_payload(
+        [
+            "discovery",
+            "prd",
+            "draft",
+            "record",
+            "--project-id",
+            str(project_id),
+            "--challenge-artifact-id",
+            str(challenge_artifact_id),
+            "--prd-file",
+            str(prd_file),
+            "--idempotency-key",
+            "scope-extension-e2e-prd",
+        ],
+        app=app,
+        capsys=capsys,
+    )
+    prd_id_value = _mapping(prd_payload["data"])["prd_id"]
+    assert isinstance(prd_id_value, int)
+    prd_id = prd_id_value
+    _cli_payload(
+        [
+            "discovery",
+            "prd",
+            "accept",
+            "--project-id",
+            str(project_id),
+            "--prd-id",
+            str(prd_id),
+            "--reviewer",
+            "integration-test",
+            "--acceptance-notes",
+            "Accepted for Spec Amendment drafting.",
+            "--idempotency-key",
+            "scope-extension-e2e-prd-accept",
+        ],
+        app=app,
+        capsys=capsys,
+    )
+    amendment_payload = _cli_payload(
+        [
+            "discovery",
+            "spec-amendment",
+            "draft",
+            "record",
+            "--project-id",
+            str(project_id),
+            "--prd-id",
+            str(prd_id),
+            "--amendment-file",
+            str(amended_spec_path),
+            "--base-spec-version-id",
+            str(base_spec_version_id),
+            "--idempotency-key",
+            "scope-extension-e2e-amendment",
+        ],
+        app=app,
+        capsys=capsys,
+    )
+    spec_amendment_draft_id_value = _mapping(amendment_payload["data"])[
+        "spec_amendment_draft_id"
+    ]
+    assert isinstance(spec_amendment_draft_id_value, int)
+    spec_amendment_draft_id = spec_amendment_draft_id_value
+    _cli_payload(
+        [
+            "discovery",
+            "spec-amendment",
+            "accept",
+            "--project-id",
+            str(project_id),
+            "--spec-amendment-draft-id",
+            str(spec_amendment_draft_id),
+            "--reviewer",
+            "integration-test",
+            "--acceptance-notes",
+            "Accepted for scope extension start.",
+            "--idempotency-key",
+            "scope-extension-e2e-amendment-accept",
+        ],
+        app=app,
+        capsys=capsys,
+    )
     start_payload = _cli_payload(
         [
             "scope",
@@ -1339,10 +1500,8 @@ def test_scope_extension_cli_drives_completed_project_end_to_end(  # noqa: PLR09
             "start",
             "--project-id",
             str(project_id),
-            "--spec-file",
-            str(amended_spec_path),
-            "--base-spec-version-id",
-            str(base_spec_version_id),
+            "--spec-amendment-draft-id",
+            str(spec_amendment_draft_id),
             "--expected-state",
             "SPRINT_COMPLETE",
             "--idempotency-key",

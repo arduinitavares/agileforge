@@ -290,6 +290,11 @@ def test_spec_amendment_draft_migration_creates_storage(tmp_path: Path) -> None:
         "artifact_fingerprint",
         "request_hash",
         "idempotency_key",
+        "reviewed_by",
+        "review_notes",
+        "reviewed_at",
+        "review_request_hash",
+        "review_idempotency_key",
     }.issubset(columns)
 
 

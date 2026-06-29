@@ -6,11 +6,12 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
+from models.agent_workbench import DiscoverySpecAmendmentDraft
 from models.core import Sprint, UserStory
 from models.enums import SprintStatus, StoryStatus
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
@@ -68,24 +69,28 @@ class ScopeExtensionStartRequest(BaseModel):
     """Validated request for guarded scope-extension start."""
 
     project_id: int
-    spec_file: str = Field(min_length=1)
-    base_spec_version_id: int
+    spec_file: str | None = Field(default=None, min_length=1)
+    base_spec_version_id: int | None = None
+    spec_amendment_draft_id: int | None = None
     expected_state: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
     changed_by: str = "cli-agent"
 
     def normalized_request_hash(self) -> str:
         """Return a stable hash for idempotent extension start."""
-        return canonical_hash(
-            {
-                "command": "agileforge scope extension start",
-                "project_id": self.project_id,
-                "spec_file": str(Path(self.spec_file).expanduser()),
-                "base_spec_version_id": self.base_spec_version_id,
-                "expected_state": self.expected_state,
-                "changed_by": self.changed_by,
-            }
-        )
+        request_data: dict[str, object] = {
+            "command": "agileforge scope extension start",
+            "project_id": self.project_id,
+            "expected_state": self.expected_state,
+            "changed_by": self.changed_by,
+        }
+        if self.spec_amendment_draft_id is not None:
+            request_data["spec_amendment_draft_id"] = self.spec_amendment_draft_id
+        if self.spec_file is not None:
+            request_data["spec_file"] = str(Path(self.spec_file).expanduser())
+        if self.base_spec_version_id is not None:
+            request_data["base_spec_version_id"] = self.base_spec_version_id
+        return canonical_hash(request_data)
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,15 @@ class _ScopeExtensionRecoveryMarkerMetadata:
     base_spec_version_id: int
     base_spec_hash: str
     added_source_item_ids: list[str]
+
+
+@dataclass(frozen=True)
+class _ResolvedScopeExtensionStart:
+    """Resolved start inputs after optional discovery artifact lookup."""
+
+    spec_file: str
+    base_spec_version_id: int
+    spec_amendment: DiscoverySpecAmendmentDraft | None = None
 
 
 class ScopeExtensionWorkflowPort(Protocol):
@@ -212,20 +226,27 @@ class ScopeExtensionRunner:
         """Start guarded setup for a valid additive scope extension."""
         session_id = str(request.project_id)
         workflow_state = self._workflow_service.get_session_status(session_id) or {}
-        validation_result = self.validate(
-            ScopeExtensionValidateRequest(
-                project_id=request.project_id,
-                spec_file=request.spec_file,
-                base_spec_version_id=request.base_spec_version_id,
+        resolved, resolve_error = self._resolve_start_request(request)
+        if resolve_error is None:
+            resolved = cast("_ResolvedScopeExtensionStart", resolved)
+            validation_result = self.validate(
+                ScopeExtensionValidateRequest(
+                    project_id=request.project_id,
+                    spec_file=resolved.spec_file,
+                    base_spec_version_id=resolved.base_spec_version_id,
+                )
             )
-        )
-        validation_data, validation_response = _start_validation_data_or_response(
-            validation_result=validation_result,
-            request=request,
-            workflow_state=workflow_state,
-        )
+            validation_data, validation_response = _start_validation_data_or_response(
+                validation_result=validation_result,
+                request=request,
+                workflow_state=workflow_state,
+            )
+        else:
+            validation_data = {}
+            validation_response = resolve_error
         if validation_response is not None:
             return validation_response
+        resolved = cast("_ResolvedScopeExtensionStart", resolved)
 
         current_state = str(workflow_state.get("fsm_state") or "")
         if current_state != request.expected_state:
@@ -249,7 +270,7 @@ class ScopeExtensionRunner:
         )
         start_error = _start_precondition_error(preconditions, request)
 
-        resolved_spec_path = Path(request.spec_file).expanduser().resolve()
+        resolved_spec_path = Path(resolved.spec_file).expanduser().resolve()
         request_fingerprint = _start_request_fingerprint(
             request,
             amended_spec_hash=str(validation_data["amended_spec_hash"]),
@@ -301,6 +322,18 @@ class ScopeExtensionRunner:
             "request_fingerprint": request_fingerprint,
             "spec_file": str(resolved_spec_path),
         }
+        if resolved.spec_amendment is not None:
+            context.update(
+                {
+                    "spec_amendment_draft_id": (
+                        resolved.spec_amendment.spec_amendment_draft_id
+                    ),
+                    "prd_id": resolved.spec_amendment.prd_id,
+                    "challenge_artifact_id": (
+                        resolved.spec_amendment.challenge_artifact_id
+                    ),
+                }
+            )
         next_actions = [
             _authority_compile_action(
                 project_id=request.project_id,
@@ -338,6 +371,140 @@ class ScopeExtensionRunner:
             spec_version_id=spec_version_id,
             context=context,
             next_actions=next_actions,
+        )
+
+    def _resolve_start_request(
+        self,
+        request: ScopeExtensionStartRequest,
+    ) -> tuple[_ResolvedScopeExtensionStart | None, dict[str, Any] | None]:
+        if request.spec_amendment_draft_id is not None:
+            return self._resolve_spec_amendment_start_request(request)
+        if request.spec_file is None or request.base_spec_version_id is None:
+            return (
+                None,
+                _error(
+                    ErrorCode.INVALID_COMMAND.value,
+                    details={
+                        "required_alternatives": [
+                            ["spec_amendment_draft_id"],
+                            ["spec_file", "base_spec_version_id"],
+                        ]
+                    },
+                    remediation=[
+                        "Start from an accepted Spec Amendment Draft "
+                        "in the guided flow."
+                    ],
+                ),
+            )
+        return (
+            _ResolvedScopeExtensionStart(
+                spec_file=request.spec_file,
+                base_spec_version_id=request.base_spec_version_id,
+            ),
+            None,
+        )
+
+    def _resolve_spec_amendment_start_request(
+        self,
+        request: ScopeExtensionStartRequest,
+    ) -> tuple[_ResolvedScopeExtensionStart | None, dict[str, Any] | None]:
+        draft = self._session.get(
+            DiscoverySpecAmendmentDraft,
+            request.spec_amendment_draft_id,
+        )
+        if draft is None or draft.project_id != request.project_id:
+            return (
+                None,
+                _error(
+                    ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
+                    details={
+                        "project_id": request.project_id,
+                        "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                    },
+                    remediation=[
+                        "Pass an accepted Spec Amendment Draft for this project."
+                    ],
+                ),
+            )
+        if draft.status != "accepted":
+            return (
+                None,
+                _error(
+                    ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
+                    details={
+                        "project_id": request.project_id,
+                        "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                        "status": draft.status,
+                    },
+                    remediation=[
+                        "Accept the validated Spec Amendment Draft "
+                        "before starting scope extension."
+                    ],
+                ),
+            )
+        if draft.base_spec_version_id is None:
+            return (
+                None,
+                _error(
+                    ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
+                    details={
+                        "project_id": request.project_id,
+                        "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                        "reason": "missing_base_spec_version_id",
+                    },
+                    remediation=[
+                        "Record and accept a validated Spec Amendment Draft "
+                        "with base spec provenance."
+                    ],
+                ),
+            )
+        if (
+            request.spec_file is not None
+            and Path(request.spec_file).expanduser().resolve()
+            != Path(draft.amendment_file).expanduser().resolve()
+        ):
+            return (
+                None,
+                _error(
+                    ErrorCode.INVALID_COMMAND.value,
+                    details={
+                        "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                        "spec_file": request.spec_file,
+                        "amendment_file": draft.amendment_file,
+                    },
+                    remediation=[
+                        "Omit --spec-file when starting from a Spec Amendment Draft."
+                    ],
+                ),
+            )
+        if (
+            request.base_spec_version_id is not None
+            and request.base_spec_version_id != draft.base_spec_version_id
+        ):
+            return (
+                None,
+                _error(
+                    ErrorCode.SCOPE_EXTENSION_BASE_SPEC_MISMATCH.value,
+                    details={
+                        "project_id": request.project_id,
+                        "expected_base_spec_version_id": request.base_spec_version_id,
+                        "spec_amendment_base_spec_version_id": (
+                            draft.base_spec_version_id
+                        ),
+                    },
+                    remediation=[
+                        "Omit --base-spec-version-id when starting "
+                        "from a Spec Amendment Draft."
+                    ],
+                ),
+            )
+        return (
+            _ResolvedScopeExtensionStart(
+                spec_file=draft.amendment_file,
+                base_spec_version_id=draft.base_spec_version_id,
+                spec_amendment=draft,
+            ),
+            None,
         )
 
     def _latest_accepted_base_spec(self, project_id: int) -> SpecRegistry | None:

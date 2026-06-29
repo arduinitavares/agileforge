@@ -100,6 +100,9 @@ class ErrorCode(StrEnum):
     SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED = (
         "SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED"
     )
+    SPEC_AMENDMENT_NOT_FOUND = "SPEC_AMENDMENT_NOT_FOUND"
+    SPEC_AMENDMENT_REVIEW_STATE_INVALID = "SPEC_AMENDMENT_REVIEW_STATE_INVALID"
+    SPEC_AMENDMENT_NOT_ACCEPTED = "SPEC_AMENDMENT_NOT_ACCEPTED"
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -571,6 +574,26 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="Spec Amendment Drafts require an accepted PRD.",
+    ),
+    ErrorCode.SPEC_AMENDMENT_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.SPEC_AMENDMENT_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Spec Amendment was not found.",
+    ),
+    ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID: ErrorMetadata(
+        code=ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value,
+        default_exit_code=4,
+        retryable=False,
+        description=(
+            "Spec Amendment review command is invalid for the current status."
+        ),
+    ),
+    ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED: ErrorMetadata(
+        code=ErrorCode.SPEC_AMENDMENT_NOT_ACCEPTED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Scope extension start requires an accepted Spec Amendment.",
     ),
 }
 

@@ -114,8 +114,8 @@ Examples:
     """--outcome-summary "..." --checklist-result fully_met """
     """--artifact-ref path/to/file --validation-summary "pytest ..."
   agileforge scope extension validate --project-id 1 --spec-file amended-spec.json
-  agileforge scope extension start --project-id 1 --spec-file amended-spec.json """
-    """--base-spec-version-id 3 --expected-state SPRINT_COMPLETE """
+  agileforge scope extension start --project-id 1 --spec-amendment-draft-id 7 """
+    """--expected-state SPRINT_COMPLETE """
     """--idempotency-key scope-extension-001
   agileforge context pack --project-id 1 --phase sprint-planning
 """
@@ -237,8 +237,9 @@ class _Application(Protocol):
         self,
         *,
         project_id: int,
-        spec_file: str,
-        base_spec_version_id: int,
+        spec_file: str | None = None,
+        base_spec_version_id: int | None = None,
+        spec_amendment_draft_id: int | None = None,
         expected_state: str,
         idempotency_key: str,
         changed_by: str = "cli-agent",
@@ -307,6 +308,32 @@ class _Application(Protocol):
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Record a Scope Discovery Spec Amendment Draft."""
+        ...
+
+    def discovery_spec_amendment_accept(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Accept a Scope Discovery Spec Amendment Draft."""
+        ...
+
+    def discovery_spec_amendment_reject(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Reject a Scope Discovery Spec Amendment Draft."""
         ...
 
     def authority_compile(  # noqa: PLR0913
@@ -1579,6 +1606,48 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     discovery_spec_amendment_draft_record.set_defaults(
         command_handler=_discovery_spec_amendment_draft_record
     )
+    discovery_spec_amendment_accept = discovery_spec_amendment_sub.add_parser(
+        "accept",
+        help="Accept a validated Spec Amendment Draft.",
+    )
+    discovery_spec_amendment_accept.add_argument(
+        "--project-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_accept.add_argument(
+        "--spec-amendment-draft-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_accept.add_argument("--reviewer", required=True)
+    discovery_spec_amendment_accept.add_argument("--acceptance-notes", required=True)
+    discovery_spec_amendment_accept.add_argument("--idempotency-key", required=True)
+    discovery_spec_amendment_accept.add_argument("--changed-by", default="cli-agent")
+    discovery_spec_amendment_accept.set_defaults(
+        command_handler=_discovery_spec_amendment_accept
+    )
+    discovery_spec_amendment_reject = discovery_spec_amendment_sub.add_parser(
+        "reject",
+        help="Reject a validated Spec Amendment Draft.",
+    )
+    discovery_spec_amendment_reject.add_argument(
+        "--project-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_reject.add_argument(
+        "--spec-amendment-draft-id",
+        type=int,
+        required=True,
+    )
+    discovery_spec_amendment_reject.add_argument("--reviewer", required=True)
+    discovery_spec_amendment_reject.add_argument("--rejection-notes", required=True)
+    discovery_spec_amendment_reject.add_argument("--idempotency-key", required=True)
+    discovery_spec_amendment_reject.add_argument("--changed-by", default="cli-agent")
+    discovery_spec_amendment_reject.set_defaults(
+        command_handler=_discovery_spec_amendment_reject
+    )
 
     scope = subparsers.add_parser(
         "scope",
@@ -1611,9 +1680,8 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help="Start a guarded additive project scope extension.",
     )
     scope_extension_start.add_argument("--project-id", type=int, required=True)
-    scope_extension_start.add_argument("--spec-file", required=True)
     scope_extension_start.add_argument(
-        "--base-spec-version-id",
+        "--spec-amendment-draft-id",
         type=int,
         required=True,
     )
@@ -2943,6 +3011,58 @@ def _discovery_spec_amendment_draft_record(
     )
 
 
+def _discovery_spec_amendment_accept(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery Spec Amendment acceptance to the app."""
+    command = "agileforge discovery spec-amendment accept"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            (
+                "Discovery Spec Amendment accept requires a non-blank "
+                "idempotency key."
+            ),
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_spec_amendment_accept(
+        project_id=args.project_id,
+        spec_amendment_draft_id=args.spec_amendment_draft_id,
+        reviewer=args.reviewer,
+        acceptance_notes=args.acceptance_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_spec_amendment_reject(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Scope Discovery Spec Amendment rejection to the app."""
+    command = "agileforge discovery spec-amendment reject"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            (
+                "Discovery Spec Amendment reject requires a non-blank "
+                "idempotency key."
+            ),
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_spec_amendment_reject(
+        project_id=args.project_id,
+        spec_amendment_draft_id=args.spec_amendment_draft_id,
+        reviewer=args.reviewer,
+        rejection_notes=args.rejection_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
 def _scope_extension_validate(
     args: argparse.Namespace,
     application: _Application,
@@ -2970,8 +3090,9 @@ def _scope_extension_start(
         )
     return command, application.scope_extension_start(
         project_id=args.project_id,
-        spec_file=args.spec_file,
-        base_spec_version_id=args.base_spec_version_id,
+        spec_file=None,
+        base_spec_version_id=None,
+        spec_amendment_draft_id=args.spec_amendment_draft_id,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,

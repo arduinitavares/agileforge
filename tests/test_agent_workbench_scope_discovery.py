@@ -22,6 +22,7 @@ from services.agent_workbench.scope_discovery import (
     PrdReviewRequest,
     ScopeDiscoveryRunner,
     SpecAmendmentDraftRecordRequest,
+    SpecAmendmentReviewRequest,
 )
 from services.specs.profile_content import normalize_spec_content_for_registry
 
@@ -161,6 +162,24 @@ def _spec_amendment_request(
         amendment_file=amendment_file,
         idempotency_key=idempotency_key,
         base_spec_version_id=base_spec_version_id,
+        changed_by="test-agent",
+    )
+
+
+def _spec_amendment_review_request(
+    *,
+    spec_amendment_draft_id: int,
+    idempotency_key: str = "spec-amendment-review-001",
+    reviewer: str = "product-owner",
+    notes: str = "Accepted for scope extension start.",
+) -> SpecAmendmentReviewRequest:
+    """Build a Spec Amendment review request."""
+    return SpecAmendmentReviewRequest(
+        project_id=PROJECT_ID,
+        spec_amendment_draft_id=spec_amendment_draft_id,
+        reviewer=reviewer,
+        notes=notes,
+        idempotency_key=idempotency_key,
         changed_by="test-agent",
     )
 
@@ -1079,6 +1098,106 @@ def test_record_spec_amendment_draft_from_accepted_prd_validates_ready(
     assert draft.changed_by == "test-agent"
     saved_validation = json.loads(draft.validation_json)
     assert saved_validation["valid"] is True
+
+
+def test_accept_spec_amendment_draft_requires_validated_ready_draft(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Only validated ready Spec Amendment Drafts can become accepted artifacts."""
+    _challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    invalid_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_modified_existing_scope(base),
+        name="invalid-spec-amendment-review.json",
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    invalid = runner.record_spec_amendment_draft(
+        _spec_amendment_request(
+            invalid_file,
+            prd_id=prd_id,
+            idempotency_key="spec-amendment-invalid-review-001",
+        )
+    )
+
+    result = runner.accept_spec_amendment(
+        _spec_amendment_review_request(
+            spec_amendment_draft_id=invalid["data"]["spec_amendment_draft_id"]
+        )
+    )
+
+    assert result["ok"] is False
+    assert ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID.value in _error_codes(result)
+
+
+def test_accept_spec_amendment_draft_records_human_acceptance(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A validated Spec Amendment Draft can be human-accepted for scope start."""
+    _challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    ready = runner.record_spec_amendment_draft(
+        _spec_amendment_request(amendment_file, prd_id=prd_id)
+    )
+    draft_id = int(ready["data"]["spec_amendment_draft_id"])
+
+    result = runner.accept_spec_amendment(
+        _spec_amendment_review_request(
+            spec_amendment_draft_id=draft_id,
+            reviewer="Ada",
+            notes="Accepted for authority compilation.",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "accepted"
+    assert data["next_action"] == "start_scope_extension"
+    saved = session.get(DiscoverySpecAmendmentDraft, draft_id)
+    assert saved is not None
+    assert saved.status == "accepted"
+    assert saved.reviewed_by == "Ada"
+    assert saved.review_notes == "Accepted for authority compilation."
+    assert saved.review_idempotency_key == "spec-amendment-review-001"
+
+
+def test_reject_spec_amendment_draft_records_human_rejection(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """A validated Spec Amendment Draft can be rejected without starting scope."""
+    _challenge_artifact_id, prd_id = _record_accepted_prd(session, tmp_path)
+    base = _base_spec_artifact()
+    _accepted_base_spec(session, artifact=base)
+    amendment_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_with_added_scope(base),
+    )
+    runner = ScopeDiscoveryRunner(session=session)
+    ready = runner.record_spec_amendment_draft(
+        _spec_amendment_request(amendment_file, prd_id=prd_id)
+    )
+
+    result = runner.reject_spec_amendment(
+        _spec_amendment_review_request(
+            spec_amendment_draft_id=int(ready["data"]["spec_amendment_draft_id"]),
+            idempotency_key="spec-amendment-reject-001",
+            notes="Reject until risk language is tightened.",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "rejected"
+    assert result["data"]["next_action"] == "revise_spec_amendment_draft"
 
 
 def test_record_spec_amendment_draft_requires_accepted_prd(
