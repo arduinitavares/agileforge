@@ -1,0 +1,3 @@
+## 2025-05-05 - Use semantic `<form>` inside Modals for Validation
+**Learning:** For modal dialogs with input fields that require validation (like `required` and `pattern`), simply wrapping the inputs in a `<div>` and manually triggering submission with a button's `onclick` bypasses native HTML5 validation popups and breaks standard Enter-key submission behavior.
+**Action:** Always ensure modal forms are wrapped in a `<form onsubmit="event.preventDefault(); submitFunction();">`, use `<button type="submit">` for the primary action, and explicitly set `type="button"` on "Cancel" or "Close" buttons to prevent accidental form submission while preserving native browser validation logic.
