@@ -2320,6 +2320,37 @@ class _FakeStoryRunner:
             "errors": [],
         }
 
+    def repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Record Story completion scope repair."""
+        self.calls.append(
+            (
+                "repair_completion_scope",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "expected_scope_id": expected_scope_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "fsm_state": "SPRINT_SETUP",
+                "cleared_story_completion_scope": {"scope_id": expected_scope_id},
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
         """Record Story dependency inspection."""
         self.calls.append(("dependency_inspect", {"project_id": project_id}))
@@ -5208,11 +5239,11 @@ def test_workflow_next_blocks_generate_for_stale_story_scope(
     ]
 
 
-def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
+def test_workflow_next_does_not_route_terminal_story_scope_reconcile(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Do not advertise repair-readiness when its DB safety guard would reject it."""
+    """Do not advertise terminal Story reconciliation for stale completion scope."""
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
     with Session(engine) as session:
@@ -5275,10 +5306,15 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
 
     assert result["ok"] is True
     data = result["data"]
-    assert data["status"] == "sprint_setup_story_scope_reconcile_required"
+    assert data["status"] == "sprint_setup_story_scope_repair_required"
     repair_command = (
         "agileforge story repair-readiness --project-id 7 "
         "--expected-state SPRINT_SETUP "
+        "--idempotency-key <idempotency_key>"
+    )
+    scope_repair_command = (
+        "agileforge story repair-completion-scope --project-id 7 "
+        "--expected-state SPRINT_SETUP --expected-scope-id milestone_1 "
         "--idempotency-key <idempotency_key>"
     )
     reconcile_command = (
@@ -5286,7 +5322,12 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
         "--action defer --reason <reason> --idempotency-key <idempotency_key>"
     )
     assert repair_command not in data["next_valid_commands"]
-    assert reconcile_command in data["next_valid_commands"]
+    assert scope_repair_command in data["next_valid_commands"]
+    assert reconcile_command not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge story reconcile")
+        for command in data["next_valid_commands"]
+    )
     assert not any(
         command.startswith(
             (
@@ -5296,6 +5337,15 @@ def test_workflow_next_blocks_unsafe_story_scope_repair_after_sprint_work(
         )
         for command in data["next_valid_commands"]
     )
+    assert {
+        "command": "agileforge story reconcile",
+        "reason": "STALE_STORY_SCOPE_RECONCILE_REQUIRES_MANUAL_REVIEW",
+        "message": (
+            "Story reconciliation can terminally archive active Stories. "
+            "workflow next does not recommend terminal reconciliation for stale "
+            "Story completion scope automatically."
+        ),
+    } in data["blocked_commands"]
     assert {
         "command": repair_command,
         "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",

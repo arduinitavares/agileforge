@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from sqlmodel import Session, select
 
-from orchestrator_agent.agent_tools.story_linkage import normalize_requirement_key
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -690,6 +688,17 @@ class _StoryPhaseRunner(Protocol):
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Backfill Story planning metadata before Sprint work starts."""
+        ...
+
+    def repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Clear stale Story completion scope before Sprint planning."""
         ...
 
     def dependency_inspect(self, *, project_id: int) -> dict[str, Any]:
@@ -2412,6 +2421,22 @@ class AgentWorkbenchApplication:
             idempotency_key=idempotency_key,
         )
 
+    def story_repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Clear stale Story completion scope before Sprint planning."""
+        return self._get_story_runner().repair_completion_scope(
+            project_id=project_id,
+            expected_state=expected_state,
+            expected_scope_id=expected_scope_id,
+            idempotency_key=idempotency_key,
+        )
+
     def story_dependencies_inspect(self, *, project_id: int) -> dict[str, Any]:
         """Inspect Story dependency graph."""
         return self._get_story_runner().dependency_inspect(project_id=project_id)
@@ -3122,80 +3147,6 @@ def _story_readiness_repair_blocker(project_id: int) -> dict[str, str] | None:
         "reason": "STORY_READINESS_REPAIR_UNSAFE_AFTER_SPRINT_WORK",
         "message": "Story readiness repair is unsafe after Sprint work exists.",
     }
-
-
-def _story_completion_scope_requirement_keys(
-    story_completion_scope: Mapping[str, Any],
-) -> set[str]:
-    """Return normalized requirement keys from a Story completion scope."""
-    raw_requirements = story_completion_scope.get("requirements")
-    if not isinstance(raw_requirements, list):
-        return set()
-    return {
-        requirement_key
-        for requirement in raw_requirements
-        if (requirement_key := normalize_requirement_key(requirement))
-    }
-
-
-def _candidate_story_matches_completion_scope(
-    story: Mapping[str, Any],
-    *,
-    requirement_keys: set[str],
-    story_completion_scope: Mapping[str, Any],
-) -> bool:
-    """Return whether a Story belongs to the active completion scope."""
-    source_requirement = str(story.get("source_requirement") or "").strip()
-    if normalize_requirement_key(source_requirement) not in requirement_keys:
-        return False
-    if story_completion_scope.get("extension_scope") is not True:
-        return True
-    accepted_spec_version_id = _positive_int_or_none(
-        story_completion_scope.get("accepted_spec_version_id")
-    )
-    if accepted_spec_version_id is not None:
-        return story.get("accepted_spec_version_id") == accepted_spec_version_id
-    return str(story.get("story_origin") or "").strip() == "scope_extension"
-
-
-def _story_scope_reconcile_commands(
-    *,
-    project_id: int,
-    story_completion_scope: Mapping[str, Any],
-) -> list[str]:
-    """Return reconcile commands for active stories outside stale Story scope."""
-    from services.orchestrator_query_service import (  # noqa: PLC0415
-        fetch_sprint_candidates_from_session,
-    )
-
-    requirement_keys = _story_completion_scope_requirement_keys(story_completion_scope)
-    if not requirement_keys:
-        return []
-
-    with Session(get_engine()) as session:
-        candidate_result = fetch_sprint_candidates_from_session(
-            session,
-            product_id=project_id,
-        )
-    raw_stories = candidate_result.get("stories")
-    if not isinstance(raw_stories, list):
-        raw_stories = []
-    stories = [story for story in raw_stories if isinstance(story, dict)]
-
-    return [
-        (
-            f"agileforge story reconcile --project-id {project_id} "
-            f"--story-id {story['story_id']} --action defer --reason <reason> "
-            "--idempotency-key <idempotency_key>"
-        )
-        for story in stories
-        if story.get("story_id") is not None
-        and not _candidate_story_matches_completion_scope(
-            story,
-            requirement_keys=requirement_keys,
-            story_completion_scope=story_completion_scope,
-        )
-    ]
 
 
 def _active_backlog_reset_stale_marker(envelope: dict[str, Any]) -> bool:
@@ -4885,47 +4836,73 @@ def _route_story_readiness_repair(
     return repair_blocker
 
 
-def _route_story_scope_reconcile(
+def _story_completion_scope_repair_command(
     *,
     project_id: int,
-    story_completion_scope: Mapping[str, Any],
+    stale_scope_blocker: dict[str, Any],
+) -> str | None:
+    """Return the non-destructive Story completion-scope repair command."""
+    scope = stale_scope_blocker.get("story_completion_scope")
+    if not isinstance(scope, dict):
+        return None
+    scope_id = _non_empty_string(scope.get("scope_id"))
+    if scope_id is None:
+        return None
+    return (
+        f"agileforge story repair-completion-scope --project-id {project_id} "
+        "--expected-state SPRINT_SETUP "
+        f"--expected-scope-id {quote(scope_id)} "
+        "--idempotency-key <idempotency_key>"
+    )
+
+
+def _route_story_completion_scope_repair(
+    *,
+    project_id: int,
+    stale_scope_blocker: dict[str, Any],
     next_valid_commands: list[str],
     blocked_future_commands: list[Any],
-) -> list[str]:
-    """Route human-mediated Story reconciliation for stale Story scope."""
-    reconcile_commands = _story_scope_reconcile_commands(
+) -> str | None:
+    """Route non-destructive repair for stale Story completion scope."""
+    repair_command = _story_completion_scope_repair_command(
         project_id=project_id,
-        story_completion_scope=story_completion_scope,
+        stale_scope_blocker=stale_scope_blocker,
     )
-    if not reconcile_commands:
-        return []
-    if command_is_available("agileforge story reconcile"):
-        next_valid_commands.extend(reconcile_commands)
-        return reconcile_commands
-    blocked_future_commands.extend(reconcile_commands)
-    return []
+    if repair_command is None:
+        return None
+    if command_is_available("agileforge story repair-completion-scope"):
+        next_valid_commands.append(repair_command)
+        return repair_command
+    blocked_future_commands.append(repair_command)
+    return None
+
+
+def _story_scope_reconcile_manual_review_blocker() -> dict[str, str]:
+    """Return the blocked manual-review marker for stale Story scope."""
+    return {
+        "command": "agileforge story reconcile",
+        "reason": "STALE_STORY_SCOPE_RECONCILE_REQUIRES_MANUAL_REVIEW",
+        "message": (
+            "Story reconciliation can terminally archive active Stories. "
+            "workflow next does not recommend terminal reconciliation for stale "
+            "Story completion scope automatically."
+        ),
+    }
 
 
 def _route_story_scope_reconcile_for_blocker(
     *,
-    project_id: int,
     stale_scope_blocker: dict[str, Any],
     story_readiness_repair_blocker: dict[str, str] | None,
-    next_valid_commands: list[str],
-    blocked_future_commands: list[Any],
-) -> list[str]:
+    blocked_commands: list[Any],
+) -> None:
     """Route Story reconciliation when readiness repair is unsafe."""
     if story_readiness_repair_blocker is None:
-        return []
+        return
     scope = stale_scope_blocker.get("story_completion_scope")
     if not isinstance(scope, dict):
-        return []
-    return _route_story_scope_reconcile(
-        project_id=project_id,
-        story_completion_scope=scope,
-        next_valid_commands=next_valid_commands,
-        blocked_future_commands=blocked_future_commands,
-    )
+        return
+    blocked_commands.append(_story_scope_reconcile_manual_review_blocker())
 
 
 def _first_pending_story_requirement(
@@ -4986,7 +4963,7 @@ def _sprint_workflow_status(
     *,
     blocker_kind: str | None,
     readiness_repair_blocked: bool,
-    has_reconcile_commands: bool,
+    has_completion_scope_repair_command: bool,
     has_story_generation_command: bool,
     has_next_valid_commands: bool,
 ) -> str | None:
@@ -4997,10 +4974,8 @@ def _sprint_workflow_status(
         if has_story_generation_command:
             return "sprint_setup_story_generation_required"
         return "sprint_setup_story_generation_blocked"
-    if not readiness_repair_blocked:
+    if not readiness_repair_blocked or has_completion_scope_repair_command:
         return "sprint_setup_story_scope_repair_required"
-    if has_reconcile_commands:
-        return "sprint_setup_story_scope_reconcile_required"
     return "sprint_setup_story_scope_repair_blocked"
 
 
@@ -5033,6 +5008,74 @@ def _sprint_generate_blocker(
     )
 
 
+def _sprint_setup_blockers(
+    *,
+    fsm_state: str | None,
+    sprint_candidates: dict[str, Any] | None,
+    workflow: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Return active Sprint setup blockers in priority order."""
+    if fsm_state != "SPRINT_SETUP":
+        return None, None, None
+    stale_scope_blocker = _sprint_setup_stale_story_scope_blocker(sprint_candidates)
+    story_refinement_blocker = (
+        _sprint_setup_story_refinement_blocker(
+            sprint_candidates,
+            workflow=workflow,
+        )
+        if stale_scope_blocker is None
+        else None
+    )
+    candidate_readiness_blocker = (
+        _sprint_setup_candidate_readiness_blocker(sprint_candidates)
+        if stale_scope_blocker is None and story_refinement_blocker is None
+        else None
+    )
+    return stale_scope_blocker, story_refinement_blocker, candidate_readiness_blocker
+
+
+def _route_sprint_command_candidate(  # noqa: PLR0913
+    *,
+    command_name: str,
+    command_text: str,
+    has_setup_blocker: bool,
+    save_blocker: dict[str, Any] | None,
+    stale_scope_blocker: dict[str, Any] | None,
+    story_refinement_blocker: dict[str, Any] | None,
+    candidate_readiness_blocker: dict[str, Any] | None,
+    next_valid_commands: list[str],
+    blocked_commands: list[Any],
+    blocked_future_commands: list[Any],
+) -> None:
+    """Route one Sprint command candidate into next-valid or blocked output."""
+    if _sprint_dependency_mutation_suppressed(
+        command_name=command_name,
+        has_setup_blocker=has_setup_blocker,
+    ):
+        return
+    if command_name == "agileforge sprint save" and save_blocker is not None:
+        blocked_commands.append(
+            {
+                "command": command_name,
+                **save_blocker,
+            }
+        )
+        return
+    generate_blocker = _sprint_generate_blocker(
+        command_name=command_name,
+        stale_scope_blocker=stale_scope_blocker,
+        story_refinement_blocker=story_refinement_blocker,
+        candidate_readiness_blocker=candidate_readiness_blocker,
+    )
+    if generate_blocker is not None:
+        blocked_commands.append(generate_blocker)
+        return
+    if command_is_available(command_name):
+        next_valid_commands.append(command_text)
+    else:
+        blocked_future_commands.append(command_text)
+
+
 def _sprint_workflow_next(
     *,
     project_id: int,
@@ -5062,64 +5105,35 @@ def _sprint_workflow_next(
     save_blocker = (
         _sprint_save_blocker(workflow) if fsm_state == "SPRINT_DRAFT" else None
     )
-    stale_scope_blocker = (
-        _sprint_setup_stale_story_scope_blocker(sprint_candidates)
-        if fsm_state == "SPRINT_SETUP"
-        else None
-    )
-    story_refinement_blocker = (
-        _sprint_setup_story_refinement_blocker(
-            sprint_candidates,
+    stale_scope_blocker, story_refinement_blocker, candidate_readiness_blocker = (
+        _sprint_setup_blockers(
+            fsm_state=fsm_state,
+            sprint_candidates=sprint_candidates,
             workflow=workflow,
         )
-        if fsm_state == "SPRINT_SETUP" and stale_scope_blocker is None
-        else None
-    )
-    candidate_readiness_blocker = (
-        _sprint_setup_candidate_readiness_blocker(sprint_candidates)
-        if (
-            fsm_state == "SPRINT_SETUP"
-            and stale_scope_blocker is None
-            and story_refinement_blocker is None
-        )
-        else None
     )
     has_setup_blocker = (
         stale_scope_blocker is not None or story_refinement_blocker is not None
     )
     story_readiness_repair_blocker = None
-    story_scope_reconcile_commands: list[str] = []
+    story_completion_scope_repair_command = None
     story_generation_command = None
     for command_name, command_text in _sprint_command_candidates(
         project_id=project_id,
         fsm_state=fsm_state,
     ):
-        if _sprint_dependency_mutation_suppressed(
+        _route_sprint_command_candidate(
             command_name=command_name,
+            command_text=command_text,
             has_setup_blocker=has_setup_blocker,
-        ):
-            continue
-        if command_name == "agileforge sprint save" and save_blocker is not None:
-            blocked_commands.append(
-                {
-                    "command": command_name,
-                    **save_blocker,
-                }
-            )
-            continue
-        generate_blocker = _sprint_generate_blocker(
-            command_name=command_name,
+            save_blocker=save_blocker,
             stale_scope_blocker=stale_scope_blocker,
             story_refinement_blocker=story_refinement_blocker,
             candidate_readiness_blocker=candidate_readiness_blocker,
+            next_valid_commands=next_valid_commands,
+            blocked_commands=blocked_commands,
+            blocked_future_commands=blocked_future_commands,
         )
-        if generate_blocker is not None:
-            blocked_commands.append(generate_blocker)
-            continue
-        if command_is_available(command_name):
-            next_valid_commands.append(command_text)
-        else:
-            blocked_future_commands.append(command_text)
 
     if stale_scope_blocker is not None:
         story_readiness_repair_blocker = _route_story_readiness_repair(
@@ -5128,12 +5142,19 @@ def _sprint_workflow_next(
             blocked_commands=blocked_commands,
             blocked_future_commands=blocked_future_commands,
         )
-        story_scope_reconcile_commands = _route_story_scope_reconcile_for_blocker(
-            project_id=project_id,
+        if story_readiness_repair_blocker is not None:
+            story_completion_scope_repair_command = (
+                _route_story_completion_scope_repair(
+                    project_id=project_id,
+                    stale_scope_blocker=stale_scope_blocker,
+                    next_valid_commands=next_valid_commands,
+                    blocked_future_commands=blocked_future_commands,
+                )
+            )
+        _route_story_scope_reconcile_for_blocker(
             stale_scope_blocker=stale_scope_blocker,
             story_readiness_repair_blocker=story_readiness_repair_blocker,
-            next_valid_commands=next_valid_commands,
-            blocked_future_commands=blocked_future_commands,
+            blocked_commands=blocked_commands,
         )
     if story_refinement_blocker is not None:
         story_generation_command = _route_story_generation_for_sprint_setup(
@@ -5157,7 +5178,9 @@ def _sprint_workflow_next(
                 else None
             ),
             readiness_repair_blocked=story_readiness_repair_blocker is not None,
-            has_reconcile_commands=bool(story_scope_reconcile_commands),
+            has_completion_scope_repair_command=(
+                story_completion_scope_repair_command is not None
+            ),
             has_story_generation_command=story_generation_command is not None,
             has_next_valid_commands=bool(next_valid_commands),
         ),

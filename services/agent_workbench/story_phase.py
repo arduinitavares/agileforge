@@ -49,6 +49,7 @@ from services.phases.story_service import (
     get_story_pending,
     reconcile_requirement,
     reopen_story_requirement,
+    repair_story_completion_scope,
     repair_story_readiness,
     requirement_reconciliation_payload_identity,
     requirement_reconciliation_request_identity,
@@ -318,6 +319,23 @@ class StoryPhaseRunner:
             self._repair_readiness,
             project_id,
             expected_state,
+            idempotency_key,
+        )
+
+    def repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Clear stale Story completion scope before Sprint planning."""
+        return anyio.run(
+            self._repair_completion_scope,
+            project_id,
+            expected_state,
+            expected_scope_id,
             idempotency_key,
         )
 
@@ -910,6 +928,37 @@ class StoryPhaseRunner:
                 assert_repair_safe=lambda repair_project_id: (
                     _assert_repair_readiness_safe(project_id=repair_project_id)
                 ),
+            )
+        except StoryPhaseError as exc:
+            return _phase_error(exc)
+        except RuntimeError as exc:
+            return _workflow_error(exc)
+        return _data_envelope(data)
+
+    async def _repair_completion_scope(
+        self,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        product = self._load_project(project_id)
+        if isinstance(product, dict):
+            return product
+
+        try:
+            data = await repair_story_completion_scope(
+                project_id=project_id,
+                expected_state=expected_state,
+                expected_scope_id=expected_scope_id,
+                idempotency_key=idempotency_key,
+                load_state=lambda: self._load_story_state(
+                    str(project_id), project_id, product
+                ),
+                save_state=lambda state: self._save_session_state(
+                    str(project_id), state
+                ),
+                now_iso=_now_iso,
             )
         except StoryPhaseError as exc:
             return _phase_error(exc)

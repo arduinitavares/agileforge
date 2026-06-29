@@ -1,10 +1,14 @@
 """Tests for story phase service."""
 
+import json
+import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from repositories.session import WorkflowSessionRepository
 from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import reset_subject_working_set
 from services.phases import story_service
@@ -17,14 +21,76 @@ from services.phases.story_service import (
     get_story_history,
     get_story_pending,
     merge_story_resolution,
+    repair_story_completion_scope,
     repair_story_readiness,
     retry_story_draft,
     save_story_draft,
     save_story_patch,
     story_parent_rank,
 )
+from utils.runtime_config import WORKFLOW_RUNNER_IDENTITY, resolve_database_target
 
 JsonDict = dict[str, Any]
+_TEST_SESSION_ID = "2"
+
+
+def _session_repo_with_state(
+    tmp_path: Path,
+    state: JsonDict,
+) -> WorkflowSessionRepository:
+    """Create a real session repository row for persistence regressions."""
+    db_path = tmp_path / "sessions.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                app_name TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                state TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions (app_name, user_id, id, state)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                WORKFLOW_RUNNER_IDENTITY.app_name,
+                WORKFLOW_RUNNER_IDENTITY.user_id,
+                _TEST_SESSION_ID,
+                json.dumps(state),
+            ),
+        )
+    return WorkflowSessionRepository(
+        db_target=resolve_database_target(
+            str(db_path),
+            env_name="AGILEFORGE_SESSION_DB_URL",
+        )
+    )
+
+
+def _load_repo_story_state(repo: WorkflowSessionRepository) -> JsonDict:
+    """Load persisted Story state from a test session repository."""
+    return repo.get_session_state(
+        WORKFLOW_RUNNER_IDENTITY.app_name,
+        WORKFLOW_RUNNER_IDENTITY.user_id,
+        _TEST_SESSION_ID,
+    )
+
+
+def _save_repo_story_state(
+    repo: WorkflowSessionRepository,
+    state: JsonDict,
+) -> None:
+    """Persist Story state through the real merge-update session repository."""
+    repo.update_session_state(
+        WORKFLOW_RUNNER_IDENTITY.app_name,
+        WORKFLOW_RUNNER_IDENTITY.user_id,
+        _TEST_SESSION_ID,
+        state,
+    )
 
 
 def _story_runtime_for(state: JsonDict, parent_requirement: str) -> JsonDict:
@@ -3157,7 +3223,7 @@ async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_s
     }
     assert state["fsm_state"] == "SPRINT_SETUP"
     assert state["story_phase_completed_at"] == "2026-04-04T12:00:00Z"
-    assert "story_completion_scope" not in state
+    assert state["story_completion_scope"] is None
     assert state["story_complete_idempotency"]["complete-story-all-saved"] == payload
     assert len(saved_states) == 1
 
@@ -3171,6 +3237,39 @@ async def test_complete_story_phase_moves_to_sprint_setup_once_all_stories_are_s
 
     assert replay_payload == payload
     assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_story_phase_persists_scope_clear_through_repo(
+    tmp_path: Path,
+) -> None:
+    """Verify no-scope Story completion clears persisted stale scope."""
+    repo = _session_repo_with_state(
+        tmp_path,
+        {
+            "fsm_state": "STORY_PERSISTENCE",
+            "roadmap_releases": [{"items": ["Enable login"]}],
+            "story_saved": {"Enable login": True},
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_5",
+                "requirements": ["Old requirement"],
+            },
+        },
+    )
+
+    payload = await complete_story_phase(
+        expected_state="STORY_PERSISTENCE",
+        idempotency_key="complete-story-all-saved",
+        load_state=lambda: _async_value(_load_repo_story_state(repo)),
+        save_state=lambda updated: _save_repo_story_state(repo, updated),
+        now_iso=lambda: "2026-04-04T12:00:00Z",
+    )
+
+    persisted = _load_repo_story_state(repo)
+    assert payload["fsm_state"] == "SPRINT_SETUP"
+    assert "story_completion_scope" not in payload
+    assert persisted["story_completion_scope"] is None
 
 
 @pytest.mark.asyncio
@@ -4098,6 +4197,93 @@ async def test_reopen_story_requirement_blocks_when_downstream_work_exists() -> 
     assert excinfo.value.status_code == 409  # noqa: PLR2004
     assert "unsafe" in excinfo.value.detail.lower()
     assert state["fsm_state"] == "SPRINT_SETUP"
+
+
+@pytest.mark.asyncio
+async def test_repair_story_completion_scope_clears_expected_scope() -> None:
+    """Verify stale Story completion scope can be cleared without Story row repair."""
+    stale_scope = {
+        "scope": "milestone",
+        "scope_id": "milestone_5",
+        "requirements": ["Old requirement"],
+        "extension_scope": True,
+        "accepted_spec_version_id": 4,
+    }
+    state: dict[str, Any] = {
+        "fsm_state": "SPRINT_SETUP",
+        "story_completion_scope": dict(stale_scope),
+    }
+    saved_states: list[dict[str, Any]] = []
+
+    payload = await repair_story_completion_scope(
+        project_id=2,
+        expected_state="SPRINT_SETUP",
+        expected_scope_id="milestone_5",
+        idempotency_key="repair-story-completion-scope-2",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-29T12:00:00Z",
+    )
+
+    assert payload == {
+        "project_id": 2,
+        "fsm_state": "SPRINT_SETUP",
+        "cleared_story_completion_scope": stale_scope,
+        "cleared_at": "2026-06-29T12:00:00Z",
+        "idempotency_key": "repair-story-completion-scope-2",
+    }
+    assert state["story_completion_scope"] is None
+    assert state["story_completion_scope_repair_idempotency"][
+        "repair-story-completion-scope-2"
+    ] == payload
+    assert len(saved_states) == 1
+
+    replay_payload = await repair_story_completion_scope(
+        project_id=2,
+        expected_state="SPRINT_SETUP",
+        expected_scope_id="milestone_5",
+        idempotency_key="repair-story-completion-scope-2",
+        load_state=lambda: _async_value(state),
+        save_state=lambda updated: saved_states.append(dict(updated)),
+        now_iso=lambda: "2026-06-29T12:01:00Z",
+    )
+
+    assert replay_payload == payload
+    assert len(saved_states) == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_story_completion_scope_persists_clear_through_repo(
+    tmp_path: Path,
+) -> None:
+    """Verify completion-scope repair clears persisted stale scope."""
+    repo = _session_repo_with_state(
+        tmp_path,
+        {
+            "fsm_state": "SPRINT_SETUP",
+            "story_completion_scope": {
+                "scope": "milestone",
+                "scope_id": "milestone_5",
+                "requirements": ["Old requirement"],
+                "extension_scope": True,
+                "accepted_spec_version_id": 4,
+            },
+        },
+    )
+
+    payload = await repair_story_completion_scope(
+        project_id=2,
+        expected_state="SPRINT_SETUP",
+        expected_scope_id="milestone_5",
+        idempotency_key="repair-story-completion-scope-2",
+        load_state=lambda: _async_value(_load_repo_story_state(repo)),
+        save_state=lambda updated: _save_repo_story_state(repo, updated),
+        now_iso=lambda: "2026-06-29T12:00:00Z",
+    )
+
+    persisted = _load_repo_story_state(repo)
+    assert payload["fsm_state"] == "SPRINT_SETUP"
+    assert persisted["story_completion_scope"] is None
 
 
 @pytest.mark.asyncio

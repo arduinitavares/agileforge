@@ -42,6 +42,9 @@ _EFFORT_TO_STORY_POINTS: dict[str, int] = {
 _INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
 _STORY_QUALITY_SCHEMA_VERSION = "agileforge.story_quality.v1"
 _STORY_COMPLETION_SCOPE_SCHEMA_VERSION = "agileforge.story_completion_scope.v1"
+_STORY_COMPLETION_SCOPE_REPAIR_IDEMPOTENCY_KEY = (
+    "story_completion_scope_repair_idempotency"
+)
 REQUIREMENT_RECONCILIATION_SCHEMA_VERSION = (
     "agileforge.requirement_reconciliation.v1"
 )
@@ -3044,6 +3047,92 @@ async def repair_story_readiness(
     return payload
 
 
+async def repair_story_completion_scope(
+    *,
+    project_id: int,
+    expected_state: str | None,
+    expected_scope_id: str | None,
+    idempotency_key: str | None,
+    load_state: Callable[[], Awaitable[dict[str, Any]]],
+    save_state: Callable[[dict[str, Any]], None],
+    now_iso: Callable[[], str],
+) -> dict[str, Any]:
+    """Clear a stale Story completion scope without mutating Story rows."""
+    if expected_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "story repair-completion-scope requires --expected-state SPRINT_SETUP",
+            status_code=400,
+        )
+    if expected_scope_id is None or not expected_scope_id.strip():
+        raise StoryPhaseError(
+            "story repair-completion-scope requires --expected-scope-id",
+            status_code=400,
+        )
+    if idempotency_key is None or not idempotency_key.strip():
+        raise StoryPhaseError(
+            "story repair-completion-scope requires --idempotency-key",
+            status_code=400,
+        )
+
+    state = await load_state()
+    normalized_scope_id = expected_scope_id.strip()
+    normalized_idempotency_key = idempotency_key.strip()
+    request_identity = {"expected_scope_id": normalized_scope_id}
+    idempotency_registry = state.get(_STORY_COMPLETION_SCOPE_REPAIR_IDEMPOTENCY_KEY)
+    if isinstance(idempotency_registry, dict):
+        existing = idempotency_registry.get(normalized_idempotency_key)
+        if isinstance(existing, dict):
+            cleared_scope = existing.get("cleared_story_completion_scope")
+            existing_scope_id = (
+                str(cleared_scope.get("scope_id")).strip()
+                if isinstance(cleared_scope, dict)
+                else None
+            )
+            _ensure_idempotency_identity_matches(
+                existing_identity={"expected_scope_id": existing_scope_id},
+                current_identity=request_identity,
+            )
+            return dict(existing)
+
+    current_state = _normalize_fsm_state(state.get("fsm_state"))
+    if current_state != OrchestratorState.SPRINT_SETUP.value:
+        raise StoryPhaseError(
+            "Story completion scope repair can run only from SPRINT_SETUP.",
+            status_code=409,
+        )
+
+    scope_payload = state.get("story_completion_scope")
+    if not isinstance(scope_payload, dict):
+        raise StoryPhaseError(
+            "Story completion scope repair requires an active Story completion scope.",
+            status_code=409,
+        )
+    current_scope_id = str(scope_payload.get("scope_id") or "").strip()
+    if current_scope_id != normalized_scope_id:
+        raise StoryPhaseError(
+            "Story completion scope repair expected scope does not match "
+            "current scope.",
+            status_code=409,
+        )
+
+    cleared_at = now_iso()
+    cleared_scope = dict(scope_payload)
+    state["story_completion_scope"] = None
+    payload: dict[str, Any] = {
+        "project_id": project_id,
+        "fsm_state": OrchestratorState.SPRINT_SETUP.value,
+        "cleared_story_completion_scope": cleared_scope,
+        "cleared_at": cleared_at,
+        "idempotency_key": normalized_idempotency_key,
+    }
+    if not isinstance(idempotency_registry, dict):
+        idempotency_registry = {}
+        state[_STORY_COMPLETION_SCOPE_REPAIR_IDEMPOTENCY_KEY] = idempotency_registry
+    idempotency_registry[normalized_idempotency_key] = payload
+    save_state(state)
+    return payload
+
+
 async def reconcile_requirement(
     *,
     project_id: int,
@@ -3285,7 +3374,7 @@ async def complete_story_phase(  # noqa: PLR0915
         scope_payload = {**scope_payload, "completed_at": completed_at}
         state["story_completion_scope"] = scope_payload
     else:
-        state.pop("story_completion_scope", None)
+        state["story_completion_scope"] = None
 
     coverage: dict[str, int] = {
         "saved": saved_count,

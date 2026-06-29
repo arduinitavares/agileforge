@@ -1319,6 +1319,37 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def story_repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Return a story completion scope repair payload."""
+        self.calls.append(
+            (
+                "story_repair_completion_scope",
+                {
+                    "project_id": project_id,
+                    "expected_state": expected_state,
+                    "expected_scope_id": expected_scope_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "fsm_state": "SPRINT_SETUP",
+                "cleared_story_completion_scope": {"scope_id": expected_scope_id},
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         """Return a story dependency inspect payload."""
         self.calls.append(("story_dependencies_inspect", {"project_id": project_id}))
@@ -5144,6 +5175,30 @@ def test_cli_routes_requirement_reconcile(capsys: pytest.CaptureFixture[str]) ->
                 },
             ),
             "agileforge story repair-readiness",
+        ),
+        (
+            [
+                "story",
+                "repair-completion-scope",
+                "--project-id",
+                str(PROJECT_ID),
+                "--expected-state",
+                "SPRINT_SETUP",
+                "--expected-scope-id",
+                "milestone_5",
+                "--idempotency-key",
+                "repair-story-completion-scope-2",
+            ],
+            (
+                "story_repair_completion_scope",
+                {
+                    "project_id": PROJECT_ID,
+                    "expected_state": "SPRINT_SETUP",
+                    "expected_scope_id": "milestone_5",
+                    "idempotency_key": "repair-story-completion-scope-2",
+                },
+            ),
+            "agileforge story repair-completion-scope",
         ),
         (
             [

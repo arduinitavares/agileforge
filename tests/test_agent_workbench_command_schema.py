@@ -79,6 +79,7 @@ EXPECTED_PHASE_2D_COMMAND_NAMES = {
     "agileforge story reopen",
     "agileforge story reconcile",
     "agileforge story repair-readiness",
+    "agileforge story repair-completion-scope",
     "agileforge story dependencies inspect",
     "agileforge story dependencies propose",
     "agileforge story dependencies apply",
@@ -847,6 +848,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: P
         "agileforge story reopen",
         "agileforge story reconcile",
         "agileforge story repair-readiness",
+        "agileforge story repair-completion-scope",
     }
 
     assert story_command_names.issubset(names)
@@ -865,6 +867,9 @@ def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: P
     reopen = command_schema_payload("agileforge story reopen")
     reconcile = command_schema_payload("agileforge story reconcile")
     repair_readiness = command_schema_payload("agileforge story repair-readiness")
+    repair_completion_scope = command_schema_payload(
+        "agileforge story repair-completion-scope"
+    )
 
     assert pending["mutates"] is False
     assert pending["input"]["required"] == ["project_id"]
@@ -945,6 +950,14 @@ def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: P
         "idempotency_key",
     ]
     assert repair_readiness["idempotency_required"] is True
+    assert repair_completion_scope["mutates"] is True
+    assert repair_completion_scope["input"]["required"] == [
+        "project_id",
+        "expected_state",
+        "expected_scope_id",
+        "idempotency_key",
+    ]
+    assert repair_completion_scope["idempotency_required"] is True
     for schema in (
         generate,
         retry,
@@ -954,6 +967,7 @@ def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: P
         reopen,
         reconcile,
         repair_readiness,
+        repair_completion_scope,
     ):
         assert ErrorCode.PROJECT_NOT_FOUND.value in schema["errors"]
         assert ErrorCode.AUTHORITY_NOT_ACCEPTED.value in schema["errors"]

@@ -770,6 +770,17 @@ class _Application(Protocol):
         """Backfill Story planning metadata before Sprint work starts."""
         ...
 
+    def story_repair_completion_scope(
+        self,
+        *,
+        project_id: int,
+        expected_state: str,
+        expected_scope_id: str,
+        idempotency_key: str,
+    ) -> JsonObject:
+        """Clear stale Story completion scope before Sprint planning."""
+        ...
+
     def story_dependencies_inspect(self, *, project_id: int) -> JsonObject:
         """Inspect Story dependency graph."""
         ...
@@ -2295,6 +2306,15 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     story_repair.add_argument("--expected-state", required=True)
     story_repair.add_argument("--idempotency-key", required=True)
     story_repair.set_defaults(command_handler=_story_repair_readiness)
+    story_repair_scope = story_sub.add_parser(
+        "repair-completion-scope",
+        help="Clear stale Story completion scope before Sprint planning.",
+    )
+    story_repair_scope.add_argument("--project-id", type=int, required=True)
+    story_repair_scope.add_argument("--expected-state", required=True)
+    story_repair_scope.add_argument("--expected-scope-id", required=True)
+    story_repair_scope.add_argument("--idempotency-key", required=True)
+    story_repair_scope.set_defaults(command_handler=_story_repair_completion_scope)
     story_dependencies = story_sub.add_parser(
         "dependencies",
         help="Inspect and review Story dependency edges.",
@@ -4264,6 +4284,22 @@ def _story_repair_readiness(
         project_id=args.project_id,
         expected_state=args.expected_state,
         idempotency_key=args.idempotency_key,
+    )
+
+
+def _story_repair_completion_scope(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route Story completion scope repair to the application facade."""
+    return (
+        "agileforge story repair-completion-scope",
+        application.story_repair_completion_scope(
+            project_id=args.project_id,
+            expected_state=args.expected_state,
+            expected_scope_id=args.expected_scope_id,
+            idempotency_key=args.idempotency_key,
+        ),
     )
 
 
