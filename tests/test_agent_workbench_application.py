@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from services.agent_workbench.scope_discovery import (
         ChallengeArtifactRecordRequest,
         PrdDraftRecordRequest,
+        PrdReviewRequest,
     )
     from services.agent_workbench.scope_extension import (
         ScopeExtensionStartRequest,
@@ -68,6 +69,8 @@ if TYPE_CHECKING:
 
 PROJECT_ID = 7
 CHALLENGE_ARTIFACT_ID = 42
+PRD_ID = 55
+SUPERSEDES_PRD_ID = 99
 RECONCILED_STORY_ID = 17
 SPRINT_ID = 11
 SPEC_VERSION_ID = 3
@@ -1576,6 +1579,32 @@ class _FakeScopeDiscoveryRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "draft"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def accept_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Record PRD accept requests."""
+        self.calls.append(("accept_prd", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reject_prd(
+        self,
+        request: PrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Record PRD reject requests."""
+        self.calls.append(("reject_prd", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "rejected"},
             "warnings": [],
             "errors": [],
         }
@@ -3125,6 +3154,77 @@ def test_application_discovery_prd_draft_record_passes_request_data_to_runner() 
     assert request.challenge_artifact_id == CHALLENGE_ARTIFACT_ID
     assert request.prd_file == "artifacts/prd.json"
     assert request.idempotency_key == "prd-draft-record-001"
+    assert request.supersedes_prd_id is None
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_prd_draft_record_passes_supersession_to_runner() -> None:
+    """Verify PRD draft record can link to an accepted PRD it may supersede."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_prd_draft_record(
+        project_id=PROJECT_ID,
+        challenge_artifact_id=CHALLENGE_ARTIFACT_ID,
+        prd_file="artifacts/prd-v2.json",
+        supersedes_prd_id=SUPERSEDES_PRD_ID,
+        idempotency_key="prd-draft-record-v2-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "record_prd_draft"
+    request = cast("PrdDraftRecordRequest", runner.calls[0][1])
+    assert request.supersedes_prd_id == SUPERSEDES_PRD_ID
+
+
+def test_application_discovery_prd_accept_passes_request_data_to_runner() -> None:
+    """Verify scope discovery facade builds a PRD accept request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_prd_accept(
+        project_id=PROJECT_ID,
+        prd_id=PRD_ID,
+        reviewer="Ada",
+        acceptance_notes="Accepted for spec amendment drafting.",
+        idempotency_key="prd-accept-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "accept_prd"
+    request = cast("PrdReviewRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.prd_id == PRD_ID
+    assert request.reviewer == "Ada"
+    assert request.notes == "Accepted for spec amendment drafting."
+    assert request.idempotency_key == "prd-accept-001"
+    assert request.changed_by == "test-agent"
+
+
+def test_application_discovery_prd_reject_passes_request_data_to_runner() -> None:
+    """Verify scope discovery facade builds a PRD reject request."""
+    runner = _FakeScopeDiscoveryRunner()
+    app = AgentWorkbenchApplication(scope_discovery_runner=runner)
+
+    result = app.discovery_prd_reject(
+        project_id=PROJECT_ID,
+        prd_id=PRD_ID,
+        reviewer="Ada",
+        rejection_notes="Missing non-goal clarity.",
+        idempotency_key="prd-reject-001",
+        changed_by="test-agent",
+    )
+
+    assert result["ok"] is True
+    assert runner.calls[0][0] == "reject_prd"
+    request = cast("PrdReviewRequest", runner.calls[0][1])
+    assert request.project_id == PROJECT_ID
+    assert request.prd_id == PRD_ID
+    assert request.reviewer == "Ada"
+    assert request.notes == "Missing non-goal clarity."
+    assert request.idempotency_key == "prd-reject-001"
     assert request.changed_by == "test-agent"
 
 

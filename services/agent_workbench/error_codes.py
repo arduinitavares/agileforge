@@ -92,6 +92,11 @@ class ErrorCode(StrEnum):
     PRD_PRODUCER_INVALID = "PRD_PRODUCER_INVALID"
     PRD_SOURCE_CHALLENGE_NOT_FOUND = "PRD_SOURCE_CHALLENGE_NOT_FOUND"
     PRD_SOURCE_CHALLENGE_NOT_READY = "PRD_SOURCE_CHALLENGE_NOT_READY"
+    PRD_NOT_FOUND = "PRD_NOT_FOUND"
+    PRD_REVIEW_STATE_INVALID = "PRD_REVIEW_STATE_INVALID"
+    PRD_ACCEPTED_IMMUTABLE = "PRD_ACCEPTED_IMMUTABLE"
+    PRD_SUPERSEDES_NOT_FOUND = "PRD_SUPERSEDES_NOT_FOUND"
+    PRD_SUPERSEDES_NOT_ACCEPTED = "PRD_SUPERSEDES_NOT_ACCEPTED"
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -527,6 +532,36 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="Source Challenge Artifact is not ready for PRD drafting.",
+    ),
+    ErrorCode.PRD_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.PRD_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="PRD was not found.",
+    ),
+    ErrorCode.PRD_REVIEW_STATE_INVALID: ErrorMetadata(
+        code=ErrorCode.PRD_REVIEW_STATE_INVALID.value,
+        default_exit_code=4,
+        retryable=False,
+        description="PRD review command is invalid for the current PRD status.",
+    ),
+    ErrorCode.PRD_ACCEPTED_IMMUTABLE: ErrorMetadata(
+        code=ErrorCode.PRD_ACCEPTED_IMMUTABLE.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Accepted PRDs cannot be modified in place.",
+    ),
+    ErrorCode.PRD_SUPERSEDES_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.PRD_SUPERSEDES_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Superseded PRD was not found.",
+    ),
+    ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED: ErrorMetadata(
+        code=ErrorCode.PRD_SUPERSEDES_NOT_ACCEPTED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Superseded PRD must be accepted.",
     ),
 }
 
