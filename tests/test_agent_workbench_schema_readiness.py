@@ -11,6 +11,9 @@ from sqlmodel import SQLModel
 from models.core import Product
 from services.agent_workbench.schema_readiness import (
     AUTHORITY_CURATION_REQUIREMENTS,
+    DISCOVERY_REQUIREMENTS,
+    GREENFIELD_DISCOVERY_REQUIREMENTS,
+    SCOPE_DISCOVERY_REQUIREMENTS,
     SchemaRequirement,
     check_schema_readiness,
 )
@@ -150,6 +153,77 @@ def test_authority_curation_readiness_requires_v2_columns() -> None:
     assert "selection_fingerprint" in columns
     assert "rejected_selection_json" in columns
     assert "overlay_json" in columns
+
+
+def test_scope_discovery_readiness_requires_existing_project_tables() -> None:
+    """Existing-project discovery requirements must cover every runtime table."""
+    requirements_by_table = {
+        requirement.table: requirement for requirement in DISCOVERY_REQUIREMENTS
+    }
+
+    assert set(requirements_by_table) == {
+        "discovery_challenge_artifacts",
+        "discovery_prds",
+        "discovery_spec_amendment_drafts",
+    }
+    assert (
+        "project_id",
+        "idempotency_key",
+    ) in requirements_by_table[
+        "discovery_challenge_artifacts"
+    ].unique_columns
+    assert (
+        "project_id",
+        "idempotency_key",
+    ) in requirements_by_table["discovery_prds"].unique_columns
+    assert (
+        "project_id",
+        "idempotency_key",
+    ) in requirements_by_table[
+        "discovery_spec_amendment_drafts"
+    ].unique_columns
+
+
+def test_scope_discovery_readiness_requires_greenfield_tables() -> None:
+    """Greenfield discovery requirements must cover every provisional table."""
+    requirements_by_table = {
+        requirement.table: requirement
+        for requirement in GREENFIELD_DISCOVERY_REQUIREMENTS
+    }
+
+    assert set(requirements_by_table) == {
+        "greenfield_discovery_contexts",
+        "greenfield_discovery_challenge_artifacts",
+        "greenfield_discovery_prds",
+        "greenfield_discovery_spec_amendment_drafts",
+    }
+    assert ("context_key",) in requirements_by_table[
+        "greenfield_discovery_contexts"
+    ].unique_columns
+    assert ("idempotency_key",) in requirements_by_table[
+        "greenfield_discovery_contexts"
+    ].unique_columns
+    assert (
+        "greenfield_context_id",
+        "idempotency_key",
+    ) in requirements_by_table[
+        "greenfield_discovery_challenge_artifacts"
+    ].unique_columns
+
+
+def test_scope_discovery_readiness_combines_existing_and_greenfield() -> None:
+    """Combined discovery requirements are available for broad diagnostics."""
+    combined_tables = {
+        requirement.table for requirement in SCOPE_DISCOVERY_REQUIREMENTS
+    }
+
+    assert combined_tables == {
+        requirement.table
+        for requirement in (
+            *DISCOVERY_REQUIREMENTS,
+            *GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+    }
 
 
 def test_authority_curation_readiness_requires_mutation_event_id(
