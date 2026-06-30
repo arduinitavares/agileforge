@@ -16,7 +16,13 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from db.migrations import ensure_schema_current
-from models.agent_workbench import CliMutationLedger
+from models.agent_workbench import (
+    CliMutationLedger,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from models.specs import (
     CompiledSpecAuthority,
@@ -40,6 +46,7 @@ from services.agent_workbench.project_setup import (
 from services.agent_workbench.project_setup_fingerprints import (
     PROJECT_SETUP_RETRY_COMMAND,
     setup_retry_context_fingerprint,
+    setup_spec_hash,
 )
 from services.specs.profile_content import normalize_spec_content_for_registry
 
@@ -136,6 +143,146 @@ def _assert_compile_required_workflow_state(
             spec_hash=spec_hash,
         )
     ]
+
+
+def _seed_greenfield_discovery_scope(
+    session: Session,
+    spec_file: Path,
+    *,
+    draft_status: str = "accepted",
+    amendment_file: str | None = None,
+) -> GreenfieldDiscoverySpecAmendmentDraft:
+    seed_key = abs(hash((spec_file, draft_status, amendment_file)))
+    context_key = f"greenfield-{seed_key}"
+    existing_context = session.exec(
+        select(GreenfieldDiscoveryContext).where(
+            GreenfieldDiscoveryContext.context_key == context_key
+        )
+    ).first()
+    if existing_context is not None:
+        existing_draft = session.exec(
+            select(GreenfieldDiscoverySpecAmendmentDraft).where(
+                GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                == existing_context.greenfield_context_id
+            )
+        ).first()
+        if existing_draft is not None:
+            return existing_draft
+
+    context = GreenfieldDiscoveryContext(
+        context_key=context_key,
+        status="ready_for_project",
+        request_hash=canonical_hash({"context": str(spec_file)}),
+        idempotency_key=f"context-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(context)
+    session.commit()
+    session.refresh(context)
+    assert context.greenfield_context_id is not None
+
+    challenge = GreenfieldDiscoveryChallengeArtifact(
+        greenfield_context_id=context.greenfield_context_id,
+        producer="grill-with-docs",
+        readiness="ready_for_prd",
+        original_idea="Build a new project.",
+        content_json=json.dumps({"original_idea": "Build a new project."}),
+        artifact_fingerprint=canonical_hash({"challenge": str(spec_file)}),
+        request_hash=canonical_hash({"challenge_request": str(spec_file)}),
+        idempotency_key=f"challenge-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(challenge)
+    session.commit()
+    session.refresh(challenge)
+    assert challenge.challenge_artifact_id is not None
+
+    prd = GreenfieldDiscoveryPrd(
+        greenfield_context_id=context.greenfield_context_id,
+        challenge_artifact_id=challenge.challenge_artifact_id,
+        producer="to-prd",
+        status="accepted",
+        version="1",
+        title="Greenfield Project PRD",
+        content_json=json.dumps({"title": "Greenfield Project PRD"}),
+        artifact_fingerprint=canonical_hash({"prd": str(spec_file)}),
+        request_hash=canonical_hash({"prd_request": str(spec_file)}),
+        idempotency_key=f"prd-{seed_key}",
+        reviewed_by="product-owner",
+        review_notes="Accepted.",
+        review_request_hash=canonical_hash({"prd_review": str(spec_file)}),
+        review_idempotency_key=f"prd-review-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    assert prd.prd_id is not None
+
+    spec_hash = (
+        setup_spec_hash(spec_file)
+        if spec_file.exists()
+        else canonical_hash({"missing_spec_file": str(spec_file)})
+    )
+    spec_content = spec_file.read_text(encoding="utf-8") if spec_file.exists() else "{}"
+    draft = GreenfieldDiscoverySpecAmendmentDraft(
+        greenfield_context_id=context.greenfield_context_id,
+        prd_id=prd.prd_id,
+        challenge_artifact_id=challenge.challenge_artifact_id,
+        status=draft_status,
+        amendment_file=amendment_file or str(spec_file),
+        content_json=spec_content,
+        validation_json=json.dumps({"valid": True}),
+        artifact_fingerprint=spec_hash,
+        request_hash=canonical_hash({"spec_request": str(spec_file)}),
+        idempotency_key=f"spec-{seed_key}",
+        amended_spec_hash=spec_hash,
+        reviewed_by="product-owner" if draft_status == "accepted" else None,
+        review_notes="Accepted." if draft_status == "accepted" else None,
+        review_request_hash=(
+            canonical_hash({"spec_review": str(spec_file)})
+            if draft_status == "accepted"
+            else None
+        ),
+        review_idempotency_key=(
+            f"spec-review-{seed_key}"
+            if draft_status == "accepted"
+            else None
+        ),
+        changed_by="test-agent",
+    )
+    session.add(draft)
+    session.commit()
+    session.refresh(draft)
+    return draft
+
+
+def _accepted_greenfield_create_request(
+    engine: Engine,
+    spec_file: Path,
+    *,
+    name: str,
+    idempotency_key: str | None = None,
+    dry_run: bool = False,
+    dry_run_id: str | None = None,
+    changed_by: str = "agent",
+    amendment_file: str | None = None,
+) -> ProjectCreateRequest:
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(
+            session,
+            spec_file,
+            amendment_file=amendment_file,
+        )
+        draft_id = int(draft.spec_amendment_draft_id or 0)
+    return ProjectCreateRequest(
+        name=name,
+        greenfield_spec_amendment_draft_id=draft_id,
+        idempotency_key=idempotency_key,
+        dry_run=dry_run,
+        dry_run_id=dry_run_id,
+        changed_by=changed_by,
+    )
 
 
 class FakeWorkflowPort:
@@ -497,25 +644,18 @@ def _create_recovery_row(
     fake_workflow = workflow or FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
     runner.fail_after_step_for_test = "product_created"
+    create_request = _accepted_greenfield_create_request(
+        engine,
+        spec_file,
+        name=name,
+        idempotency_key=idempotency_key,
+        changed_by="agent",
+    )
 
     with pytest.raises(RuntimeError, match="Injected project setup failure"):
-        runner.create_project(
-            ProjectCreateRequest(
-                name=name,
-                spec_file=str(spec_file),
-                idempotency_key=idempotency_key,
-                changed_by="agent",
-            )
-        )
+        runner.create_project(create_request)
 
-    result = runner.create_project(
-        ProjectCreateRequest(
-            name=name,
-            spec_file=str(spec_file),
-            idempotency_key=idempotency_key,
-            changed_by="agent",
-        )
-    )
+    result = runner.create_project(create_request)
     assert _error_code(result) == "MUTATION_RECOVERY_REQUIRED"
     return result, spec_file, fake_workflow
 
@@ -673,12 +813,14 @@ def test_project_create_dry_run_resolves_spec_from_caller_cwd_without_writes(
     runner = ProjectSetupMutationRunner(engine=engine)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file="specs/spec.json",
             dry_run=True,
             dry_run_id="dry-run-project-001",
             changed_by="agent",
+            amendment_file="specs/spec.json",
         )
     )
 
@@ -700,9 +842,10 @@ def test_project_create_dry_run_missing_spec_returns_structured_error_without_wr
     runner = ProjectSetupMutationRunner(engine=engine)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            missing_spec,
             name="CLI Project",
-            spec_file=str(missing_spec),
             dry_run=True,
             dry_run_id="dry-run-project-001",
             changed_by="agent",
@@ -727,9 +870,10 @@ def test_project_create_missing_spec_returns_structured_error_before_ledger(
     runner = ProjectSetupMutationRunner(engine=engine)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            missing_spec,
             name="CLI Project",
-            spec_file=str(missing_spec),
             idempotency_key="create-project-001",
             changed_by="agent",
         )
@@ -746,7 +890,11 @@ def test_project_create_missing_spec_returns_structured_error_before_ledger(
 
 def test_project_create_request_validation_rules() -> None:
     with pytest.raises(ValidationError, match="idempotency_key is required"):
-        ProjectCreateRequest(name="CLI Project", spec_file="specs/app.md")
+        ProjectCreateRequest(
+            name="CLI Project",
+            spec_file="specs/app.md",
+            greenfield_spec_amendment_draft_id=1,
+        )
 
     with pytest.raises(
         ValidationError, match="idempotency_key is not allowed with dry_run"
@@ -754,6 +902,7 @@ def test_project_create_request_validation_rules() -> None:
         ProjectCreateRequest(
             name="CLI Project",
             spec_file="specs/app.md",
+            greenfield_spec_amendment_draft_id=1,
             dry_run=True,
             dry_run_id="preview-001",
             idempotency_key="create-project-001",
@@ -763,6 +912,7 @@ def test_project_create_request_validation_rules() -> None:
         ProjectCreateRequest(
             name="CLI Project",
             spec_file="specs/app.md",
+            greenfield_spec_amendment_draft_id=1,
             dry_run=True,
         )
 
@@ -770,6 +920,7 @@ def test_project_create_request_validation_rules() -> None:
         ProjectCreateRequest(
             name="CLI Project",
             spec_file="specs/app.md",
+            greenfield_spec_amendment_draft_id=1,
             idempotency_key="create-é-001",
         )
 
@@ -777,17 +928,233 @@ def test_project_create_request_validation_rules() -> None:
         ProjectCreateRequest(
             name="CLI Project",
             spec_file="specs/app.md",
+            greenfield_spec_amendment_draft_id=1,
             dry_run=True,
             dry_run_id="bad key 001",
         )
 
 
 def test_greenfield_project_create_requires_spec_file() -> None:
-    with pytest.raises(ValidationError, match="spec_file is required"):
+    request = ProjectCreateRequest(
+        name="Greenfield Missing Spec",
+        greenfield_spec_amendment_draft_id=1,
+        idempotency_key="greenfield-missing-spec-001",
+    )
+
+    assert request.spec_file is None
+
+
+def test_project_create_rejects_raw_greenfield_spec_before_ledger(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    runner = ProjectSetupMutationRunner(engine=engine)
+
+    result = runner.create_project(
         ProjectCreateRequest(
-            name="Greenfield Missing Spec",
-            idempotency_key="greenfield-missing-spec-001",
+            name="Raw Spec Project",
+            spec_file=str(spec_file),
+            idempotency_key="raw-spec-create-001",
+            changed_by="agent",
         )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "GREENFIELD_DISCOVERY_REQUIRED"
+    assert result["errors"][0]["details"] == {"provided": ["spec_file"]}
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(CliMutationLedger)).all() == []
+
+
+def test_project_create_rejects_unknown_greenfield_discovery_draft_before_ledger(
+    engine: Engine,
+) -> None:
+    ensure_schema_current(engine)
+    runner = ProjectSetupMutationRunner(engine=engine)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Unknown Draft Project",
+            greenfield_spec_amendment_draft_id=999,
+            idempotency_key="unknown-greenfield-draft-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "GREENFIELD_DISCOVERY_NOT_FOUND"
+    assert result["errors"][0]["details"] == {
+        "greenfield_spec_amendment_draft_id": 999
+    }
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(CliMutationLedger)).all() == []
+
+
+def test_project_create_rejects_unaccepted_greenfield_discovery_draft_before_ledger(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(
+            session,
+            spec_file,
+            draft_status="ready",
+        )
+        draft_id = int(draft.spec_amendment_draft_id or 0)
+    runner = ProjectSetupMutationRunner(engine=engine)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Unaccepted Draft Project",
+            greenfield_spec_amendment_draft_id=draft_id,
+            idempotency_key="unaccepted-greenfield-draft-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
+    assert result["errors"][0]["details"] == {
+        "greenfield_spec_amendment_draft_id": draft_id,
+        "status": "ready",
+    }
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(CliMutationLedger)).all() == []
+
+
+def test_project_create_rejects_accepted_greenfield_draft_with_rejected_prd(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(session, spec_file)
+        prd = session.get(GreenfieldDiscoveryPrd, draft.prd_id)
+        assert prd is not None
+        prd.status = "rejected"
+        session.add(prd)
+        session.commit()
+        draft_id = int(draft.spec_amendment_draft_id or 0)
+    runner = ProjectSetupMutationRunner(engine=engine)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Rejected PRD Chain Project",
+            greenfield_spec_amendment_draft_id=draft_id,
+            idempotency_key="rejected-prd-chain-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
+    assert result["errors"][0]["details"]["prd_status"] == "rejected"
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(CliMutationLedger)).all() == []
+
+
+def test_project_create_rejects_accepted_greenfield_draft_with_unready_challenge(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(session, spec_file)
+        challenge = session.get(
+            GreenfieldDiscoveryChallengeArtifact,
+            draft.challenge_artifact_id,
+        )
+        assert challenge is not None
+        challenge.readiness = "needs_answers"
+        session.add(challenge)
+        session.commit()
+        draft_id = int(draft.spec_amendment_draft_id or 0)
+    runner = ProjectSetupMutationRunner(engine=engine)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Unready Challenge Chain Project",
+            greenfield_spec_amendment_draft_id=draft_id,
+            idempotency_key="unready-challenge-chain-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is False
+    assert _error_code(result) == "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
+    assert result["errors"][0]["details"]["challenge_readiness"] == "needs_answers"
+
+    with Session(engine) as session:
+        assert session.exec(select(Product)).all() == []
+        assert session.exec(select(CliMutationLedger)).all() == []
+
+
+def test_project_create_success_uses_accepted_greenfield_discovery_scope(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(session, spec_file)
+        draft_id = int(draft.spec_amendment_draft_id or 0)
+        context_id = int(draft.greenfield_context_id)
+        challenge_id = int(draft.challenge_artifact_id)
+        prd_id = int(draft.prd_id)
+    fake_workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
+
+    result = runner.create_project(
+        ProjectCreateRequest(
+            name="Greenfield Discovery Project",
+            greenfield_spec_amendment_draft_id=draft_id,
+            idempotency_key="accepted-greenfield-draft-001",
+            changed_by="agent",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["resolved_spec_path"] == str(spec_file.resolve())
+    assert data["greenfield_discovery"] == {
+        "greenfield_context_id": context_id,
+        "challenge_artifact_id": challenge_id,
+        "prd_id": prd_id,
+        "spec_amendment_draft_id": draft_id,
+    }
+
+    with Session(engine) as session:
+        project = session.get(Product, data["project_id"])
+        assert project is not None
+        context = session.get(GreenfieldDiscoveryContext, context_id)
+        assert context is not None
+        assert context.project_id == data["project_id"]
+        assert context.status == "consumed"
+        assert len(session.exec(select(SpecRegistry)).all()) == 1
+
+    _assert_compile_required_workflow_state(
+        fake_workflow.sessions[str(data["project_id"])],
+        project_id=data["project_id"],
+        spec_file=spec_file,
+        spec_hash=data["spec_hash"],
+        spec_version_id=data["spec_version_id"],
+    )
 
 
 def test_brownfield_project_create_rejects_spec_file() -> None:
@@ -871,9 +1238,10 @@ def test_project_create_success_registers_spec_without_compiling_authority(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
             changed_by="agent",
         )
@@ -1079,9 +1447,10 @@ def test_authority_compile_succeeds_from_compile_required(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-success-001",
             changed_by="agent",
         )
@@ -1196,9 +1565,10 @@ def test_authority_compile_pins_guarded_spec_version(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Guarded Spec Pin Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-pin-001",
             changed_by="agent",
         )
@@ -1249,9 +1619,10 @@ def test_authority_compile_marks_compiling_before_invocation(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Compile State Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-state-001",
             changed_by="agent",
         )
@@ -1345,9 +1716,10 @@ def test_authority_compile_failure_records_retryable_compile_failed(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-failure-001",
             changed_by="agent",
         )
@@ -1410,9 +1782,10 @@ def test_authority_compile_rejects_live_spec_hash_change_before_compiler(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Stale File Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-stale-file-001",
             changed_by="agent",
         )
@@ -1498,9 +1871,10 @@ def test_authority_compile_final_workflow_failure_marks_recovery_required(
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Workflow Recovery Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-final-workflow-fails-001",
             changed_by="agent",
         )
@@ -1625,9 +1999,10 @@ def test_authority_compile_initial_workflow_failure_marks_recovery_required(
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Initial Workflow Recovery Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-initial-workflow-fails-001",
             changed_by="agent",
         )
@@ -1696,9 +2071,10 @@ def test_authority_compile_validation_workflow_failure_marks_recovery_required(
     )
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Validation Workflow Recovery Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-validation-workflow-fails-001",
             changed_by="agent",
         )
@@ -1761,9 +2137,10 @@ def test_authority_compile_retry_success_clears_failure_metadata(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Authority Compile Retry Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-retry-001",
             changed_by="agent",
         )
@@ -1842,9 +2219,10 @@ def test_authority_compile_rejects_stale_guards(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name=f"Stale Guard Project {expected_code}",
-            spec_file=str(spec_file),
             idempotency_key=f"create-stale-{expected_code.lower().replace('_', '-')}-001",
             changed_by="agent",
         )
@@ -1915,9 +2293,10 @@ def test_event_159_style_long_compile_survives_past_original_lease(
     runner._lease_seconds = lease_seconds
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Event 159 Regression Project",
-            spec_file=str(spec_file),
             idempotency_key="create-event-159-regression-001",
             changed_by="agent",
         )
@@ -1957,9 +2336,10 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Compiler Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-fails-001",
             changed_by="agent",
         )
@@ -1985,9 +2365,10 @@ def test_project_create_compile_failure_records_failed_setup_not_recovery(
     )
 
     replay = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Compiler Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-fails-001",
             changed_by="agent",
         )
@@ -2019,9 +2400,10 @@ def test_project_create_compiler_timeout_is_failed_setup_not_recovery(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Compiler Timeout Project",
-            spec_file=str(spec_file),
             idempotency_key="create-timeout-001",
             changed_by="agent",
         )
@@ -2071,9 +2453,10 @@ def test_create_recovery_mark_failure_not_needed_when_compile_deferred(
     )
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Recovery Mark Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-recovery-mark-fails-001",
             changed_by="agent",
         )
@@ -2116,9 +2499,10 @@ def test_workflow_setup_recovery_mark_failure_does_not_claim_recovery_required(
     )
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Workflow Recovery Mark Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-workflow-recovery-mark-fails-001",
             changed_by="agent",
         )
@@ -2155,9 +2539,10 @@ def test_failed_workflow_setup_recovery_mark_failure_does_not_claim_recovery_req
     )
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Failed Workflow Recovery Mark Failure Project",
-            spec_file=str(spec_file),
             idempotency_key="create-failed-workflow-recovery-mark-fails-001",
             changed_by="agent",
         )
@@ -2184,9 +2569,10 @@ def test_project_setup_retry_recovery_without_link_keeps_compile_required_state(
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     created = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Retry Compile Required Project",
-            spec_file=str(spec_file),
             idempotency_key="create-compile-fails-001",
             changed_by="agent",
         )
@@ -2306,37 +2692,33 @@ def test_project_create_duplicate_replay_key_reuse_and_recovery_required(
     _install_fast_compiler(monkeypatch)
     workflow = FakeWorkflowPort()
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
-
-    first = runner.create_project(
-        ProjectCreateRequest(
-            name="CLI Project",
-            spec_file=str(spec_file),
-            idempotency_key="create-project-001",
-        )
+    first_request = _accepted_greenfield_create_request(
+        engine,
+        spec_file,
+        name="CLI Project",
+        idempotency_key="create-project-001",
     )
+
+    first = runner.create_project(first_request)
     assert first["ok"] is True
     duplicate = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-002",
         )
     )
     assert _error_code(duplicate) == "PROJECT_ALREADY_EXISTS"
 
-    replay = runner.create_project(
-        ProjectCreateRequest(
-            name="CLI Project",
-            spec_file=str(spec_file),
-            idempotency_key="create-project-001",
-        )
-    )
+    replay = runner.create_project(first_request)
     assert replay == first
 
     reused_name = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="Changed Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
         )
     )
@@ -2348,9 +2730,10 @@ def test_project_create_duplicate_replay_key_reuse_and_recovery_required(
         requirement_statement="The changed system MUST record updated audit evidence.",
     )
     reused_spec = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            changed_spec,
             name="CLI Project",
-            spec_file=str(changed_spec),
             idempotency_key="create-project-001",
         )
     )
@@ -2740,9 +3123,10 @@ def test_linked_setup_retry_success_supersedes_original_and_replays(
         assert retry.recovers_mutation_event_id == original_event_id
 
     replay = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
             changed_by="agent",
         )
@@ -2962,9 +3346,10 @@ def test_linked_retry_post_side_effect_failure_transfers_recovery(
     original_replay = ProjectSetupMutationRunner(
         engine=engine, workflow=workflow
     ).create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
             changed_by="agent",
         )
@@ -3060,9 +3445,10 @@ def test_workflow_setup_reconciles_partial_or_existing_session_state(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
 
     result = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
         )
     )
@@ -3093,9 +3479,10 @@ def test_workflow_setup_retry_recovers_session_created_without_status(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
 
     recovery = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
         )
     )
@@ -3149,9 +3536,10 @@ def test_workflow_setup_retry_recovers_status_written_without_ledger_progress(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=fake_workflow)
 
     recovery = runner.create_project(
-        ProjectCreateRequest(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
             name="CLI Project",
-            spec_file=str(spec_file),
             idempotency_key="create-project-001",
         )
     )

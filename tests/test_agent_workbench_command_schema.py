@@ -309,7 +309,10 @@ def test_project_create_is_registered_as_mutating_idempotent_command() -> None:
     assert project_create_schema["mutates"] is True
     assert project_create_schema["idempotency_required"] is True
     assert project_create_schema["idempotency_policy"] == DRY_RUN_IDEMPOTENCY_POLICY
-    assert project_create_schema["input"]["required"] == ["name", "spec_file"]
+    assert project_create_schema["input"]["required"] == [
+        "name",
+        "greenfield_spec_amendment_draft_id",
+    ]
     assert "idempotency_key" in project_create_schema["input"]["optional"]
     assert "dry_run" in project_create_schema["input"]["optional"]
     assert "dry_run_id" in project_create_schema["input"]["optional"]
