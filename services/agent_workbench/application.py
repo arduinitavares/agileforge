@@ -59,9 +59,9 @@ from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
 from services.agent_workbench.schema_readiness import (
-    DISCOVERY_REQUIREMENTS,
     MUTATION_LEDGER_REQUIREMENTS,
     SchemaReadiness,
+    SchemaRequirement,
     check_schema_readiness,
 )
 from services.agent_workbench.scope_discovery import (
@@ -89,6 +89,77 @@ STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
 AUTHORITY_CURATE_COMMAND: Final[str] = "agileforge authority curate"
 AUTHORITY_REGENERATE_COMMAND: Final[str] = "agileforge authority regenerate"
+_SCOPE_DISCOVERY_ROUTE_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
+    SchemaRequirement(
+        table="discovery_challenge_artifacts",
+        columns=(
+            "challenge_artifact_id",
+            "project_id",
+            "producer",
+            "readiness",
+            "original_idea",
+            "content_json",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+    SchemaRequirement(
+        table="discovery_prds",
+        columns=(
+            "prd_id",
+            "project_id",
+            "challenge_artifact_id",
+            "producer",
+            "status",
+            "version",
+            "title",
+            "content_json",
+            "supersedes_prd_id",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "reviewed_by",
+            "review_notes",
+            "reviewed_at",
+            "review_request_hash",
+            "review_idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+    SchemaRequirement(
+        table="discovery_spec_amendment_drafts",
+        columns=(
+            "spec_amendment_draft_id",
+            "project_id",
+            "prd_id",
+            "challenge_artifact_id",
+            "status",
+            "amendment_file",
+            "content_json",
+            "validation_json",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "base_spec_version_id",
+            "base_spec_hash",
+            "amended_spec_hash",
+            "reviewed_by",
+            "review_notes",
+            "reviewed_at",
+            "review_request_hash",
+            "review_idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -6040,7 +6111,7 @@ def _scope_discovery_next_response(
     """Return the next required Scope Discovery gate for exhausted projects."""
     response: dict[str, Any] | None = None
     engine = get_engine()
-    readiness = check_schema_readiness(engine, DISCOVERY_REQUIREMENTS)
+    readiness = check_schema_readiness(engine, _SCOPE_DISCOVERY_ROUTE_REQUIREMENTS)
     if not readiness.ok:
         return _schema_not_ready_response(
             command=WORKFLOW_NEXT_COMMAND,
