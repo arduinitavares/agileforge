@@ -1301,6 +1301,90 @@ def _is_non_normative_source_item(source_item: Mapping[str, Any]) -> bool:
     )
 
 
+def _drop_redundant_unsupported_behavior_invariants(
+    success: SpecAuthorityCompilationSuccess,
+    *,
+    source_text: str,
+) -> int:
+    """Drop repairable unsupported behavior invariants for already-covered items."""
+    source_items = _structured_profile_items_by_id(source_text)
+    if not source_items or not success.invariants:
+        return 0
+
+    source_entries = _source_map_entries_by_invariant(success.source_map)
+    covered_source_item_ids: set[str] = set()
+    repairable_candidates: list[Invariant] = []
+
+    for invariant in success.invariants:
+        if not invariant.source_item_id:
+            continue
+
+        source_item = source_items.get(invariant.source_item_id)
+        if source_item is not None and invariant.source_level == source_item.get(
+            "level"
+        ):
+            real_texts = _structured_item_real_texts(source_item)
+            grounded_excerpts = _grounded_structured_entry_excerpts(
+                source_entries.get(invariant.id, []),
+                source_item_id=invariant.source_item_id,
+                real_texts=real_texts,
+            )
+            if (
+                grounded_excerpts is not None
+                and _behavioral_source_excerpts_support_invariant(
+                    invariant,
+                    grounded_excerpts,
+                )
+            ):
+                covered_source_item_ids.add(invariant.source_item_id)
+
+        if not _is_behavioral_invariant(invariant):
+            continue
+
+        issues = _behavioral_source_metadata_issues(
+            invariant,
+            source_items=source_items,
+            source_entries=source_entries.get(invariant.id, []),
+        )
+        if not issues:
+            covered_source_item_ids.add(invariant.source_item_id)
+            continue
+
+        if all(
+            issue.get("subcode") == BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED
+            and issue.get("repairable") is True
+            and issue.get("source_item_id") == invariant.source_item_id
+            for issue in issues
+        ):
+            repairable_candidates.append(invariant)
+
+    removable_ids = {
+        invariant.id
+        for invariant in repairable_candidates
+        if invariant.source_item_id in covered_source_item_ids
+    }
+    if not removable_ids:
+        return 0
+
+    dropped_invariants: list[Invariant] = []
+    kept_invariants: list[Invariant] = []
+    for invariant in success.invariants:
+        if invariant.id in removable_ids:
+            dropped_invariants.append(invariant)
+            continue
+        kept_invariants.append(invariant)
+
+    success.invariants = kept_invariants
+    success.source_map = [
+        entry for entry in success.source_map if entry.invariant_id not in removable_ids
+    ]
+    for dropped in dropped_invariants:
+        gap = f"Dropped unsupported compiler invariant: {_invariant_text(dropped)}"
+        if gap not in success.gaps:
+            success.gaps.append(gap)
+    return len(dropped_invariants)
+
+
 def _source_metadata_issue(  # noqa: PLR0913
     *,
     subcode: str,
@@ -2382,6 +2466,10 @@ def normalize_compiler_output(
             source_text=source_text,
             original_invariants=original_invariants,
             original_source_map=original_source_map,
+        )
+        _drop_redundant_unsupported_behavior_invariants(
+            success,
+            source_text=source_text,
         )
         metadata_issues = _structured_authority_metadata_issues(
             success,
