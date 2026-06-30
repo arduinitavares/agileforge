@@ -2069,6 +2069,7 @@ def test_get_project_authority_review_post_accept_fallback(
         compiler_version="1.0",
         prompt_hash="hash",
         compiled_at="date",
+        scope_discovery=None,
         artifact={
             "invariants": [],
             "gaps": [],

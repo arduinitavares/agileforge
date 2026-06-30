@@ -15,6 +15,7 @@ from models.db import get_engine
 from orchestrator_agent.agent_tools.roadmap_builder.tools import save_roadmap_tool
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
 from services.phases.roadmap_service import (
     RoadmapPhaseError,
     generate_roadmap_draft,
@@ -100,6 +101,9 @@ class RoadmapPhaseRunner:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+        authority_error = self._accepted_authority_error(project_id)
+        if authority_error is not None:
+            return authority_error
 
         try:
             data = await generate_roadmap_draft(
@@ -219,6 +223,14 @@ class RoadmapPhaseRunner:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
+
+    def _accepted_authority_error(self, project_id: int) -> dict[str, Any] | None:
+        """Return an execution guard error for real repository-backed commands."""
+        if not isinstance(self._product_repo, ProductRepository):
+            return None
+        return AcceptedAuthorityExecutionGuard(
+            engine=get_engine()
+        ).reject_unless_current(project_id=project_id)
 
 
 def _now_iso() -> str:

@@ -31,6 +31,7 @@ from orchestrator_agent.agent_tools.sprint_planner_tool.tools import (
 )
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
     LedgerLoadResult,
@@ -511,6 +512,9 @@ class SprintPhaseRunner:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+        authority_error = self._accepted_authority_error(project_id)
+        if authority_error is not None:
+            return authority_error
 
         engine = get_engine()
         ledger = MutationLedgerRepository(engine=engine)
@@ -1208,6 +1212,9 @@ class SprintPhaseRunner:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+        authority_error = self._accepted_authority_error(project_id)
+        if authority_error is not None:
+            return authority_error
 
         capacity_points = max_story_points
         capacity_source = "user_override" if max_story_points is not None else None
@@ -1529,6 +1536,14 @@ class SprintPhaseRunner:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
+
+    def _accepted_authority_error(self, project_id: int) -> dict[str, Any] | None:
+        """Return an execution guard error for real repository-backed commands."""
+        if not isinstance(self._product_repo, ProductRepository):
+            return None
+        return AcceptedAuthorityExecutionGuard(
+            engine=get_engine()
+        ).reject_unless_current(project_id=project_id)
 
     def _sync_completed_sprint_state(self, *, project_id: int, sprint_id: int) -> None:
         state = self._workflow_service.get_session_status(str(project_id)) or {}

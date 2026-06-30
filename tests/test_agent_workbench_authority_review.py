@@ -6,6 +6,11 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
+from models.agent_workbench import (
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.authority_projection import pending_authority_fingerprint
@@ -171,6 +176,92 @@ def _seed_pending_review_project(  # noqa: PLR0913
     session.refresh(authority)
     authority_id = require_id(authority.authority_id, "authority_id")
     return project_id, spec_version_id, authority_id, spec_path
+
+
+def _seed_discovery_provenance(
+    session: Session,
+    *,
+    project_id: int,
+    spec_hash: str,
+    spec_path: Path,
+) -> None:
+    """Seed accepted Scope Discovery artifacts for a pending authority review."""
+    challenge_payload = {
+        "producer": "grill-with-docs",
+        "readiness": "ready_for_prd",
+        "original_idea": "Add an expert review workflow.",
+        "questions": [
+            {"question": "Who reviews the output?", "answer": "A domain expert."}
+        ],
+        "reviewed_evidence": ["CONTEXT.md", "docs/adr/0001-required-discovery.md"],
+        "evidence_conflicts": ["ADR and context disagreed on the first command."],
+        "assumptions": ["Reviewers are available before authority acceptance."],
+        "non_goals": ["Do not generate PRDs inside AgileForge."],
+        "risks": ["Agents may try to skip discovery artifacts."],
+        "open_questions": [],
+        "glossary_changes": [{"term": "Challenge Artifact", "status": "settled"}],
+    }
+    challenge = DiscoveryChallengeArtifact(
+        project_id=project_id,
+        producer="grill-with-docs",
+        readiness="ready_for_prd",
+        original_idea="Add an expert review workflow.",
+        content_json=json.dumps(challenge_payload),
+        artifact_fingerprint="sha256:challenge-provenance",
+        request_hash="sha256:challenge-request",
+        idempotency_key="challenge-provenance",
+    )
+    session.add(challenge)
+    session.commit()
+    session.refresh(challenge)
+    challenge_id = require_id(
+        challenge.challenge_artifact_id,
+        "challenge_artifact_id",
+    )
+    prd_payload = {
+        "producer": "to-prd",
+        "title": "Expert Review Workflow",
+        "problem_statement": "Reviewed scope needs deterministic gatekeeping.",
+        "user_stories": ["As a reviewer, I can see discovery provenance."],
+    }
+    prd = DiscoveryPrd(
+        project_id=project_id,
+        challenge_artifact_id=challenge_id,
+        producer="to-prd",
+        status="accepted",
+        version="1",
+        title="Expert Review Workflow",
+        content_json=json.dumps(prd_payload),
+        artifact_fingerprint="sha256:prd-provenance",
+        request_hash="sha256:prd-request",
+        idempotency_key="prd-provenance",
+        reviewed_by="product-owner",
+        review_notes="Accepted for amendment drafting.",
+        reviewed_at=datetime(2026, 5, 17, 14, tzinfo=UTC),
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    draft = DiscoverySpecAmendmentDraft(
+        project_id=project_id,
+        prd_id=require_id(prd.prd_id, "prd_id"),
+        challenge_artifact_id=challenge_id,
+        status="accepted",
+        amendment_file=str(spec_path),
+        content_json=spec_path.read_text(encoding="utf-8"),
+        validation_json=json.dumps({"valid": True, "blocking_issues": []}),
+        artifact_fingerprint="sha256:amendment-provenance",
+        request_hash="sha256:amendment-request",
+        idempotency_key="amendment-provenance",
+        base_spec_version_id=11,
+        base_spec_hash="sha256:base-spec",
+        amended_spec_hash=spec_hash,
+        reviewed_by="product-owner",
+        review_notes="Accepted for scope extension start.",
+        reviewed_at=datetime(2026, 5, 17, 15, tzinfo=UTC),
+    )
+    session.add(draft)
+    session.commit()
 
 
 def _base_spec() -> str:
@@ -1303,6 +1394,77 @@ def test_review_summary_counts_compiler_artifact_evidence(
     assert summary["compiler_gap_count"] == 1
     assert summary["compiler_assumption_count"] == 1
     assert summary["compiler_invariant_count"] == 1
+
+
+def test_review_packet_exposes_scope_discovery_provenance(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Reviewers see Challenge Artifact and PRD provenance for discovered scope."""
+    project_id, _spec_version_id, _authority_id, spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+        )
+    )
+    spec_hash = sha256_prefixed(spec_path.read_bytes())
+    _seed_discovery_provenance(
+        session,
+        project_id=project_id,
+        spec_hash=spec_hash,
+        spec_path=spec_path,
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+    snapshot = build_authority_review_snapshot(
+        engine=_engine(session),
+        project_id=project_id,
+    )
+
+    assert result["ok"] is True
+    discovery = result["data"]["scope_discovery"]
+    assert discovery["challenge_artifact"] == {
+        "challenge_artifact_id": 1,
+        "producer": "grill-with-docs",
+        "readiness": "ready_for_prd",
+        "original_idea": "Add an expert review workflow.",
+        "artifact_fingerprint": "sha256:challenge-provenance",
+        "assumptions": ["Reviewers are available before authority acceptance."],
+        "non_goals": ["Do not generate PRDs inside AgileForge."],
+        "risks": ["Agents may try to skip discovery artifacts."],
+        "evidence_conflicts": [
+            "ADR and context disagreed on the first command."
+        ],
+        "open_questions": [],
+        "glossary_changes": [
+            {"term": "Challenge Artifact", "status": "settled"}
+        ],
+    }
+    assert discovery["prd"] == {
+        "prd_id": 1,
+        "producer": "to-prd",
+        "status": "accepted",
+        "version": "1",
+        "title": "Expert Review Workflow",
+        "artifact_fingerprint": "sha256:prd-provenance",
+        "reviewed_by": "product-owner",
+    }
+    assert discovery["spec_amendment"]["status"] == "accepted"
+    assert discovery["spec_amendment"]["amended_spec_hash"] == spec_hash
+    assert discovery["readiness"] == {
+        "challenge_readiness": "ready_for_prd",
+        "prd_status": "accepted",
+        "spec_amendment_status": "accepted",
+        "open_questions_status": "closed",
+        "evidence_conflict_count": 1,
+    }
+    assert not isinstance(snapshot, dict)
+    assert snapshot.payload["scope_discovery_fingerprint"] == discovery[
+        "scope_discovery_fingerprint"
+    ]
 
 
 def test_authority_review_packet_exposes_authority_quality(

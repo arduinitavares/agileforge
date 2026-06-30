@@ -27,6 +27,7 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
 from orchestrator_agent.fsm.states import OrchestratorState
 from repositories.product import ProductRepository
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
+from services.agent_workbench.execution_guard import AcceptedAuthorityExecutionGuard
 from services.agent_workbench.fingerprints import canonical_hash
 from services.interview_runtime import (
     append_attempt,
@@ -405,7 +406,7 @@ class StoryPhaseRunner:
             return _workflow_error(exc)
         return _data_envelope(data)
 
-    async def _generate(  # noqa: PLR0913
+    async def _generate(  # noqa: PLR0911, PLR0913
         self,
         project_id: int,
         parent_requirement: str,
@@ -417,6 +418,9 @@ class StoryPhaseRunner:
         product = self._load_project(project_id)
         if isinstance(product, dict):
             return product
+        authority_error = self._accepted_authority_error(project_id)
+        if authority_error is not None:
+            return authority_error
 
         if target_story_id is not None and target_refinement_slot is None:
             target_refinement_slot = _resolve_target_refinement_slot(
@@ -1188,6 +1192,14 @@ class StoryPhaseRunner:
 
     def _save_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         self._workflow_service.update_session_status(session_id, state)
+
+    def _accepted_authority_error(self, project_id: int) -> dict[str, Any] | None:
+        """Return an execution guard error for real repository-backed commands."""
+        if not isinstance(self._product_repo, ProductRepository):
+            return None
+        return AcceptedAuthorityExecutionGuard(
+            engine=get_engine()
+        ).reject_unless_current(project_id=project_id)
 
     def _save_story_mutation_state(
         self,
