@@ -1521,6 +1521,12 @@ class AgentWorkbenchApplication:
                 scope_extension_preconditions=scope_extension_preconditions,
             )
 
+        if _stale_scope_extension_accept_candidate(workflow):
+            workflow = _reconciled_scope_extension_accept_workflow(
+                workflow=workflow,
+                authority=self.authority_status(project_id=project_id),
+            )
+
         sprint_candidates_for_setup = (
             self.sprint_candidates(project_id=project_id)
             if fsm_state == "SPRINT_SETUP"
@@ -3444,6 +3450,79 @@ def _setup_status(envelope: dict[str, Any]) -> str | None:
     state_data = state if isinstance(state, dict) else {}
     setup_status = state_data.get("setup_status")
     return str(setup_status).strip().lower() if setup_status is not None else None
+
+
+def _stale_scope_extension_accept_candidate(workflow: dict[str, Any]) -> bool:
+    """Return whether workflow state looks like a stale scope-extension accept."""
+    if _fsm_state_from_envelope(workflow) != "VISION_INTERVIEW":
+        return False
+    if _setup_status(workflow) != "passed":
+        return False
+    state = _workflow_state_mapping(workflow)
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        return False
+    if context.get("schema") != "agileforge.scope_extension.v1":
+        return False
+    amended_spec_version_id = _concrete_int(context.get("amended_spec_version_id"))
+    if amended_spec_version_id is None:
+        return False
+    return (
+        state.get("accepted_spec_version_id") != amended_spec_version_id
+        or state.get("latest_spec_version_id") != amended_spec_version_id
+    )
+
+
+def _reconciled_scope_extension_accept_workflow(
+    *,
+    workflow: dict[str, Any],
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a workflow envelope corrected for an already-accepted extension."""
+    if authority.get("ok") is not True:
+        return workflow
+    authority_data = _envelope_data(authority)
+    if authority_data.get("status") != "current":
+        return workflow
+    state = _workflow_state_mapping(workflow)
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict):
+        return workflow
+    amended_spec_version_id = _concrete_int(context.get("amended_spec_version_id"))
+    accepted_spec_version_id = _concrete_int(
+        authority_data.get("accepted_spec_version_id")
+    )
+    if (
+        amended_spec_version_id is None
+        or accepted_spec_version_id != amended_spec_version_id
+    ):
+        return workflow
+
+    data = _envelope_data(workflow)
+    reconciled_state = {
+        **state,
+        "fsm_state": "BACKLOG_INTERVIEW",
+        "accepted_spec_version_id": amended_spec_version_id,
+        "latest_spec_version_id": amended_spec_version_id,
+    }
+    return {
+        **workflow,
+        "data": {
+            **data,
+            "state": reconciled_state,
+        },
+    }
+
+
+def _workflow_state_mapping(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Return workflow state mapping from an envelope."""
+    state = _envelope_data(workflow).get("state")
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _concrete_int(value: object) -> int | None:
+    """Return concrete int values while excluding bools."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _authority_has_pending_review(authority: dict[str, Any] | None) -> bool:

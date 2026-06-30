@@ -205,6 +205,7 @@ class ReviewedAuthoritySnapshot:
     spec_version_id: int
     review_findings: list[JsonDict]
     ir_packet_limits: JsonDict
+    scope_discovery: JsonDict | None
 
 
 class AuthorityDecisionRunner:
@@ -896,6 +897,7 @@ class AuthorityDecisionRunner:
             accepted_route = self._accepted_authority_route(
                 project_id=snapshot.project_id,
                 spec_version_id=snapshot.spec_version_id,
+                scope_discovery=snapshot.scope_discovery,
             )
             self._workflow.update_session_status(
                 str(snapshot.project_id),
@@ -921,11 +923,13 @@ class AuthorityDecisionRunner:
         *,
         project_id: int,
         spec_version_id: int | None,
+        scope_discovery: JsonDict | None = None,
     ) -> _AcceptedAuthorityRoute:
         state = self._workflow.get_session_status(str(project_id))
         if _is_scope_extension_acceptance(
             workflow_state=state,
             spec_version_id=spec_version_id,
+            scope_discovery=scope_discovery,
         ):
             return _SCOPE_EXTENSION_ACCEPTED_ROUTE
         return _INITIAL_ACCEPTED_ROUTE
@@ -1234,6 +1238,7 @@ def _snapshot_from_review(
         spec_version_id=_required_int(snapshot.spec_version_id),
         review_findings=list(snapshot.review_findings),
         ir_packet_limits=dict(snapshot.ir_packet_limits),
+        scope_discovery=snapshot.scope_discovery,
     )
 
 
@@ -1460,6 +1465,7 @@ def _accepted_workflow_update(
     }
     if route.write_accepted_spec_version_id and spec_version_id is not None:
         update["accepted_spec_version_id"] = spec_version_id
+        update["latest_spec_version_id"] = spec_version_id
     return update
 
 
@@ -1467,26 +1473,27 @@ def _is_scope_extension_acceptance(
     *,
     workflow_state: Mapping[str, Any],
     spec_version_id: int | None,
+    scope_discovery: Mapping[str, Any] | None = None,
 ) -> bool:
     if spec_version_id is None:
         return False
-    if workflow_state.get("setup_status") != "authority_pending_review":
-        return False
     context = workflow_state.get("scope_extension_context")
-    if not isinstance(context, Mapping):
-        return False
-    if context.get("schema") != "agileforge.scope_extension.v1":
-        return False
-    amended_spec_version_id = _workflow_int(
-        context.get("amended_spec_version_id")
-    )
-    if amended_spec_version_id != spec_version_id:
-        return False
     pending_spec_version_id = _workflow_int(
         workflow_state.get("pending_compiled_spec_version_id")
     )
     setup_spec_version_id = _workflow_int(workflow_state.get("setup_spec_version_id"))
-    return spec_version_id in {pending_spec_version_id, setup_spec_version_id}
+    workflow_has_setup_spec = spec_version_id in {
+        pending_spec_version_id,
+        setup_spec_version_id,
+    }
+    if isinstance(context, Mapping):
+        if context.get("schema") != "agileforge.scope_extension.v1":
+            return False
+        amended_spec_version_id = _workflow_int(
+            context.get("amended_spec_version_id")
+        )
+        return amended_spec_version_id == spec_version_id and workflow_has_setup_spec
+    return scope_discovery is not None and workflow_has_setup_spec
 
 
 def _workflow_int(value: object) -> int | None:

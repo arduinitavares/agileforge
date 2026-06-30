@@ -895,6 +895,31 @@ class _VisionInterviewReadProjection(_FakeReadProjection):
         return result
 
 
+class _StaleScopeExtensionVisionReadProjection(_FakeReadProjection):
+    """Fake projection for an accepted scope extension left in Vision state."""
+
+    def workflow_state(self, *, project_id: int) -> dict[str, Any]:
+        """Return the stale scope-extension state observed after authority accept."""
+        result = super().workflow_state(project_id=project_id)
+        result["data"]["state"] = {
+            "fsm_state": "VISION_INTERVIEW",
+            "setup_status": "passed",
+            "accepted_spec_version_id": 4,
+            "latest_spec_version_id": 4,
+            "setup_spec_version_id": 5,
+            "vision_saved_at": "2026-06-08T20:10:09Z",
+            "backlog_saved_at": "2026-06-22T12:06:08Z",
+            "roadmap_saved_at": "2026-06-22T12:11:39Z",
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": 4,
+                "amended_spec_version_id": 5,
+                "amended_spec_hash": "sha256:" + "a" * 64,
+            },
+        }
+        return result
+
+
 class _VisionReviewReadProjection(_FakeReadProjection):
     """Fake read projection for the Vision review state."""
 
@@ -1308,6 +1333,21 @@ class _CurrentAuthorityProjection(_FakeAuthorityProjection):
         """Return a current authority status payload."""
         result = super().status(project_id=project_id)
         result["data"]["status"] = "current"
+        return result
+
+
+class _CurrentScopeExtensionAuthorityProjection(_CurrentAuthorityProjection):
+    """Fake authority projection current for the amended scope spec."""
+
+    def status(self, *, project_id: int) -> dict[str, Any]:
+        """Return current authority status for spec version 5."""
+        result = super().status(project_id=project_id)
+        result["data"].update(
+            {
+                "accepted_spec_version_id": 5,
+                "latest_spec_version_id": 5,
+            }
+        )
         return result
 
 
@@ -4568,6 +4608,24 @@ def test_application_workflow_next_routes_vision_interview_to_generate() -> None
         "agileforge vision generate --project-id 7"
     ]
     assert result["data"]["blocked_commands"] == []
+
+
+def test_workflow_next_reconciles_stale_scope_extension_accept_to_backlog() -> None:
+    """Route accepted scope extensions to Backlog even if workflow state is stale."""
+    app = AgentWorkbenchApplication(
+        read_projection=_StaleScopeExtensionVisionReadProjection(),
+        authority_projection=_CurrentScopeExtensionAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge backlog generate --project-id 7"
+    ]
+    assert result["data"]["blocked_commands"] == []
+    assert result["data"]["blocked_future_commands"] == []
+    assert result["data"]["status"] == "next_phase_available"
 
 
 def test_application_workflow_next_routes_vision_review_to_save_and_refine() -> None:

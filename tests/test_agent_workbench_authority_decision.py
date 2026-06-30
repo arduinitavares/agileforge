@@ -16,7 +16,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from models.agent_workbench import CliMutationLedger
+from models.agent_workbench import (
+    CliMutationLedger,
+    DiscoveryChallengeArtifact,
+    DiscoveryPrd,
+    DiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from models.specs import (
     CompiledSpecAuthority,
@@ -292,6 +297,80 @@ def _seed_regenerated_pending_authority(
     return require_id(authority.authority_id, "authority_id")
 
 
+def _seed_scope_discovery_amendment(
+    session: Session,
+    *,
+    project_id: int,
+    base_spec_version_id: int,
+    amended_spec_hash: str,
+) -> None:
+    challenge = DiscoveryChallengeArtifact(
+        project_id=project_id,
+        producer="decision-test",
+        readiness="ready",
+        original_idea="Add scope without restarting project setup.",
+        content_json=json.dumps(
+            {
+                "assumptions": [],
+                "non_goals": [],
+                "risks": [],
+                "evidence_conflicts": [],
+                "open_questions": [],
+                "glossary_changes": [],
+            }
+        ),
+        artifact_fingerprint="sha256:" + "c" * 64,
+        request_hash="sha256:" + "d" * 64,
+        idempotency_key="scope-challenge-key",
+    )
+    session.add(challenge)
+    session.commit()
+    session.refresh(challenge)
+    challenge_artifact_id = require_id(
+        challenge.challenge_artifact_id,
+        "challenge_artifact_id",
+    )
+
+    prd = DiscoveryPrd(
+        project_id=project_id,
+        challenge_artifact_id=challenge_artifact_id,
+        producer="decision-test",
+        status="accepted",
+        version="1.0.0",
+        title="Scope Extension PRD",
+        content_json=json.dumps({"summary": "Extend existing scope."}),
+        artifact_fingerprint="sha256:" + "e" * 64,
+        request_hash="sha256:" + "f" * 64,
+        idempotency_key="scope-prd-key",
+        reviewed_by="decision-test",
+        reviewed_at=datetime(2026, 5, 17, 13, 30, tzinfo=UTC),
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    prd_id = require_id(prd.prd_id, "prd_id")
+
+    draft = DiscoverySpecAmendmentDraft(
+        project_id=project_id,
+        prd_id=prd_id,
+        challenge_artifact_id=challenge_artifact_id,
+        status="accepted",
+        amendment_file="scope-extension.json",
+        content_json=json.dumps({"summary": "Accepted scope amendment."}),
+        validation_json=json.dumps({"ok": True}),
+        artifact_fingerprint="sha256:" + "1" * 64,
+        request_hash="sha256:" + "2" * 64,
+        idempotency_key="scope-amendment-key",
+        base_spec_version_id=base_spec_version_id,
+        base_spec_hash="sha256:" + "3" * 64,
+        amended_spec_hash=amended_spec_hash,
+        reviewed_by="decision-test",
+        reviewed_at=datetime(2026, 5, 17, 13, 45, tzinfo=UTC),
+    )
+    session.add(draft)
+    session.commit()
+
+
 def _complete_spec() -> str:
     return _agileforge_spec_profile_json()
 
@@ -522,6 +601,73 @@ def test_accept_scope_extension_authority_routes_to_backlog(
     assert state["setup_status"] == "passed"
     assert state["fsm_state"] == "BACKLOG_INTERVIEW"
     assert state["accepted_spec_version_id"] == spec_version_id
+
+
+def test_accept_scope_extension_authority_uses_durable_scope_provenance(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    _make_schema_v3_ready(_engine(session))
+    project_id, spec_version_id, authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+        spec_filename="scope-extension.json",
+    )
+    spec = session.get(SpecRegistry, spec_version_id)
+    assert spec is not None
+    assert spec.spec_hash is not None
+    _seed_scope_discovery_amendment(
+        session,
+        project_id=project_id,
+        base_spec_version_id=spec_version_id - 1,
+        amended_spec_hash=spec.spec_hash,
+    )
+    snapshot = _snapshot(session, project_id)
+    assert snapshot.scope_discovery is not None
+    workflow = _workflow_for(project_id)
+    workflow.sessions[str(project_id)].update(
+        {
+            "setup_spec_version_id": spec_version_id,
+            "accepted_spec_version_id": spec_version_id - 1,
+            "latest_spec_version_id": spec_version_id - 1,
+            "vision_saved_at": "2026-06-08T20:10:09Z",
+            "backlog_saved_at": "2026-06-22T12:06:08Z",
+            "roadmap_saved_at": "2026-06-22T12:11:39Z",
+        }
+    )
+
+    result = _runner(session, workflow).accept(
+        _accept_request(
+            project_id=project_id,
+            review_token=snapshot.review_token,
+            idempotency_key="scope-extension-provenance-accept-key",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data == {
+        "project_id": project_id,
+        "authority_id": authority_id,
+        "accepted_decision_id": data["accepted_decision_id"],
+        "accepted_spec_version_id": spec_version_id,
+        "authority_fingerprint": snapshot.authority_fingerprint,
+        "setup_status": "passed",
+        "fsm_state": "BACKLOG_INTERVIEW",
+        "next_actions": [
+            {
+                "command": f"agileforge backlog generate --project-id {project_id}",
+                "reason": (
+                    "Scope extension authority is accepted and Backlog is unlocked."
+                ),
+            }
+        ],
+    }
+    state = workflow.get_session_status(str(project_id))
+    assert state["setup_status"] == "passed"
+    assert state["fsm_state"] == "BACKLOG_INTERVIEW"
+    assert state["accepted_spec_version_id"] == spec_version_id
+    assert state["latest_spec_version_id"] == spec_version_id
 
 
 def test_accept_structured_spec_persists_prefixed_hash_for_projection(

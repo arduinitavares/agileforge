@@ -435,6 +435,97 @@ def test_backlog_generate_hydrates_vision_spec_and_authority_before_agent(
     )
 
 
+def test_backlog_generate_repairs_stale_scope_extension_accept_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlog generate should execute after a stale scope-extension accept."""
+    amended_spec_version_id = 5
+    workflow_service = _FakeWorkflowService()
+    workflow_service.state.update(
+        {
+            "fsm_state": "VISION_INTERVIEW",
+            "setup_status": "passed",
+            "accepted_spec_version_id": 4,
+            "latest_spec_version_id": 4,
+            "setup_spec_version_id": amended_spec_version_id,
+            "vision_saved_at": "2026-06-08T20:10:09Z",
+            "backlog_saved_at": "2026-06-22T12:06:08Z",
+            "roadmap_saved_at": "2026-06-22T12:11:39Z",
+            "scope_extension_context": {
+                "schema": "agileforge.scope_extension.v1",
+                "base_spec_version_id": 4,
+                "amended_spec_version_id": amended_spec_version_id,
+                "amended_spec_hash": "sha256:" + "a" * 64,
+                "added_source_item_ids": ["REQ.scope-extension"],
+            },
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_select_project(
+        product_id: int, tool_context: SimpleNamespace
+    ) -> dict[str, Any]:
+        state = tool_context.state
+        state["pending_spec_content"] = "SPEC CONTENT"
+        state["compiled_authority_cached"] = "AUTHORITY JSON"
+        state["product_vision_assessment"] = {
+            "product_vision_statement": "A clear saved vision.",
+            "is_complete": True,
+        }
+        return {"success": True, "project_id": product_id}
+
+    async def fake_run_backlog_agent_from_state(
+        state: dict[str, Any],
+        *,
+        project_id: int,
+        user_input: str | None,
+    ) -> dict[str, Any]:
+        captured["state"] = dict(state)
+        captured["project_id"] = project_id
+        captured["user_input"] = user_input
+        return {
+            "success": True,
+            "input_context": {
+                "generation_mode": "scope_extension",
+                "user_input": user_input or "",
+            },
+            "output_artifact": {
+                "backlog_items": [{"title": "Extend evidence reporting"}],
+                "is_complete": False,
+                "clarifying_questions": ["Which review packet first?"],
+            },
+            "is_complete": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.select_project",
+        fake_select_project,
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.backlog_phase.run_backlog_agent_from_state",
+        fake_run_backlog_agent_from_state,
+    )
+    runner = BacklogPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=workflow_service,
+    )
+
+    result = runner.generate(project_id=2)
+
+    assert result["ok"] is True
+    assert captured["state"]["fsm_state"] == "BACKLOG_INTERVIEW"
+    assert (
+        captured["state"]["accepted_spec_version_id"] == amended_spec_version_id
+    )
+    assert captured["state"]["latest_spec_version_id"] == amended_spec_version_id
+    assert (
+        workflow_service.state["accepted_spec_version_id"]
+        == amended_spec_version_id
+    )
+    assert workflow_service.state["latest_spec_version_id"] == amended_spec_version_id
+
+
 def test_backlog_preview_runs_from_sprint_complete_without_persisting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -313,7 +313,9 @@ class BacklogPhaseRunner:
             data = await generate_backlog_draft(
                 project_id=project_id,
                 load_state=lambda: self._load_backlog_state(
-                    str(project_id), project_id
+                    str(project_id),
+                    project_id,
+                    repair_stale_scope_extension=True,
                 ),
                 save_state=lambda state: self._save_session_state(
                     str(project_id), state
@@ -670,9 +672,15 @@ class BacklogPhaseRunner:
         self,
         session_id: str,
         project_id: int,
+        *,
+        repair_stale_scope_extension: bool = False,
     ) -> dict[str, Any]:
         """Load workflow state with active project, spec, and authority hydrated."""
         context = await self._hydrate_context(session_id, project_id)
+        if repair_stale_scope_extension and _repair_stale_scope_extension_accept_state(
+            context.state
+        ):
+            self._save_session_state(session_id, context.state)
         return dict(context.state)
 
     async def _hydrate_context(
@@ -842,6 +850,54 @@ def _assert_required_context(state: dict[str, Any]) -> None:
         raise BacklogPhaseError(
             "Setup required: Backlog context hydration missing " + ", ".join(missing)
         )
+
+
+def _repair_stale_scope_extension_accept_state(state: dict[str, Any]) -> bool:
+    """Repair stale post-accept state before executable Backlog generation."""
+    amended_spec_version_id = _repairable_scope_extension_amended_spec_version(state)
+    if amended_spec_version_id is None:
+        return False
+    state["fsm_state"] = "BACKLOG_INTERVIEW"
+    state["accepted_spec_version_id"] = amended_spec_version_id
+    state["latest_spec_version_id"] = amended_spec_version_id
+    return True
+
+
+def _repairable_scope_extension_amended_spec_version(
+    state: dict[str, Any],
+) -> int | None:
+    """Return amended spec id when stale scope-extension state is repairable."""
+    if state.get("fsm_state") != "VISION_INTERVIEW":
+        return None
+    if state.get("setup_status") != "passed":
+        return None
+    context = state.get("scope_extension_context")
+    if not isinstance(context, dict) or context.get("schema") != (
+        "agileforge.scope_extension.v1"
+    ):
+        return None
+    amended_spec_version_id = _concrete_int(context.get("amended_spec_version_id"))
+    setup_spec_version_id = _concrete_int(state.get("setup_spec_version_id"))
+    if (
+        amended_spec_version_id is None
+        or setup_spec_version_id != amended_spec_version_id
+    ):
+        return None
+    added_source_item_ids = context.get("added_source_item_ids")
+    if not (
+        isinstance(added_source_item_ids, list)
+        and any(
+            isinstance(item, str) and item.strip()
+            for item in added_source_item_ids
+        )
+    ):
+        return None
+    return amended_spec_version_id
+
+
+def _concrete_int(value: object) -> int | None:
+    """Return concrete int values while excluding bools."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
