@@ -1390,6 +1390,21 @@ def _apply_sprint_generation_runtime_blocker(
         summary.update(scope_extension_projection)
 
 
+def _active_sprint_create_next_disabled_reason(active: Sprint) -> str:
+    """Return the create-next disabled reason for an active Sprint."""
+    return (
+        f"Current sprint is active. Finish or close Sprint {active.sprint_id} "
+        "before generating another sprint."
+    )
+
+
+def _active_sprint_create_next_blocker(active: Sprint | None) -> dict[str, str]:
+    """Return active-Sprint create-next blocker fields."""
+    if active is None:
+        return {}
+    return {"create_next_sprint_blocked_reason": "ACTIVE_SPRINT"}
+
+
 def _build_sprint_runtime_summary(
     sprints: Sequence[Sprint],
     *,
@@ -1431,7 +1446,8 @@ def _build_sprint_runtime_summary(
     )
     triage_blocks_next_sprint = current_triage is not None and triage_impact != "none"
     can_create_next_sprint = (
-        planned is None
+        active is None
+        and planned is None
         and not has_reviewable_draft
         and not triage_required
         and not triage_blocks_next_sprint
@@ -1443,11 +1459,14 @@ def _build_sprint_runtime_summary(
         triage_impact=triage_impact,
         load_candidate_summary=load_candidate_summary,
     )
-    if sprint_generation_blocker is not None:
-        can_create_next_sprint = False
+    can_create_next_sprint = (
+        can_create_next_sprint and sprint_generation_blocker is None
+    )
 
     disabled_reason = None
-    if triage_required:
+    if active is not None:
+        disabled_reason = _active_sprint_create_next_disabled_reason(active)
+    elif triage_required:
         disabled_reason = (
             "Post-sprint triage is required before creating the next sprint."
         )
@@ -1477,6 +1496,7 @@ def _build_sprint_runtime_summary(
         "create_next_sprint_disabled_reason": disabled_reason,
         "post_sprint_triage_required": triage_required,
         "post_sprint_triage": current_triage,
+        **_active_sprint_create_next_blocker(active),
     }
     if has_reviewable_draft:
         summary.update(

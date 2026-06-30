@@ -1781,10 +1781,12 @@ def test_list_sprints_returns_saved_sprints_newest_first(session, monkeypatch): 
         "latest_completed_sprint_id": None,
         "can_create_next_sprint": False,
         "create_next_sprint_disabled_reason": (
-            "A planned sprint already exists. Modify it instead of creating another."
+            f"Current sprint is active. Finish or close Sprint {older_sprint_id} "
+            "before generating another sprint."
         ),
         "post_sprint_triage_required": False,
         "post_sprint_triage": None,
+        "create_next_sprint_blocked_reason": "ACTIVE_SPRINT",
     }
     assert payload["data"]["items"][0]["id"] == newer_sprint.sprint_id
     assert payload["data"]["items"][0]["started_at"] is None
@@ -2037,6 +2039,52 @@ def test_sprint_runtime_summary_blocks_create_next_when_sprint_generation_blocke
         "candidate_count": 0,
         "excluded_counts": {"non_refined": 0, "superseded": 9},
     }
+
+
+def test_sprint_runtime_summary_prefers_active_sprint_over_zero_candidates(  # noqa: ANN201, D103
+    session,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+):
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id = _seed_saved_sprint(
+        session,
+        repo,
+        started=True,
+        created_title="Active Sprint",
+    )
+
+    def fake_load_sprint_candidates(
+        product_id: int,  # noqa: ARG001
+        *,
+        story_completion_scope: object = None,  # noqa: ARG001
+    ) -> dict[str, object]:
+        return {
+            "success": True,
+            "count": 0,
+            "stories": [],
+            "excluded_counts": {"open_sprint": 2},
+            "readiness": {"ready": False, "blocking_codes": []},
+            "message": "Found 0 sprint candidates.",
+        }
+
+    monkeypatch.setattr(
+        api_module,
+        "load_sprint_candidates",
+        fake_load_sprint_candidates,
+    )
+
+    response = client.get(f"/api/projects/{project_id}/sprints")
+
+    assert response.status_code == 200  # noqa: PLR2004
+    runtime_summary = response.json()["data"]["runtime_summary"]
+    assert runtime_summary["active_sprint_id"] == sprint_id
+    assert runtime_summary["can_create_next_sprint"] is False
+    assert runtime_summary["create_next_sprint_blocked_reason"] == "ACTIVE_SPRINT"
+    assert runtime_summary["create_next_sprint_disabled_reason"] == (
+        f"Current sprint is active. Finish or close Sprint {sprint_id} before "
+        "generating another sprint."
+    )
+    assert "create_next_sprint_blocked_command" not in runtime_summary
 
 
 def _zero_sprint_candidates(
