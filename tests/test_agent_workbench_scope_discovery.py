@@ -6,7 +6,11 @@ import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from sqlmodel import select
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from models.agent_workbench import (
     DiscoveryChallengeArtifact,
@@ -36,9 +40,33 @@ from services.specs.profile_content import normalize_spec_content_for_registry
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sqlmodel import Session
+    from sqlalchemy.engine import Engine
 
 PROJECT_ID = 7
+SCOPE_DISCOVERY_TABLES: tuple[str, ...] = (
+    "discovery_spec_amendment_drafts",
+    "discovery_prds",
+    "discovery_challenge_artifacts",
+    "greenfield_discovery_spec_amendment_drafts",
+    "greenfield_discovery_prds",
+    "greenfield_discovery_challenge_artifacts",
+    "greenfield_discovery_contexts",
+)
+
+
+def _engine_missing_discovery_storage() -> Engine:
+    """Return a temporary engine with core tables but no discovery storage."""
+    engine = create_engine(
+        "sqlite://",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        for table_name in SCOPE_DISCOVERY_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+    return engine
 
 
 def _write_challenge_artifact(
@@ -439,6 +467,57 @@ def test_record_challenge_artifact_persists_minimal_provenance(
     assert artifact.readiness == "ready_for_prd"
     assert artifact.idempotency_key == "challenge-record-001"
     assert artifact.changed_by == "test-agent"
+
+
+def test_record_challenge_artifact_reports_schema_not_ready_without_raw_db_error(
+    tmp_path: Path,
+) -> None:
+    """Direct existing-project discovery returns a structured schema error."""
+    engine = _engine_missing_discovery_storage()
+    artifact_file = _write_challenge_artifact(tmp_path)
+
+    with Session(engine) as session:
+        session.add(Product(product_id=PROJECT_ID, name="Scope Discovery"))
+        session.commit()
+        runner = ScopeDiscoveryRunner(session=session)
+        try:
+            result = runner.record_challenge_artifact(_request(artifact_file))
+        except OperationalError as exc:
+            pytest.fail(f"raw OperationalError leaked: {exc}")
+
+    assert result["ok"] is False
+    error = _first_error(result)
+    assert error["code"] == ErrorCode.SCHEMA_NOT_READY.value
+    assert "discovery_challenge_artifacts" in error["details"]["missing"]
+    assert "greenfield_discovery_contexts" not in error["details"]["missing"]
+
+
+def test_record_greenfield_challenge_reports_schema_not_ready_without_raw_db_error(
+    tmp_path: Path,
+) -> None:
+    """Direct greenfield discovery returns a structured schema error."""
+    engine = _engine_missing_discovery_storage()
+    artifact_file = _write_challenge_artifact(tmp_path)
+
+    with Session(engine) as session:
+        runner = ScopeDiscoveryRunner(session=session)
+        try:
+            result = runner.record_greenfield_challenge_artifact(
+                GreenfieldChallengeArtifactRecordRequest(
+                    context_key="new-greenfield-product",
+                    artifact_file=artifact_file,
+                    idempotency_key="greenfield-missing-schema-001",
+                    changed_by="test-agent",
+                )
+            )
+        except OperationalError as exc:
+            pytest.fail(f"raw OperationalError leaked: {exc}")
+
+    assert result["ok"] is False
+    error = _first_error(result)
+    assert error["code"] == ErrorCode.SCHEMA_NOT_READY.value
+    assert "greenfield_discovery_contexts" in error["details"]["missing"]
+    assert "discovery_challenge_artifacts" not in error["details"]["missing"]
 
 
 def test_record_greenfield_discovery_chain_without_project(
