@@ -283,6 +283,72 @@ def _asa_like_structured_spec_source() -> str:
     return canonical_spec_json(artifact)
 
 
+def _no_causal_claims_structured_spec_source() -> str:
+    """Return structured spec JSON reproducing issue #176 source evidence."""
+    from utils.agileforge_spec_profile import (  # noqa: PLC0415
+        TechnicalSpecArtifact,
+        canonical_spec_json,
+    )
+
+    artifact = TechnicalSpecArtifact.model_validate(
+        {
+            "schema_version": "agileforge.spec.v1",
+            "artifact_id": "SPEC.issue-176-normalizer",
+            "title": "Issue 176 Normalizer Spec",
+            "status": "draft",
+            "version": "0.1",
+            "created_at": "2026-06-30",
+            "updated_at": "2026-06-30",
+            "summary": "Exercise repairable redundant source metadata failures.",
+            "problem_statement": (
+                "Redundant unsupported invariants must not block already-covered "
+                "source items."
+            ),
+            "items": [
+                {
+                    "id": "CONSTRAINT.no-causal-or-optimal-control-claims",
+                    "type": "CONSTRAINT",
+                    "status": "accepted",
+                    "title": (
+                        "No causal or optimal-control claims from observational data"
+                    ),
+                    "statement": (
+                        "The offline advisory system must not describe "
+                        "model-ranked setpoint candidates as proven causal "
+                        "improvements, guaranteed faster target tracking, or "
+                        "optimal live-control actions based only on historical "
+                        "observational data."
+                    ),
+                    "level": "MUST_NOT",
+                    "verification": "inspection",
+                    "acceptance": [
+                        (
+                            "Recommendation packets and reports use language such "
+                            "as predicted, supported by historical cases, "
+                            "expert-review-only, or abstained rather than causal, "
+                            "guaranteed, optimal, or production-ready unless a "
+                            "later authority gate approves stronger evidence."
+                        ),
+                        (
+                            "Low delayed reward is described as low performance "
+                            "under the recorded objective, not operator error, "
+                            "unless additional reviewed evidence supports an "
+                            "operator-error conclusion."
+                        ),
+                        (
+                            "The system remains offline advisory and does not "
+                            "promote a recommendation to live-action use during "
+                            "phase one, even when predicted reward improvement "
+                            "is high."
+                        ),
+                    ],
+                }
+            ],
+        }
+    )
+    return canonical_spec_json(artifact)
+
+
 def _legacy_success_payload() -> dict[str, Any]:
     return {
         "scope_themes": ["payload validation"],
@@ -2866,6 +2932,125 @@ def test_structured_profile_does_not_backfill_around_existing_bad_entry() -> Non
 
     assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
     assert normalized.root.reason == "SOURCE_METADATA_MISMATCH"
+
+
+def test_structured_profile_drops_redundant_bad_behavior_when_item_covered() -> None:
+    """Issue #176: redundant repairable bad invariants do not block covered items."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
+        normalize_compiler_output,
+    )
+
+    source_item_id = "CONSTRAINT.no-causal-or-optimal-control-claims"
+    raw = _legacy_success_payload()
+    raw["invariants"] = [
+        {
+            "id": "INV-covered-source",
+            "type": "FORBIDDEN_CAPABILITY",
+            "source_item_id": source_item_id,
+            "source_level": "MUST_NOT",
+            "parameters": {
+                "capability": (
+                    "model-ranked setpoint candidates as proven causal "
+                    "improvements, guaranteed faster target tracking, or "
+                    "optimal live-control actions based only on historical "
+                    "observational data"
+                )
+            },
+        },
+        {
+            "id": "INV-missing-source-map",
+            "type": "DATA_CONTRACT",
+            "source_item_id": source_item_id,
+            "source_level": "MUST_NOT",
+            "parameters": {
+                "subject": "recommendation-packet-language",
+                "fields": [
+                    "predicted",
+                    "supported-by-historical-cases",
+                    "expert-review-only",
+                    "abstained",
+                ],
+                "rule": (
+                    "Require category-level qualified observational language "
+                    "(e.g., predicted, supported-by-historical-cases, "
+                    "expert-review-only, abstained). Forbid positive "
+                    "unsupported causal, guaranteed, optimal, or "
+                    "production-ready claims. Preserve allowance for accurate "
+                    "negated or qualifying limitation statements."
+                ),
+            },
+        },
+        {
+            "id": "INV-fake-source-map",
+            "type": "DATA_CONTRACT",
+            "source_item_id": source_item_id,
+            "source_level": "MUST_NOT",
+            "parameters": {
+                "subject": "recommendation-packet-language-prohibition",
+                "fields": [
+                    "positive causal claims",
+                    "guarantee claims",
+                    "optimality claims",
+                    "production-readiness claims",
+                ],
+                "rule": (
+                    "Recommendation packets and reports must not present "
+                    "positively-framed causal, guaranteed, optimal, or "
+                    "production-ready claims based on historical observational "
+                    "data. Safety-oriented negated or qualifying statements "
+                    "that reference these concepts are permitted when they "
+                    "accurately reflect the offline advisory limitations."
+                ),
+            },
+        },
+    ]
+    raw["source_map"] = [
+        {
+            "invariant_id": "INV-covered-source",
+            "excerpt": (
+                "The offline advisory system must not describe model-ranked "
+                "setpoint candidates as proven causal improvements, guaranteed "
+                "faster target tracking, or optimal live-control actions based "
+                "only on historical observational data."
+            ),
+            "location": f"{source_item_id}.statement",
+        },
+        {
+            "invariant_id": "INV-fake-source-map",
+            "excerpt": (
+                "Recommendation packets and reports must not present "
+                "positively-framed causal, guaranteed, optimal, or "
+                "production-ready claims based on historical observational data."
+            ),
+            "location": f"{source_item_id}.acceptance[0]",
+        },
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(raw),
+        source_text=_no_causal_claims_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    source_item_invariants = [
+        invariant
+        for invariant in normalized.root.invariants
+        if invariant.source_item_id == source_item_id
+    ]
+    assert len(source_item_invariants) == 1
+    assert source_item_invariants[0].type == InvariantType.FORBIDDEN_CAPABILITY
+    assert not any(
+        isinstance(invariant.parameters, DataContractParams)
+        for invariant in source_item_invariants
+    )
+    assert {entry.invariant_id for entry in normalized.root.source_map} == {
+        source_item_invariants[0].id
+    }
+    assert not any(
+        "positively-framed causal" in entry.excerpt
+        for entry in normalized.root.source_map
+    )
 
 
 def test_structured_profile_backfills_missing_behavior_source_map_entry() -> None:
