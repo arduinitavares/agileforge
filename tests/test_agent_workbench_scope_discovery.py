@@ -530,6 +530,123 @@ def test_record_greenfield_discovery_chain_without_project(
     assert persisted.greenfield_context_id == context_id
 
 
+def test_accept_greenfield_prd_replays_same_idempotency_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Retrying the same greenfield PRD accept returns the accepted PRD."""
+    runner = ScopeDiscoveryRunner(session=session)
+    context_key = "greenfield-prd-replay"
+    challenge_file = _write_challenge_artifact(tmp_path)
+    challenge = runner.record_greenfield_challenge_artifact(
+        GreenfieldChallengeArtifactRecordRequest(
+            context_key=context_key,
+            artifact_file=challenge_file,
+            idempotency_key="greenfield-prd-replay-challenge",
+            changed_by="test-agent",
+        )
+    )
+    challenge_id = int(challenge["data"]["challenge_artifact_id"])
+    prd_file = _write_prd_draft(tmp_path, challenge_artifact_id=challenge_id)
+    prd = runner.record_greenfield_prd_draft(
+        GreenfieldPrdDraftRecordRequest(
+            context_key=context_key,
+            challenge_artifact_id=challenge_id,
+            prd_file=prd_file,
+            idempotency_key="greenfield-prd-replay-draft",
+            changed_by="test-agent",
+        )
+    )
+    request = GreenfieldPrdReviewRequest(
+        context_key=context_key,
+        prd_id=int(prd["data"]["prd_id"]),
+        reviewer="product-owner",
+        notes="Accepted.",
+        idempotency_key="greenfield-prd-replay-review",
+        changed_by="test-agent",
+    )
+
+    first = runner.accept_greenfield_prd(request)
+    second = runner.accept_greenfield_prd(request)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second["data"]["prd_id"] == first["data"]["prd_id"]
+    assert second["data"]["status"] == "accepted"
+
+
+def test_accept_greenfield_spec_amendment_replays_same_idempotency_request(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Retrying the same greenfield spec accept returns the accepted draft."""
+    runner = ScopeDiscoveryRunner(session=session)
+    context_key = "greenfield-spec-replay"
+    challenge_file = _write_challenge_artifact(tmp_path)
+    challenge = runner.record_greenfield_challenge_artifact(
+        GreenfieldChallengeArtifactRecordRequest(
+            context_key=context_key,
+            artifact_file=challenge_file,
+            idempotency_key="greenfield-spec-replay-challenge",
+            changed_by="test-agent",
+        )
+    )
+    challenge_id = int(challenge["data"]["challenge_artifact_id"])
+    prd_file = _write_prd_draft(tmp_path, challenge_artifact_id=challenge_id)
+    prd = runner.record_greenfield_prd_draft(
+        GreenfieldPrdDraftRecordRequest(
+            context_key=context_key,
+            challenge_artifact_id=challenge_id,
+            prd_file=prd_file,
+            idempotency_key="greenfield-spec-replay-prd",
+            changed_by="test-agent",
+        )
+    )
+    accepted_prd = runner.accept_greenfield_prd(
+        GreenfieldPrdReviewRequest(
+            context_key=context_key,
+            prd_id=int(prd["data"]["prd_id"]),
+            reviewer="product-owner",
+            notes="Accepted.",
+            idempotency_key="greenfield-spec-replay-prd-review",
+            changed_by="test-agent",
+        )
+    )
+    spec_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_base_spec_artifact(),
+        name="greenfield-spec-replay.json",
+    )
+    draft = runner.record_greenfield_spec_amendment_draft(
+        GreenfieldSpecAmendmentDraftRecordRequest(
+            context_key=context_key,
+            prd_id=int(accepted_prd["data"]["prd_id"]),
+            amendment_file=spec_file,
+            idempotency_key="greenfield-spec-replay-draft",
+            changed_by="test-agent",
+        )
+    )
+    request = GreenfieldSpecAmendmentReviewRequest(
+        context_key=context_key,
+        spec_amendment_draft_id=int(draft["data"]["spec_amendment_draft_id"]),
+        reviewer="product-owner",
+        notes="Accepted.",
+        idempotency_key="greenfield-spec-replay-review",
+        changed_by="test-agent",
+    )
+
+    first = runner.accept_greenfield_spec_amendment(request)
+    second = runner.accept_greenfield_spec_amendment(request)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert (
+        second["data"]["spec_amendment_draft_id"]
+        == first["data"]["spec_amendment_draft_id"]
+    )
+    assert second["data"]["status"] == "accepted"
+
+
 def test_record_ready_challenge_artifact_persists_rich_evidence(
     session: Session,
     tmp_path: Path,

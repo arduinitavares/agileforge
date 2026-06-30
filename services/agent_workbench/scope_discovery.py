@@ -808,12 +808,6 @@ class ScopeDiscoveryRunner:
                 details={"context_key": request.context_key, "prd_id": request.prd_id},
                 remediation=["Pass an existing greenfield PRD ID for this context."],
             )
-        if prd.status != PRD_STATUS_DRAFT:
-            return _error(
-                ErrorCode.PRD_REVIEW_STATE_INVALID,
-                details={"prd_id": request.prd_id, "status": prd.status},
-                remediation=["Review only draft PRDs."],
-            )
         request_hash = canonical_hash(
             {
                 "command": command,
@@ -824,6 +818,19 @@ class ScopeDiscoveryRunner:
                 "changed_by": request.changed_by,
             }
         )
+        idempotency_error = self._greenfield_prd_review_idempotency_error(
+            context=context,
+            request=request,
+            request_hash=request_hash,
+        )
+        if idempotency_error is not None:
+            return idempotency_error
+        if prd.status != PRD_STATUS_DRAFT:
+            return _error(
+                ErrorCode.PRD_REVIEW_STATE_INVALID,
+                details={"prd_id": request.prd_id, "status": prd.status},
+                remediation=["Review only draft PRDs."],
+            )
         now = datetime.now(UTC)
         prd.status = target_status
         prd.reviewed_by = request.reviewer
@@ -837,6 +844,34 @@ class ScopeDiscoveryRunner:
         self._session.commit()
         self._session.refresh(prd)
         return _success(_greenfield_prd_data(prd, context=context))
+
+    def _greenfield_prd_review_idempotency_error(
+        self,
+        *,
+        context: GreenfieldDiscoveryContext,
+        request: GreenfieldPrdReviewRequest,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        existing = self._session.exec(
+            select(GreenfieldDiscoveryPrd).where(
+                GreenfieldDiscoveryPrd.greenfield_context_id
+                == context.greenfield_context_id,
+                GreenfieldDiscoveryPrd.review_idempotency_key
+                == request.idempotency_key,
+            )
+        ).first()
+        if existing is None:
+            return None
+        if existing.review_request_hash != request_hash:
+            return _error(
+                ErrorCode.IDEMPOTENCY_KEY_REUSED,
+                details={
+                    "context_key": request.context_key,
+                    "idempotency_key": request.idempotency_key,
+                },
+                remediation=["Retry with a fresh --idempotency-key."],
+            )
+        return _success(_greenfield_prd_data(existing, context=context))
 
     def _validated_greenfield_spec_source_prd(
         self,
@@ -911,15 +946,6 @@ class ScopeDiscoveryRunner:
                     "this context."
                 ],
             )
-        if draft.status != SPEC_AMENDMENT_DRAFT_READY:
-            return _error(
-                ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID,
-                details={
-                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
-                    "status": draft.status,
-                },
-                remediation=["Review only validated Spec Amendment Drafts."],
-            )
         request_hash = canonical_hash(
             {
                 "command": command,
@@ -930,6 +956,24 @@ class ScopeDiscoveryRunner:
                 "changed_by": request.changed_by,
             }
         )
+        idempotency_error = (
+            self._greenfield_spec_amendment_review_idempotency_error(
+                context=context,
+                request=request,
+                request_hash=request_hash,
+            )
+        )
+        if idempotency_error is not None:
+            return idempotency_error
+        if draft.status != SPEC_AMENDMENT_DRAFT_READY:
+            return _error(
+                ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID,
+                details={
+                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                    "status": draft.status,
+                },
+                remediation=["Review only validated Spec Amendment Drafts."],
+            )
         now = datetime.now(UTC)
         draft.status = target_status
         draft.reviewed_by = request.reviewer
@@ -943,6 +987,36 @@ class ScopeDiscoveryRunner:
         self._session.commit()
         self._session.refresh(draft)
         return _success(_greenfield_spec_amendment_draft_data(draft, context=context))
+
+    def _greenfield_spec_amendment_review_idempotency_error(
+        self,
+        *,
+        context: GreenfieldDiscoveryContext,
+        request: GreenfieldSpecAmendmentReviewRequest,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        existing = self._session.exec(
+            select(GreenfieldDiscoverySpecAmendmentDraft).where(
+                GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                == context.greenfield_context_id,
+                GreenfieldDiscoverySpecAmendmentDraft.review_idempotency_key
+                == request.idempotency_key,
+            )
+        ).first()
+        if existing is None:
+            return None
+        if existing.review_request_hash != request_hash:
+            return _error(
+                ErrorCode.IDEMPOTENCY_KEY_REUSED,
+                details={
+                    "context_key": request.context_key,
+                    "idempotency_key": request.idempotency_key,
+                },
+                remediation=["Retry with a fresh --idempotency-key."],
+            )
+        return _success(
+            _greenfield_spec_amendment_draft_data(existing, context=context)
+        )
 
     def _review_spec_amendment(
         self,
