@@ -64,6 +64,11 @@ if TYPE_CHECKING:
     )
     from services.agent_workbench.scope_discovery import (
         ChallengeArtifactRecordRequest,
+        GreenfieldChallengeArtifactRecordRequest,
+        GreenfieldPrdDraftRecordRequest,
+        GreenfieldPrdReviewRequest,
+        GreenfieldSpecAmendmentDraftRecordRequest,
+        GreenfieldSpecAmendmentReviewRequest,
         PrdDraftRecordRequest,
         PrdReviewRequest,
         SpecAmendmentDraftRecordRequest,
@@ -1734,6 +1739,100 @@ class _FakeScopeDiscoveryRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "rejected"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def record_greenfield_challenge_artifact(
+        self,
+        request: GreenfieldChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield Challenge Artifact requests."""
+        self.calls.append(("record_greenfield_challenge_artifact", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "recorded"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def record_greenfield_prd_draft(
+        self,
+        request: GreenfieldPrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield PRD draft requests."""
+        self.calls.append(("record_greenfield_prd_draft", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "draft"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def accept_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield PRD accept requests."""
+        self.calls.append(("accept_greenfield_prd", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reject_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield PRD reject requests."""
+        self.calls.append(("reject_greenfield_prd", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "rejected"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def record_greenfield_spec_amendment_draft(
+        self,
+        request: GreenfieldSpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield Spec Amendment Draft requests."""
+        self.calls.append(("record_greenfield_spec_amendment_draft", request))
+        return {
+            "ok": True,
+            "data": {
+                "context_key": request.context_key,
+                "status": "ready_for_amendment_acceptance",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
+    def accept_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield Spec Amendment accept requests."""
+        self.calls.append(("accept_greenfield_spec_amendment", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "accepted"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def reject_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Record greenfield Spec Amendment reject requests."""
+        self.calls.append(("reject_greenfield_spec_amendment", request))
+        return {
+            "ok": True,
+            "data": {"context_key": request.context_key, "status": "rejected"},
             "warnings": [],
             "errors": [],
         }

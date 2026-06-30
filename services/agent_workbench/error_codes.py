@@ -103,6 +103,11 @@ class ErrorCode(StrEnum):
     SPEC_AMENDMENT_NOT_FOUND = "SPEC_AMENDMENT_NOT_FOUND"
     SPEC_AMENDMENT_REVIEW_STATE_INVALID = "SPEC_AMENDMENT_REVIEW_STATE_INVALID"
     SPEC_AMENDMENT_NOT_ACCEPTED = "SPEC_AMENDMENT_NOT_ACCEPTED"
+    GREENFIELD_DISCOVERY_REQUIRED = "GREENFIELD_DISCOVERY_REQUIRED"
+    GREENFIELD_DISCOVERY_NOT_FOUND = "GREENFIELD_DISCOVERY_NOT_FOUND"
+    GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED = (
+        "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
+    )
     BROWNFIELD_SOURCE_FILE_NOT_FOUND = "BROWNFIELD_SOURCE_FILE_NOT_FOUND"
     BROWNFIELD_REPO_PATH_NOT_FOUND = "BROWNFIELD_REPO_PATH_NOT_FOUND"
     BROWNFIELD_SOURCE_NOT_FOUND = "BROWNFIELD_SOURCE_NOT_FOUND"
@@ -594,6 +599,24 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=4,
         retryable=False,
         description="Scope extension start requires an accepted Spec Amendment.",
+    ),
+    ErrorCode.GREENFIELD_DISCOVERY_REQUIRED: ErrorMetadata(
+        code=ErrorCode.GREENFIELD_DISCOVERY_REQUIRED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Greenfield project creation requires completed Scope Discovery.",
+    ),
+    ErrorCode.GREENFIELD_DISCOVERY_NOT_FOUND: ErrorMetadata(
+        code=ErrorCode.GREENFIELD_DISCOVERY_NOT_FOUND.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Greenfield discovery artifact was not found.",
+    ),
+    ErrorCode.GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED: ErrorMetadata(
+        code=ErrorCode.GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED.value,
+        default_exit_code=4,
+        retryable=False,
+        description="Greenfield project creation requires an accepted spec draft.",
     ),
 }
 

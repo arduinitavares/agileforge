@@ -157,3 +157,141 @@ class DiscoverySpecAmendmentDraft(SQLModel, table=True):
     changed_by: str = Field(default="cli-agent", index=True)
     created_at: datetime = Field(default_factory=_utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class GreenfieldDiscoveryContext(SQLModel, table=True):
+    """Provisional Scope Discovery context before a project exists."""
+
+    __tablename__ = "greenfield_discovery_contexts"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "context_key",
+            name="uq_greenfield_discovery_context_key",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_greenfield_discovery_context_idempotency",
+        ),
+    )
+
+    greenfield_context_id: int | None = Field(default=None, primary_key=True)
+    context_key: str = Field(index=True)
+    project_id: int | None = Field(
+        default=None,
+        foreign_key="products.product_id",
+        index=True,
+    )
+    status: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class GreenfieldDiscoveryChallengeArtifact(SQLModel, table=True):
+    """Saved greenfield Challenge Artifact before a project exists."""
+
+    __tablename__ = "greenfield_discovery_challenge_artifacts"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "greenfield_context_id",
+            "idempotency_key",
+            name="uq_greenfield_challenge_context_idempotency",
+        ),
+    )
+
+    challenge_artifact_id: int | None = Field(default=None, primary_key=True)
+    greenfield_context_id: int = Field(
+        foreign_key="greenfield_discovery_contexts.greenfield_context_id",
+        index=True,
+    )
+    producer: str = Field(index=True)
+    readiness: str = Field(index=True)
+    original_idea: str = Field(sa_type=Text)
+    content_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class GreenfieldDiscoveryPrd(SQLModel, table=True):
+    """Saved greenfield PRD before a project exists."""
+
+    __tablename__ = "greenfield_discovery_prds"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "greenfield_context_id",
+            "idempotency_key",
+            name="uq_greenfield_prd_context_idempotency",
+        ),
+    )
+
+    prd_id: int | None = Field(default=None, primary_key=True)
+    greenfield_context_id: int = Field(
+        foreign_key="greenfield_discovery_contexts.greenfield_context_id",
+        index=True,
+    )
+    challenge_artifact_id: int = Field(
+        foreign_key="greenfield_discovery_challenge_artifacts.challenge_artifact_id",
+        index=True,
+    )
+    producer: str = Field(index=True)
+    status: str = Field(index=True)
+    version: str = Field(index=True)
+    title: str = Field(index=True)
+    content_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    reviewed_by: str | None = Field(default=None, index=True)
+    review_notes: str | None = Field(default=None, sa_type=Text)
+    reviewed_at: datetime | None = Field(default=None, nullable=True)
+    review_request_hash: str | None = Field(default=None, index=True)
+    review_idempotency_key: str | None = Field(default=None, index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)
+
+
+class GreenfieldDiscoverySpecAmendmentDraft(SQLModel, table=True):
+    """Saved greenfield initial spec draft before a project exists."""
+
+    __tablename__ = "greenfield_discovery_spec_amendment_drafts"  # type: ignore[assignment]
+    __table_args__ = (
+        UniqueConstraint(
+            "greenfield_context_id",
+            "idempotency_key",
+            name="uq_greenfield_spec_amendment_context_idempotency",
+        ),
+    )
+
+    spec_amendment_draft_id: int | None = Field(default=None, primary_key=True)
+    greenfield_context_id: int = Field(
+        foreign_key="greenfield_discovery_contexts.greenfield_context_id",
+        index=True,
+    )
+    prd_id: int = Field(foreign_key="greenfield_discovery_prds.prd_id", index=True)
+    challenge_artifact_id: int = Field(
+        foreign_key="greenfield_discovery_challenge_artifacts.challenge_artifact_id",
+        index=True,
+    )
+    status: str = Field(index=True)
+    amendment_file: str = Field(sa_type=Text)
+    content_json: str = Field(sa_type=Text)
+    validation_json: str = Field(sa_type=Text)
+    artifact_fingerprint: str = Field(index=True)
+    request_hash: str = Field(index=True)
+    idempotency_key: str = Field(index=True)
+    amended_spec_hash: str | None = Field(default=None, index=True)
+    reviewed_by: str | None = Field(default=None, index=True)
+    review_notes: str | None = Field(default=None, sa_type=Text)
+    reviewed_at: datetime | None = Field(default=None, nullable=True)
+    review_request_hash: str | None = Field(default=None, index=True)
+    review_idempotency_key: str | None = Field(default=None, index=True)
+    changed_by: str = Field(default="cli-agent", index=True)
+    created_at: datetime = Field(default_factory=_utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=_utc_now, nullable=False)

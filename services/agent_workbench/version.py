@@ -3,7 +3,7 @@
 from importlib import metadata as importlib_metadata
 
 COMMAND_VERSION = "1"
-STORAGE_SCHEMA_VERSION = "8"
+STORAGE_SCHEMA_VERSION = "9"
 
 
 def agileforge_version() -> str:

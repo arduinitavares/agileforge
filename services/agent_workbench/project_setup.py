@@ -17,7 +17,13 @@ from sqlalchemy import update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from models.agent_workbench import CliMutationLedger
+from models.agent_workbench import (
+    CliMutationLedger,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from models.db import ensure_business_db_ready
 from models.specs import CompiledSpecAuthority, SpecRegistry
@@ -56,6 +62,14 @@ if TYPE_CHECKING:
 PROJECT_CREATE_COMMAND = "agileforge project create"
 PROJECT_AUTHORITY_COMPILE_COMMAND = "agileforge authority compile"
 PROJECT_ALREADY_EXISTS = "PROJECT_ALREADY_EXISTS"
+GREENFIELD_DISCOVERY_REQUIRED = "GREENFIELD_DISCOVERY_REQUIRED"
+GREENFIELD_DISCOVERY_NOT_FOUND = "GREENFIELD_DISCOVERY_NOT_FOUND"
+GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED = "GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED"
+GREENFIELD_SPEC_AMENDMENT_ACCEPTED_STATUS = "accepted"
+GREENFIELD_CHALLENGE_PRODUCER = "grill-with-docs"
+GREENFIELD_CHALLENGE_READY_STATUS = "ready_for_prd"
+GREENFIELD_PRD_PRODUCER = "to-prd"
+GREENFIELD_PRD_ACCEPTED_STATUS = "accepted"
 AUTHORITY_COMPILE_FAILED = "authority_compile_failed"
 AUTHORITY_COMPILE_REQUIRED = "authority_compile_required"
 AUTHORITY_PENDING_REVIEW = "authority_pending_review"
@@ -91,6 +105,7 @@ class ProjectCreateRequest(BaseModel):
 
     name: str = Field(min_length=1)
     spec_file: str | None = Field(default=None, min_length=1)
+    greenfield_spec_amendment_draft_id: int | None = None
     setup_mode: str = GREENFIELD_SETUP_MODE
     idempotency_key: str | None = None
     dry_run: bool = False
@@ -102,10 +117,15 @@ class ProjectCreateRequest(BaseModel):
     def _validate_mutation_keys(self) -> ProjectCreateRequest:
         if self.setup_mode not in {GREENFIELD_SETUP_MODE, BROWNFIELD_SETUP_MODE}:
             raise ValueError("setup_mode must be greenfield or brownfield")
-        if self.setup_mode == GREENFIELD_SETUP_MODE and self.spec_file is None:
-            raise ValueError("spec_file is required for greenfield setup")
         if self.setup_mode == BROWNFIELD_SETUP_MODE and self.spec_file is not None:
             raise ValueError("spec_file is not allowed for brownfield setup")
+        if (
+            self.setup_mode == BROWNFIELD_SETUP_MODE
+            and self.greenfield_spec_amendment_draft_id is not None
+        ):
+            raise ValueError(
+                "greenfield_spec_amendment_draft_id is not allowed for brownfield setup"
+            )
         _validate_key_mode(
             dry_run=self.dry_run,
             idempotency_key=self.idempotency_key,
@@ -366,7 +386,122 @@ class ProjectSetupMutationRunner:
         if request.setup_mode == BROWNFIELD_SETUP_MODE:
             return self._run_brownfield_create(request)
 
-        resolved_spec_path = Path(_required(request.spec_file)).expanduser().resolve()
+        if request.greenfield_spec_amendment_draft_id is None:
+            provided = ["spec_file"] if request.spec_file is not None else []
+            return _error(
+                GREENFIELD_DISCOVERY_REQUIRED,
+                details={"provided": provided},
+                remediation=[
+                    "Complete greenfield Scope Discovery before project creation.",
+                    "Pass --greenfield-spec-amendment-draft-id for an accepted validated draft.",
+                ],
+            )
+
+        greenfield_spec_file: str
+        greenfield_discovery: dict[str, int]
+        with Session(self._engine) as session:
+            greenfield_draft = session.get(
+                GreenfieldDiscoverySpecAmendmentDraft,
+                request.greenfield_spec_amendment_draft_id,
+            )
+            if greenfield_draft is None:
+                return _error(
+                    GREENFIELD_DISCOVERY_NOT_FOUND,
+                    details={
+                        "greenfield_spec_amendment_draft_id": (
+                            request.greenfield_spec_amendment_draft_id
+                        )
+                    },
+                    remediation=[
+                        "Record and accept a greenfield Spec Amendment Draft before project creation."
+                    ],
+                )
+            if greenfield_draft.status != GREENFIELD_SPEC_AMENDMENT_ACCEPTED_STATUS:
+                return _error(
+                    GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED,
+                    details={
+                        "greenfield_spec_amendment_draft_id": (
+                            request.greenfield_spec_amendment_draft_id
+                        ),
+                        "status": greenfield_draft.status,
+                    },
+                    remediation=[
+                        "Accept the greenfield Spec Amendment Draft before project creation."
+                    ],
+                )
+            context = session.get(
+                GreenfieldDiscoveryContext,
+                greenfield_draft.greenfield_context_id,
+            )
+            challenge = session.get(
+                GreenfieldDiscoveryChallengeArtifact,
+                greenfield_draft.challenge_artifact_id,
+            )
+            prd = session.get(GreenfieldDiscoveryPrd, greenfield_draft.prd_id)
+            if context is None or challenge is None or prd is None:
+                return _error(
+                    GREENFIELD_DISCOVERY_NOT_FOUND,
+                    details={
+                        "greenfield_spec_amendment_draft_id": (
+                            request.greenfield_spec_amendment_draft_id
+                        ),
+                        "greenfield_context_id": greenfield_draft.greenfield_context_id,
+                        "challenge_artifact_id": greenfield_draft.challenge_artifact_id,
+                        "prd_id": greenfield_draft.prd_id,
+                    },
+                    remediation=[
+                        "Record a complete greenfield Scope Discovery chain before project creation."
+                    ],
+                )
+            if (
+                challenge.greenfield_context_id != greenfield_draft.greenfield_context_id
+                or prd.greenfield_context_id != greenfield_draft.greenfield_context_id
+                or prd.challenge_artifact_id != greenfield_draft.challenge_artifact_id
+            ):
+                return _error(
+                    GREENFIELD_DISCOVERY_NOT_FOUND,
+                    details={
+                        "greenfield_spec_amendment_draft_id": (
+                            request.greenfield_spec_amendment_draft_id
+                        ),
+                        "reason": "provenance_mismatch",
+                    },
+                    remediation=[
+                        "Record a Spec Amendment Draft linked to the accepted PRD and Challenge Artifact."
+                    ],
+                )
+            if (
+                challenge.producer != GREENFIELD_CHALLENGE_PRODUCER
+                or challenge.readiness != GREENFIELD_CHALLENGE_READY_STATUS
+                or prd.producer != GREENFIELD_PRD_PRODUCER
+                or prd.status != GREENFIELD_PRD_ACCEPTED_STATUS
+            ):
+                return _error(
+                    GREENFIELD_SPEC_AMENDMENT_NOT_ACCEPTED,
+                    details={
+                        "greenfield_spec_amendment_draft_id": (
+                            request.greenfield_spec_amendment_draft_id
+                        ),
+                        "challenge_producer": challenge.producer,
+                        "challenge_readiness": challenge.readiness,
+                        "prd_producer": prd.producer,
+                        "prd_status": prd.status,
+                    },
+                    remediation=[
+                        "Complete grill-with-docs and accept the to-prd output before accepting the greenfield spec draft."
+                    ],
+                )
+            greenfield_spec_file = greenfield_draft.amendment_file
+            greenfield_discovery = {
+                "greenfield_context_id": greenfield_draft.greenfield_context_id,
+                "challenge_artifact_id": greenfield_draft.challenge_artifact_id,
+                "prd_id": greenfield_draft.prd_id,
+                "spec_amendment_draft_id": int(
+                    request.greenfield_spec_amendment_draft_id
+                ),
+            }
+
+        resolved_spec_path = Path(greenfield_spec_file).expanduser().resolve()
         spec_hash_result = _spec_hash_or_error(resolved_spec_path)
         if not isinstance(spec_hash_result, str):
             return spec_hash_result
@@ -414,7 +549,7 @@ class ProjectSetupMutationRunner:
         if loaded.error_code == MUTATION_RECOVERY_REQUIRED:
             return _recovery_required_response(
                 loaded.ledger,
-                spec_file=_required(request.spec_file),
+                spec_file=greenfield_spec_file,
             )
         if loaded.error_code is not None:
             return _error_for_ledger(loaded.error_code, loaded.ledger)
@@ -423,11 +558,12 @@ class ProjectSetupMutationRunner:
         lease_owner = _required(loaded.ledger.lease_owner)
         return self._run_setup_steps(
             request_name=request.name,
-            requested_spec_file=_required(request.spec_file),
+            requested_spec_file=greenfield_spec_file,
             resolved_spec_path=resolved_spec_path,
             mutation_event_id=event_id,
             lease_owner=lease_owner,
             create_product=True,
+            greenfield_discovery=greenfield_discovery,
         )
 
     def _run_brownfield_create(self, request: ProjectCreateRequest) -> dict[str, Any]:
@@ -1566,6 +1702,7 @@ class ProjectSetupMutationRunner:
         existing_project_id: int | None = None,
         finalize: bool = True,
         finalize_domain_failures: bool = True,
+        greenfield_discovery: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         completed_steps = self._completed_steps(mutation_event_id)
         project_id = existing_project_id or self._project_id_for_event(
@@ -1671,6 +1808,14 @@ class ProjectSetupMutationRunner:
                 spec_file=requested_spec_file,
             )
 
+        if greenfield_discovery is not None:
+            consumed_error = self._mark_greenfield_discovery_consumed(
+                greenfield_context_id=greenfield_discovery["greenfield_context_id"],
+                project_id=project_id,
+            )
+            if consumed_error is not None:
+                return consumed_error
+
         data = {
             "project_id": project_id,
             "name": self._project_name(project_id),
@@ -1689,6 +1834,8 @@ class ProjectSetupMutationRunner:
                 )
             ],
         }
+        if greenfield_discovery is not None:
+            data["greenfield_discovery"] = greenfield_discovery
         response = _success(data)
         if finalize and not self._ledger.finalize_success(
             mutation_event_id=mutation_event_id,
@@ -1703,6 +1850,29 @@ class ProjectSetupMutationRunner:
                 remediation=["Re-read mutation state before retrying recovery."],
             )
         return response
+
+    def _mark_greenfield_discovery_consumed(
+        self,
+        *,
+        greenfield_context_id: int,
+        project_id: int,
+    ) -> dict[str, Any] | None:
+        with Session(self._engine) as session:
+            context = session.get(GreenfieldDiscoveryContext, greenfield_context_id)
+            if context is None:
+                return _error(
+                    GREENFIELD_DISCOVERY_NOT_FOUND,
+                    details={"greenfield_context_id": greenfield_context_id},
+                    remediation=[
+                        "Record greenfield Scope Discovery before project creation."
+                    ],
+                )
+            context.project_id = project_id
+            context.status = "consumed"
+            context.updated_at = _now()
+            session.add(context)
+            session.commit()
+        return None
 
     def _create_product_and_record_progress(
         self,

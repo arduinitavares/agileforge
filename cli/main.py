@@ -195,6 +195,7 @@ class _Application(Protocol):
         *,
         name: str,
         spec_file: str | None = None,
+        greenfield_spec_amendment_draft_id: int | None = None,
         setup_mode: str = "greenfield",
         idempotency_key: str | None = None,
         dry_run: bool = False,
@@ -334,6 +335,93 @@ class _Application(Protocol):
         changed_by: str = "cli-agent",
     ) -> JsonObject:
         """Reject a Scope Discovery Spec Amendment Draft."""
+        ...
+
+    def discovery_greenfield_challenge_record(
+        self,
+        *,
+        context_key: str,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a greenfield Scope Discovery Challenge Artifact."""
+        ...
+
+    def discovery_greenfield_prd_draft_record(
+        self,
+        *,
+        context_key: str,
+        challenge_artifact_id: int,
+        prd_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a greenfield Scope Discovery PRD draft."""
+        ...
+
+    def discovery_greenfield_prd_accept(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Accept a greenfield Scope Discovery PRD."""
+        ...
+
+    def discovery_greenfield_prd_reject(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Reject a greenfield Scope Discovery PRD."""
+        ...
+
+    def discovery_greenfield_spec_amendment_draft_record(
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        amendment_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Record a greenfield Scope Discovery Spec Amendment Draft."""
+        ...
+
+    def discovery_greenfield_spec_amendment_accept(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Accept a greenfield Scope Discovery Spec Amendment Draft."""
+        ...
+
+    def discovery_greenfield_spec_amendment_reject(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Reject a greenfield Scope Discovery Spec Amendment Draft."""
         ...
 
     def authority_compile(  # noqa: PLR0913
@@ -1414,6 +1502,7 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     project_create = project_sub.add_parser("create", help="Create a project.")
     project_create.add_argument("--name", required=True)
     project_create.add_argument("--spec-file")
+    project_create.add_argument("--greenfield-spec-amendment-draft-id", type=int)
     project_create.add_argument(
         "--setup-mode",
         choices=("greenfield", "brownfield"),
@@ -1647,6 +1736,240 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     discovery_spec_amendment_reject.add_argument("--changed-by", default="cli-agent")
     discovery_spec_amendment_reject.set_defaults(
         command_handler=_discovery_spec_amendment_reject
+    )
+    discovery_greenfield = discovery_sub.add_parser(
+        "greenfield",
+        help="Manage pre-project greenfield discovery artifacts.",
+    )
+    discovery_greenfield_sub = discovery_greenfield.add_subparsers(
+        dest="greenfield_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_greenfield_challenge = discovery_greenfield_sub.add_parser(
+        "challenge",
+        help="Manage greenfield Challenge Artifacts.",
+    )
+    discovery_greenfield_challenge_sub = (
+        discovery_greenfield_challenge.add_subparsers(
+            dest="greenfield_challenge_action",
+            required=True,
+            parser_class=_WorkbenchArgumentParser,
+        )
+    )
+    discovery_greenfield_challenge_record = (
+        discovery_greenfield_challenge_sub.add_parser(
+            "record",
+            help="Record a greenfield grill-with-docs Challenge Artifact.",
+        )
+    )
+    discovery_greenfield_challenge_record.add_argument("--context-key", required=True)
+    discovery_greenfield_challenge_record.add_argument(
+        "--artifact-file",
+        required=True,
+    )
+    discovery_greenfield_challenge_record.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_greenfield_challenge_record.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_challenge_record.set_defaults(
+        command_handler=_discovery_greenfield_challenge_record
+    )
+    discovery_greenfield_prd = discovery_greenfield_sub.add_parser(
+        "prd",
+        help="Manage greenfield PRD drafts.",
+    )
+    discovery_greenfield_prd_sub = discovery_greenfield_prd.add_subparsers(
+        dest="greenfield_prd_action",
+        required=True,
+        parser_class=_WorkbenchArgumentParser,
+    )
+    discovery_greenfield_prd_draft = discovery_greenfield_prd_sub.add_parser(
+        "draft",
+        help="Manage greenfield PRD draft artifacts.",
+    )
+    discovery_greenfield_prd_draft_sub = (
+        discovery_greenfield_prd_draft.add_subparsers(
+            dest="greenfield_prd_draft_action",
+            required=True,
+            parser_class=_WorkbenchArgumentParser,
+        )
+    )
+    discovery_greenfield_prd_draft_record = (
+        discovery_greenfield_prd_draft_sub.add_parser(
+            "record",
+            help="Record a greenfield to-prd PRD draft.",
+        )
+    )
+    discovery_greenfield_prd_draft_record.add_argument("--context-key", required=True)
+    discovery_greenfield_prd_draft_record.add_argument(
+        "--challenge-artifact-id",
+        type=int,
+        required=True,
+    )
+    discovery_greenfield_prd_draft_record.add_argument("--prd-file", required=True)
+    discovery_greenfield_prd_draft_record.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_greenfield_prd_draft_record.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_prd_draft_record.set_defaults(
+        command_handler=_discovery_greenfield_prd_draft_record
+    )
+    discovery_greenfield_prd_accept = discovery_greenfield_prd_sub.add_parser(
+        "accept",
+        help="Accept a greenfield draft PRD.",
+    )
+    discovery_greenfield_prd_accept.add_argument("--context-key", required=True)
+    discovery_greenfield_prd_accept.add_argument("--prd-id", type=int, required=True)
+    discovery_greenfield_prd_accept.add_argument("--reviewer", required=True)
+    discovery_greenfield_prd_accept.add_argument("--acceptance-notes", required=True)
+    discovery_greenfield_prd_accept.add_argument("--idempotency-key", required=True)
+    discovery_greenfield_prd_accept.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_prd_accept.set_defaults(
+        command_handler=_discovery_greenfield_prd_accept
+    )
+    discovery_greenfield_prd_reject = discovery_greenfield_prd_sub.add_parser(
+        "reject",
+        help="Reject a greenfield draft PRD.",
+    )
+    discovery_greenfield_prd_reject.add_argument("--context-key", required=True)
+    discovery_greenfield_prd_reject.add_argument("--prd-id", type=int, required=True)
+    discovery_greenfield_prd_reject.add_argument("--reviewer", required=True)
+    discovery_greenfield_prd_reject.add_argument("--rejection-notes", required=True)
+    discovery_greenfield_prd_reject.add_argument("--idempotency-key", required=True)
+    discovery_greenfield_prd_reject.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_prd_reject.set_defaults(
+        command_handler=_discovery_greenfield_prd_reject
+    )
+    discovery_greenfield_spec_amendment = discovery_greenfield_sub.add_parser(
+        "spec-amendment",
+        help="Manage greenfield Spec Amendment Draft artifacts.",
+    )
+    discovery_greenfield_spec_amendment_sub = (
+        discovery_greenfield_spec_amendment.add_subparsers(
+            dest="greenfield_spec_amendment_action",
+            required=True,
+            parser_class=_WorkbenchArgumentParser,
+        )
+    )
+    discovery_greenfield_spec_amendment_draft = (
+        discovery_greenfield_spec_amendment_sub.add_parser(
+            "draft",
+            help="Manage greenfield Spec Amendment Draft records.",
+        )
+    )
+    discovery_greenfield_spec_amendment_draft_sub = (
+        discovery_greenfield_spec_amendment_draft.add_subparsers(
+            dest="greenfield_spec_amendment_draft_action",
+            required=True,
+            parser_class=_WorkbenchArgumentParser,
+        )
+    )
+    discovery_greenfield_spec_amendment_draft_record = (
+        discovery_greenfield_spec_amendment_draft_sub.add_parser(
+            "record",
+            help="Record a greenfield initial Spec Amendment Draft.",
+        )
+    )
+    discovery_greenfield_spec_amendment_draft_record.add_argument(
+        "--context-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_draft_record.add_argument(
+        "--prd-id",
+        type=int,
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_draft_record.add_argument(
+        "--amendment-file",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_draft_record.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_draft_record.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_spec_amendment_draft_record.set_defaults(
+        command_handler=_discovery_greenfield_spec_amendment_draft_record
+    )
+    discovery_greenfield_spec_amendment_accept = (
+        discovery_greenfield_spec_amendment_sub.add_parser(
+            "accept",
+            help="Accept a greenfield validated Spec Amendment Draft.",
+        )
+    )
+    discovery_greenfield_spec_amendment_accept.add_argument(
+        "--context-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_accept.add_argument(
+        "--spec-amendment-draft-id",
+        type=int,
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_accept.add_argument("--reviewer", required=True)
+    discovery_greenfield_spec_amendment_accept.add_argument(
+        "--acceptance-notes",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_accept.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_accept.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_spec_amendment_accept.set_defaults(
+        command_handler=_discovery_greenfield_spec_amendment_accept
+    )
+    discovery_greenfield_spec_amendment_reject = (
+        discovery_greenfield_spec_amendment_sub.add_parser(
+            "reject",
+            help="Reject a greenfield validated Spec Amendment Draft.",
+        )
+    )
+    discovery_greenfield_spec_amendment_reject.add_argument(
+        "--context-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_reject.add_argument(
+        "--spec-amendment-draft-id",
+        type=int,
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_reject.add_argument("--reviewer", required=True)
+    discovery_greenfield_spec_amendment_reject.add_argument(
+        "--rejection-notes",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_reject.add_argument(
+        "--idempotency-key",
+        required=True,
+    )
+    discovery_greenfield_spec_amendment_reject.add_argument(
+        "--changed-by",
+        default="cli-agent",
+    )
+    discovery_greenfield_spec_amendment_reject.set_defaults(
+        command_handler=_discovery_greenfield_spec_amendment_reject
     )
 
     scope = subparsers.add_parser(
@@ -2862,6 +3185,9 @@ def _project_create(
     return command, application.project_create(
         name=args.name,
         spec_file=args.spec_file,
+        greenfield_spec_amendment_draft_id=(
+            args.greenfield_spec_amendment_draft_id
+        ),
         setup_mode=args.setup_mode,
         idempotency_key=args.idempotency_key,
         dry_run=args.dry_run,
@@ -3055,6 +3381,163 @@ def _discovery_spec_amendment_reject(
         )
     return command, application.discovery_spec_amendment_reject(
         project_id=args.project_id,
+        spec_amendment_draft_id=args.spec_amendment_draft_id,
+        reviewer=args.reviewer,
+        rejection_notes=args.rejection_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_challenge_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield Challenge Artifact recording to the application."""
+    command = "agileforge discovery greenfield challenge record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield challenge record requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_challenge_record(
+        context_key=args.context_key,
+        artifact_file=args.artifact_file,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_prd_draft_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield PRD draft recording to the application."""
+    command = "agileforge discovery greenfield prd draft record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield PRD draft record requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_prd_draft_record(
+        context_key=args.context_key,
+        challenge_artifact_id=args.challenge_artifact_id,
+        prd_file=args.prd_file,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_prd_accept(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield PRD acceptance to the application."""
+    command = "agileforge discovery greenfield prd accept"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield PRD accept requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_prd_accept(
+        context_key=args.context_key,
+        prd_id=args.prd_id,
+        reviewer=args.reviewer,
+        acceptance_notes=args.acceptance_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_prd_reject(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield PRD rejection to the application."""
+    command = "agileforge discovery greenfield prd reject"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield PRD reject requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_prd_reject(
+        context_key=args.context_key,
+        prd_id=args.prd_id,
+        reviewer=args.reviewer,
+        rejection_notes=args.rejection_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_spec_amendment_draft_record(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield Spec Amendment Draft recording to the app."""
+    command = "agileforge discovery greenfield spec-amendment draft record"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield Spec Amendment record requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_spec_amendment_draft_record(
+        context_key=args.context_key,
+        prd_id=args.prd_id,
+        amendment_file=args.amendment_file,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_spec_amendment_accept(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield Spec Amendment acceptance to the app."""
+    command = "agileforge discovery greenfield spec-amendment accept"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield Spec Amendment accept requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_spec_amendment_accept(
+        context_key=args.context_key,
+        spec_amendment_draft_id=args.spec_amendment_draft_id,
+        reviewer=args.reviewer,
+        acceptance_notes=args.acceptance_notes,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _discovery_greenfield_spec_amendment_reject(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route greenfield Spec Amendment rejection to the app."""
+    command = "agileforge discovery greenfield spec-amendment reject"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Greenfield Spec Amendment reject requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.discovery_greenfield_spec_amendment_reject(
+        context_key=args.context_key,
         spec_amendment_draft_id=args.spec_amendment_draft_id,
         reviewer=args.reviewer,
         rejection_notes=args.rejection_notes,

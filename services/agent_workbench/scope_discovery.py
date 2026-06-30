@@ -16,6 +16,10 @@ from models.agent_workbench import (
     DiscoveryChallengeArtifact,
     DiscoveryPrd,
     DiscoverySpecAmendmentDraft,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
 )
 from models.core import Product
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
@@ -35,6 +39,23 @@ SPEC_AMENDMENT_DRAFT_RECORD_COMMAND: str = (
 )
 SPEC_AMENDMENT_ACCEPT_COMMAND: str = "agileforge discovery spec-amendment accept"
 SPEC_AMENDMENT_REJECT_COMMAND: str = "agileforge discovery spec-amendment reject"
+GREENFIELD_CHALLENGE_RECORD_COMMAND: str = (
+    "agileforge discovery greenfield challenge record"
+)
+GREENFIELD_PRD_DRAFT_RECORD_COMMAND: str = (
+    "agileforge discovery greenfield prd draft record"
+)
+GREENFIELD_PRD_ACCEPT_COMMAND: str = "agileforge discovery greenfield prd accept"
+GREENFIELD_PRD_REJECT_COMMAND: str = "agileforge discovery greenfield prd reject"
+GREENFIELD_SPEC_AMENDMENT_DRAFT_RECORD_COMMAND: str = (
+    "agileforge discovery greenfield spec-amendment draft record"
+)
+GREENFIELD_SPEC_AMENDMENT_ACCEPT_COMMAND: str = (
+    "agileforge discovery greenfield spec-amendment accept"
+)
+GREENFIELD_SPEC_AMENDMENT_REJECT_COMMAND: str = (
+    "agileforge discovery greenfield spec-amendment reject"
+)
 CHALLENGE_PRODUCER: str = "grill-with-docs"
 PRD_PRODUCER: str = "to-prd"
 PRD_STATUS_DRAFT: str = "draft"
@@ -117,6 +138,57 @@ class SpecAmendmentReviewRequest(BaseModel):
     """Validated request for reviewing a Spec Amendment Draft."""
 
     project_id: int
+    spec_amendment_draft_id: int
+    reviewer: str = Field(min_length=1)
+    notes: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class GreenfieldChallengeArtifactRecordRequest(BaseModel):
+    """Validated request for recording a greenfield Challenge Artifact."""
+
+    context_key: str = Field(min_length=1)
+    artifact_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class GreenfieldPrdDraftRecordRequest(BaseModel):
+    """Validated request for recording a greenfield PRD draft."""
+
+    context_key: str = Field(min_length=1)
+    challenge_artifact_id: int
+    prd_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class GreenfieldPrdReviewRequest(BaseModel):
+    """Validated request for accepting or rejecting a greenfield PRD."""
+
+    context_key: str = Field(min_length=1)
+    prd_id: int
+    reviewer: str = Field(min_length=1)
+    notes: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class GreenfieldSpecAmendmentDraftRecordRequest(BaseModel):
+    """Validated request for recording a greenfield initial spec draft."""
+
+    context_key: str = Field(min_length=1)
+    prd_id: int
+    amendment_file: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+
+class GreenfieldSpecAmendmentReviewRequest(BaseModel):
+    """Validated request for reviewing a greenfield initial spec draft."""
+
+    context_key: str = Field(min_length=1)
     spec_amendment_draft_id: int
     reviewer: str = Field(min_length=1)
     notes: str = Field(min_length=1)
@@ -370,6 +442,507 @@ class ScopeDiscoveryRunner:
             command=SPEC_AMENDMENT_REJECT_COMMAND,
             target_status=SPEC_AMENDMENT_DRAFT_REJECTED,
         )
+
+    def record_greenfield_challenge_artifact(
+        self,
+        request: GreenfieldChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield grill-with-docs Challenge Artifact."""
+        payload, load_error = _load_challenge_payload(request.artifact_file)
+        if load_error is not None:
+            return load_error
+        if payload is None:
+            return _error(
+                ErrorCode.CHALLENGE_ARTIFACT_INVALID,
+                details={"artifact_file": request.artifact_file},
+                remediation=["Pass a valid JSON Challenge Artifact file."],
+            )
+
+        validation_error = _validate_minimal_challenge_payload(payload)
+        if validation_error is not None:
+            return validation_error
+
+        context = self._greenfield_context_for_key(request)
+        producer = str(payload["producer"])
+        readiness = str(payload["readiness"])
+        original_idea = str(payload["original_idea"]).strip()
+        content_json = canonical_json(payload)
+        artifact_fingerprint = canonical_hash(payload)
+        request_hash = canonical_hash(
+            {
+                "command": GREENFIELD_CHALLENGE_RECORD_COMMAND,
+                "context_key": request.context_key,
+                "artifact_fingerprint": artifact_fingerprint,
+                "changed_by": request.changed_by,
+            }
+        )
+        existing = self._session.exec(
+            select(GreenfieldDiscoveryChallengeArtifact).where(
+                GreenfieldDiscoveryChallengeArtifact.greenfield_context_id
+                == context.greenfield_context_id,
+                GreenfieldDiscoveryChallengeArtifact.idempotency_key
+                == request.idempotency_key,
+            )
+        ).first()
+        if existing is not None:
+            return _existing_greenfield_artifact_result(
+                artifact=existing,
+                context=context,
+                request_hash=request_hash,
+            )
+
+        artifact = GreenfieldDiscoveryChallengeArtifact(
+            greenfield_context_id=int(context.greenfield_context_id or 0),
+            producer=producer,
+            readiness=readiness,
+            original_idea=original_idea,
+            content_json=content_json,
+            artifact_fingerprint=artifact_fingerprint,
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            changed_by=request.changed_by,
+        )
+        self._session.add(artifact)
+        self._session.commit()
+        self._session.refresh(artifact)
+
+        return _success(_greenfield_artifact_data(artifact, context=context))
+
+    def record_greenfield_prd_draft(
+        self,
+        request: GreenfieldPrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield draft PRD produced by to-prd."""
+        context, challenge, payload, validation_error = (
+            self._validated_greenfield_prd_inputs(request)
+        )
+        if validation_error is not None:
+            return validation_error
+        context = cast("GreenfieldDiscoveryContext", context)
+        challenge = cast("GreenfieldDiscoveryChallengeArtifact", challenge)
+        payload = cast("Mapping[str, Any]", payload)
+
+        producer = str(payload["producer"])
+        title = str(payload["title"]).strip()
+        content_json = canonical_json(payload)
+        artifact_fingerprint = canonical_hash(payload)
+        request_hash = canonical_hash(
+            {
+                "command": GREENFIELD_PRD_DRAFT_RECORD_COMMAND,
+                "context_key": request.context_key,
+                "challenge_artifact_id": request.challenge_artifact_id,
+                "artifact_fingerprint": artifact_fingerprint,
+                "changed_by": request.changed_by,
+            }
+        )
+        existing = self._session.exec(
+            select(GreenfieldDiscoveryPrd).where(
+                GreenfieldDiscoveryPrd.greenfield_context_id
+                == context.greenfield_context_id,
+                GreenfieldDiscoveryPrd.idempotency_key == request.idempotency_key,
+            )
+        ).first()
+        if existing is not None:
+            return _existing_greenfield_prd_result(
+                prd=existing,
+                context=context,
+                request_hash=request_hash,
+            )
+
+        prd = GreenfieldDiscoveryPrd(
+            greenfield_context_id=int(context.greenfield_context_id or 0),
+            challenge_artifact_id=int(challenge.challenge_artifact_id or 0),
+            producer=producer,
+            status=PRD_STATUS_DRAFT,
+            version="1",
+            title=title,
+            content_json=content_json,
+            artifact_fingerprint=artifact_fingerprint,
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            changed_by=request.changed_by,
+        )
+        self._session.add(prd)
+        self._session.commit()
+        self._session.refresh(prd)
+
+        return _success(_greenfield_prd_data(prd, context=context))
+
+    def accept_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield draft PRD."""
+        return self._review_greenfield_prd(
+            request=request,
+            command=GREENFIELD_PRD_ACCEPT_COMMAND,
+            target_status=PRD_STATUS_ACCEPTED,
+        )
+
+    def reject_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield draft PRD."""
+        return self._review_greenfield_prd(
+            request=request,
+            command=GREENFIELD_PRD_REJECT_COMMAND,
+            target_status=PRD_STATUS_REJECTED,
+        )
+
+    def record_greenfield_spec_amendment_draft(
+        self,
+        request: GreenfieldSpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record and validate a greenfield initial structured spec draft."""
+        context, prd, source_error = self._validated_greenfield_spec_source_prd(
+            request,
+        )
+        if source_error is not None:
+            return source_error
+        context = cast("GreenfieldDiscoveryContext", context)
+        prd = cast("GreenfieldDiscoveryPrd", prd)
+
+        content_json, amended_spec_hash, load_error = _load_spec_amendment_content(
+            request.amendment_file
+        )
+        if load_error is not None:
+            return load_error
+        content_json = cast("str", content_json)
+        amended_spec_hash = cast("str", amended_spec_hash)
+
+        validation = {
+            "valid": True,
+            "mode": "greenfield_initial_spec",
+            "blocking_issues": [],
+        }
+        request_hash = canonical_hash(
+            {
+                "command": GREENFIELD_SPEC_AMENDMENT_DRAFT_RECORD_COMMAND,
+                "context_key": request.context_key,
+                "prd_id": request.prd_id,
+                "artifact_fingerprint": amended_spec_hash,
+                "changed_by": request.changed_by,
+            }
+        )
+        existing = self._session.exec(
+            select(GreenfieldDiscoverySpecAmendmentDraft).where(
+                GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                == context.greenfield_context_id,
+                GreenfieldDiscoverySpecAmendmentDraft.idempotency_key
+                == request.idempotency_key,
+            )
+        ).first()
+        if existing is not None:
+            return _existing_greenfield_spec_amendment_draft_result(
+                draft=existing,
+                context=context,
+                request_hash=request_hash,
+            )
+
+        draft = GreenfieldDiscoverySpecAmendmentDraft(
+            greenfield_context_id=int(context.greenfield_context_id or 0),
+            prd_id=int(prd.prd_id or 0),
+            challenge_artifact_id=prd.challenge_artifact_id,
+            status=SPEC_AMENDMENT_DRAFT_READY,
+            amendment_file=request.amendment_file,
+            content_json=content_json,
+            validation_json=canonical_json(validation),
+            artifact_fingerprint=amended_spec_hash,
+            request_hash=request_hash,
+            idempotency_key=request.idempotency_key,
+            amended_spec_hash=amended_spec_hash,
+            changed_by=request.changed_by,
+        )
+        self._session.add(draft)
+        self._session.commit()
+        self._session.refresh(draft)
+
+        return _success(_greenfield_spec_amendment_draft_data(draft, context=context))
+
+    def accept_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield validated initial spec draft."""
+        return self._review_greenfield_spec_amendment(
+            request=request,
+            command=GREENFIELD_SPEC_AMENDMENT_ACCEPT_COMMAND,
+            target_status=SPEC_AMENDMENT_DRAFT_ACCEPTED,
+        )
+
+    def reject_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield validated initial spec draft."""
+        return self._review_greenfield_spec_amendment(
+            request=request,
+            command=GREENFIELD_SPEC_AMENDMENT_REJECT_COMMAND,
+            target_status=SPEC_AMENDMENT_DRAFT_REJECTED,
+        )
+
+    def _greenfield_context_for_key(
+        self,
+        request: GreenfieldChallengeArtifactRecordRequest,
+    ) -> GreenfieldDiscoveryContext:
+        context = self._session.exec(
+            select(GreenfieldDiscoveryContext).where(
+                GreenfieldDiscoveryContext.context_key == request.context_key
+            )
+        ).first()
+        if context is not None:
+            return context
+        context = GreenfieldDiscoveryContext(
+            context_key=request.context_key,
+            status="discovery",
+            request_hash=canonical_hash(
+                {
+                    "command": GREENFIELD_CHALLENGE_RECORD_COMMAND,
+                    "context_key": request.context_key,
+                    "changed_by": request.changed_by,
+                }
+            ),
+            idempotency_key=request.idempotency_key,
+            changed_by=request.changed_by,
+        )
+        self._session.add(context)
+        self._session.commit()
+        self._session.refresh(context)
+        return context
+
+    def _greenfield_context_by_key(
+        self,
+        context_key: str,
+    ) -> GreenfieldDiscoveryContext | None:
+        return self._session.exec(
+            select(GreenfieldDiscoveryContext).where(
+                GreenfieldDiscoveryContext.context_key == context_key
+            )
+        ).first()
+
+    def _validated_greenfield_prd_inputs(
+        self,
+        request: GreenfieldPrdDraftRecordRequest,
+    ) -> tuple[
+        GreenfieldDiscoveryContext | None,
+        GreenfieldDiscoveryChallengeArtifact | None,
+        Mapping[str, Any] | None,
+        dict[str, Any] | None,
+    ]:
+        context = self._greenfield_context_by_key(request.context_key)
+        if context is None:
+            return (
+                None,
+                None,
+                None,
+                _error(
+                    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND,
+                    details={"context_key": request.context_key},
+                    remediation=["Record a greenfield Challenge Artifact first."],
+                ),
+            )
+        challenge = self._session.get(
+            GreenfieldDiscoveryChallengeArtifact,
+            request.challenge_artifact_id,
+        )
+        if (
+            challenge is None
+            or challenge.greenfield_context_id != context.greenfield_context_id
+        ):
+            return (
+                context,
+                None,
+                None,
+                _error(
+                    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_FOUND,
+                    details={
+                        "context_key": request.context_key,
+                        "challenge_artifact_id": request.challenge_artifact_id,
+                    },
+                    remediation=[
+                        "Record the PRD against a Challenge Artifact in the same "
+                        "greenfield context."
+                    ],
+                ),
+            )
+        if challenge.readiness != "ready_for_prd":
+            return (
+                context,
+                challenge,
+                None,
+                _error(
+                    ErrorCode.PRD_SOURCE_CHALLENGE_NOT_READY,
+                    details={
+                        "challenge_artifact_id": request.challenge_artifact_id,
+                        "readiness": challenge.readiness,
+                    },
+                    remediation=["Continue grill-with-docs until ready_for_prd."],
+                ),
+            )
+        payload, load_error = _load_prd_payload(request.prd_file)
+        if load_error is not None:
+            return context, challenge, None, load_error
+        payload = cast("Mapping[str, Any]", payload)
+        validation_error = _validate_greenfield_prd_payload(payload, request)
+        if validation_error is not None:
+            return context, challenge, payload, validation_error
+        return context, challenge, payload, None
+
+    def _review_greenfield_prd(
+        self,
+        *,
+        request: GreenfieldPrdReviewRequest,
+        command: str,
+        target_status: str,
+    ) -> dict[str, Any]:
+        context = self._greenfield_context_by_key(request.context_key)
+        prd = self._session.get(GreenfieldDiscoveryPrd, request.prd_id)
+        if (
+            context is None
+            or prd is None
+            or prd.greenfield_context_id != context.greenfield_context_id
+        ):
+            return _error(
+                ErrorCode.PRD_NOT_FOUND,
+                details={"context_key": request.context_key, "prd_id": request.prd_id},
+                remediation=["Pass an existing greenfield PRD ID for this context."],
+            )
+        if prd.status != PRD_STATUS_DRAFT:
+            return _error(
+                ErrorCode.PRD_REVIEW_STATE_INVALID,
+                details={"prd_id": request.prd_id, "status": prd.status},
+                remediation=["Review only draft PRDs."],
+            )
+        request_hash = canonical_hash(
+            {
+                "command": command,
+                "context_key": request.context_key,
+                "prd_id": request.prd_id,
+                "reviewer": request.reviewer,
+                "notes": request.notes,
+                "changed_by": request.changed_by,
+            }
+        )
+        now = datetime.now(UTC)
+        prd.status = target_status
+        prd.reviewed_by = request.reviewer
+        prd.review_notes = request.notes
+        prd.reviewed_at = now
+        prd.review_request_hash = request_hash
+        prd.review_idempotency_key = request.idempotency_key
+        prd.changed_by = request.changed_by
+        prd.updated_at = now
+        self._session.add(prd)
+        self._session.commit()
+        self._session.refresh(prd)
+        return _success(_greenfield_prd_data(prd, context=context))
+
+    def _validated_greenfield_spec_source_prd(
+        self,
+        request: GreenfieldSpecAmendmentDraftRecordRequest,
+    ) -> tuple[
+        GreenfieldDiscoveryContext | None,
+        GreenfieldDiscoveryPrd | None,
+        dict[str, Any] | None,
+    ]:
+        context = self._greenfield_context_by_key(request.context_key)
+        prd = self._session.get(GreenfieldDiscoveryPrd, request.prd_id)
+        if (
+            context is None
+            or prd is None
+            or prd.greenfield_context_id != context.greenfield_context_id
+        ):
+            return (
+                context,
+                None,
+                _error(
+                    ErrorCode.PRD_NOT_FOUND,
+                    details={
+                        "context_key": request.context_key,
+                        "prd_id": request.prd_id,
+                    },
+                    remediation=[
+                        "Accept a greenfield PRD before recording the initial "
+                        "spec draft."
+                    ],
+                ),
+            )
+        if prd.status != PRD_STATUS_ACCEPTED:
+            return (
+                context,
+                prd,
+                _error(
+                    ErrorCode.SPEC_AMENDMENT_SOURCE_PRD_NOT_ACCEPTED,
+                    details={"prd_id": request.prd_id, "status": prd.status},
+                    remediation=[
+                        "Accept the greenfield PRD before recording the initial "
+                        "spec draft."
+                    ],
+                ),
+            )
+        return context, prd, None
+
+    def _review_greenfield_spec_amendment(
+        self,
+        *,
+        request: GreenfieldSpecAmendmentReviewRequest,
+        command: str,
+        target_status: str,
+    ) -> dict[str, Any]:
+        context = self._greenfield_context_by_key(request.context_key)
+        draft = self._session.get(
+            GreenfieldDiscoverySpecAmendmentDraft,
+            request.spec_amendment_draft_id,
+        )
+        if (
+            context is None
+            or draft is None
+            or draft.greenfield_context_id != context.greenfield_context_id
+        ):
+            return _error(
+                ErrorCode.SPEC_AMENDMENT_NOT_FOUND,
+                details={
+                    "context_key": request.context_key,
+                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                },
+                remediation=[
+                    "Pass an existing greenfield Spec Amendment Draft ID for "
+                    "this context."
+                ],
+            )
+        if draft.status != SPEC_AMENDMENT_DRAFT_READY:
+            return _error(
+                ErrorCode.SPEC_AMENDMENT_REVIEW_STATE_INVALID,
+                details={
+                    "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                    "status": draft.status,
+                },
+                remediation=["Review only validated Spec Amendment Drafts."],
+            )
+        request_hash = canonical_hash(
+            {
+                "command": command,
+                "context_key": request.context_key,
+                "spec_amendment_draft_id": request.spec_amendment_draft_id,
+                "reviewer": request.reviewer,
+                "notes": request.notes,
+                "changed_by": request.changed_by,
+            }
+        )
+        now = datetime.now(UTC)
+        draft.status = target_status
+        draft.reviewed_by = request.reviewer
+        draft.review_notes = request.notes
+        draft.reviewed_at = now
+        draft.review_request_hash = request_hash
+        draft.review_idempotency_key = request.idempotency_key
+        draft.changed_by = request.changed_by
+        draft.updated_at = now
+        self._session.add(draft)
+        self._session.commit()
+        self._session.refresh(draft)
+        return _success(_greenfield_spec_amendment_draft_data(draft, context=context))
 
     def _review_spec_amendment(
         self,
@@ -780,6 +1353,60 @@ def _existing_spec_amendment_draft_result(
     return _success(_spec_amendment_draft_data(draft))
 
 
+def _existing_greenfield_artifact_result(
+    *,
+    artifact: GreenfieldDiscoveryChallengeArtifact,
+    context: GreenfieldDiscoveryContext,
+    request_hash: str,
+) -> dict[str, Any]:
+    if artifact.request_hash != request_hash:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            details={
+                "context_key": context.context_key,
+                "idempotency_key": artifact.idempotency_key,
+            },
+            remediation=["Retry with a fresh --idempotency-key."],
+        )
+    return _success(_greenfield_artifact_data(artifact, context=context))
+
+
+def _existing_greenfield_prd_result(
+    *,
+    prd: GreenfieldDiscoveryPrd,
+    context: GreenfieldDiscoveryContext,
+    request_hash: str,
+) -> dict[str, Any]:
+    if prd.request_hash != request_hash:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            details={
+                "context_key": context.context_key,
+                "idempotency_key": prd.idempotency_key,
+            },
+            remediation=["Retry with a fresh --idempotency-key."],
+        )
+    return _success(_greenfield_prd_data(prd, context=context))
+
+
+def _existing_greenfield_spec_amendment_draft_result(
+    *,
+    draft: GreenfieldDiscoverySpecAmendmentDraft,
+    context: GreenfieldDiscoveryContext,
+    request_hash: str,
+) -> dict[str, Any]:
+    if draft.request_hash != request_hash:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            details={
+                "context_key": context.context_key,
+                "idempotency_key": draft.idempotency_key,
+            },
+            remediation=["Retry with a fresh --idempotency-key."],
+        )
+    return _success(_greenfield_spec_amendment_draft_data(draft, context=context))
+
+
 def _prd_draft_request_hash(
     *,
     request: PrdDraftRecordRequest,
@@ -955,6 +1582,60 @@ def _project_exists_error(session: Session, project_id: int) -> dict[str, Any] |
 def _validate_prd_payload(
     payload: Mapping[str, Any],
     request: PrdDraftRecordRequest,
+) -> dict[str, Any] | None:
+    missing = [
+        field
+        for field in ("producer", "source_challenge_artifact_id", "title", "content")
+        if field not in payload
+    ]
+    if missing:
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"missing": missing},
+            remediation=[
+                "Include producer, source_challenge_artifact_id, title, and content."
+            ],
+        )
+    if str(payload["producer"]) != PRD_PRODUCER:
+        return _error(
+            ErrorCode.PRD_PRODUCER_INVALID,
+            details={
+                "producer": str(payload["producer"]),
+                "required_producer": PRD_PRODUCER,
+            },
+            remediation=["Run to-prd and record that PRD draft output."],
+        )
+    if payload["source_challenge_artifact_id"] != request.challenge_artifact_id:
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={
+                "source_challenge_artifact_id": payload[
+                    "source_challenge_artifact_id"
+                ],
+                "expected_challenge_artifact_id": request.challenge_artifact_id,
+            },
+            remediation=[
+                "Record the PRD against its declared source Challenge Artifact."
+            ],
+        )
+    if not str(payload["title"]).strip():
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"blank": ["title"]},
+            remediation=["Include a non-blank PRD title."],
+        )
+    if not isinstance(payload["content"], Mapping):
+        return _error(
+            ErrorCode.PRD_DRAFT_INVALID,
+            details={"field": "content", "reason": "not_object"},
+            remediation=["Include a JSON object in content."],
+        )
+    return None
+
+
+def _validate_greenfield_prd_payload(
+    payload: Mapping[str, Any],
+    request: GreenfieldPrdDraftRecordRequest,
 ) -> dict[str, Any] | None:
     missing = [
         field
@@ -1334,6 +2015,70 @@ def _spec_amendment_draft_next_action(status: str) -> str:
     if status == SPEC_AMENDMENT_DRAFT_READY:
         return "accept_spec_amendment"
     return "revise_spec_amendment_draft"
+
+
+def _greenfield_artifact_data(
+    artifact: GreenfieldDiscoveryChallengeArtifact,
+    *,
+    context: GreenfieldDiscoveryContext,
+) -> dict[str, Any]:
+    return {
+        "challenge_artifact_id": artifact.challenge_artifact_id,
+        "greenfield_context_id": context.greenfield_context_id,
+        "context_key": context.context_key,
+        "project_id": context.project_id,
+        "producer": artifact.producer,
+        "readiness": artifact.readiness,
+        "artifact_fingerprint": artifact.artifact_fingerprint,
+        "next_action": (
+            "record_greenfield_prd"
+            if artifact.readiness == "ready_for_prd"
+            else "continue_challenge"
+        ),
+    }
+
+
+def _greenfield_prd_data(
+    prd: GreenfieldDiscoveryPrd,
+    *,
+    context: GreenfieldDiscoveryContext,
+) -> dict[str, Any]:
+    return {
+        "prd_id": prd.prd_id,
+        "greenfield_context_id": context.greenfield_context_id,
+        "context_key": context.context_key,
+        "project_id": context.project_id,
+        "challenge_artifact_id": prd.challenge_artifact_id,
+        "producer": prd.producer,
+        "status": prd.status,
+        "version": prd.version,
+        "artifact_fingerprint": prd.artifact_fingerprint,
+        "next_action": _prd_next_action(prd.status),
+    }
+
+
+def _greenfield_spec_amendment_draft_data(
+    draft: GreenfieldDiscoverySpecAmendmentDraft,
+    *,
+    context: GreenfieldDiscoveryContext,
+) -> dict[str, Any]:
+    validation = json.loads(draft.validation_json)
+    return {
+        "spec_amendment_draft_id": draft.spec_amendment_draft_id,
+        "greenfield_context_id": context.greenfield_context_id,
+        "context_key": context.context_key,
+        "project_id": context.project_id,
+        "prd_id": draft.prd_id,
+        "challenge_artifact_id": draft.challenge_artifact_id,
+        "status": draft.status,
+        "amendment_file": draft.amendment_file,
+        "artifact_fingerprint": draft.artifact_fingerprint,
+        "amended_spec_hash": draft.amended_spec_hash,
+        "validation": validation,
+        "blocking_issues": validation.get("blocking_issues", []),
+        "remediation": [],
+        "next_action": _spec_amendment_draft_next_action(draft.status),
+    }
 
 
 def _next_prd_version(superseded_prd: DiscoveryPrd | None) -> str:

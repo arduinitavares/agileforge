@@ -12,12 +12,19 @@ from models.agent_workbench import (
     DiscoveryChallengeArtifact,
     DiscoveryPrd,
     DiscoverySpecAmendmentDraft,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoverySpecAmendmentDraft,
 )
 from models.core import Product
 from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
+    GreenfieldChallengeArtifactRecordRequest,
+    GreenfieldPrdDraftRecordRequest,
+    GreenfieldPrdReviewRequest,
+    GreenfieldSpecAmendmentDraftRecordRequest,
+    GreenfieldSpecAmendmentReviewRequest,
     PrdDraftRecordRequest,
     PrdReviewRequest,
     ScopeDiscoveryRunner,
@@ -432,6 +439,95 @@ def test_record_challenge_artifact_persists_minimal_provenance(
     assert artifact.readiness == "ready_for_prd"
     assert artifact.idempotency_key == "challenge-record-001"
     assert artifact.changed_by == "test-agent"
+
+
+def test_record_greenfield_discovery_chain_without_project(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Greenfield discovery artifacts persist before a project exists."""
+    runner = ScopeDiscoveryRunner(session=session)
+    context_key = "new-greenfield-product"
+    challenge_file = _write_challenge_artifact(tmp_path)
+
+    challenge = runner.record_greenfield_challenge_artifact(
+        GreenfieldChallengeArtifactRecordRequest(
+            context_key=context_key,
+            artifact_file=challenge_file,
+            idempotency_key="greenfield-challenge-001",
+            changed_by="test-agent",
+        )
+    )
+
+    assert challenge["ok"] is True
+    challenge_id = int(challenge["data"]["challenge_artifact_id"])
+    context_id = int(challenge["data"]["greenfield_context_id"])
+    assert challenge["data"]["project_id"] is None
+    assert session.exec(select(Product)).all() == []
+
+    prd_file = _write_prd_draft(tmp_path, challenge_artifact_id=challenge_id)
+    prd = runner.record_greenfield_prd_draft(
+        GreenfieldPrdDraftRecordRequest(
+            context_key=context_key,
+            challenge_artifact_id=challenge_id,
+            prd_file=prd_file,
+            idempotency_key="greenfield-prd-001",
+            changed_by="test-agent",
+        )
+    )
+    assert prd["ok"] is True
+    prd_id = int(prd["data"]["prd_id"])
+
+    accepted_prd = runner.accept_greenfield_prd(
+        GreenfieldPrdReviewRequest(
+            context_key=context_key,
+            prd_id=prd_id,
+            reviewer="product-owner",
+            notes="Accepted.",
+            idempotency_key="greenfield-prd-review-001",
+            changed_by="test-agent",
+        )
+    )
+    assert accepted_prd["ok"] is True
+    assert accepted_prd["data"]["status"] == "accepted"
+
+    spec_file = _write_spec_amendment(
+        tmp_path,
+        artifact=_base_spec_artifact(),
+        name="greenfield-initial-spec.json",
+    )
+    draft = runner.record_greenfield_spec_amendment_draft(
+        GreenfieldSpecAmendmentDraftRecordRequest(
+            context_key=context_key,
+            prd_id=prd_id,
+            amendment_file=spec_file,
+            idempotency_key="greenfield-spec-001",
+            changed_by="test-agent",
+        )
+    )
+    assert draft["ok"] is True
+    draft_id = int(draft["data"]["spec_amendment_draft_id"])
+    assert draft["data"]["status"] == "ready_for_amendment_acceptance"
+
+    accepted_draft = runner.accept_greenfield_spec_amendment(
+        GreenfieldSpecAmendmentReviewRequest(
+            context_key=context_key,
+            spec_amendment_draft_id=draft_id,
+            reviewer="product-owner",
+            notes="Accepted.",
+            idempotency_key="greenfield-spec-review-001",
+            changed_by="test-agent",
+        )
+    )
+
+    assert accepted_draft["ok"] is True
+    assert accepted_draft["data"]["status"] == "accepted"
+    context = session.get(GreenfieldDiscoveryContext, context_id)
+    assert context is not None
+    assert context.project_id is None
+    persisted = session.get(GreenfieldDiscoverySpecAmendmentDraft, draft_id)
+    assert persisted is not None
+    assert persisted.greenfield_context_id == context_id
 
 
 def test_record_ready_challenge_artifact_persists_rich_evidence(

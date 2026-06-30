@@ -64,6 +64,11 @@ from services.agent_workbench.schema_readiness import (
 )
 from services.agent_workbench.scope_discovery import (
     ChallengeArtifactRecordRequest,
+    GreenfieldChallengeArtifactRecordRequest,
+    GreenfieldPrdDraftRecordRequest,
+    GreenfieldPrdReviewRequest,
+    GreenfieldSpecAmendmentDraftRecordRequest,
+    GreenfieldSpecAmendmentReviewRequest,
     PrdDraftRecordRequest,
     PrdReviewRequest,
     SpecAmendmentDraftRecordRequest,
@@ -303,6 +308,55 @@ class _ScopeDiscoveryRunner(Protocol):
         """Reject a Spec Amendment Draft."""
         ...
 
+    def record_greenfield_challenge_artifact(
+        self,
+        request: GreenfieldChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield Challenge Artifact."""
+        ...
+
+    def record_greenfield_prd_draft(
+        self,
+        request: GreenfieldPrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield PRD draft."""
+        ...
+
+    def accept_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield PRD."""
+        ...
+
+    def reject_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield PRD."""
+        ...
+
+    def record_greenfield_spec_amendment_draft(
+        self,
+        request: GreenfieldSpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield Spec Amendment Draft."""
+        ...
+
+    def accept_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield Spec Amendment Draft."""
+        ...
+
+    def reject_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield Spec Amendment Draft."""
+        ...
+
 
 def _zero_scope_extension_sprint_candidate_count(_project_id: int) -> int:
     """Return the direct-runner default when no read projection is available."""
@@ -399,6 +453,100 @@ class _DefaultScopeDiscoveryRunner:
 
         with Session(get_engine()) as session:
             return ScopeDiscoveryRunner(session=session).reject_spec_amendment(request)
+
+    def record_greenfield_challenge_artifact(
+        self,
+        request: GreenfieldChallengeArtifactRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield Challenge Artifact with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(
+                session=session
+            ).record_greenfield_challenge_artifact(request)
+
+    def record_greenfield_prd_draft(
+        self,
+        request: GreenfieldPrdDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield PRD draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).record_greenfield_prd_draft(
+                request
+            )
+
+    def accept_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield PRD with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).accept_greenfield_prd(request)
+
+    def reject_greenfield_prd(
+        self,
+        request: GreenfieldPrdReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield PRD with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(session=session).reject_greenfield_prd(request)
+
+    def record_greenfield_spec_amendment_draft(
+        self,
+        request: GreenfieldSpecAmendmentDraftRecordRequest,
+    ) -> dict[str, Any]:
+        """Record a greenfield Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(
+                session=session
+            ).record_greenfield_spec_amendment_draft(request)
+
+    def accept_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Accept a greenfield Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(
+                session=session
+            ).accept_greenfield_spec_amendment(request)
+
+    def reject_greenfield_spec_amendment(
+        self,
+        request: GreenfieldSpecAmendmentReviewRequest,
+    ) -> dict[str, Any]:
+        """Reject a greenfield Spec Amendment Draft with a short-lived session."""
+        from services.agent_workbench.scope_discovery import (  # noqa: PLC0415
+            ScopeDiscoveryRunner,
+        )
+
+        with Session(get_engine()) as session:
+            return ScopeDiscoveryRunner(
+                session=session
+            ).reject_greenfield_spec_amendment(request)
 
 
 class _DefaultScopeExtensionRunner:
@@ -1512,6 +1660,7 @@ class AgentWorkbenchApplication:
         *,
         name: str,
         spec_file: str | None = None,
+        greenfield_spec_amendment_draft_id: int | None = None,
         setup_mode: str = "greenfield",
         idempotency_key: str | None = None,
         dry_run: bool = False,
@@ -1523,6 +1672,7 @@ class AgentWorkbenchApplication:
         request = ProjectCreateRequest(
             name=name,
             spec_file=spec_file,
+            greenfield_spec_amendment_draft_id=greenfield_spec_amendment_draft_id,
             setup_mode=setup_mode,
             idempotency_key=idempotency_key,
             dry_run=dry_run,
@@ -1935,6 +2085,152 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
         return self._get_scope_discovery_runner().reject_spec_amendment(request)
+
+    def discovery_greenfield_challenge_record(
+        self,
+        *,
+        context_key: str,
+        artifact_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a greenfield Challenge Artifact through the runner."""
+        request = GreenfieldChallengeArtifactRecordRequest(
+            context_key=context_key,
+            artifact_file=artifact_file,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().record_greenfield_challenge_artifact(
+            request
+        )
+
+    def discovery_greenfield_prd_draft_record(
+        self,
+        *,
+        context_key: str,
+        challenge_artifact_id: int,
+        prd_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a greenfield PRD draft through the runner."""
+        request = GreenfieldPrdDraftRecordRequest(
+            context_key=context_key,
+            challenge_artifact_id=challenge_artifact_id,
+            prd_file=prd_file,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().record_greenfield_prd_draft(request)
+
+    def discovery_greenfield_prd_accept(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Accept a greenfield PRD through the runner."""
+        request = GreenfieldPrdReviewRequest(
+            context_key=context_key,
+            prd_id=prd_id,
+            reviewer=reviewer,
+            notes=acceptance_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().accept_greenfield_prd(request)
+
+    def discovery_greenfield_prd_reject(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Reject a greenfield PRD through the runner."""
+        request = GreenfieldPrdReviewRequest(
+            context_key=context_key,
+            prd_id=prd_id,
+            reviewer=reviewer,
+            notes=rejection_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().reject_greenfield_prd(request)
+
+    def discovery_greenfield_spec_amendment_draft_record(
+        self,
+        *,
+        context_key: str,
+        prd_id: int,
+        amendment_file: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Record a greenfield Spec Amendment Draft through the runner."""
+        request = GreenfieldSpecAmendmentDraftRecordRequest(
+            context_key=context_key,
+            prd_id=prd_id,
+            amendment_file=amendment_file,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        runner = self._get_scope_discovery_runner()
+        return runner.record_greenfield_spec_amendment_draft(request)
+
+    def discovery_greenfield_spec_amendment_accept(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        acceptance_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Accept a greenfield Spec Amendment Draft through the runner."""
+        request = GreenfieldSpecAmendmentReviewRequest(
+            context_key=context_key,
+            spec_amendment_draft_id=spec_amendment_draft_id,
+            reviewer=reviewer,
+            notes=acceptance_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().accept_greenfield_spec_amendment(
+            request
+        )
+
+    def discovery_greenfield_spec_amendment_reject(  # noqa: PLR0913
+        self,
+        *,
+        context_key: str,
+        spec_amendment_draft_id: int,
+        reviewer: str,
+        rejection_notes: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Reject a greenfield Spec Amendment Draft through the runner."""
+        request = GreenfieldSpecAmendmentReviewRequest(
+            context_key=context_key,
+            spec_amendment_draft_id=spec_amendment_draft_id,
+            reviewer=reviewer,
+            notes=rejection_notes,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_discovery_runner().reject_greenfield_spec_amendment(
+            request
+        )
 
     def scope_extension_start(  # noqa: PLR0913
         self,

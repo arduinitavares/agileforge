@@ -1,6 +1,6 @@
 """End-to-end CLI integration tests for project setup mutations."""
 
-# ruff: noqa: ANN401, D102, D103, D107, PLC0415, PLR0913, TC002
+# ruff: noqa: ANN401, D102, D103, D107, PLC0415, PLR0913, S603, TC002
 
 from __future__ import annotations
 
@@ -13,17 +13,28 @@ from typing import Any
 
 import pytest
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
-from cli.main import INVALID_COMMAND_EXIT_CODE, main
-from models.agent_workbench import CliMutationLedger
+from cli.main import main
+from db.migrations import ensure_schema_current
+from models.agent_workbench import (
+    CliMutationLedger,
+    GreenfieldDiscoveryChallengeArtifact,
+    GreenfieldDiscoveryContext,
+    GreenfieldDiscoveryPrd,
+    GreenfieldDiscoverySpecAmendmentDraft,
+)
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
 from services.agent_workbench.application import AgentWorkbenchApplication
+from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import MutationStatus
 from services.agent_workbench.project_setup import (
     ProjectSetupMutationRunner,
 )
+from services.agent_workbench.project_setup_fingerprints import setup_spec_hash
+
+GREENFIELD_GATE_EXIT_CODE = 4
 
 
 class FakeWorkflowPort:
@@ -114,6 +125,12 @@ def _business_engine(path: Path) -> Engine:
     )
 
 
+def _prepare_business_schema(engine: Engine) -> None:
+    """Create the schema used by direct greenfield fixture seeding."""
+    SQLModel.metadata.create_all(engine)
+    ensure_schema_current(engine)
+
+
 def _structured_spec_payload(*, title: str = "Outside Repo Project") -> dict[str, Any]:
     """Build a minimal valid agileforge.spec.v1 fixture."""
     return {
@@ -189,6 +206,135 @@ def _write_invalid_structured_spec(caller_dir: Path) -> Path:
         encoding="utf-8",
     )
     return spec_file
+
+
+def _seed_greenfield_discovery_scope(
+    session: Session,
+    spec_file: Path,
+    *,
+    draft_status: str = "accepted",
+    amendment_file: str | None = None,
+) -> GreenfieldDiscoverySpecAmendmentDraft:
+    """Seed an accepted greenfield discovery chain for project-create tests."""
+    seed_key = canonical_hash(
+        {
+            "spec_file": str(spec_file.resolve()),
+            "draft_status": draft_status,
+            "amendment_file": amendment_file,
+        }
+    )[-16:]
+    context_key = f"greenfield-{seed_key}"
+    existing_context = session.exec(
+        select(GreenfieldDiscoveryContext).where(
+            GreenfieldDiscoveryContext.context_key == context_key
+        )
+    ).first()
+    if existing_context is not None:
+        existing_draft = session.exec(
+            select(GreenfieldDiscoverySpecAmendmentDraft).where(
+                GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                == existing_context.greenfield_context_id
+            )
+        ).first()
+        if existing_draft is not None:
+            return existing_draft
+
+    context = GreenfieldDiscoveryContext(
+        context_key=context_key,
+        status="ready_for_project",
+        request_hash=canonical_hash({"context": str(spec_file.resolve())}),
+        idempotency_key=f"context-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(context)
+    session.commit()
+    session.refresh(context)
+    assert context.greenfield_context_id is not None
+
+    challenge = GreenfieldDiscoveryChallengeArtifact(
+        greenfield_context_id=context.greenfield_context_id,
+        producer="grill-with-docs",
+        readiness="ready_for_prd",
+        original_idea="Build a new project.",
+        content_json=json.dumps({"original_idea": "Build a new project."}),
+        artifact_fingerprint=canonical_hash({"challenge": str(spec_file.resolve())}),
+        request_hash=canonical_hash({"challenge_request": str(spec_file.resolve())}),
+        idempotency_key=f"challenge-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(challenge)
+    session.commit()
+    session.refresh(challenge)
+    assert challenge.challenge_artifact_id is not None
+
+    prd = GreenfieldDiscoveryPrd(
+        greenfield_context_id=context.greenfield_context_id,
+        challenge_artifact_id=challenge.challenge_artifact_id,
+        producer="to-prd",
+        status="accepted",
+        version="1",
+        title="Greenfield Project PRD",
+        content_json=json.dumps({"title": "Greenfield Project PRD"}),
+        artifact_fingerprint=canonical_hash({"prd": str(spec_file.resolve())}),
+        request_hash=canonical_hash({"prd_request": str(spec_file.resolve())}),
+        idempotency_key=f"prd-{seed_key}",
+        reviewed_by="product-owner",
+        review_notes="Accepted.",
+        review_request_hash=canonical_hash({"prd_review": str(spec_file.resolve())}),
+        review_idempotency_key=f"prd-review-{seed_key}",
+        changed_by="test-agent",
+    )
+    session.add(prd)
+    session.commit()
+    session.refresh(prd)
+    assert prd.prd_id is not None
+
+    spec_hash = setup_spec_hash(spec_file)
+    draft = GreenfieldDiscoverySpecAmendmentDraft(
+        greenfield_context_id=context.greenfield_context_id,
+        prd_id=prd.prd_id,
+        challenge_artifact_id=challenge.challenge_artifact_id,
+        status=draft_status,
+        amendment_file=amendment_file or str(spec_file),
+        content_json=spec_file.read_text(encoding="utf-8"),
+        validation_json=json.dumps({"valid": True}),
+        artifact_fingerprint=spec_hash,
+        request_hash=canonical_hash({"spec_request": str(spec_file.resolve())}),
+        idempotency_key=f"spec-{seed_key}",
+        amended_spec_hash=spec_hash,
+        reviewed_by="product-owner" if draft_status == "accepted" else None,
+        review_notes="Accepted." if draft_status == "accepted" else None,
+        review_request_hash=(
+            canonical_hash({"spec_review": str(spec_file.resolve())})
+            if draft_status == "accepted"
+            else None
+        ),
+        review_idempotency_key=(
+            f"spec-review-{seed_key}" if draft_status == "accepted" else None
+        ),
+        changed_by="test-agent",
+    )
+    session.add(draft)
+    session.commit()
+    session.refresh(draft)
+    return draft
+
+
+def _accepted_greenfield_draft_id(
+    engine: Engine,
+    spec_file: Path,
+    *,
+    amendment_file: str | None = None,
+) -> int:
+    """Return an accepted greenfield spec draft ID for project creation."""
+    _prepare_business_schema(engine)
+    with Session(engine) as session:
+        draft = _seed_greenfield_discovery_scope(
+            session,
+            spec_file,
+            amendment_file=amendment_file,
+        )
+        return int(draft.spec_amendment_draft_id or 0)
 
 
 def _write_sitecustomize_compiler_patch(caller_dir: Path) -> None:
@@ -332,6 +478,12 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
     _write_sitecustomize_compiler_patch(caller_dir)
     business_db_path = tmp_path / "business.sqlite3"
     session_db_path = tmp_path / "sessions.sqlite3"
+    business_engine = _business_engine(business_db_path)
+    draft_id = _accepted_greenfield_draft_id(
+        business_engine,
+        spec_file,
+        amendment_file="specs/spec.json",
+    )
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([str(caller_dir), str(repo_root)])
@@ -348,8 +500,8 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
             "create",
             "--name",
             "Outside Repo Project",
-            "--spec-file",
-            "specs/spec.json",
+            "--greenfield-spec-amendment-draft-id",
+            str(draft_id),
             "--idempotency-key",
             "outside-repo-project-001",
         ],
@@ -384,7 +536,7 @@ def test_project_create_cli_from_non_repo_cwd_uses_caller_relative_spec(
         == "authority_compile_required"
     )
 
-    with Session(_business_engine(business_db_path)) as session:
+    with Session(business_engine) as session:
         project = session.get(Product, project_id)
         assert project is not None
         assert project.name == "Outside Repo Project"
@@ -540,6 +692,7 @@ def test_project_create_then_authority_compile_cli_flow(
     runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
     app = AgentWorkbenchApplication(project_setup_runner=runner)
     _install_compiler(monkeypatch, success=True)
+    draft_id = _accepted_greenfield_draft_id(engine, spec_file)
 
     create_rc = main(
         [
@@ -547,8 +700,8 @@ def test_project_create_then_authority_compile_cli_flow(
             "create",
             "--name",
             "Split Setup CLI Project",
-            "--spec-file",
-            str(spec_file),
+            "--greenfield-spec-amendment-draft-id",
+            str(draft_id),
             "--idempotency-key",
             "split-setup-create-001",
         ],
@@ -615,14 +768,11 @@ def test_project_create_cli_returns_error_envelope_for_invalid_structured_spec(
     )
     payload = _captured_payload(capsys)
 
-    assert create_rc == INVALID_COMMAND_EXIT_CODE
+    assert create_rc == GREENFIELD_GATE_EXIT_CODE
     assert payload["ok"] is False
-    assert payload["errors"][0]["code"] == "SPEC_FILE_INVALID"
+    assert payload["errors"][0]["code"] == "GREENFIELD_DISCOVERY_REQUIRED"
     assert payload["data"] is None
-    assert (
-        "Invalid agileforge.spec.v1 content"
-        in payload["errors"][0]["details"]["reason"]
-    )
+    assert payload["errors"][0]["details"] == {"provided": ["spec_file"]}
     with Session(engine) as session:
         assert session.exec(select(Product)).all() == []
 
@@ -658,13 +808,10 @@ def test_project_create_rejects_markdown_spec_source(
     )
 
     payload = _captured_payload(capsys)
-    assert exit_code == INVALID_COMMAND_EXIT_CODE
+    assert exit_code == GREENFIELD_GATE_EXIT_CODE
     assert payload["ok"] is False
-    assert payload["errors"][0]["code"] == "SPEC_SOURCE_FORMAT_UNSUPPORTED"
-    assert payload["errors"][0]["remediation"] == [
-        "Generate specs/spec.json as agileforge.spec.v1 JSON.",
-        "Retry project create with --spec-file specs/spec.json.",
-    ]
+    assert payload["errors"][0]["code"] == "GREENFIELD_DISCOVERY_REQUIRED"
+    assert payload["errors"][0]["details"] == {"provided": ["spec_file"]}
     with Session(engine) as session:
         assert session.exec(select(Product)).all() == []
 
@@ -684,6 +831,7 @@ def test_project_create_cli_defers_compiler_failure_to_authority_compile(
         success=False,
         error_code="MUTATION_RECOVERY_REQUIRED",
     )
+    draft_id = _accepted_greenfield_draft_id(engine, spec_file)
 
     create_rc = main(
         [
@@ -691,8 +839,8 @@ def test_project_create_cli_defers_compiler_failure_to_authority_compile(
             "create",
             "--name",
             "Retry Project",
-            "--spec-file",
-            str(spec_file),
+            "--greenfield-spec-amendment-draft-id",
+            str(draft_id),
             "--idempotency-key",
             "retry-create-project-001",
         ],
@@ -732,8 +880,8 @@ def test_project_create_cli_defers_compiler_failure_to_authority_compile(
             "create",
             "--name",
             "Retry Project",
-            "--spec-file",
-            str(spec_file),
+            "--greenfield-spec-amendment-draft-id",
+            str(draft_id),
             "--idempotency-key",
             "retry-create-project-001",
         ],

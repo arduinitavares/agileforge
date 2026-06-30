@@ -25,7 +25,7 @@ from utils.task_metadata import canonical_task_metadata_json
 
 logger = logging.getLogger(__name__)
 
-AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "8"
+AGENT_WORKBENCH_STORAGE_SCHEMA_VERSION = "9"
 REVIEW_KEY_COLUMN = "review_token"
 
 
@@ -1662,6 +1662,100 @@ CREATE TABLE IF NOT EXISTS discovery_spec_amendment_drafts (
 )
 """
 
+GREENFIELD_DISCOVERY_CONTEXTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS greenfield_discovery_contexts (
+    greenfield_context_id INTEGER PRIMARY KEY,
+    context_key VARCHAR NOT NULL,
+    project_id INTEGER REFERENCES products(product_id),
+    status VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_greenfield_discovery_context_key UNIQUE (context_key),
+    CONSTRAINT uq_greenfield_discovery_context_idempotency
+        UNIQUE (idempotency_key)
+)
+"""
+
+GREENFIELD_DISCOVERY_CHALLENGE_ARTIFACTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS greenfield_discovery_challenge_artifacts (
+    challenge_artifact_id INTEGER PRIMARY KEY,
+    greenfield_context_id INTEGER NOT NULL
+        REFERENCES greenfield_discovery_contexts(greenfield_context_id),
+    producer VARCHAR NOT NULL,
+    readiness VARCHAR NOT NULL,
+    original_idea TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_greenfield_challenge_context_idempotency
+        UNIQUE (greenfield_context_id, idempotency_key)
+)
+"""
+
+GREENFIELD_DISCOVERY_PRDS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS greenfield_discovery_prds (
+    prd_id INTEGER PRIMARY KEY,
+    greenfield_context_id INTEGER NOT NULL
+        REFERENCES greenfield_discovery_contexts(greenfield_context_id),
+    challenge_artifact_id INTEGER NOT NULL
+        REFERENCES greenfield_discovery_challenge_artifacts(challenge_artifact_id),
+    producer VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    version VARCHAR NOT NULL,
+    title VARCHAR NOT NULL,
+    content_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    reviewed_by VARCHAR,
+    review_notes TEXT,
+    reviewed_at DATETIME,
+    review_request_hash VARCHAR,
+    review_idempotency_key VARCHAR,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_greenfield_prd_context_idempotency
+        UNIQUE (greenfield_context_id, idempotency_key)
+)
+"""
+
+GREENFIELD_DISCOVERY_SPEC_AMENDMENT_DRAFTS_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS greenfield_discovery_spec_amendment_drafts (
+    spec_amendment_draft_id INTEGER PRIMARY KEY,
+    greenfield_context_id INTEGER NOT NULL
+        REFERENCES greenfield_discovery_contexts(greenfield_context_id),
+    prd_id INTEGER NOT NULL REFERENCES greenfield_discovery_prds(prd_id),
+    challenge_artifact_id INTEGER NOT NULL
+        REFERENCES greenfield_discovery_challenge_artifacts(challenge_artifact_id),
+    status VARCHAR NOT NULL,
+    amendment_file TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    validation_json TEXT NOT NULL,
+    artifact_fingerprint VARCHAR NOT NULL,
+    request_hash VARCHAR NOT NULL,
+    idempotency_key VARCHAR NOT NULL,
+    amended_spec_hash VARCHAR,
+    reviewed_by VARCHAR,
+    review_notes TEXT,
+    reviewed_at DATETIME,
+    review_request_hash VARCHAR,
+    review_idempotency_key VARCHAR,
+    changed_by VARCHAR NOT NULL DEFAULT 'cli-agent',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_greenfield_spec_amendment_context_idempotency
+        UNIQUE (greenfield_context_id, idempotency_key)
+)
+"""
+
 AUTHORITY_FEEDBACK_ATTEMPTS_CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS authority_feedback_attempts (
     feedback_row_id INTEGER PRIMARY KEY,
@@ -1734,6 +1828,10 @@ def migrate_agent_workbench_contract_tables(engine: Engine) -> list[str]:
     actions.extend(_ensure_discovery_challenge_artifact_storage(engine))
     actions.extend(_ensure_discovery_prd_storage(engine))
     actions.extend(_ensure_discovery_spec_amendment_draft_storage(engine))
+    actions.extend(_ensure_greenfield_discovery_context_storage(engine))
+    actions.extend(_ensure_greenfield_discovery_challenge_artifact_storage(engine))
+    actions.extend(_ensure_greenfield_discovery_prd_storage(engine))
+    actions.extend(_ensure_greenfield_discovery_spec_amendment_draft_storage(engine))
     _record_agent_workbench_schema_version(engine)
 
     return actions
@@ -1932,6 +2030,168 @@ def _ensure_discovery_spec_amendment_draft_storage(engine: Engine) -> list[str]:
         if _ensure_index_exists(
             engine,
             "discovery_spec_amendment_drafts",
+            index_name,
+            columns,
+        ):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _ensure_greenfield_discovery_context_storage(engine: Engine) -> list[str]:
+    """Ensure greenfield Scope Discovery context storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "greenfield_discovery_contexts",
+        GREENFIELD_DISCOVERY_CONTEXTS_CREATE_SQL,
+    ):
+        actions.append("created table: greenfield_discovery_contexts")
+
+    for index_name, columns in {
+        "ix_greenfield_discovery_contexts_context_key": ["context_key"],
+        "ix_greenfield_discovery_contexts_project_id": ["project_id"],
+        "ix_greenfield_discovery_contexts_status": ["status"],
+        "ix_greenfield_discovery_contexts_request_hash": ["request_hash"],
+        "ix_greenfield_discovery_contexts_idempotency_key": ["idempotency_key"],
+        "ix_greenfield_discovery_contexts_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "greenfield_discovery_contexts",
+            index_name,
+            columns,
+        ):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _ensure_greenfield_discovery_challenge_artifact_storage(
+    engine: Engine,
+) -> list[str]:
+    """Ensure greenfield Scope Discovery Challenge Artifact storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "greenfield_discovery_challenge_artifacts",
+        GREENFIELD_DISCOVERY_CHALLENGE_ARTIFACTS_CREATE_SQL,
+    ):
+        actions.append("created table: greenfield_discovery_challenge_artifacts")
+
+    for index_name, columns in {
+        "ix_greenfield_discovery_challenge_artifacts_greenfield_context_id": [
+            "greenfield_context_id"
+        ],
+        "ix_greenfield_discovery_challenge_artifacts_producer": ["producer"],
+        "ix_greenfield_discovery_challenge_artifacts_readiness": ["readiness"],
+        "ix_greenfield_discovery_challenge_artifacts_artifact_fingerprint": [
+            "artifact_fingerprint"
+        ],
+        "ix_greenfield_discovery_challenge_artifacts_request_hash": ["request_hash"],
+        "ix_greenfield_discovery_challenge_artifacts_idempotency_key": [
+            "idempotency_key"
+        ],
+        "ix_greenfield_discovery_challenge_artifacts_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "greenfield_discovery_challenge_artifacts",
+            index_name,
+            columns,
+        ):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _ensure_greenfield_discovery_prd_storage(engine: Engine) -> list[str]:
+    """Ensure greenfield Scope Discovery PRD storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "greenfield_discovery_prds",
+        GREENFIELD_DISCOVERY_PRDS_CREATE_SQL,
+    ):
+        actions.append("created table: greenfield_discovery_prds")
+
+    for index_name, columns in {
+        "ix_greenfield_discovery_prds_greenfield_context_id": [
+            "greenfield_context_id"
+        ],
+        "ix_greenfield_discovery_prds_challenge_artifact_id": [
+            "challenge_artifact_id"
+        ],
+        "ix_greenfield_discovery_prds_producer": ["producer"],
+        "ix_greenfield_discovery_prds_status": ["status"],
+        "ix_greenfield_discovery_prds_version": ["version"],
+        "ix_greenfield_discovery_prds_title": ["title"],
+        "ix_greenfield_discovery_prds_artifact_fingerprint": [
+            "artifact_fingerprint"
+        ],
+        "ix_greenfield_discovery_prds_request_hash": ["request_hash"],
+        "ix_greenfield_discovery_prds_idempotency_key": ["idempotency_key"],
+        "ix_greenfield_discovery_prds_reviewed_by": ["reviewed_by"],
+        "ix_greenfield_discovery_prds_review_request_hash": ["review_request_hash"],
+        "ix_greenfield_discovery_prds_review_idempotency_key": [
+            "review_idempotency_key"
+        ],
+        "ix_greenfield_discovery_prds_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "greenfield_discovery_prds",
+            index_name,
+            columns,
+        ):
+            actions.append(f"created index: {index_name}")
+    return actions
+
+
+def _ensure_greenfield_discovery_spec_amendment_draft_storage(
+    engine: Engine,
+) -> list[str]:
+    """Ensure greenfield Scope Discovery Spec Amendment Draft storage exists."""
+    actions: list[str] = []
+    if _ensure_table_exists(
+        engine,
+        "greenfield_discovery_spec_amendment_drafts",
+        GREENFIELD_DISCOVERY_SPEC_AMENDMENT_DRAFTS_CREATE_SQL,
+    ):
+        actions.append("created table: greenfield_discovery_spec_amendment_drafts")
+
+    for index_name, columns in {
+        "ix_greenfield_discovery_spec_amendment_drafts_greenfield_context_id": [
+            "greenfield_context_id"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_prd_id": ["prd_id"],
+        "ix_greenfield_discovery_spec_amendment_drafts_challenge_artifact_id": [
+            "challenge_artifact_id"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_status": ["status"],
+        "ix_greenfield_discovery_spec_amendment_drafts_artifact_fingerprint": [
+            "artifact_fingerprint"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_request_hash": [
+            "request_hash"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_idempotency_key": [
+            "idempotency_key"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_amended_spec_hash": [
+            "amended_spec_hash"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_reviewed_by": [
+            "reviewed_by"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_review_request_hash": [
+            "review_request_hash"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_review_idempotency_key": [
+            "review_idempotency_key"
+        ],
+        "ix_greenfield_discovery_spec_amendment_drafts_changed_by": ["changed_by"],
+    }.items():
+        if _ensure_index_exists(
+            engine,
+            "greenfield_discovery_spec_amendment_drafts",
             index_name,
             columns,
         ):
