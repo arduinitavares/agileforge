@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from json import JSONDecodeError
@@ -93,6 +94,19 @@ STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "RISK.",
     "EXAMPLE.",
     "OPEN_QUESTION.",
+)
+STRUCTURED_NORMATIVE_ITEM_PREFIXES: Final[tuple[str, ...]] = (
+    "REQ.",
+    "QUALITY.",
+    "CONSTRAINT.",
+    "INTERFACE.",
+    "DATA.",
+)
+ONLY_ACCEPTED_ASSUMPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bonly\s+"
+    r"((?:REQ|QUALITY|CONSTRAINT|INTERFACE|DATA)\.[a-z0-9][a-z0-9.-]{1,96})"
+    r"\s+(?:was|is|were|are)\s+accepted\b",
+    re.IGNORECASE,
 )
 
 
@@ -794,10 +808,15 @@ def _authority_ir_payload(
         artifact=artifact,
         spec_artifact=structured_artifact,
     )
+    assumption_findings = _compiled_assumption_findings(
+        artifact=artifact,
+        spec_artifact=structured_artifact,
+    )
     rendered_findings = [
         *[_finding_payload(finding) for finding in diagnostic_findings],
         *[dict(finding) for finding in artifact_shape_findings],
         *source_ref_findings,
+        *assumption_findings,
     ]
     return {
         "source_units": [],
@@ -1042,6 +1061,101 @@ def _structured_source_ref_findings(
             }
         ]
     return []
+
+
+def _compiled_assumption_findings(
+    *,
+    artifact: Mapping[str, Any],
+    spec_artifact: TechnicalSpecArtifact | None,
+) -> list[JsonDict]:
+    """Block compiler assumptions with false structured accepted-item claims."""
+    if spec_artifact is None:
+        return []
+    assumptions = artifact.get("assumptions")
+    if not isinstance(assumptions, Sequence) or isinstance(
+        assumptions,
+        (str, bytes, bytearray),
+    ):
+        return []
+
+    accepted_item_ids = sorted(
+        item.id
+        for item in spec_artifact.items
+        if item.status == "accepted"
+        and item.id.startswith(STRUCTURED_NORMATIVE_ITEM_PREFIXES)
+    )
+    findings: list[JsonDict] = []
+    for index, assumption in enumerate(assumptions, start=1):
+        text = _assumption_text(assumption)
+        if text is None:
+            continue
+        match = ONLY_ACCEPTED_ASSUMPTION_RE.search(text)
+        if match is None:
+            continue
+        claimed_item_id = _normalize_structured_item_id(match.group(1))
+        if claimed_item_id in accepted_item_ids and len(accepted_item_ids) == 1:
+            continue
+        findings.append(
+            _compiled_assumption_finding(
+                assumption_index=index,
+                assumption_text=text,
+                claimed_item_id=claimed_item_id,
+                accepted_item_ids=accepted_item_ids,
+            )
+        )
+    return findings
+
+
+def _assumption_text(value: object) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, Mapping):
+        data = cast("Mapping[str, Any]", value)
+        text = str(data.get("text") or "").strip()
+    else:
+        return None
+    return text or None
+
+
+def _normalize_structured_item_id(item_id: str) -> str:
+    prefix, suffix = item_id.split(".", maxsplit=1)
+    return f"{prefix.upper()}.{suffix}"
+
+
+def _compiled_assumption_finding(
+    *,
+    assumption_index: int,
+    assumption_text: str,
+    claimed_item_id: str,
+    accepted_item_ids: Sequence[str],
+) -> JsonDict:
+    accepted_count = len(accepted_item_ids)
+    payload = {
+        "assumption_index": assumption_index,
+        "claimed_item_id": claimed_item_id,
+        "code": "COMPILER_ASSUMPTION_UNSUPPORTED",
+    }
+    finding_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "finding_id": f"ARF-{finding_hash}",
+        "severity": "blocking",
+        "code": "COMPILER_ASSUMPTION_UNSUPPORTED",
+        "message": (
+            "Compiler assumption makes an unsupported accepted-item exclusivity "
+            f"claim: {assumption_text!r}."
+        ),
+        "candidate_ids": [],
+        "source_unit_ids": [],
+        "override_allowed": False,
+        "details": {
+            "assumption_index": assumption_index,
+            "claimed_item_id": claimed_item_id,
+            "accepted_item_count": accepted_count,
+            "accepted_item_ids": list(accepted_item_ids),
+        },
+    }
 
 
 def _artifact_with_review_findings(

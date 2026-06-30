@@ -1396,6 +1396,97 @@ def test_review_summary_counts_compiler_artifact_evidence(
     assert summary["compiler_invariant_count"] == 1
 
 
+def test_review_blocks_false_only_accepted_compiler_assumption(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """False accepted-item exclusivity assumptions block authority review."""
+    expected_accepted_item_count = 2
+    payload = json.loads(
+        _agileforge_spec_profile_payload(
+            requirement_statement="The system must include audit evidence.",
+            acceptance=["The authority packet exposes audit evidence."],
+        )
+    )
+    for item in payload["items"]:
+        if item["id"] == "REQ.guard-tokens":
+            item["status"] = "accepted"
+    payload["items"].append(
+        {
+            "id": "CONSTRAINT.audit-log",
+            "type": "CONSTRAINT",
+            "status": "accepted",
+            "title": "Audit log retention",
+            "statement": "The system must retain authority audit logs.",
+            "level": "MUST",
+            "verification": "inspection",
+            "acceptance": ["Authority audit logs are retained."],
+        }
+    )
+    spec_content = canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority review"],
+        domain="agent workbench",
+        invariants=[
+            Invariant(
+                id=INVARIANT_ID,
+                type=InvariantType.REQUIRED_FIELD,
+                parameters=RequiredFieldParams(field_name="audit_evidence"),
+            )
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[
+            (
+                "Only REQ.guard-tokens was accepted; it governs authority "
+                "review evidence."
+            )
+        ],
+        source_map=[
+            SourceMapEntry(
+                invariant_id=INVARIANT_ID,
+                excerpt="The system must include audit evidence.",
+                location="REQ.guard-tokens.statement",
+            )
+        ],
+        compiler_version=COMPILER_VERSION,
+        prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=spec_content,
+            spec_filename="spec.json",
+            artifact_json=_stored_compiled_success_json_from_success(success),
+        )
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    findings = result["data"]["review_findings"]
+    codes = {finding["code"] for finding in findings}
+    assert "COMPILER_ASSUMPTION_UNSUPPORTED" in codes
+    finding = next(
+        finding
+        for finding in findings
+        if finding["code"] == "COMPILER_ASSUMPTION_UNSUPPORTED"
+    )
+    assert finding["severity"] == "blocking"
+    assert finding["override_allowed"] is False
+    assert finding["details"]["assumption_index"] == 1
+    assert finding["details"]["claimed_item_id"] == "REQ.guard-tokens"
+    assert (
+        finding["details"]["accepted_item_count"] == expected_accepted_item_count
+    )
+    assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
+
+
 def test_review_packet_exposes_scope_discovery_provenance(
     session: Session,
     tmp_path: Path,
