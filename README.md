@@ -106,8 +106,10 @@ cp .env.example .env
 The CLI is the supported agent interface for workflow inspection and guarded
 mutations. For the full contract, workflows, idempotency rules, and recovery
 guidance, see [docs/agent-cli-manual.md](docs/agent-cli-manual.md).
-Create and validate an AgileForge profile spec at `specs/spec.json` before
-running `project create`; Markdown specs are review views, not project-create
+For the `grill-with-docs` -> `to-prd` -> AgileForge Scope Discovery handoff,
+see [docs/scope-discovery-agent-runbook.md](docs/scope-discovery-agent-runbook.md).
+For direct spec-file project creation, create and validate an AgileForge profile
+spec at `specs/spec.json`; Markdown specs are review views, not project-create
 inputs.
 
 ```bash

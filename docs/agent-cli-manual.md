@@ -15,6 +15,8 @@ The installed CLI supports:
 
 - Project inspection.
 - Project creation with a guarded mutation ledger.
+- Scope Discovery artifact recording for `grill-with-docs` Challenge
+  Artifacts, `to-prd` PRD drafts, and agent-generated Spec Amendment Drafts.
 - Project setup retry for interrupted creation/setup recovery.
 - Brownfield source import, repository scan, curated spec draft/import, and
   approval before authority compilation.
@@ -47,6 +49,9 @@ with:
 agileforge capabilities
 agileforge command schema "agileforge project create"
 ```
+
+For the required new-scope discovery sequence and agent prompt, see
+[Scope Discovery Agent Runbook](scope-discovery-agent-runbook.md).
 
 ## Mental Model
 
