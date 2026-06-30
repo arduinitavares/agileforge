@@ -14,12 +14,29 @@ from models import db as model_db
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIRED_COLUMNS,
     MUTATION_LEDGER_TABLE,
+    SCOPE_DISCOVERY_REQUIREMENTS,
+    check_schema_readiness,
 )
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from utils.runtime_config import get_session_db_target
 
 BUSINESS_SCHEMA_VERSION_TABLE = "agent_workbench_schema_versions"
 BUSINESS_MUTATION_LEDGER_TABLE = MUTATION_LEDGER_TABLE
+
+
+def _flatten_missing(
+    missing: dict[str, list[str]],
+    *,
+    table_names: set[str],
+) -> list[str]:
+    """Return table names for absent tables and table.element for missing elements."""
+    flattened: list[str] = []
+    for table_name, elements in missing.items():
+        if table_name not in table_names:
+            flattened.append(table_name)
+            continue
+        flattened.extend(f"{table_name}.{element}" for element in elements)
+    return flattened
 
 
 def schema_check_payload(
@@ -61,6 +78,8 @@ def _business_db_payload(*, business_engine: Engine | None) -> dict[str, Any]:
         "schema_versions_table": False,
         "cli_mutation_ledger_table": False,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     if _is_missing_sqlite_file(engine):
         return {
@@ -73,7 +92,8 @@ def _business_db_payload(*, business_engine: Engine | None) -> dict[str, Any]:
         }
 
     try:
-        table_names = set(inspect(engine).get_table_names())
+        inspector = inspect(engine)
+        table_names = set(inspector.get_table_names())
     except SQLAlchemyError:
         return {
             "ok": False,
@@ -88,12 +108,14 @@ def _business_db_payload(*, business_engine: Engine | None) -> dict[str, Any]:
         "schema_versions_table": BUSINESS_SCHEMA_VERSION_TABLE in table_names,
         "cli_mutation_ledger_table": BUSINESS_MUTATION_LEDGER_TABLE in table_names,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     missing_columns: list[str] = []
     if checks["cli_mutation_ledger_table"]:
         existing_columns = {
             column["name"]
-            for column in inspect(engine).get_columns(BUSINESS_MUTATION_LEDGER_TABLE)
+            for column in inspector.get_columns(BUSINESS_MUTATION_LEDGER_TABLE)
         }
         missing_columns = [
             column
@@ -101,6 +123,19 @@ def _business_db_payload(*, business_engine: Engine | None) -> dict[str, Any]:
             if column not in existing_columns
         ]
         checks["cli_mutation_ledger_columns"] = not missing_columns
+
+    discovery_readiness = check_schema_readiness(engine, SCOPE_DISCOVERY_REQUIREMENTS)
+    discovery_missing = _flatten_missing(
+        discovery_readiness.missing,
+        table_names=table_names,
+    )
+    required_discovery_tables = {
+        requirement.table for requirement in SCOPE_DISCOVERY_REQUIREMENTS
+    }
+    checks["scope_discovery_tables"] = required_discovery_tables.issubset(
+        table_names,
+    )
+    checks["scope_discovery_columns"] = discovery_readiness.ok
 
     missing = [
         table_name
@@ -113,6 +148,7 @@ def _business_db_payload(*, business_engine: Engine | None) -> dict[str, Any]:
     missing.extend(
         f"{BUSINESS_MUTATION_LEDGER_TABLE}.{column}" for column in missing_columns
     )
+    missing.extend(discovery_missing)
     ok = not missing
     return {
         "ok": ok,

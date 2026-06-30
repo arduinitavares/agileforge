@@ -6078,6 +6078,150 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_discovery(
     ]
 
 
+def test_workflow_next_returns_schema_not_ready_when_discovery_tables_missing(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not raise OperationalError when discovery tables are absent."""
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE discovery_spec_amendment_drafts"))
+        conn.execute(text("DROP TABLE discovery_prds"))
+        conn.execute(text("DROP TABLE discovery_challenge_artifacts"))
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["errors"][0]["code"] == "SCHEMA_NOT_READY"
+    assert result["errors"][0]["retryable"] is True
+    assert "discovery_challenge_artifacts" in result["errors"][0]["details"]["missing"]
+
+
+def _replace_discovery_tables_with_legacy_read_shape(engine: Engine) -> None:
+    """Recreate discovery tables with readable columns but no write-path indexes."""
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE discovery_spec_amendment_drafts"))
+        conn.execute(text("DROP TABLE discovery_prds"))
+        conn.execute(text("DROP TABLE discovery_challenge_artifacts"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE discovery_challenge_artifacts (
+                    challenge_artifact_id INTEGER PRIMARY KEY,
+                    project_id INTEGER,
+                    producer VARCHAR,
+                    readiness VARCHAR,
+                    original_idea TEXT,
+                    content_json TEXT,
+                    artifact_fingerprint VARCHAR,
+                    request_hash VARCHAR,
+                    idempotency_key VARCHAR,
+                    changed_by VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE discovery_prds (
+                    prd_id INTEGER PRIMARY KEY,
+                    project_id INTEGER,
+                    challenge_artifact_id INTEGER,
+                    producer VARCHAR,
+                    status VARCHAR,
+                    version VARCHAR,
+                    title VARCHAR,
+                    content_json TEXT,
+                    supersedes_prd_id INTEGER,
+                    artifact_fingerprint VARCHAR,
+                    request_hash VARCHAR,
+                    idempotency_key VARCHAR,
+                    reviewed_by VARCHAR,
+                    review_notes TEXT,
+                    reviewed_at DATETIME,
+                    review_request_hash VARCHAR,
+                    review_idempotency_key VARCHAR,
+                    changed_by VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE discovery_spec_amendment_drafts (
+                    spec_amendment_draft_id INTEGER PRIMARY KEY,
+                    project_id INTEGER,
+                    prd_id INTEGER,
+                    challenge_artifact_id INTEGER,
+                    status VARCHAR,
+                    amendment_file TEXT,
+                    content_json TEXT,
+                    validation_json TEXT,
+                    artifact_fingerprint VARCHAR,
+                    request_hash VARCHAR,
+                    idempotency_key VARCHAR,
+                    base_spec_version_id INTEGER,
+                    base_spec_hash VARCHAR,
+                    amended_spec_hash VARCHAR,
+                    reviewed_by VARCHAR,
+                    review_notes TEXT,
+                    reviewed_at DATETIME,
+                    review_request_hash VARCHAR,
+                    review_idempotency_key VARCHAR,
+                    changed_by VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+        )
+
+
+def test_workflow_next_routes_with_readable_discovery_tables_missing_indexes(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route workflow-next when discovery read columns exist without indexes."""
+    _replace_discovery_tables_with_legacy_read_shape(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "scope_discovery_challenge_artifact_missing"
+
+
 def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,

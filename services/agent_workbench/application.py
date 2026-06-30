@@ -60,6 +60,8 @@ from services.agent_workbench.project_setup_fingerprints import (
 )
 from services.agent_workbench.schema_readiness import (
     MUTATION_LEDGER_REQUIREMENTS,
+    SchemaReadiness,
+    SchemaRequirement,
     check_schema_readiness,
 )
 from services.agent_workbench.scope_discovery import (
@@ -87,6 +89,77 @@ STATUS_COMMAND: Final[str] = "agileforge status"
 WORKFLOW_NEXT_COMMAND: Final[str] = "agileforge workflow next"
 AUTHORITY_CURATE_COMMAND: Final[str] = "agileforge authority curate"
 AUTHORITY_REGENERATE_COMMAND: Final[str] = "agileforge authority regenerate"
+_SCOPE_DISCOVERY_ROUTE_REQUIREMENTS: Final[tuple[SchemaRequirement, ...]] = (
+    SchemaRequirement(
+        table="discovery_challenge_artifacts",
+        columns=(
+            "challenge_artifact_id",
+            "project_id",
+            "producer",
+            "readiness",
+            "original_idea",
+            "content_json",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+    SchemaRequirement(
+        table="discovery_prds",
+        columns=(
+            "prd_id",
+            "project_id",
+            "challenge_artifact_id",
+            "producer",
+            "status",
+            "version",
+            "title",
+            "content_json",
+            "supersedes_prd_id",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "reviewed_by",
+            "review_notes",
+            "reviewed_at",
+            "review_request_hash",
+            "review_idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+    SchemaRequirement(
+        table="discovery_spec_amendment_drafts",
+        columns=(
+            "spec_amendment_draft_id",
+            "project_id",
+            "prd_id",
+            "challenge_artifact_id",
+            "status",
+            "amendment_file",
+            "content_json",
+            "validation_json",
+            "artifact_fingerprint",
+            "request_hash",
+            "idempotency_key",
+            "base_spec_version_id",
+            "base_spec_hash",
+            "amended_spec_hash",
+            "reviewed_by",
+            "review_notes",
+            "reviewed_at",
+            "review_request_hash",
+            "review_idempotency_key",
+            "changed_by",
+            "created_at",
+            "updated_at",
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -6037,7 +6110,15 @@ def _scope_discovery_next_response(
 ) -> dict[str, Any] | None:
     """Return the next required Scope Discovery gate for exhausted projects."""
     response: dict[str, Any] | None = None
-    with Session(get_engine()) as session:
+    engine = get_engine()
+    readiness = check_schema_readiness(engine, _SCOPE_DISCOVERY_ROUTE_REQUIREMENTS)
+    if not readiness.ok:
+        return _schema_not_ready_response(
+            command=WORKFLOW_NEXT_COMMAND,
+            readiness=readiness,
+        )
+
+    with Session(engine) as session:
         challenge_artifact = session.exec(
             select(DiscoveryChallengeArtifact)
             .where(DiscoveryChallengeArtifact.project_id == project_id)
@@ -6132,7 +6213,7 @@ def _scope_discovery_next_response(
             commands=commands,
             spec_amendment=spec_amendment,
         )
-    elif spec_amendment.status == "accepted":
+    else:
         response = _scope_discovery_scope_extension_start_next_response(
             project_id=project_id,
             workflow=workflow,
@@ -7705,6 +7786,32 @@ def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
         "warnings": [],
         "errors": [],
     }
+
+
+def _schema_not_ready_response(
+    *,
+    command: str,
+    readiness: SchemaReadiness,
+) -> dict[str, Any]:
+    """Return a schema-not-ready envelope for application-level guards."""
+    return error_envelope(
+        command=command,
+        error=workbench_error(
+            ErrorCode.SCHEMA_NOT_READY,
+            message=(
+                "Database schema is missing required tables or columns for this "
+                "command."
+            ),
+            details={"missing": readiness.missing},
+            remediation=[
+                (
+                    "Run the application startup or migration command before using "
+                    "the CLI."
+                ),
+                "Then rerun agileforge schema check.",
+            ],
+        ),
+    )
 
 
 def _mutation_ledger_repository() -> (

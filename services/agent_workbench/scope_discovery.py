@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -24,11 +24,20 @@ from models.agent_workbench import (
 from models.core import Product
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.agent_workbench.schema_readiness import (
+    DISCOVERY_REQUIREMENTS,
+    GREENFIELD_DISCOVERY_REQUIREMENTS,
+    SchemaRequirement,
+    check_schema_readiness,
+)
 from services.agent_workbench.scope_extension import (
     ScopeExtensionRunner,
     ScopeExtensionValidateRequest,
     load_structured_spec_file,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 CHALLENGE_RECORD_COMMAND: str = "agileforge discovery challenge record"
 PRD_DRAFT_RECORD_COMMAND: str = "agileforge discovery prd draft record"
@@ -90,6 +99,25 @@ class _PrdDraftRecordInputs:
 
     payload: Mapping[str, Any]
     superseded_prd: DiscoveryPrd | None
+
+
+def _schema_not_ready(
+    session: Session,
+    requirements: tuple[SchemaRequirement, ...],
+) -> dict[str, Any] | None:
+    """Return schema-not-ready when discovery storage is absent."""
+    engine = cast("Engine", session.get_bind())
+    readiness = check_schema_readiness(engine, requirements)
+    if readiness.ok:
+        return None
+    return _error(
+        ErrorCode.SCHEMA_NOT_READY,
+        details={"missing": readiness.missing},
+        remediation=[
+            "Run the application startup or migration command before using the CLI.",
+            "Then rerun agileforge schema check.",
+        ],
+    )
 
 
 class ChallengeArtifactRecordRequest(BaseModel):
@@ -226,11 +254,13 @@ class ScopeDiscoveryRunner:
         request: ChallengeArtifactRecordRequest,
     ) -> dict[str, Any]:
         """Record a minimal grill-with-docs Challenge Artifact."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         payload, load_error = _load_challenge_payload(request.artifact_file)
-        if load_error is not None:
-            return load_error
-        if payload is None:
-            return _error(
+        if load_error is not None or payload is None:
+            return load_error or _error(
                 ErrorCode.CHALLENGE_ARTIFACT_INVALID,
                 details={"artifact_file": request.artifact_file},
                 remediation=["Pass a valid JSON Challenge Artifact file."],
@@ -296,6 +326,10 @@ class ScopeDiscoveryRunner:
         request: PrdDraftRecordRequest,
     ) -> dict[str, Any]:
         """Record a draft PRD produced by to-prd."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         inputs, validation_error = self._validated_prd_draft_record_inputs(request)
         if validation_error is not None:
             return validation_error
@@ -348,6 +382,10 @@ class ScopeDiscoveryRunner:
         request: SpecAmendmentDraftRecordRequest,
     ) -> dict[str, Any]:
         """Record and validate an agent-generated Spec Amendment Draft."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         prd, source_error = self._validated_spec_amendment_source_prd(request)
         if source_error is not None:
             return source_error
@@ -426,6 +464,10 @@ class ScopeDiscoveryRunner:
         request: SpecAmendmentReviewRequest,
     ) -> dict[str, Any]:
         """Accept a validated Spec Amendment Draft."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         return self._review_spec_amendment(
             request=request,
             command=SPEC_AMENDMENT_ACCEPT_COMMAND,
@@ -437,6 +479,10 @@ class ScopeDiscoveryRunner:
         request: SpecAmendmentReviewRequest,
     ) -> dict[str, Any]:
         """Reject a validated Spec Amendment Draft."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         return self._review_spec_amendment(
             request=request,
             command=SPEC_AMENDMENT_REJECT_COMMAND,
@@ -448,6 +494,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldChallengeArtifactRecordRequest,
     ) -> dict[str, Any]:
         """Record a greenfield grill-with-docs Challenge Artifact."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         payload, load_error = _load_challenge_payload(request.artifact_file)
         if load_error is not None:
             return load_error
@@ -513,6 +566,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldPrdDraftRecordRequest,
     ) -> dict[str, Any]:
         """Record a greenfield draft PRD produced by to-prd."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         context, challenge, payload, validation_error = (
             self._validated_greenfield_prd_inputs(request)
         )
@@ -573,6 +633,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldPrdReviewRequest,
     ) -> dict[str, Any]:
         """Accept a greenfield draft PRD."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         return self._review_greenfield_prd(
             request=request,
             command=GREENFIELD_PRD_ACCEPT_COMMAND,
@@ -584,6 +651,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldPrdReviewRequest,
     ) -> dict[str, Any]:
         """Reject a greenfield draft PRD."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         return self._review_greenfield_prd(
             request=request,
             command=GREENFIELD_PRD_REJECT_COMMAND,
@@ -595,6 +669,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldSpecAmendmentDraftRecordRequest,
     ) -> dict[str, Any]:
         """Record and validate a greenfield initial structured spec draft."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         context, prd, source_error = self._validated_greenfield_spec_source_prd(
             request,
         )
@@ -665,6 +746,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldSpecAmendmentReviewRequest,
     ) -> dict[str, Any]:
         """Accept a greenfield validated initial spec draft."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         return self._review_greenfield_spec_amendment(
             request=request,
             command=GREENFIELD_SPEC_AMENDMENT_ACCEPT_COMMAND,
@@ -676,6 +764,13 @@ class ScopeDiscoveryRunner:
         request: GreenfieldSpecAmendmentReviewRequest,
     ) -> dict[str, Any]:
         """Reject a greenfield validated initial spec draft."""
+        schema_error = _schema_not_ready(
+            self._session,
+            GREENFIELD_DISCOVERY_REQUIREMENTS,
+        )
+        if schema_error is not None:
+            return schema_error
+
         return self._review_greenfield_spec_amendment(
             request=request,
             command=GREENFIELD_SPEC_AMENDMENT_REJECT_COMMAND,
@@ -1205,6 +1300,10 @@ class ScopeDiscoveryRunner:
 
     def accept_prd(self, request: PrdReviewRequest) -> dict[str, Any]:
         """Accept a draft PRD."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         return self._review_prd(
             request=request,
             command=PRD_ACCEPT_COMMAND,
@@ -1213,6 +1312,10 @@ class ScopeDiscoveryRunner:
 
     def reject_prd(self, request: PrdReviewRequest) -> dict[str, Any]:
         """Reject a draft PRD."""
+        schema_error = _schema_not_ready(self._session, DISCOVERY_REQUIREMENTS)
+        if schema_error is not None:
+            return schema_error
+
         return self._review_prd(
             request=request,
             command=PRD_REJECT_COMMAND,
