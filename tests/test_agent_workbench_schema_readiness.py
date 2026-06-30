@@ -209,6 +209,16 @@ def test_scope_discovery_readiness_requires_greenfield_tables() -> None:
     ) in requirements_by_table[
         "greenfield_discovery_challenge_artifacts"
     ].unique_columns
+    assert (
+        "greenfield_context_id",
+        "idempotency_key",
+    ) in requirements_by_table["greenfield_discovery_prds"].unique_columns
+    assert (
+        "greenfield_context_id",
+        "idempotency_key",
+    ) in requirements_by_table[
+        "greenfield_discovery_spec_amendment_drafts"
+    ].unique_columns
 
 
 def test_scope_discovery_readiness_combines_existing_and_greenfield() -> None:
