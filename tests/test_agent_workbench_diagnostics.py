@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, text
 
 from db.migrations import ensure_schema_current
 from services.agent_workbench.diagnostics import doctor_payload, schema_check_payload
+from services.agent_workbench.schema_readiness import SCOPE_DISCOVERY_REQUIREMENTS
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 
 if TYPE_CHECKING:
@@ -54,6 +55,26 @@ CREATE TABLE IF NOT EXISTS agent_workbench_schema_versions (
 )
 """
 
+SCOPE_DISCOVERY_TABLES: tuple[str, ...] = (
+    "discovery_spec_amendment_drafts",
+    "discovery_prds",
+    "discovery_challenge_artifacts",
+    "greenfield_discovery_spec_amendment_drafts",
+    "greenfield_discovery_prds",
+    "greenfield_discovery_challenge_artifacts",
+    "greenfield_discovery_contexts",
+)
+SCOPE_DISCOVERY_MISSING_TABLES: tuple[str, ...] = tuple(
+    requirement.table for requirement in SCOPE_DISCOVERY_REQUIREMENTS
+)
+
+
+def _drop_scope_discovery_tables(engine: Engine) -> None:
+    """Remove Scope Discovery tables from an otherwise migrated database."""
+    with engine.begin() as conn:
+        for table_name in SCOPE_DISCOVERY_TABLES:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
 
 def test_schema_check_reports_ready_business_db(engine: Engine) -> None:
     """Report ready when business contract tables are present."""
@@ -73,6 +94,8 @@ def test_schema_check_reports_ready_business_db(engine: Engine) -> None:
             "schema_versions_table": True,
             "cli_mutation_ledger_table": True,
             "cli_mutation_ledger_columns": True,
+            "scope_discovery_tables": True,
+            "scope_discovery_columns": True,
         },
         "missing": [],
     }
@@ -90,6 +113,31 @@ def test_schema_check_reports_ready_business_db(engine: Engine) -> None:
     }
 
 
+def test_schema_check_blocks_missing_scope_discovery_storage(
+    engine: Engine,
+) -> None:
+    """Report missing discovery tables even when version and ledger look current."""
+    ensure_schema_current(engine)
+    _drop_scope_discovery_tables(engine)
+
+    payload = schema_check_payload(
+        business_engine=engine,
+        session_db_url="sqlite:///:memory:",
+    )
+
+    assert payload["business_db"]["ok"] is False
+    assert payload["business_db"]["status"] == "blocked"
+    assert payload["business_db"]["checks"]["schema_versions_table"] is True
+    assert payload["business_db"]["checks"]["cli_mutation_ledger_table"] is True
+    assert payload["business_db"]["checks"]["cli_mutation_ledger_columns"] is True
+    assert payload["business_db"]["checks"]["scope_discovery_tables"] is False
+    assert payload["business_db"]["checks"]["scope_discovery_columns"] is False
+    assert "discovery_challenge_artifacts" in payload["business_db"]["missing"]
+    assert "discovery_prds" in payload["business_db"]["missing"]
+    assert "discovery_spec_amendment_drafts" in payload["business_db"]["missing"]
+    assert "greenfield_discovery_contexts" in payload["business_db"]["missing"]
+
+
 def test_schema_check_reports_missing_business_contract_tables() -> None:
     """Report missing contract tables without migrating an empty database."""
     empty_engine = create_engine("sqlite:///:memory:")
@@ -105,10 +153,13 @@ def test_schema_check_reports_missing_business_contract_tables() -> None:
         "schema_versions_table": False,
         "cli_mutation_ledger_table": False,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     assert payload["business_db"]["missing"] == [
         "agent_workbench_schema_versions",
         "cli_mutation_ledger",
+        *SCOPE_DISCOVERY_MISSING_TABLES,
     ]
 
 
@@ -130,6 +181,8 @@ def test_schema_check_reports_missing_business_sqlite_file_without_creating_it(
         "schema_versions_table": False,
         "cli_mutation_ledger_table": False,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     assert payload["business_db"]["missing"] == [
         "agent_workbench_schema_versions",
@@ -168,10 +221,13 @@ def test_schema_check_reports_missing_mutation_ledger_columns(
         "schema_versions_table": True,
         "cli_mutation_ledger_table": True,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     assert payload["business_db"]["missing"] == [
         "cli_mutation_ledger.recovers_mutation_event_id",
         "cli_mutation_ledger.superseded_by_mutation_event_id",
+        *SCOPE_DISCOVERY_MISSING_TABLES,
     ]
 
 
@@ -213,6 +269,8 @@ def test_schema_check_reports_malformed_mutation_ledger_columns(
         "schema_versions_table": True,
         "cli_mutation_ledger_table": True,
         "cli_mutation_ledger_columns": False,
+        "scope_discovery_tables": False,
+        "scope_discovery_columns": False,
     }
     assert "cli_mutation_ledger.command" in payload["business_db"]["missing"]
     assert "cli_mutation_ledger.status" in payload["business_db"]["missing"]
