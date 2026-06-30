@@ -59,7 +59,9 @@ from services.agent_workbench.project_setup_fingerprints import (
     setup_retry_context_fingerprint,
 )
 from services.agent_workbench.schema_readiness import (
+    DISCOVERY_REQUIREMENTS,
     MUTATION_LEDGER_REQUIREMENTS,
+    SchemaReadiness,
     check_schema_readiness,
 )
 from services.agent_workbench.scope_discovery import (
@@ -6037,7 +6039,15 @@ def _scope_discovery_next_response(
 ) -> dict[str, Any] | None:
     """Return the next required Scope Discovery gate for exhausted projects."""
     response: dict[str, Any] | None = None
-    with Session(get_engine()) as session:
+    engine = get_engine()
+    readiness = check_schema_readiness(engine, DISCOVERY_REQUIREMENTS)
+    if not readiness.ok:
+        return _schema_not_ready_response(
+            command=WORKFLOW_NEXT_COMMAND,
+            readiness=readiness,
+        )
+
+    with Session(engine) as session:
         challenge_artifact = session.exec(
             select(DiscoveryChallengeArtifact)
             .where(DiscoveryChallengeArtifact.project_id == project_id)
@@ -6132,7 +6142,7 @@ def _scope_discovery_next_response(
             commands=commands,
             spec_amendment=spec_amendment,
         )
-    elif spec_amendment.status == "accepted":
+    else:
         response = _scope_discovery_scope_extension_start_next_response(
             project_id=project_id,
             workflow=workflow,
@@ -7705,6 +7715,32 @@ def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
         "warnings": [],
         "errors": [],
     }
+
+
+def _schema_not_ready_response(
+    *,
+    command: str,
+    readiness: SchemaReadiness,
+) -> dict[str, Any]:
+    """Return a schema-not-ready envelope for application-level guards."""
+    return error_envelope(
+        command=command,
+        error=workbench_error(
+            ErrorCode.SCHEMA_NOT_READY,
+            message=(
+                "Database schema is missing required tables or columns for this "
+                "command."
+            ),
+            details={"missing": readiness.missing},
+            remediation=[
+                (
+                    "Run the application startup or migration command before using "
+                    "the CLI."
+                ),
+                "Then rerun agileforge schema check.",
+            ],
+        ),
+    )
 
 
 def _mutation_ledger_repository() -> (

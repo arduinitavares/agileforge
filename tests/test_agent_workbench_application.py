@@ -6078,6 +6078,38 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_discovery(
     ]
 
 
+def test_workflow_next_returns_schema_not_ready_when_discovery_tables_missing(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not raise OperationalError when discovery tables are absent."""
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE discovery_spec_amendment_drafts"))
+        conn.execute(text("DROP TABLE discovery_prds"))
+        conn.execute(text("DROP TABLE discovery_challenge_artifacts"))
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is False
+    assert result["data"] is None
+    assert result["errors"][0]["code"] == "SCHEMA_NOT_READY"
+    assert result["errors"][0]["retryable"] is True
+    assert "discovery_challenge_artifacts" in result["errors"][0]["details"]["missing"]
+
+
 def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
