@@ -13,7 +13,7 @@ from google.genai import types
 from utils.failure_artifacts import AgentInvocationError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Collection, Iterable, Iterator
 
 
 class RunnerIdentityLike(Protocol):
@@ -80,7 +80,74 @@ def extract_partial_response_text(events: list[object]) -> str:
     return "\n".join(fragments).strip()
 
 
-def parse_json_payload(raw_text: str) -> dict[str, Any] | None:
+def _parse_json_dict(candidate: str) -> dict[str, Any] | None:
+    parsed = json.loads(candidate)
+    return cast("dict[str, Any]", parsed) if isinstance(parsed, dict) else None
+
+
+def _iter_json_dict_candidates(raw_text: str) -> Iterator[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while cursor < len(raw_text):
+        start = raw_text.find("{", cursor)
+        if start == -1:
+            return
+
+        try:
+            parsed, end = decoder.raw_decode(raw_text, start)
+        except json.JSONDecodeError:
+            cursor = start + 1
+            continue
+
+        if isinstance(parsed, dict):
+            yield cast("dict[str, Any]", parsed)
+        cursor = max(end, start + 1)
+
+
+def _json_dict_matches_required_keys(
+    payload: dict[str, Any],
+    required_keys: Collection[str] | None,
+) -> bool:
+    if required_keys is None:
+        return True
+    return all(key in payload for key in required_keys)
+
+
+def _parse_json_payload_without_required_keys(candidate: str) -> dict[str, Any] | None:
+    try:
+        return _parse_json_dict(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+
+        try:
+            return _parse_json_dict(candidate[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+
+
+def _parse_json_payload_with_required_keys(
+    candidate: str,
+    required_keys: Collection[str],
+) -> dict[str, Any] | None:
+    try:
+        return _parse_json_dict(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    for parsed in _iter_json_dict_candidates(candidate):
+        if _json_dict_matches_required_keys(parsed, required_keys):
+            return parsed
+    return None
+
+
+def parse_json_payload(
+    raw_text: str,
+    *,
+    required_keys: Collection[str] | None = None,
+) -> dict[str, Any] | None:
     """Parse a JSON object from raw model text or a fenced JSON block."""
     candidate = (raw_text or "").strip()
     if not candidate:
@@ -94,20 +161,10 @@ def parse_json_payload(raw_text: str) -> dict[str, Any] | None:
     if fenced:
         candidate = fenced.group(1).strip()
 
-    try:
-        parsed = json.loads(candidate)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            return None
-        sliced = candidate[start : end + 1]
-        try:
-            parsed = json.loads(sliced)
-            return parsed if isinstance(parsed, dict) else None
-        except json.JSONDecodeError:
-            return None
+    if required_keys is None:
+        return _parse_json_payload_without_required_keys(candidate)
+
+    return _parse_json_payload_with_required_keys(candidate, required_keys)
 
 
 def get_agent_model_info(agent: object) -> dict[str, Any]:

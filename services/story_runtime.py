@@ -64,6 +64,23 @@ _MIN_ACTIONABLE_QUESTION_WORDS: int = 5
 MAX_STORY_SCHEMA_REPAIR_ATTEMPTS: int = 2
 MAX_STORY_SCHEMA_REPAIR_FEEDBACK_CHARS: int = 4000
 MAX_STORIES_PER_ATTEMPT: int = 8
+_USER_STORY_WRITER_OUTPUT_KEYS = frozenset(
+    {
+        "parent_requirement",
+        "user_stories",
+        "is_complete",
+        "clarifying_questions",
+    }
+)
+_USER_STORY_PATCH_OUTPUT_KEYS = frozenset(
+    {
+        "parent_requirement",
+        "target_refinement_slot",
+        "story",
+        "is_complete",
+        "clarifying_questions",
+    }
+)
 _INVEST_SCORES: tuple[str, ...] = ("High", "Medium", "Low")
 _REQUESTED_STORY_COUNT_PATTERN = re.compile(
     r"(?:~|about|around|approximately|approx\.?)?\s*"
@@ -1109,7 +1126,10 @@ async def run_story_agent_request(  # noqa: PLR0911
                 request_payload=attempt_request_payload,
             )
 
-        parsed = parse_json_payload(raw_text)
+        parsed = parse_json_payload(
+            raw_text,
+            required_keys=_USER_STORY_WRITER_OUTPUT_KEYS,
+        )
         if parsed is None:
             error = "Story response is not valid JSON"
             if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:
@@ -1288,7 +1308,10 @@ async def run_story_patch_agent_request(  # noqa: PLR0911
                 request_payload=attempt_request_payload,
             )
 
-        parsed = parse_json_payload(raw_text)
+        parsed = parse_json_payload(
+            raw_text,
+            required_keys=_USER_STORY_PATCH_OUTPUT_KEYS,
+        )
         if parsed is None:
             error = "Story patch response is not valid JSON"
             if attempt_index < MAX_STORY_SCHEMA_REPAIR_ATTEMPTS:

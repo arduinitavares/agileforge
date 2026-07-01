@@ -801,9 +801,75 @@ def test_story_generate_passes_target_slot_to_service(
     )
 
     assert result["ok"] is True
+    assert result["warnings"] == []
     assert captured["target_story_id"] is None
     assert captured["target_refinement_slot"] == 2  # noqa: PLR2004
     assert result["data"]["current_draft"]["kind"] == "story_patch"
+
+
+def test_story_generate_exposes_feedback_soft_gate_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Soft-gated feedback should appear in outer warnings."""
+
+    async def fake_generate_story_draft(**kwargs: object) -> dict[str, Any]:
+        return {
+            "fsm_state": "STORY_INTERVIEW",
+            "parent_requirement": kwargs["parent_requirement"],
+            "data": {
+                "generation_ran": False,
+                "feedback_quality": {
+                    "needs_revision": True,
+                    "forced": False,
+                    "missing_fields": ["target", "required_change"],
+                    "warnings": [
+                        {
+                            "code": "FEEDBACK_FIELDS_MISSING",
+                            "message": (
+                                "Missing feedback fields: target, required_change."
+                            ),
+                        }
+                    ],
+                    "suggested_template": "Target:\n...\nRequired change:\n...",
+                },
+                "story_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.story_phase.generate_story_draft",
+        fake_generate_story_draft,
+    )
+    runner = StoryPhaseRunner(
+        product_repo=_FakeProductRepo(),
+        workflow_service=_FakeWorkflowService(),
+    )
+
+    result = runner.generate(
+        project_id=PROJECT_ID,
+        parent_requirement="Review match result",
+        user_input="Try again.",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["generation_ran"] is False
+    assert result["warnings"] == [
+        {
+            "code": "FEEDBACK_FIELDS_MISSING",
+            "message": "Missing feedback fields: target, required_change.",
+            "remediation": [
+                (
+                    "Use structured feedback with Target, Issue/Evidence, "
+                    "Required change, Acceptance criteria, and Scope limit sections."
+                ),
+                "Missing fields: target, required_change.",
+                (
+                    "Use --force-feedback to bypass this check when regenerating "
+                    "after a non-draft runtime failure."
+                ),
+            ],
+        }
+    ]
 
 
 def test_story_generate_resolves_target_story_id_to_slot(

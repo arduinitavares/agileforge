@@ -2138,12 +2138,60 @@ def _flatten_phase_payload(data: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _warnings_from_feedback_quality(data: dict[str, Any]) -> list[dict[str, Any]]:
+    inner = data.get("data")
+    if not isinstance(inner, dict) or inner.get("generation_ran") is not False:
+        return []
+    feedback_quality = inner.get("feedback_quality")
+    if not isinstance(feedback_quality, dict):
+        return []
+    if feedback_quality.get("needs_revision") is not True:
+        return []
+    raw_warnings = feedback_quality.get("warnings")
+    if not isinstance(raw_warnings, list):
+        return []
+
+    missing_fields = feedback_quality.get("missing_fields")
+    missing_summary = (
+        ", ".join(str(item) for item in missing_fields if isinstance(item, str))
+        if isinstance(missing_fields, list)
+        else ""
+    )
+    remediation = [
+        (
+            "Use structured feedback with Target, Issue/Evidence, Required change, "
+            "Acceptance criteria, and Scope limit sections."
+        ),
+    ]
+    if missing_summary:
+        remediation.append(f"Missing fields: {missing_summary}.")
+    remediation.append(
+        "Use --force-feedback to bypass this check when regenerating after a "
+        "non-draft runtime failure."
+    )
+
+    warnings: list[dict[str, Any]] = []
+    for raw_warning in raw_warnings:
+        if not isinstance(raw_warning, dict):
+            continue
+        warnings.append(
+            {
+                "code": str(raw_warning.get("code") or "FEEDBACK_NEEDS_REVISION"),
+                "message": str(
+                    raw_warning.get("message") or "Feedback needs revision."
+                ),
+                "remediation": list(remediation),
+            }
+        )
+    return warnings
+
+
 def _data_envelope(data: dict[str, Any]) -> dict[str, Any]:
     """Return application facade success envelope."""
     return {
         "ok": True,
         "data": _flatten_phase_payload(data),
-        "warnings": [],
+        "warnings": _warnings_from_feedback_quality(data),
         "errors": [],
     }
 

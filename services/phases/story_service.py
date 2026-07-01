@@ -696,6 +696,30 @@ def story_retryable(classification: str | None) -> bool:
     }
 
 
+def _should_soft_gate_story_feedback(
+    *,
+    feedback_quality: dict[str, Any],
+    force_feedback: bool,
+    has_working_state: bool,
+    latest_attempt: dict[str, Any] | None,
+) -> bool:
+    if not feedback_quality.get("needs_revision") or force_feedback:
+        return False
+    latest_classification = (
+        latest_attempt.get("classification")
+        if isinstance(latest_attempt, dict)
+        else None
+    )
+    if latest_classification == "quality_gate_failed":
+        return True
+    if (
+        isinstance(latest_classification, str)
+        and latest_classification.startswith("nonreusable_")
+    ):
+        return False
+    return has_working_state
+
+
 def _find_attempt_by_id(
     runtime: dict[str, Any],
     attempt_id: str,
@@ -933,6 +957,42 @@ def _zero_invest_score_counts() -> dict[str, int]:
     return dict.fromkeys(_INVEST_SCORES, 0)
 
 
+def _runtime_failure_finding_from_artifact(
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not (
+        artifact.get("error") == "STORY_GENERATION_FAILED"
+        or artifact.get("failure_stage")
+    ):
+        return None
+    message = str(
+        artifact.get("failure_summary")
+        or artifact.get("message")
+        or artifact.get("error")
+        or "Story generation failed."
+    )
+    finding: dict[str, Any] = {
+        "code": "STORY_RUNTIME_FAILURE",
+        "severity": "blocking",
+        "message": message,
+    }
+    failure_stage = artifact.get("failure_stage")
+    if isinstance(failure_stage, str) and failure_stage:
+        finding["failure_stage"] = failure_stage
+    failure_artifact_id = artifact.get("failure_artifact_id")
+    if isinstance(failure_artifact_id, str) and failure_artifact_id:
+        finding["failure_artifact_id"] = failure_artifact_id
+    return finding
+
+
+def _runtime_failure_finding_key(finding: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (
+        finding.get("code"),
+        finding.get("failure_artifact_id"),
+        finding.get("failure_stage"),
+    )
+
+
 def _quality_findings_from_artifact(artifact: dict[str, Any]) -> list[dict[str, Any]]:
     quality = artifact.get("quality")
     findings = (
@@ -940,9 +1000,17 @@ def _quality_findings_from_artifact(artifact: dict[str, Any]) -> list[dict[str, 
         if isinstance(quality, dict)
         else artifact.get("quality_findings")
     )
-    if not isinstance(findings, list):
-        return []
-    return [finding for finding in findings if isinstance(finding, dict)]
+    quality_findings = (
+        [finding for finding in findings if isinstance(finding, dict)]
+        if isinstance(findings, list)
+        else []
+    )
+    runtime_failure_finding = _runtime_failure_finding_from_artifact(artifact)
+    if runtime_failure_finding is not None and _runtime_failure_finding_key(
+        runtime_failure_finding,
+    ) not in {_runtime_failure_finding_key(finding) for finding in quality_findings}:
+        quality_findings.append(runtime_failure_finding)
+    return quality_findings
 
 
 def story_quality_summary(artifact: dict[str, Any] | None) -> dict[str, Any]:
@@ -2116,12 +2184,18 @@ async def generate_story_draft(  # noqa: PLR0915
 
     feedback_quality: dict[str, Any] | None = None
     if has_prior_attempt and normalized_user_input:
+        latest_attempt = _latest_story_attempt(runtime)
         feedback_quality = evaluate_story_feedback_quality(
             normalized_user_input,
             parent_requirement=normalized_parent_requirement,
             force=force_feedback,
         )
-        if feedback_quality["needs_revision"] and not force_feedback:
+        if _should_soft_gate_story_feedback(
+            feedback_quality=feedback_quality,
+            force_feedback=force_feedback,
+            has_working_state=has_working_state,
+            latest_attempt=latest_attempt,
+        ):
             state["fsm_state"] = OrchestratorState.STORY_INTERVIEW.value
             save_state(state)
             return {

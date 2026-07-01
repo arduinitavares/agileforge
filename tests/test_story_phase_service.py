@@ -27,6 +27,7 @@ from services.phases.story_service import (
     save_story_draft,
     save_story_patch,
     story_parent_rank,
+    story_quality_summary,
 )
 from utils.runtime_config import WORKFLOW_RUNNER_IDENTITY, resolve_database_target
 
@@ -370,6 +371,57 @@ def _mark_current_story_draft_scope_extension(
         for attempt in attempts:
             if isinstance(attempt, dict) and attempt.get("attempt_id") == "attempt-1":
                 attempt.update(extension_metadata)
+
+
+def test_story_quality_summary_projects_runtime_failure_as_blocking_finding() -> None:
+    """Runtime failures should not look like empty clarification drafts."""
+    summary = story_quality_summary(
+        {
+            "error": "STORY_GENERATION_FAILED",
+            "message": "Story response is not valid JSON",
+            "failure_stage": "invalid_json",
+            "failure_summary": "Story response is not valid JSON",
+            "failure_artifact_id": "story-failure-1",
+            "is_complete": False,
+        }
+    )
+
+    assert summary["saveable"] is False
+    assert summary["story_count"] == 0
+    assert summary["coverage_status"] == "needs_clarification"
+    assert summary["blocking_findings"] == [
+        {
+            "code": "STORY_RUNTIME_FAILURE",
+            "severity": "blocking",
+            "message": "Story response is not valid JSON",
+            "failure_stage": "invalid_json",
+            "failure_artifact_id": "story-failure-1",
+        }
+    ]
+
+
+def test_story_quality_summary_deduplicates_runtime_failure_finding() -> None:
+    """Runtime failure projection should not duplicate existing quality findings."""
+    runtime_finding = {
+        "code": "STORY_RUNTIME_FAILURE",
+        "severity": "blocking",
+        "message": "Story response is not valid JSON",
+        "failure_stage": "invalid_json",
+        "failure_artifact_id": "story-failure-1",
+    }
+    summary = story_quality_summary(
+        {
+            "error": "STORY_GENERATION_FAILED",
+            "message": "Story response is not valid JSON",
+            "failure_stage": "invalid_json",
+            "failure_summary": "Story response is not valid JSON",
+            "failure_artifact_id": "story-failure-1",
+            "quality_findings": [runtime_finding],
+            "is_complete": False,
+        }
+    )
+
+    assert summary["blocking_findings"] == [runtime_finding]
 
 
 def test_story_save_payload_blocks_complete_all_low_artifact() -> None:
@@ -1473,6 +1525,140 @@ async def test_generate_story_draft_soft_gates_weak_feedback() -> None:
     assert "required_change" in payload["data"]["feedback_quality"]["missing_fields"]
     runtime = state["interview_runtime"]["story"][parent_requirement]
     assert len(runtime["attempt_history"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_story_draft_weak_feedback_after_schema_failure_runs_generation() -> None:  # noqa: E501
+    """Weak feedback after a hard schema failure starts a fresh generation."""
+    parent_requirement = "Requirement A"
+    expected_attempt_count = 2
+    artifact = _story_artifact(parent_requirement, "Recovered draft")
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "nonreusable_schema_failure",
+                            "failure_stage": "invalid_json",
+                            "failure_summary": "Story response is not valid JSON",
+                            "is_reusable": False,
+                            "retryable": False,
+                            "draft_kind": None,
+                            "output_artifact": {
+                                "error": "STORY_GENERATION_FAILED",
+                                "failure_stage": "invalid_json",
+                                "is_complete": False,
+                            },
+                        }
+                    ],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {
+                        "payload": {
+                            "parent_requirement": parent_requirement,
+                            "requirement_context": "Requirement context",
+                            "technical_spec": "{}",
+                            "compiled_authority": "{}",
+                            "global_roadmap_context": "Roadmap context",
+                            "already_generated_milestone_stories": "Existing stories",
+                            "artifact_registry": {},
+                        }
+                    },
+                }
+            }
+        },
+    }
+    calls = {"agent": 0, "feedback": 0}
+
+    async def fake_run_story_agent_from_state(
+        *args: object,
+        **kwargs: object,
+    ) -> JsonDict:
+        del args, kwargs
+        calls["agent"] += 1
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {"parent_requirement": parent_requirement},
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(
+        runtime: JsonDict,
+        text: str,
+        created_at: str,
+        **kwargs: object,
+    ) -> JsonDict:
+        calls["feedback"] += 1
+        feedback_entry = {
+            "feedback_id": "feedback-1",
+            "text": text,
+            "created_at": created_at,
+            "status": "unabsorbed",
+            **kwargs,
+        }
+        feedback_projection = runtime.setdefault(
+            "feedback_projection",
+            {"items": [], "next_feedback_sequence": 0},
+        )
+        cast("list[JsonDict]", feedback_projection.setdefault("items", [])).append(
+            feedback_entry
+        )
+        return feedback_entry
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Try again with this requirement only.",
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-30T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == {"agent": 1, "feedback": 1}
+    assert payload["fsm_state"] == "STORY_REVIEW"
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"]["needs_revision"] is True
+    runtime = cast(
+        "JsonDict",
+        state["interview_runtime"]["story"][parent_requirement],
+    )
+    assert len(runtime["attempt_history"]) == expected_attempt_count
+    feedback_projection = cast("JsonDict", runtime["feedback_projection"])
+    feedback_items = cast("list[JsonDict]", feedback_projection["items"])
+    assert feedback_items[0]["feedback_id"] == "feedback-1"
 
 
 @pytest.mark.asyncio

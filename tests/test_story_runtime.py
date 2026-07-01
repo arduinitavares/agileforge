@@ -90,6 +90,111 @@ def _valid_story_patch_output(parent_requirement: str) -> str:
 
 
 @pytest.mark.asyncio
+async def test_story_runtime_recovers_story_output_from_multi_object_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story generation recovers the writer artifact from noisy JSON output."""
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        return "\n".join(
+            (
+                json.dumps({"diagnostic": "ignore this object"}),
+                _valid_story_output(payload.parent_requirement),
+            )
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input=None,
+    )
+
+    assert result["success"] is True
+    assert result["draft_kind"] == "complete_draft"
+    assert result["output_artifact"]["user_stories"][0]["story_title"] == (
+        "Projection-backed story"
+    )
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_recovers_patch_output_from_multi_object_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Targeted Story runtime recovers the patch artifact from noisy JSON output."""
+    target_slot = 2
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        return "\n".join(
+            (
+                _valid_story_output(payload.parent_requirement),
+                _valid_story_patch_output(payload.parent_requirement),
+            )
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_patch_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input="Refine slot 2 only",
+        target_story_id=None,
+        target_refinement_slot=target_slot,
+    )
+
+    assert result["success"] is True
+    assert result["draft_kind"] == "story_patch"
+    assert result["output_artifact"]["artifact_kind"] == "story_patch"
+    assert result["output_artifact"]["target_refinement_slot"] == target_slot
+    assert result["output_artifact"]["story"]["story_title"] == (
+        "Projection-backed patch story"
+    )
+
+
+@pytest.mark.asyncio
+async def test_story_runtime_skips_under_specified_patch_multi_object_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Targeted Story runtime skips patch-shaped objects missing the slot."""
+    target_slot = 2
+
+    async def fake_invoke(payload: UserStoryWriterInput) -> str:
+        under_specified_patch = {
+            "parent_requirement": payload.parent_requirement,
+            "story": _valid_story("Under-specified patch story"),
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+        return "\n".join(
+            (
+                json.dumps(under_specified_patch),
+                _valid_story_patch_output(payload.parent_requirement),
+            )
+        )
+
+    monkeypatch.setattr(story_runtime, "_invoke_story_patch_agent", fake_invoke)
+
+    result = await story_runtime.run_story_agent_from_state(
+        _base_state(),
+        project_id=1,
+        parent_requirement="Requirement A",
+        user_input="Refine slot 2 only",
+        target_story_id=None,
+        target_refinement_slot=target_slot,
+    )
+
+    assert result["success"] is True
+    assert result["draft_kind"] == "story_patch"
+    assert result["output_artifact"]["target_refinement_slot"] == target_slot
+    assert result["output_artifact"]["story"]["story_title"] == (
+        "Projection-backed patch story"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_story_agent_from_state_target_slot_validates_patch_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
