@@ -87,6 +87,7 @@ Produce a set of **independent, valuable, and releasable user stories** that col
 ## SCOPE ENFORCEMENT & DEDUPLICATION (MANDATORY)
 * **Roadmap Boundaries:** Review the `global_roadmap_context`. You are writing stories ONLY for the `parent_requirement`. Artifacts listed under other milestones are not your responsibility. Do not generate stories for them.
 * **Artifact Deduplication:** Review the `artifact_registry` and `already_generated_milestone_stories`. If an artifact already exists or is owned by another requirement, DO NOT create a new story producing the same artifact. It is better to rely on existing stories than to duplicate them.
+* **Dependency Candidate Refs:** If you include `dependency_candidates`, set `prerequisite_ref` to an exact story title, story id, or `dependency_ref` shown in `already_generated_milestone_stories` (for example, `Requirement Name#1`). Do not use a bare requirement or milestone name as `prerequisite_ref`.
 * **Story Sizing:** INVEST score measures story quality, not size. Use `estimated_effort` for size (XS = <1 hour, S = small task, M = multi-step task, L = complex task, XL = major feature). Do not artificially split simple documentation or setup tasks just to fill a 2-3 day bucket. Let small tasks be small (XS/S). 
 * **Avoid Over-Decomposition:** If multiple documentation outputs or related tasks belong to the same artifact (e.g., report + summary + appendix), combine them into ONE story with multiple acceptance criteria. Do not create one story for every paragraph.
 

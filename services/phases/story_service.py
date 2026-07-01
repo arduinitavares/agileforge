@@ -708,6 +708,31 @@ def _attempt_has_clarifying_questions(attempt: dict[str, Any] | None) -> bool:
     return any(isinstance(question, str) and question.strip() for question in questions)
 
 
+def _attempt_has_dependency_preflight_blocker(
+    attempt: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(attempt, dict):
+        return False
+    artifact = attempt.get("output_artifact")
+    if not isinstance(artifact, dict):
+        return False
+    quality = artifact.get("quality")
+    containers = [artifact, quality] if isinstance(quality, dict) else [artifact]
+    for container in containers:
+        findings = container.get("blocking_findings")
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            code = finding.get("code")
+            if isinstance(code, str) and code.startswith(
+                "STORY_DEPENDENCY_CANDIDATE_"
+            ):
+                return True
+    return False
+
+
 def _should_soft_gate_story_feedback(
     *,
     feedback_quality: dict[str, Any],
@@ -723,7 +748,10 @@ def _should_soft_gate_story_feedback(
         else None
     )
     if latest_classification == "quality_gate_failed":
-        return not _attempt_has_clarifying_questions(latest_attempt)
+        return not (
+            _attempt_has_clarifying_questions(latest_attempt)
+            or _attempt_has_dependency_preflight_blocker(latest_attempt)
+        )
     if (
         isinstance(latest_classification, str)
         and latest_classification.startswith("nonreusable_")
@@ -1092,7 +1120,7 @@ def _quality_finding_from_dependency_preflight(
     finding: dict[str, Any],
 ) -> dict[str, Any]:
     """Return Story quality finding fields from dependency preflight output."""
-    return {
+    quality_finding = {
         "code": str(finding.get("code") or "STORY_DEPENDENCY_CANDIDATE_INVALID"),
         "severity": str(finding.get("severity") or "blocking"),
         "message": str(finding.get("message") or "Story dependency candidate failed."),
@@ -1107,6 +1135,16 @@ def _quality_finding_from_dependency_preflight(
             if isinstance(title, str)
         ],
     }
+    story_id = finding.get("story_id")
+    if isinstance(story_id, int):
+        quality_finding["story_id"] = story_id
+    prerequisite_ref = finding.get("prerequisite_ref")
+    if isinstance(prerequisite_ref, str) and prerequisite_ref.strip():
+        quality_finding["prerequisite_ref"] = prerequisite_ref
+    confidence = finding.get("confidence")
+    if isinstance(confidence, str) and confidence.strip():
+        quality_finding["confidence"] = confidence
+    return quality_finding
 
 
 def _append_quality_findings(

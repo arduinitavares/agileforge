@@ -465,9 +465,19 @@ def _build_global_roadmap_context(roadmap_releases: list[object]) -> str:
     return "\n".join(lines)
 
 
-def _story_summary_line(story: dict[str, object]) -> str:
+def _story_summary_line(
+    story: dict[str, object],
+    *,
+    dependency_ref: str | None = None,
+) -> str:
     title: object = story.get("story_title", "Untitled")
     statement: object = story.get("statement", "")
+    if dependency_ref:
+        return (
+            f"  - {title}: {statement} "
+            f"[dependency_ref: {dependency_ref}; "
+            "use this ref in dependency_candidates.prerequisite_ref]"
+        )
     return f"  - {title}: {statement}"
 
 
@@ -490,11 +500,16 @@ def _build_already_generated_story_context(
 
         added_any_stories = True
         sections.extend(("", f"Requirement: '{req_name}' contains:"))
-        for story in stories:
+        for slot, story in enumerate(stories, start=1):
             story_map: dict[str, object] | None = _as_object_dict(story)
             if story_map is None:
                 continue
-            sections.append(_story_summary_line(story_map))
+            sections.append(
+                _story_summary_line(
+                    story_map,
+                    dependency_ref=f"{req_name}#{slot}",
+                )
+            )
             produced_artifacts = story_map.get("produced_artifacts")
             if not isinstance(produced_artifacts, list):
                 continue

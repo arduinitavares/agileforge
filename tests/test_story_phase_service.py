@@ -1688,6 +1688,156 @@ async def test_generate_story_draft_clarification_answer_runs_generation() -> No
 
 
 @pytest.mark.asyncio
+async def test_generate_story_draft_dependency_blocker_repair_runs_generation() -> None:
+    """Dependency-preflight repair feedback should run instead of soft-gating."""
+    parent_requirement = "First Model Baseline Evaluation and Reporting"
+    artifact = _story_artifact(parent_requirement, "Validation-only draft")
+    current_artifact = _story_artifact(
+        parent_requirement,
+        "Validate Baseline Evaluation Report Completeness",
+        is_complete=False,
+    )
+    current_artifact["clarifying_questions"] = []
+    current_artifact["quality"] = {
+        "coverage_status": "complete",
+        "blocking_findings": [
+            {
+                "code": "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED",
+                "severity": "blocking",
+                "message": "Dependency candidate did not resolve to an active story.",
+                "prerequisite_ref": "First Real Offline Delayed-Outcome Model Attempt",
+                "confidence": "explicit",
+            }
+        ],
+        "quality_findings": [],
+        "remaining_scope": [],
+    }
+    state: JsonDict = {
+        "roadmap_releases": [{"items": [parent_requirement]}],
+        "interview_runtime": {
+            "story": {
+                parent_requirement: {
+                    "phase": "story",
+                    "subject_key": parent_requirement,
+                    "attempt_history": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "classification": "quality_gate_failed",
+                            "is_reusable": False,
+                            "retryable": False,
+                            "draft_kind": "quality_blocked_draft",
+                            "output_artifact": current_artifact,
+                        }
+                    ],
+                    "draft_projection": {},
+                    "feedback_projection": {"items": [], "next_feedback_sequence": 0},
+                    "request_projection": {
+                        "payload": {
+                            "parent_requirement": parent_requirement,
+                            "requirement_context": "Requirement context",
+                            "technical_spec": "{}",
+                            "compiled_authority": "{}",
+                            "global_roadmap_context": "Roadmap context",
+                            "already_generated_milestone_stories": "Existing stories",
+                            "artifact_registry": {},
+                        }
+                    },
+                }
+            }
+        },
+    }
+    calls = {"agent": 0, "feedback": 0}
+
+    async def fake_run_story_agent_from_state(
+        _state: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+    ) -> JsonDict:
+        assert project_id == 7  # noqa: PLR2004
+        assert parent_requirement == "First Model Baseline Evaluation and Reporting"
+        assert user_input is None
+        calls["agent"] += 1
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": artifact,
+            "classification": "reusable_content_result",
+            "draft_kind": "complete_draft",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {"parent_requirement": parent_requirement},
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(
+        runtime: JsonDict,
+        text: str,
+        created_at: str,
+        **kwargs: object,
+    ) -> JsonDict:
+        calls["feedback"] += 1
+        feedback_entry = {
+            "feedback_id": "feedback-1",
+            "text": text,
+            "created_at": created_at,
+            "status": "unabsorbed",
+            **kwargs,
+        }
+        feedback_projection = runtime.setdefault(
+            "feedback_projection",
+            {"items": [], "next_feedback_sequence": 0},
+        )
+        cast("list[JsonDict]", feedback_projection.setdefault("items", [])).append(
+            feedback_entry
+        )
+        return feedback_entry
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input=(
+            "Remove dependency_candidates and put the existing model attempt report "
+            "as an acceptance-criteria precondition instead."
+        ),
+        force_feedback=False,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-07-01T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection", {}
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    assert calls == {"agent": 1, "feedback": 1}
+    assert payload["fsm_state"] == "STORY_REVIEW"
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"]["needs_revision"] is True
+    runtime = cast("JsonDict", state["interview_runtime"]["story"][parent_requirement])
+    assert len(runtime["attempt_history"]) == 2  # noqa: PLR2004
+    assert runtime["attempt_history"][-1]["attempt_id"] == "attempt-2"
+
+
+@pytest.mark.asyncio
 async def test_generate_story_draft_weak_feedback_after_schema_failure_runs_generation() -> None:  # noqa: E501
     """Weak feedback after a hard schema failure starts a fresh generation."""
     parent_requirement = "Requirement A"
@@ -2355,6 +2505,9 @@ async def test_generate_story_draft_blocks_dependency_preflight() -> None:
                     "message": (
                         "Dependency candidate did not resolve to an active story."
                     ),
+                    "story_id": -1,
+                    "prerequisite_ref": "Missing prerequisite",
+                    "confidence": "explicit",
                     "affected_story_indexes": [1],
                     "affected_story_titles": ["Needs missing prerequisite"],
                 }
@@ -2409,9 +2562,17 @@ async def test_generate_story_draft_blocks_dependency_preflight() -> None:
     assert data["quality"]["blocking_findings"][0]["code"] == (
         "STORY_DEPENDENCY_CANDIDATE_UNRESOLVED"
     )
+    assert data["quality"]["blocking_findings"][0]["story_id"] == -1
+    assert data["quality"]["blocking_findings"][0]["prerequisite_ref"] == (
+        "Missing prerequisite"
+    )
+    assert data["quality"]["blocking_findings"][0]["confidence"] == "explicit"
     assert data["current_draft"] is None
     assert attempt["classification"] == "quality_gate_failed"
     assert attempt["is_reusable"] is False
+    assert attempt["output_artifact"]["quality"]["blocking_findings"][0][
+        "prerequisite_ref"
+    ] == "Missing prerequisite"
     assert attempt["output_artifact"]["is_complete"] is False
 
 

@@ -41,6 +41,53 @@ def _valid_story(title: str) -> dict[str, Any]:
     }
 
 
+def test_story_input_context_exposes_dependency_refs() -> None:
+    """Sibling story context shows resolver-safe refs for dependency candidates."""
+    parent_requirement = "First Model Baseline Evaluation and Reporting"
+    sibling_requirement = "First Real Offline Delayed-Outcome Model Attempt"
+    state = _base_state()
+    state["roadmap_releases"] = [
+        {"items": [sibling_requirement, parent_requirement]},
+    ]
+    state["story_outputs"] = {
+        sibling_requirement: {
+            "parent_requirement": sibling_requirement,
+            "user_stories": [
+                _valid_story(
+                    "Execute the First Real Offline Delayed-Outcome Model "
+                    "Training Attempt"
+                ),
+                _valid_story(
+                    "Assess First Model Attempt with Baseline Evaluation and "
+                    "Usability Gating"
+                ),
+            ],
+            "is_complete": True,
+            "clarifying_questions": [],
+        }
+    }
+
+    context = story_runtime.build_story_input_context(
+        state,
+        parent_requirement=parent_requirement,
+    )
+
+    generated = context["already_generated_milestone_stories"]
+    assert (
+        "Requirement: 'First Real Offline Delayed-Outcome Model Attempt'"
+        in generated
+    )
+    assert (
+        "dependency_ref: First Real Offline Delayed-Outcome Model Attempt#1"
+        in generated
+    )
+    assert (
+        "dependency_ref: First Real Offline Delayed-Outcome Model Attempt#2"
+        in generated
+    )
+    assert "use this ref in dependency_candidates.prerequisite_ref" in generated
+
+
 def _low_story(title: str) -> dict[str, Any]:
     story = _valid_story(title)
     story["invest_score"] = "Low"
