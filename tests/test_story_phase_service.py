@@ -3141,6 +3141,52 @@ async def test_save_story_patch_rejects_complete_draft_attempt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_story_patch_rejects_unreconstructable_siblings_before_tool() -> (
+    None
+):
+    """Story patch save should fail before persistence if siblings are missing."""
+    state = _state_with_story_patch_draft()
+    state.pop("story_outputs", None)
+    runtime = state["interview_runtime"]["story"]["Requirement A"]
+    artifact_fingerprint = runtime["draft_projection"]["artifact_fingerprint"]
+    hydrated = SimpleNamespace(state=state, session_id="7")
+    calls = {"save_patch_tool": 0, "save_state": 0}
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        assert session_id == "7"
+        assert project_id == 7  # noqa: PLR2004
+        return hydrated
+
+    def fake_save_story_patch_tool(_save_input: object, _context: object) -> JsonDict:
+        calls["save_patch_tool"] += 1
+        return {"success": True, "saved_count": 1, "updated_story_ids": [29]}
+
+    with pytest.raises(StoryPhaseError, match="cannot reconstruct sibling"):
+        await save_story_patch(
+            project_id=7,
+            parent_requirement="Requirement A",
+            load_state=lambda: _async_value(state),
+            save_state=lambda _updated: calls.__setitem__(
+                "save_state",
+                calls["save_state"] + 1,
+            ),
+            hydrate_context=hydrate_context,
+            build_tool_context=lambda context: context,
+            save_story_patch_tool=fake_save_story_patch_tool,
+            attempt_id="attempt-1",
+            expected_artifact_fingerprint=artifact_fingerprint,
+            expected_state="STORY_REVIEW",
+            idempotency_key="story-patch-7-requirement-a",
+            target_story_id=None,
+            target_refinement_slot=2,
+            resolve_target_refinement_slot=None,
+        )
+
+    assert calls == {"save_patch_tool": 0, "save_state": 0}
+    assert state["fsm_state"] == "STORY_REVIEW"
+
+
+@pytest.mark.asyncio
 async def test_save_story_draft_rejects_story_patch_current_draft() -> None:
     """Full-list Story save must not save a targeted patch draft."""
     state = _state_with_story_patch_draft()

@@ -2821,6 +2821,13 @@ async def save_story_patch(
         target_refinement_slot=target_refinement_slot,
     )
     target_story = cast("dict[str, Any]", patch_artifact["story"])
+    merged_output = _story_patch_merged_output(
+        state,
+        parent_requirement=normalized_parent_requirement,
+        patch_artifact=patch_artifact,
+        patch_story=target_story,
+        target_refinement_slot=target_refinement_slot,
+    )
 
     context = await hydrate_context(str(project_id), project_id)
     result = save_story_patch_tool(
@@ -2859,13 +2866,6 @@ async def save_story_patch(
         parent_requirement=normalized_parent_requirement,
     )
     context.state["fsm_state"] = OrchestratorState.STORY_PERSISTENCE.value
-    merged_output = _story_patch_merged_output(
-        context.state,
-        parent_requirement=normalized_parent_requirement,
-        patch_artifact=patch_artifact,
-        patch_story=target_story,
-        target_refinement_slot=target_refinement_slot,
-    )
     sync_story_legacy_mirrors(
         context.state,
         parent_requirement=normalized_parent_requirement,
