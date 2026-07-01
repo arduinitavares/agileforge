@@ -4932,7 +4932,7 @@ def test_workflow_next_routes_saveable_story_interview_to_guarded_save() -> None
             "agileforge story generate --project-id 7 "
             '--parent-requirement "Canonical Process Event Record Definition '
             'and Validation" '
-            "--input <feedback>"
+            "--input-file <feedback_file>"
         ),
     ]
     assert result["data"]["blocked_commands"] == []
@@ -5138,7 +5138,7 @@ def test_workflow_next_routes_non_saveable_story_attempt_to_refinement() -> None
         (
             "agileforge story generate --project-id 7 "
             '--parent-requirement "State Window Feature Generation" '
-            "--input <feedback>"
+            "--input-file <feedback_file>"
         ),
     ]
     assert not any(
@@ -5196,7 +5196,7 @@ def test_application_workflow_next_routes_story_review_to_history_save_and_refin
         (
             "agileforge story generate --project-id 7 "
             "--parent-requirement <parent_requirement> "
-            "--input <feedback>"
+            "--input-file <feedback_file>"
         ),
     ]
     assert result["data"]["blocked_commands"] == []

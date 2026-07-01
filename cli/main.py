@@ -93,7 +93,11 @@ Examples:
     """--expected-artifact-fingerprint <fingerprint> --expected-state ROADMAP_REVIEW """
     """--idempotency-key save-roadmap-001
   agileforge story pending --project-id 1
-  agileforge story generate --project-id 1 --parent-requirement 'Roadmap requirement'
+  agileforge story generate --project-id 1 --parent-requirement 'Requirement'
+  agileforge story generate --project-id 1 --parent-requirement 'Requirement' """
+    """--input-file story-feedback.txt
+  agileforge story generate --project-id 1 --parent-requirement 'Requirement' """
+    """--feedback-json-file story-feedback.json
   agileforge story save --project-id 1 --parent-requirement 'Roadmap requirement' """
     """--attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> """
     """--expected-state STORY_REVIEW --idempotency-key save-story-001
@@ -120,6 +124,39 @@ Examples:
   agileforge context pack --project-id 1 --phase sprint-planning
 """
 )
+_STORY_FEEDBACK_JSON_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "target",
+        "issue",
+        "evidence",
+        "required_change",
+        "acceptance_criteria",
+        "scope_limit",
+        "priority",
+    }
+)
+_STORY_FEEDBACK_JSON_REQUIRED_TEXT_FIELDS: tuple[str, ...] = (
+    "target",
+    "required_change",
+    "scope_limit",
+)
+_STORY_FEEDBACK_JSON_TEXT_FIELDS: tuple[str, ...] = (
+    "target",
+    "issue",
+    "evidence",
+    "required_change",
+    "scope_limit",
+    "priority",
+)
+_STORY_FEEDBACK_JSON_LABELS: Mapping[str, str] = {
+    "target": "Target",
+    "issue": "Issue",
+    "evidence": "Evidence",
+    "required_change": "Required change",
+    "acceptance_criteria": "Acceptance criteria",
+    "scope_limit": "Scope limit",
+    "priority": "Priority",
+}
 type JsonObject = dict[str, object]
 type JsonList = list[object]
 CommandResult = tuple[str, JsonObject]
@@ -2563,7 +2600,17 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     story_generate.add_argument("--project-id", type=int, required=True)
     story_generate.add_argument("--parent-requirement", required=True)
-    story_generate.add_argument("--input", dest="user_input")
+    story_generate_input = story_generate.add_mutually_exclusive_group()
+    story_generate_input.add_argument("--input", dest="user_input")
+    story_generate_input.add_argument("--input-file", dest="user_input_file")
+    story_generate_input.add_argument(
+        "--feedback-json-file",
+        dest="feedback_json_file",
+        help=(
+            "Read strict structured Story feedback JSON and render canonical "
+            "feedback."
+        ),
+    )
     story_generate.add_argument(
         "--force-feedback",
         action="store_true",
@@ -3794,6 +3841,197 @@ def _invalid_command(
     )
 
 
+def _read_text_argument_file(
+    command: str,
+    *,
+    flag: str,
+    file_path: object,
+) -> tuple[str | None, CommandResult | None]:
+    """Return UTF-8 file contents or a structured invalid-command result."""
+    input_path = Path(str(file_path)).expanduser()
+    try:
+        return input_path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeError) as exc:
+        detail_key = flag.removeprefix("--").replace("-", "_")
+        return None, _invalid_command(
+            command,
+            f"Could not read {flag}: {exc}",
+            details={detail_key: str(input_path)},
+            remediation=["Pass a readable UTF-8 text file."],
+        )
+
+
+def _story_feedback_string_value(
+    data: Mapping[str, object],
+    field: str,
+) -> tuple[str | None, str | None]:
+    """Return a non-blank Story feedback string field or an error message."""
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        return None, f"Field '{field}' must be a non-empty string."
+    return value.strip(), None
+
+
+def _story_feedback_missing_fields(data: Mapping[str, object]) -> list[str]:
+    """Return missing required Story feedback JSON fields."""
+    missing = [
+        field
+        for field in _STORY_FEEDBACK_JSON_REQUIRED_TEXT_FIELDS
+        if field not in data
+    ]
+    if "acceptance_criteria" not in data:
+        missing.append("acceptance_criteria")
+    if "issue" not in data and "evidence" not in data:
+        missing.append("issue_or_evidence")
+    return missing
+
+
+def _story_feedback_json_mapping(
+    data: object,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Return Story feedback JSON as a mapping or an error message."""
+    if not isinstance(data, dict):
+        return None, "Feedback JSON must be an object."
+    return {str(key): value for key, value in data.items()}, None
+
+
+def _story_feedback_contract_error(data: Mapping[str, object]) -> str | None:
+    """Return a Story feedback JSON contract error, if any."""
+    unknown_fields = sorted(data.keys() - _STORY_FEEDBACK_JSON_ALLOWED_FIELDS)
+    if unknown_fields:
+        return f"Unknown feedback fields: {', '.join(unknown_fields)}."
+
+    missing_fields = _story_feedback_missing_fields(data)
+    if missing_fields:
+        return f"Missing required feedback fields: {', '.join(missing_fields)}."
+
+    for field in _STORY_FEEDBACK_JSON_TEXT_FIELDS:
+        if field not in data:
+            continue
+        _, error = _story_feedback_string_value(data, field)
+        if error is not None:
+            return error
+    return None
+
+
+def _story_feedback_criteria_lines(
+    data: Mapping[str, object],
+) -> tuple[list[str] | None, str | None]:
+    """Return canonical acceptance criteria lines or an error message."""
+    criteria = data.get("acceptance_criteria")
+    if not isinstance(criteria, list) or not criteria:
+        return (
+            None,
+            "Field 'acceptance_criteria' must be a non-empty list of strings.",
+        )
+    criteria_lines: list[str] = []
+    for index, item in enumerate(criteria, start=1):
+        if not isinstance(item, str) or not item.strip():
+            return (
+                None,
+                "Field 'acceptance_criteria' must be a non-empty list "
+                f"of strings; item {index} is invalid.",
+            )
+        criteria_lines.append(item.strip())
+    return criteria_lines, None
+
+
+def _story_feedback_section(
+    data: Mapping[str, object],
+    field: str,
+) -> str | None:
+    """Return one canonical labeled feedback section."""
+    if field not in data:
+        return None
+    value, _error = _story_feedback_string_value(data, field)
+    if value is None:
+        return None
+    label = _STORY_FEEDBACK_JSON_LABELS[field]
+    return f"{label}:\n{value}"
+
+
+def _render_story_feedback_json(data: object) -> tuple[str | None, str | None]:
+    """Render strict Story feedback JSON as canonical labeled feedback text."""
+    feedback_data, error = _story_feedback_json_mapping(data)
+    if error is not None or feedback_data is None:
+        return None, error
+
+    error = _story_feedback_contract_error(feedback_data)
+    if error is not None:
+        return None, error
+
+    criteria_lines, error = _story_feedback_criteria_lines(feedback_data)
+    if error is not None or criteria_lines is None:
+        return None, error
+
+    sections: list[str] = []
+    for field in (
+        "target",
+        "issue",
+        "evidence",
+        "required_change",
+    ):
+        section = _story_feedback_section(feedback_data, field)
+        if section is not None:
+            sections.append(section)
+
+    criteria_label = _STORY_FEEDBACK_JSON_LABELS["acceptance_criteria"]
+    sections.append(
+        criteria_label
+        + ":\n"
+        + "\n".join(
+            line if line.startswith("- ") else f"- {line}"
+            for line in criteria_lines
+        )
+    )
+
+    for field in ("scope_limit", "priority"):
+        section = _story_feedback_section(feedback_data, field)
+        if section is not None:
+            sections.append(section)
+
+    return "\n\n".join(sections) + "\n", None
+
+
+def _read_story_feedback_json_file(
+    command: str,
+    file_path: object,
+) -> tuple[str | None, CommandResult | None]:
+    """Read and render strict structured Story feedback JSON."""
+    raw_text, error = _read_text_argument_file(
+        command,
+        flag="--feedback-json-file",
+        file_path=file_path,
+    )
+    if error is not None or raw_text is None:
+        return None, error
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        return None, _invalid_command(
+            command,
+            f"Could not parse --feedback-json-file: {exc}",
+            details={"feedback_json_file": str(Path(str(file_path)).expanduser())},
+            remediation=["Pass a valid JSON object with Story feedback fields."],
+        )
+
+    rendered_feedback, contract_error = _render_story_feedback_json(payload)
+    if contract_error is not None or rendered_feedback is None:
+        return None, _invalid_command(
+            command,
+            contract_error or "Invalid Story feedback JSON.",
+            details={"feedback_json_file": str(Path(str(file_path)).expanduser())},
+            remediation=[
+                (
+                    "Pass target, required_change, non-empty acceptance_criteria, "
+                    "scope_limit, and issue or evidence."
+                )
+            ],
+        )
+    return rendered_feedback, None
+
+
 def _authority_review_required(command: str) -> CommandResult:
     """Return a missing-review-token result for non-interactive decisions."""
     return _mutation_arg_error(
@@ -4754,10 +4992,28 @@ def _story_generate(
     application: _Application,
 ) -> CommandResult:
     """Route Story generation to the application facade."""
-    return "agileforge story generate", application.story_generate(
+    command = "agileforge story generate"
+    user_input = args.user_input
+    if args.user_input_file:
+        user_input, error = _read_text_argument_file(
+            command,
+            flag="--input-file",
+            file_path=args.user_input_file,
+        )
+        if error is not None:
+            return error
+    elif args.feedback_json_file:
+        user_input, error = _read_story_feedback_json_file(
+            command,
+            args.feedback_json_file,
+        )
+        if error is not None:
+            return error
+
+    return command, application.story_generate(
         project_id=args.project_id,
         parent_requirement=args.parent_requirement,
-        user_input=args.user_input,
+        user_input=user_input,
         force_feedback=bool(args.force_feedback),
         target_story_id=args.target_story_id,
         target_refinement_slot=args.target_refinement_slot,

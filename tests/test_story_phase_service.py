@@ -2071,6 +2071,111 @@ async def test_generate_story_draft_force_feedback_runs_generation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_story_patch_force_feedback_runs_targeted_generation() -> None:
+    """Forced feedback should run generation for an existing targeted patch draft."""
+    parent_requirement = "Requirement A"
+    target_slot = 2
+    state = _state_with_story_patch_draft(parent_requirement)
+    captured_feedback: dict[str, Any] = {}
+    captured_text: dict[str, str] = {}
+
+    async def fake_run_story_agent_from_state(  # noqa: PLR0913
+        state_arg: JsonDict,
+        *,
+        project_id: int,
+        parent_requirement: str,
+        user_input: str | None,
+        target_story_id: int | None = None,
+        target_refinement_slot: int | None = None,
+    ) -> JsonDict:
+        del state_arg, project_id
+        assert parent_requirement == "Requirement A"
+        assert user_input is None
+        assert target_story_id is None
+        assert target_refinement_slot == target_slot
+        return {
+            "success": True,
+            "input_context": {"requirement_context": "assembled"},
+            "output_artifact": _story_patch_artifact(
+                parent_requirement,
+                "Forced target refinement",
+                target_refinement_slot=target_slot,
+            ),
+            "classification": "reusable_content_result",
+            "draft_kind": "story_patch",
+            "is_reusable": True,
+            "is_complete": True,
+            "request_payload": {
+                "parent_requirement": parent_requirement,
+                "target_refinement_slot": target_slot,
+            },
+            "error": None,
+        }
+
+    def fake_append_feedback_entry(
+        runtime: JsonDict,
+        text: str,
+        created_at: str,
+        **kwargs: object,
+    ) -> JsonDict:
+        del created_at
+        captured_text["value"] = text
+        captured_feedback.update(kwargs)
+        item = {
+            "feedback_id": "feedback-1",
+            "text": text,
+            "status": "unabsorbed",
+            "extension_metadata": None,
+        }
+        runtime["feedback_projection"]["items"].append(item)
+        return item
+
+    payload = await generate_story_draft(
+        project_id=7,
+        parent_requirement=parent_requirement,
+        user_input="Try again.",
+        force_feedback=True,
+        target_story_id=None,
+        target_refinement_slot=target_slot,
+        load_state=lambda: _async_value(state),
+        save_state=lambda _updated: None,
+        now_iso=lambda: "2026-06-09T00:00:00Z",
+        run_story_agent_from_state=fake_run_story_agent_from_state,
+        append_feedback_entry=fake_append_feedback_entry,
+        set_request_projection=lambda runtime, **kwargs: (
+            runtime.setdefault("request_projection", {}).update(kwargs)
+            or runtime["request_projection"]
+        ),
+        append_attempt=lambda runtime, attempt: runtime.setdefault(
+            "attempt_history", []
+        ).append(attempt),
+        promote_reusable_draft=lambda runtime, **kwargs: runtime.setdefault(
+            "draft_projection",
+            {},
+        ).update(
+            {
+                "latest_reusable_attempt_id": kwargs["attempt_id"],
+                "kind": kwargs["kind"],
+                "is_complete": kwargs["is_complete"],
+                "updated_at": kwargs["updated_at"],
+            }
+        ),
+        mark_feedback_absorbed=lambda _runtime, **_kwargs: [],
+        failure_meta=lambda *_args, **_kwargs: {},
+    )
+
+    runtime = _story_runtime_for(state, parent_requirement)
+    attempt = runtime["attempt_history"][-1]
+    feedback_quality = cast("JsonDict", captured_feedback["feedback_quality"])
+    assert payload["data"]["generation_ran"] is True
+    assert payload["data"]["feedback_quality"]["forced"] is True
+    assert captured_text["value"] == "Try again."
+    assert feedback_quality["forced"] is True
+    assert attempt["draft_kind"] == "story_patch"
+    assert attempt["target_refinement_slot"] == target_slot
+
+
+@pytest.mark.asyncio
 async def test_generate_story_draft_returns_attempt_guards() -> None:
     """Verify generate story draft returns attempt guards."""
     parent_requirement = "Requirement A"

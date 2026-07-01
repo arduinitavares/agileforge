@@ -740,6 +740,8 @@ _PHASE_2D_COMMANDS: tuple[CommandMetadata, ...] = (
         input_required=("project_id", "parent_requirement"),
         input_optional=(
             "input",
+            "input_file",
+            "feedback_json_file",
             "force_feedback",
             "target_story_id",
             "target_refinement_slot",

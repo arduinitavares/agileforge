@@ -4884,7 +4884,7 @@ def _story_command_candidates(
             (
                 f"agileforge story generate --project-id {project_id} "
                 "--parent-requirement <parent_requirement> "
-                "--input <feedback>"
+                "--input-file <feedback_file>"
             ),
         ),
     ]
@@ -4961,7 +4961,7 @@ def _story_review_commands_for_candidate(
             (
                 f"agileforge story generate --project-id {project_id} "
                 f"{parent_flag} "
-                "--input <feedback>"
+                "--input-file <feedback_file>"
             ),
         ),
     ]
@@ -4984,7 +4984,7 @@ def _story_refinement_commands_for_requirement(
             (
                 f"agileforge story generate --project-id {project_id} "
                 f"{parent_flag} "
-                "--input <feedback>"
+                "--input-file <feedback_file>"
             ),
         ),
     ]

@@ -19,6 +19,7 @@ from services.agent_workbench.application import AgentWorkbenchApplication
 from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
 from services.specs.profile_content import normalize_spec_content_for_registry
+from services.story_feedback_quality import evaluate_story_feedback_quality
 
 type JsonObject = dict[str, Any]
 PROJECT_ID = 7
@@ -5076,6 +5077,297 @@ def test_cli_routes_requirement_reconcile(capsys: pytest.CaptureFixture[str]) ->
             },
         )
     ]
+
+
+def test_cli_routes_story_generate_input_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story generate should accept multiline feedback from a file."""
+    app = _FakeApplication()
+    input_file = tmp_path / "story-feedback.txt"
+    input_file.write_text(
+        "Target:\n"
+        "Gold Snapshot Publishing / story 34 / attempt-1\n\n"
+        "Issue:\n"
+        "The draft is complete but changes the wrong behavior.\n\n"
+        "Required change:\n"
+        "Refine only the validation story.\n\n"
+        "Acceptance criteria:\n"
+        "- Verify that snapshot output is validated.\n\n"
+        "Scope limit:\n"
+        "Do not add runtime publishing behavior.\n",
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            "--target-story-id",
+            "34",
+            "--input-file",
+            str(input_file),
+            "--force-feedback",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge story generate"
+    assert app.calls == [
+        (
+            "story_generate",
+            {
+                "project_id": PROJECT_ID,
+                "parent_requirement": "Gold Snapshot Publishing",
+                "user_input": input_file.read_text(encoding="utf-8"),
+                "force_feedback": True,
+                "target_story_id": 34,
+                "target_refinement_slot": None,
+            },
+        )
+    ]
+
+
+def test_cli_routes_story_generate_feedback_json_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Story generate should render structured feedback JSON to canonical text."""
+    app = _FakeApplication()
+    target_story_id = 34
+    input_file = tmp_path / "story-feedback.json"
+    input_file.write_text(
+        json.dumps(
+            {
+                "target": "Gold Snapshot Publishing / story 34 / attempt-1",
+                "issue": "The draft is complete but changes the wrong behavior.",
+                "required_change": "Refine only the validation story.",
+                "acceptance_criteria": [
+                    "Verify that snapshot output is validated.",
+                    "Verify that runtime publishing behavior is not changed.",
+                ],
+                "scope_limit": "Do not add runtime publishing behavior.",
+                "priority": "Must fix.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            "--target-story-id",
+            str(target_story_id),
+            "--feedback-json-file",
+            str(input_file),
+            "--force-feedback",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == "agileforge story generate"
+    assert app.calls[0][0] == "story_generate"
+    call = app.calls[0][1]
+    assert call["force_feedback"] is True
+    assert call["target_story_id"] == target_story_id
+    feedback_text = call["user_input"]
+    assert isinstance(feedback_text, str)
+    quality = evaluate_story_feedback_quality(
+        feedback_text,
+        parent_requirement="Gold Snapshot Publishing",
+        force=True,
+    )
+    assert quality["missing_fields"] == []
+    assert quality["needs_revision"] is False
+    assert quality["forced"] is True
+    assert "Target:\nGold Snapshot Publishing / story 34 / attempt-1" in feedback_text
+    assert "- Verify that snapshot output is validated." in feedback_text
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--input-file", "--feedback-json-file"],
+)
+def test_cli_rejects_missing_story_generate_feedback_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    """Story generate file inputs should fail cleanly when the file is absent."""
+    app = _FakeApplication()
+    missing_file = tmp_path / "missing-feedback.txt"
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            flag,
+            str(missing_file),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _mapping(payload["errors"][0])
+    assert error["code"] == ErrorCode.INVALID_COMMAND.value
+    assert f"Could not read {flag}" in str(error["message"])
+    assert app.calls == []
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--input-file", "--feedback-json-file"],
+)
+def test_cli_rejects_non_utf8_story_generate_feedback_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    """Story generate file inputs should require UTF-8 text."""
+    app = _FakeApplication()
+    input_file = tmp_path / "story-feedback.bin"
+    input_file.write_bytes(b"\xff\xfe\x00")
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            flag,
+            str(input_file),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _mapping(payload["errors"][0])
+    assert error["code"] == ErrorCode.INVALID_COMMAND.value
+    assert f"Could not read {flag}" in str(error["message"])
+    assert app.calls == []
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--input", "feedback", "--input-file", "feedback.txt"],
+        ["--input", "feedback", "--feedback-json-file", "feedback.json"],
+        ["--input-file", "feedback.txt", "--feedback-json-file", "feedback.json"],
+    ],
+)
+def test_cli_rejects_multiple_story_generate_input_sources(
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+) -> None:
+    """Story generate should accept only one feedback input source."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            *extra_args,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _mapping(payload["errors"][0])
+    assert error["code"] == ErrorCode.INVALID_COMMAND.value
+    assert "not allowed with argument" in str(error["message"])
+    assert app.calls == []
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_message"),
+    [
+        ("not json", "Could not parse --feedback-json-file"),
+        (json.dumps({"target": "Story 34"}), "Missing required feedback fields"),
+        (
+            json.dumps(
+                {
+                    "target": "Story 34",
+                    "issue": "Wrong scope.",
+                    "required_change": "Refine validation only.",
+                    "acceptance_criteria": [],
+                    "scope_limit": "No publishing changes.",
+                }
+            ),
+            "Field 'acceptance_criteria' must be a non-empty list",
+        ),
+        (
+            json.dumps(
+                {
+                    "target": "Story 34",
+                    "issue": "Wrong scope.",
+                    "required_change": "Refine validation only.",
+                    "acceptance_criteria": ["Verify validation."],
+                    "scope_limit": "No publishing changes.",
+                    "extra": "typo",
+                }
+            ),
+            "Unknown feedback fields",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_story_generate_feedback_json_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    content: str,
+    expected_message: str,
+) -> None:
+    """Story feedback JSON should fail closed on malformed contracts."""
+    app = _FakeApplication()
+    input_file = tmp_path / "story-feedback.json"
+    input_file.write_text(content, encoding="utf-8")
+
+    rc = main(
+        [
+            "story",
+            "generate",
+            "--project-id",
+            str(PROJECT_ID),
+            "--parent-requirement",
+            "Gold Snapshot Publishing",
+            "--feedback-json-file",
+            str(input_file),
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    error = _mapping(payload["errors"][0])
+    assert error["code"] == ErrorCode.INVALID_COMMAND.value
+    assert expected_message in str(error["message"])
+    assert app.calls == []
 
 
 @pytest.mark.parametrize(

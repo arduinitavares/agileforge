@@ -882,6 +882,8 @@ def test_story_phase_commands_are_registered_and_available() -> None:  # noqa: P
     assert generate["input"]["required"] == ["project_id", "parent_requirement"]
     assert generate["input"]["optional"] == [
         "input",
+        "input_file",
+        "feedback_json_file",
         "force_feedback",
         "target_story_id",
         "target_refinement_slot",

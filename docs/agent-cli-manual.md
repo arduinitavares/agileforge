@@ -1827,6 +1827,8 @@ agileforge story show --story-id 42
 agileforge story pending --project-id 1
 agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement"
 agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement" --input "answers or review feedback"
+agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement" --input-file story-feedback.txt
+agileforge story generate --project-id 1 --parent-requirement "Roadmap requirement" --feedback-json-file story-feedback.json --force-feedback
 agileforge story retry --project-id 1 --parent-requirement "Roadmap requirement"
 agileforge story history --project-id 1 --parent-requirement "Roadmap requirement"
 agileforge story save --project-id 1 --parent-requirement "Roadmap requirement" --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state STORY_REVIEW --idempotency-key save-story-001
@@ -1839,6 +1841,9 @@ agileforge story dependencies propose --project-id 1 --expected-state SPRINT_SET
 agileforge story dependencies propose --project-id 1 --expected-state SPRINT_VIEW --manual-edge 85:67 --manual-edge 85:68 --idempotency-key dep-propose-manual-001
 agileforge story dependencies apply --project-id 1 --attempt-id <attempt_id> --expected-artifact-fingerprint <fingerprint> --expected-state SPRINT_SETUP --idempotency-key dep-apply-001
 ```
+
+Use `--input-file` or `--feedback-json-file` for multiline Story feedback.
+Pass `--force-feedback` as its own CLI flag; do not put it inside feedback text.
 
 `story show`, `story pending`, `story history`, and `story dependencies inspect`
 are read-only. `story generate`, `story retry`, `story save`, `story complete`,
