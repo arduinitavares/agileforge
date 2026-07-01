@@ -696,6 +696,18 @@ def story_retryable(classification: str | None) -> bool:
     }
 
 
+def _attempt_has_clarifying_questions(attempt: dict[str, Any] | None) -> bool:
+    if not isinstance(attempt, dict):
+        return False
+    artifact = attempt.get("output_artifact")
+    if not isinstance(artifact, dict):
+        return False
+    questions = artifact.get("clarifying_questions")
+    if not isinstance(questions, list):
+        return False
+    return any(isinstance(question, str) and question.strip() for question in questions)
+
+
 def _should_soft_gate_story_feedback(
     *,
     feedback_quality: dict[str, Any],
@@ -711,7 +723,7 @@ def _should_soft_gate_story_feedback(
         else None
     )
     if latest_classification == "quality_gate_failed":
-        return True
+        return not _attempt_has_clarifying_questions(latest_attempt)
     if (
         isinstance(latest_classification, str)
         and latest_classification.startswith("nonreusable_")
