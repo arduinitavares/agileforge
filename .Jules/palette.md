@@ -1,0 +1,3 @@
+## 2024-05-15 - Improve Form Validation & A11y in Modals
+**Learning:** Manual JS alert() validation on form submission creates a poor UX because it interrupts flow without providing contextual guidance, and raw `div` structures for modals miss out on native HTML5 validations, enter-key submission, and proper focus flow.
+**Action:** Always wrap modal inputs inside a `<form onsubmit="event.preventDefault(); ...">` block. Use native HTML attributes like `required`, `pattern=".*\S+.*"`, and descriptive `title` tooltips for form constraints instead of JS alerts. Make sure buttons correctly use `type="submit"` and `type="button"` to ensure predictable behavior.
