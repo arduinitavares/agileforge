@@ -194,6 +194,42 @@ class _FakeApplication:
             "errors": [],
         }
 
+    def scope_extension_abandon_setup(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Return a scope extension abandon-setup payload."""
+        self.calls.append(
+            (
+                "scope_extension_abandon_setup",
+                {
+                    "project_id": project_id,
+                    "spec_version_id": spec_version_id,
+                    "expected_spec_hash": expected_spec_hash,
+                    "expected_state": expected_state,
+                    "expected_setup_status": expected_setup_status,
+                    "idempotency_key": idempotency_key,
+                    "changed_by": changed_by,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "data": {
+                "project_id": project_id,
+                "status": "project_scope_extension_setup_abandoned",
+            },
+            "warnings": [],
+            "errors": [],
+        }
+
     def discovery_challenge_record(
         self,
         *,
@@ -3922,6 +3958,95 @@ def test_scope_extension_start_cli_rejects_blank_idempotency_key(
     assert rc == INVALID_COMMAND_EXIT_CODE
     assert payload["ok"] is False
     assert _mapping(payload["meta"])["command"] == "agileforge scope extension start"
+    assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
+    assert app.calls == []
+
+
+def test_scope_extension_abandon_setup_cli_routes_guards_to_application(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scope extension abandon setup routes guarded recovery inputs."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "scope",
+            "extension",
+            "abandon-setup",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            "6",
+            "--expected-spec-hash",
+            "sha256:" + "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--idempotency-key",
+            "abandon-scope-extension-setup-001",
+            "--changed-by",
+            "test-agent",
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == 0
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge scope extension abandon-setup"
+    )
+    assert app.calls == [
+        (
+            "scope_extension_abandon_setup",
+            {
+                "project_id": PROJECT_ID,
+                "spec_version_id": 6,
+                "expected_spec_hash": "sha256:" + "a" * 64,
+                "expected_state": "SETUP_REQUIRED",
+                "expected_setup_status": "authority_compile_required",
+                "idempotency_key": "abandon-scope-extension-setup-001",
+                "changed_by": "test-agent",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+def test_scope_extension_abandon_setup_cli_rejects_blank_idempotency_key(
+    capsys: pytest.CaptureFixture[str],
+    idempotency_key: str,
+) -> None:
+    """Scope extension abandon setup requires a non-blank idempotency key."""
+    app = _FakeApplication()
+
+    rc = main(
+        [
+            "scope",
+            "extension",
+            "abandon-setup",
+            "--project-id",
+            str(PROJECT_ID),
+            "--spec-version-id",
+            "6",
+            "--expected-spec-hash",
+            "sha256:" + "a" * 64,
+            "--expected-state",
+            "SETUP_REQUIRED",
+            "--expected-setup-status",
+            "authority_compile_required",
+            "--idempotency-key",
+            idempotency_key,
+        ],
+        application=app,
+    )
+
+    payload = _stdout_payload(capsys)
+    assert rc == INVALID_COMMAND_EXIT_CODE
+    assert payload["ok"] is False
+    assert _mapping(payload["meta"])["command"] == (
+        "agileforge scope extension abandon-setup"
+    )
     assert _first_mapping(payload["errors"])["code"] == ErrorCode.INVALID_COMMAND.value
     assert app.calls == []
 

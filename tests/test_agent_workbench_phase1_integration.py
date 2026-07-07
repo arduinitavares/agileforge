@@ -35,6 +35,7 @@ from services.agent_workbench.post_sprint_triage import build_triage_payload
 from services.agent_workbench.read_projection import ReadProjectionService
 from services.agent_workbench.scope_discovery import ScopeDiscoveryRunner
 from services.agent_workbench.scope_extension import (
+    ScopeExtensionAbandonSetupRequest,
     ScopeExtensionPreconditions,
     ScopeExtensionRunner,
     ScopeExtensionStartRequest,
@@ -283,6 +284,13 @@ class _ScopeExtensionIntegrationRunner:
     def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
         """Delegate start to the real scope-extension runner."""
         return self._runner().start(request)
+
+    def abandon_setup(
+        self,
+        request: ScopeExtensionAbandonSetupRequest,
+    ) -> dict[str, Any]:
+        """Delegate setup abandonment to the real scope-extension runner."""
+        return self._runner().abandon_setup(request)
 
     def _runner(self) -> ScopeExtensionRunner:
         """Build a real runner over the shared test session."""

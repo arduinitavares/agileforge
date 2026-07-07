@@ -101,6 +101,7 @@ EXPECTED_PHASE_2E_COMMAND_NAMES = {
 EXPECTED_SCOPE_EXTENSION_COMMAND_NAMES = {
     "agileforge scope extension validate",
     "agileforge scope extension start",
+    "agileforge scope extension abandon-setup",
 }
 
 EXPECTED_SCOPE_DISCOVERY_COMMAND_NAMES = {
@@ -1305,6 +1306,9 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
 
     validate = command_schema_payload("agileforge scope extension validate")
     start = command_schema_payload("agileforge scope extension start")
+    abandon_setup = command_schema_payload(
+        "agileforge scope extension abandon-setup"
+    )
 
     assert validate["mutates"] is False
     assert (
@@ -1357,6 +1361,39 @@ def test_scope_extension_commands_publish_expected_cli_schema() -> None:
         ErrorCode.MUTATION_RECOVERY_REQUIRED.value,
         ErrorCode.WORKFLOW_SESSION_FAILED.value,
     }.issubset(set(start["errors"]))
+
+    assert abandon_setup["mutates"] is True
+    assert capabilities["agileforge scope extension abandon-setup"]["phase"] == (
+        "scope_extension"
+    )
+    assert abandon_setup["idempotency_required"] is True
+    assert abandon_setup["idempotency_policy"]["non_dry_run"] == "required"
+    assert {
+        "expected_state",
+        "expected_setup_status",
+        "expected_spec_hash",
+        "spec_version_id",
+    }.issubset(set(abandon_setup["guard_policy"]))
+    assert abandon_setup["input"]["required"] == [
+        "project_id",
+        "spec_version_id",
+        "expected_spec_hash",
+        "expected_state",
+        "expected_setup_status",
+        "idempotency_key",
+    ]
+    assert abandon_setup["input"]["optional"] == ["changed_by"]
+    assert {
+        ErrorCode.PROJECT_NOT_FOUND.value,
+        ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+        ErrorCode.STALE_STATE.value,
+        ErrorCode.STALE_SETUP_STATUS.value,
+        ErrorCode.STALE_SPEC_HASH.value,
+        ErrorCode.STALE_SPEC_VERSION.value,
+        ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+        ErrorCode.MUTATION_FAILED.value,
+        ErrorCode.WORKFLOW_SESSION_FAILED.value,
+    }.issubset(set(abandon_setup["errors"]))
 
 
 def test_scope_discovery_commands_publish_expected_cli_schema() -> None:

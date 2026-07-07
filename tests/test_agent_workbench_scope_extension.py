@@ -6,6 +6,7 @@ import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from sqlmodel import select
 
 from models.agent_workbench import (
@@ -26,8 +27,10 @@ from services.agent_workbench.scope_extension import (
     ERR_SCOPE_EXTENSION_UNRESOLVED_WORK,
     SCOPE_EXTENSION_AVAILABLE,
     SCOPE_EXTENSION_BLOCKED,
+    SCOPE_EXTENSION_SETUP_ABANDONED,
     SCOPE_EXTENSION_STARTED,
     SCOPE_EXTENSION_VALID,
+    ScopeExtensionAbandonSetupRequest,
     ScopeExtensionIssue,
     ScopeExtensionRunner,
     ScopeExtensionStartRequest,
@@ -754,6 +757,137 @@ def test_runner_start_registers_pending_spec_and_routes_to_authority_compile(
         ),
         "spec_file": str(amended_file.resolve()),
     }
+
+
+def test_runner_abandon_setup_reverts_pending_scope_extension_to_sprint_complete(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Abandon a pending scope-extension setup without deleting its spec row."""
+    product = _product(session)
+    base_spec = _accepted_base_spec(session, _product_id(product))
+    amended_file = _write_spec_file(
+        tmp_path,
+        "amended.json",
+        _with_new_item(_artifact()),
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+    started = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=_product_id(product),
+            spec_file=str(amended_file),
+            base_spec_version_id=base_spec.spec_version_id or 0,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key="scope-ext-1",
+        )
+    )
+    spec_version_id = int(started["data"]["spec_version_id"])
+    pending = session.get(SpecRegistry, spec_version_id)
+    assert pending is not None
+    spec_hash = str(pending.spec_hash)
+
+    result = runner.abandon_setup(
+        ScopeExtensionAbandonSetupRequest(
+            project_id=_product_id(product),
+            spec_version_id=spec_version_id,
+            expected_spec_hash=spec_hash,
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="abandon-scope-ext-1",
+        )
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == SCOPE_EXTENSION_SETUP_ABANDONED
+    assert data["abandoned_spec_version_id"] == spec_version_id
+    assert data["abandoned_spec_hash"] == spec_hash
+    assert workflow.state["fsm_state"] == "SPRINT_COMPLETE"
+    assert workflow.state["setup_status"] is None
+    assert workflow.state["setup_error"] is None
+    assert workflow.state["setup_spec_file_path"] is None
+    assert workflow.state["setup_spec_hash"] is None
+    assert workflow.state["setup_spec_version_id"] is None
+    assert workflow.state["setup_next_actions"] == []
+    assert workflow.state["scope_extension_context"] is None
+    preserved = session.get(SpecRegistry, spec_version_id)
+    assert preserved is not None
+    assert preserved.spec_hash == spec_hash
+    assert preserved.content_ref == str(amended_file.resolve())
+
+    replay = runner.abandon_setup(
+        ScopeExtensionAbandonSetupRequest(
+            project_id=_product_id(product),
+            spec_version_id=spec_version_id,
+            expected_spec_hash=spec_hash,
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="abandon-scope-ext-1",
+        )
+    )
+
+    assert replay == result
+    expected_update_count = 2
+    assert len(workflow.updates) == expected_update_count
+
+
+@pytest.mark.parametrize(
+    ("request_update", "expected_code"),
+    [
+        ({"expected_state": "SPRINT_COMPLETE"}, ErrorCode.STALE_STATE.value),
+        (
+            {"expected_setup_status": "authority_pending_review"},
+            ErrorCode.STALE_SETUP_STATUS.value,
+        ),
+        ({"expected_spec_hash": "sha256:" + "b" * 64}, ErrorCode.STALE_SPEC_HASH.value),
+        ({"spec_version_id": 999}, ErrorCode.STALE_SPEC_VERSION.value),
+    ],
+)
+def test_runner_abandon_setup_rejects_stale_guards(
+    session: Session,
+    tmp_path: Path,
+    request_update: dict[str, Any],
+    expected_code: str,
+) -> None:
+    """Abandon setup requires all pending setup guards to match."""
+    product = _product(session)
+    base_spec = _accepted_base_spec(session, _product_id(product))
+    amended_file = _write_spec_file(
+        tmp_path,
+        "amended.json",
+        _with_new_item(_artifact()),
+    )
+    workflow = _WorkflowServiceDouble({"fsm_state": "SPRINT_COMPLETE"})
+    runner = ScopeExtensionRunner(session=session, workflow_service=workflow)
+    started = runner.start(
+        ScopeExtensionStartRequest(
+            project_id=_product_id(product),
+            spec_file=str(amended_file),
+            base_spec_version_id=base_spec.spec_version_id or 0,
+            expected_state="SPRINT_COMPLETE",
+            idempotency_key=f"scope-ext-{expected_code}",
+        )
+    )
+    spec_version_id = int(started["data"]["spec_version_id"])
+    pending = session.get(SpecRegistry, spec_version_id)
+    assert pending is not None
+    request_data: dict[str, Any] = {
+        "project_id": _product_id(product),
+        "spec_version_id": spec_version_id,
+        "expected_spec_hash": pending.spec_hash,
+        "expected_state": "SETUP_REQUIRED",
+        "expected_setup_status": "authority_compile_required",
+        "idempotency_key": f"abandon-{expected_code}",
+    }
+    request_data.update(request_update)
+
+    result = runner.abandon_setup(ScopeExtensionAbandonSetupRequest(**request_data))
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == expected_code
+    assert workflow.state["fsm_state"] == "SETUP_REQUIRED"
+    assert workflow.state["setup_spec_version_id"] == spec_version_id
 
 
 def test_runner_start_consumes_accepted_spec_amendment_and_preserves_provenance(

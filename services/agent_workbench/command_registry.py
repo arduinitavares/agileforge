@@ -1589,6 +1589,40 @@ _SCOPE_EXTENSION_COMMANDS: tuple[CommandMetadata, ...] = (
             ErrorCode.WORKFLOW_SESSION_FAILED.value,
         ),
     ),
+    CommandMetadata(
+        name="agileforge scope extension abandon-setup",
+        mutates=True,
+        phase="scope_extension",
+        requires_idempotency_key=True,
+        accepts_expected_state=True,
+        guard_policy=(
+            "expected_state",
+            "expected_setup_status",
+            "expected_spec_hash",
+            "spec_version_id",
+        ),
+        idempotency_policy=_REQUIRED_IDEMPOTENCY_POLICY,
+        input_required=(
+            "project_id",
+            "spec_version_id",
+            "expected_spec_hash",
+            "expected_state",
+            "expected_setup_status",
+            "idempotency_key",
+        ),
+        input_optional=("changed_by",),
+        errors=(
+            ErrorCode.PROJECT_NOT_FOUND.value,
+            ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+            ErrorCode.STALE_STATE.value,
+            ErrorCode.STALE_SETUP_STATUS.value,
+            ErrorCode.STALE_SPEC_HASH.value,
+            ErrorCode.STALE_SPEC_VERSION.value,
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            ErrorCode.MUTATION_FAILED.value,
+            ErrorCode.WORKFLOW_SESSION_FAILED.value,
+        ),
+    ),
 )
 
 

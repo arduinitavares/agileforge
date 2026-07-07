@@ -114,7 +114,10 @@ _PATCH_TEXT_FIELDS = (
     "assumption",
     "reason",
 )
-_INVARIANT_PARAMETER_TEXT_FIELDS = ("parameters.rule",)
+_INVARIANT_PARAMETER_TEXT_FIELDS = (
+    "parameters.capability",
+    "parameters.rule",
+)
 _REVIEW_TARGET_RE: re.Pattern[str] = re.compile(
     r"\b(?P<prefix>ASM|GAP|INV)-[A-Za-z0-9][A-Za-z0-9_-]*\b"
 )
@@ -3511,7 +3514,7 @@ def _apply_replace_text_selection(
         target.container[target.index] = replacement_text
         return None
     item_payload = cast("dict[str, Any]", target.item)
-    if target.target_field == "parameters.rule":
+    if target.target_field in _INVARIANT_PARAMETER_TEXT_FIELDS:
         parameters = item_payload.get("parameters")
         if not isinstance(parameters, dict):
             return _repair_target_error(
@@ -3524,7 +3527,8 @@ def _apply_replace_text_selection(
                     target_handle=target.target_handle,
                 ),
             )
-        parameters["rule"] = replacement_text
+        _parameters_prefix, parameter_name = target.target_field.split(".", 1)
+        parameters[parameter_name] = replacement_text
         _recompute_invariant_id_if_possible(
             item_payload,
             target_kind=target.target_kind,
@@ -3951,8 +3955,10 @@ def _repairable_text_field(target_item: object) -> str | None:
         if isinstance(item.get(field_name), str):
             return field_name
     parameters = item.get("parameters")
-    if isinstance(parameters, dict) and isinstance(parameters.get("rule"), str):
-        return "parameters.rule"
+    if isinstance(parameters, dict):
+        for parameter_name in ("capability", "rule"):
+            if isinstance(parameters.get(parameter_name), str):
+                return f"parameters.{parameter_name}"
     return None
 
 
@@ -3962,10 +3968,11 @@ def _target_text_value(target_item: object, *, target_field: str) -> str | None:
         return target_item
     if not isinstance(target_item, dict):
         return None
-    if target_field == "parameters.rule":
+    if target_field in _INVARIANT_PARAMETER_TEXT_FIELDS:
         parameters = cast("dict[str, Any]", target_item).get("parameters")
         if isinstance(parameters, dict):
-            value = parameters.get("rule")
+            _parameters_prefix, parameter_name = target_field.split(".", 1)
+            value = parameters.get(parameter_name)
             return value if isinstance(value, str) else None
         return None
     value = cast("dict[str, Any]", target_item).get(target_field)

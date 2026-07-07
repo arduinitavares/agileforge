@@ -29,6 +29,7 @@ SCOPE_EXTENSION_BLOCKED: str = "project_scope_extension_blocked"
 SCOPE_EXTENSION_VALID: str = "project_scope_extension_valid"
 SCOPE_EXTENSION_INVALID: str = "project_scope_extension_invalid"
 SCOPE_EXTENSION_STARTED: str = "project_scope_extension_started"
+SCOPE_EXTENSION_SETUP_ABANDONED: str = "project_scope_extension_setup_abandoned"
 AUTHORITY_COMPILE_REQUIRED: str = "authority_compile_required"
 
 ERR_SCOPE_EXTENSION_NOT_AVAILABLE: str = "SCOPE_EXTENSION_NOT_AVAILABLE"
@@ -91,6 +92,32 @@ class ScopeExtensionStartRequest(BaseModel):
         if self.base_spec_version_id is not None:
             request_data["base_spec_version_id"] = self.base_spec_version_id
         return canonical_hash(request_data)
+
+
+class ScopeExtensionAbandonSetupRequest(BaseModel):
+    """Validated request for abandoning a pending scope-extension setup."""
+
+    project_id: int
+    spec_version_id: int
+    expected_spec_hash: str = Field(min_length=1)
+    expected_state: str = Field(min_length=1)
+    expected_setup_status: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    changed_by: str = "cli-agent"
+
+    def normalized_request_hash(self) -> str:
+        """Return a stable hash for idempotent setup abandonment."""
+        return canonical_hash(
+            {
+                "command": "agileforge scope extension abandon-setup",
+                "project_id": self.project_id,
+                "spec_version_id": self.spec_version_id,
+                "expected_spec_hash": self.expected_spec_hash,
+                "expected_state": self.expected_state,
+                "expected_setup_status": self.expected_setup_status,
+                "changed_by": self.changed_by,
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -371,6 +398,90 @@ class ScopeExtensionRunner:
             spec_version_id=spec_version_id,
             context=context,
             next_actions=next_actions,
+        )
+
+    def abandon_setup(
+        self,
+        request: ScopeExtensionAbandonSetupRequest,
+    ) -> dict[str, Any]:
+        """Abandon a pending scope-extension setup before authority compile."""
+        session_id = str(request.project_id)
+        workflow_state = self._workflow_service.get_session_status(session_id) or {}
+        request_fingerprint = _abandon_setup_request_fingerprint(request)
+        replay = _abandon_setup_replay_response(
+            request=request,
+            workflow_state=workflow_state,
+            request_fingerprint=request_fingerprint,
+        )
+        if replay is not None:
+            return replay
+
+        stale_guard = _abandon_setup_stale_guard(
+            request=request,
+            workflow_state=workflow_state,
+        )
+        if stale_guard is not None:
+            code, details = stale_guard
+            return _error(
+                code,
+                details={"project_id": request.project_id, **details},
+                remediation=["Refresh pending setup guards before retrying."],
+            )
+
+        spec = self._session.get(SpecRegistry, request.spec_version_id)
+        if spec is None or spec.product_id != request.project_id:
+            return _error(
+                ErrorCode.SPEC_VERSION_NOT_FOUND.value,
+                details={
+                    "project_id": request.project_id,
+                    "spec_version_id": request.spec_version_id,
+                },
+                remediation=["Refresh pending setup guards before retrying."],
+            )
+        if spec.spec_hash != request.expected_spec_hash:
+            return _error(
+                ErrorCode.STALE_SPEC_HASH.value,
+                details={
+                    "expected_spec_hash": request.expected_spec_hash,
+                    "actual_spec_hash": spec.spec_hash,
+                },
+                remediation=["Refresh pending setup guards before retrying."],
+            )
+
+        context = _abandon_setup_context(
+            request=request,
+            workflow_state=workflow_state,
+            request_fingerprint=request_fingerprint,
+        )
+        workflow_update = {
+            "fsm_state": "SPRINT_COMPLETE",
+            "setup_status": None,
+            "setup_error": None,
+            "setup_spec_file_path": None,
+            "setup_spec_hash": None,
+            "setup_spec_version_id": None,
+            "setup_next_actions": [],
+            "scope_extension_context": None,
+            "scope_extension_abandon_context": context,
+        }
+        try:
+            self._workflow_service.update_session_status(session_id, workflow_update)
+        except Exception as exc:  # noqa: BLE001
+            return _error(
+                ErrorCode.MUTATION_FAILED.value,
+                details={
+                    "project_id": request.project_id,
+                    "spec_version_id": request.spec_version_id,
+                    "spec_hash": request.expected_spec_hash,
+                    "workflow_error": str(exc),
+                },
+                remediation=["Retry the same scope extension abandon-setup request."],
+            )
+        return _abandoned_response(
+            project_id=request.project_id,
+            spec_version_id=request.spec_version_id,
+            spec_hash=request.expected_spec_hash,
+            context=context,
         )
 
     def _resolve_start_request(
@@ -962,6 +1073,34 @@ def _scope_extension_replay_response(
     )
 
 
+def _abandon_setup_replay_response(
+    *,
+    request: ScopeExtensionAbandonSetupRequest,
+    workflow_state: Mapping[str, Any],
+    request_fingerprint: str,
+) -> dict[str, Any] | None:
+    context = workflow_state.get("scope_extension_abandon_context")
+    if not isinstance(context, Mapping):
+        return None
+    if context.get("idempotency_key") != request.idempotency_key:
+        return None
+    if context.get("request_fingerprint") != request_fingerprint:
+        return _error(
+            ErrorCode.IDEMPOTENCY_KEY_REUSED.value,
+            details={
+                "project_id": request.project_id,
+                "idempotency_key": request.idempotency_key,
+            },
+            remediation=["Use a new idempotency key for changed inputs."],
+        )
+    return _abandoned_response(
+        project_id=request.project_id,
+        spec_version_id=int(context["abandoned_spec_version_id"]),
+        spec_hash=str(context["abandoned_spec_hash"]),
+        context=dict(context),
+    )
+
+
 def _start_validation_data_or_response(
     *,
     validation_result: dict[str, Any],
@@ -994,6 +1133,85 @@ def _start_request_fingerprint(
             "amended_spec_hash": amended_spec_hash,
         }
     )
+
+
+def _abandon_setup_request_fingerprint(
+    request: ScopeExtensionAbandonSetupRequest,
+) -> str:
+    return canonical_hash({"request": request.normalized_request_hash()})
+
+
+def _abandon_setup_context(
+    *,
+    request: ScopeExtensionAbandonSetupRequest,
+    workflow_state: Mapping[str, Any],
+    request_fingerprint: str,
+) -> dict[str, Any]:
+    scope_context = workflow_state.get("scope_extension_context")
+    return {
+        "schema": "agileforge.scope_extension_abandon.v1",
+        "status": SCOPE_EXTENSION_SETUP_ABANDONED,
+        "idempotency_key": request.idempotency_key,
+        "request_fingerprint": request_fingerprint,
+        "abandoned_spec_version_id": request.spec_version_id,
+        "abandoned_spec_hash": request.expected_spec_hash,
+        "previous_state": request.expected_state,
+        "previous_setup_status": request.expected_setup_status,
+        "previous_scope_extension_context": (
+            dict(scope_context) if isinstance(scope_context, Mapping) else None
+        ),
+    }
+
+
+def _abandon_setup_stale_guard(
+    *,
+    request: ScopeExtensionAbandonSetupRequest,
+    workflow_state: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    current_state = str(workflow_state.get("fsm_state") or "")
+    if current_state != request.expected_state:
+        return (
+            ErrorCode.STALE_STATE.value,
+            {"expected_state": request.expected_state, "actual_state": current_state},
+        )
+
+    current_setup_status = str(workflow_state.get("setup_status") or "")
+    if current_setup_status != request.expected_setup_status:
+        return (
+            ErrorCode.STALE_SETUP_STATUS.value,
+            {
+                "expected_setup_status": request.expected_setup_status,
+                "actual_setup_status": current_setup_status,
+            },
+        )
+
+    current_spec_hash = str(workflow_state.get("setup_spec_hash") or "")
+    if current_spec_hash != request.expected_spec_hash:
+        return (
+            ErrorCode.STALE_SPEC_HASH.value,
+            {
+                "expected_spec_hash": request.expected_spec_hash,
+                "actual_spec_hash": current_spec_hash,
+            },
+        )
+
+    current_spec_version_id = _concrete_int(
+        workflow_state.get("setup_spec_version_id")
+    )
+    if current_spec_version_id != request.spec_version_id:
+        return (
+            ErrorCode.STALE_SPEC_VERSION.value,
+            {
+                "expected_spec_version_id": request.spec_version_id,
+                "actual_spec_version_id": current_spec_version_id,
+            },
+        )
+
+    return None
+
+
+def _concrete_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _latest_recovery_marker(
@@ -1152,6 +1370,24 @@ def _started_response(
             "spec_version_id": spec_version_id,
             "scope_extension_context": context,
             "next_actions": next_actions,
+        }
+    )
+
+
+def _abandoned_response(
+    *,
+    project_id: int,
+    spec_version_id: int,
+    spec_hash: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return _success(
+        {
+            "project_id": project_id,
+            "status": SCOPE_EXTENSION_SETUP_ABANDONED,
+            "abandoned_spec_version_id": spec_version_id,
+            "abandoned_spec_hash": spec_hash,
+            "scope_extension_abandon_context": context,
         }
     )
 

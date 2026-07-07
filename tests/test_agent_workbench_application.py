@@ -75,6 +75,7 @@ if TYPE_CHECKING:
         SpecAmendmentReviewRequest,
     )
     from services.agent_workbench.scope_extension import (
+        ScopeExtensionAbandonSetupRequest,
         ScopeExtensionStartRequest,
         ScopeExtensionValidateRequest,
     )
@@ -1678,6 +1679,19 @@ class _FakeScopeExtensionRunner:
         return {
             "ok": True,
             "data": {"project_id": request.project_id, "status": "started"},
+            "warnings": [],
+            "errors": [],
+        }
+
+    def abandon_setup(
+        self,
+        request: ScopeExtensionAbandonSetupRequest,
+    ) -> dict[str, Any]:
+        """Record abandon-setup requests."""
+        self.calls.append(("abandon_setup", request))
+        return {
+            "ok": True,
+            "data": {"project_id": request.project_id, "status": "abandoned"},
             "warnings": [],
             "errors": [],
         }
@@ -3396,11 +3410,22 @@ def test_application_scope_extension_facades_pass_request_data_to_runner() -> No
         idempotency_key="scope-extension-start-001",
         changed_by="test-agent",
     )
+    abandon_result = app.scope_extension_abandon_setup(
+        project_id=PROJECT_ID,
+        spec_version_id=SPEC_VERSION_ID,
+        expected_spec_hash="sha256:" + "a" * 64,
+        expected_state="SETUP_REQUIRED",
+        expected_setup_status="authority_compile_required",
+        idempotency_key="scope-extension-abandon-001",
+        changed_by="test-agent",
+    )
 
     assert validate_result["ok"] is True
     assert start_result["ok"] is True
+    assert abandon_result["ok"] is True
     validate_request = cast("ScopeExtensionValidateRequest", runner.calls[0][1])
     start_request = cast("ScopeExtensionStartRequest", runner.calls[1][1])
+    abandon_request = cast("ScopeExtensionAbandonSetupRequest", runner.calls[2][1])
     assert validate_request.project_id == PROJECT_ID
     assert validate_request.spec_file == "specs/amended.md"
     assert validate_request.base_spec_version_id == SPEC_VERSION_ID
@@ -3411,6 +3436,13 @@ def test_application_scope_extension_facades_pass_request_data_to_runner() -> No
     assert start_request.expected_state == "SPRINT_COMPLETE"
     assert start_request.idempotency_key == "scope-extension-start-001"
     assert start_request.changed_by == "test-agent"
+    assert abandon_request.project_id == PROJECT_ID
+    assert abandon_request.spec_version_id == SPEC_VERSION_ID
+    assert abandon_request.expected_spec_hash == "sha256:" + "a" * 64
+    assert abandon_request.expected_state == "SETUP_REQUIRED"
+    assert abandon_request.expected_setup_status == "authority_compile_required"
+    assert abandon_request.idempotency_key == "scope-extension-abandon-001"
+    assert abandon_request.changed_by == "test-agent"
 
 
 def test_application_scope_extension_start_passes_spec_amendment_id_to_runner() -> None:
@@ -7885,6 +7917,74 @@ def test_workflow_next_routes_compile_required_to_authority_compile() -> None:
         "--expected-setup-status authority_compile_required"
     ]
     assert data["next_actions"][0]["command"] == data["next_valid_commands"][0]
+
+
+def test_workflow_next_routes_newer_accepted_scope_draft_to_abandon_setup(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advertise abandon-setup when a corrected accepted draft supersedes setup."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft = _discovery_spec_amendment_draft(
+            session,
+            prd=prd,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft_id = draft.spec_amendment_draft_id or 0
+    spec_hash = "sha256:" + "a" * 64
+    app = AgentWorkbenchApplication(
+        read_projection=_WorkflowStateReader(
+            {
+                "fsm_state": "SETUP_REQUIRED",
+                "setup_status": "authority_compile_required",
+                "setup_spec_file_path": "/workspace/agileforge/spec.json",
+                "setup_spec_hash": spec_hash,
+                "setup_spec_version_id": SPEC_VERSION_ID,
+                "scope_extension_context": {
+                    "schema": "agileforge.scope_extension.v1",
+                    "spec_amendment_draft_id": draft_id - 1,
+                },
+            }
+        )
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    expected_command = (
+        "agileforge scope extension abandon-setup "
+        f"--project-id {PROJECT_ID} "
+        f"--spec-version-id {SPEC_VERSION_ID} "
+        f"--expected-spec-hash {spec_hash} "
+        "--expected-state SETUP_REQUIRED "
+        "--expected-setup-status authority_compile_required "
+        "--idempotency-key <idempotency_key>"
+    )
+    assert data["status"] == "scope_extension_pending_setup_recovery_required"
+    assert data["next_valid_commands"] == [expected_command]
+    assert not any(
+        command.startswith("agileforge authority compile")
+        for command in data["next_valid_commands"]
+    )
+    assert data["next_actions"][0] == {
+        "command": expected_command,
+        "installed": True,
+        "requires_cli_installation": False,
+        "reason": (
+            "Abandon the pending scope-extension setup before starting the newer "
+            "accepted Spec Amendment Draft."
+        ),
+    }
 
 
 def test_workflow_next_routes_brownfield_curation_to_setup_actions(

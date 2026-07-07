@@ -77,6 +77,7 @@ from services.agent_workbench.scope_discovery import (
     SpecAmendmentReviewRequest,
 )
 from services.agent_workbench.scope_extension import (
+    ScopeExtensionAbandonSetupRequest,
     ScopeExtensionPreconditions,
     ScopeExtensionRunner,
     ScopeExtensionStartRequest,
@@ -326,6 +327,13 @@ class _ScopeExtensionRunner(Protocol):
 
     def start(self, request: ScopeExtensionStartRequest) -> dict[str, Any]:
         """Start guarded scope extension."""
+        ...
+
+    def abandon_setup(
+        self,
+        request: ScopeExtensionAbandonSetupRequest,
+    ) -> dict[str, Any]:
+        """Abandon pending scope-extension setup."""
         ...
 
 
@@ -678,6 +686,23 @@ class _DefaultScopeExtensionRunner:
                 ),
             )
             return runner.start(request)
+
+    def abandon_setup(
+        self,
+        request: ScopeExtensionAbandonSetupRequest,
+    ) -> dict[str, Any]:
+        """Abandon pending scope-extension setup through a short-lived runner."""
+        from services.workflow import WorkflowService  # noqa: PLC0415
+
+        with Session(get_engine()) as session:
+            runner = ScopeExtensionRunner(
+                session=session,
+                workflow_service=WorkflowService(),
+                sprint_candidate_count_resolver=(
+                    self._sprint_candidate_count_resolver
+                ),
+            )
+            return runner.abandon_setup(request)
 
 
 class _VisionPhaseRunner(Protocol):
@@ -2333,6 +2358,29 @@ class AgentWorkbenchApplication:
             changed_by=changed_by,
         )
         return self._get_scope_extension_runner().start(request)
+
+    def scope_extension_abandon_setup(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> dict[str, Any]:
+        """Abandon pending scope-extension setup through the runner."""
+        request = ScopeExtensionAbandonSetupRequest(
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            expected_spec_hash=expected_spec_hash,
+            expected_state=expected_state,
+            expected_setup_status=expected_setup_status,
+            idempotency_key=idempotency_key,
+            changed_by=changed_by,
+        )
+        return self._get_scope_extension_runner().abandon_setup(request)
 
     def authority_status(self, *, project_id: int) -> dict[str, Any]:
         """Return authority status projection."""
@@ -4178,6 +4226,35 @@ def _apply_authority_compile_routing(
     setup_status: str,
 ) -> None:
     """Publish guarded authority compile commands for setup states."""
+    if (
+        setup_status == "authority_compile_required"
+        and _has_newer_accepted_scope_extension_draft(
+            project_id=project_id,
+            workflow=workflow,
+        )
+    ):
+        abandon_command = _scope_extension_abandon_setup_command_from_workflow(
+            project_id=project_id,
+            workflow=workflow,
+            expected_setup_status=setup_status,
+        )
+        if abandon_command.get("runnable"):
+            command = str(abandon_command["command"])
+            data["status"] = "scope_extension_pending_setup_recovery_required"
+            data["next_valid_commands"] = [command]
+            data["next_actions"] = [
+                {
+                    "command": command,
+                    "installed": True,
+                    "requires_cli_installation": False,
+                    "reason": (
+                        "Abandon the pending scope-extension setup before "
+                        "starting the newer accepted Spec Amendment Draft."
+                    ),
+                }
+            ]
+            return
+
     compile_command = _authority_compile_command_from_workflow(
         project_id=project_id,
         workflow=workflow,
@@ -4303,6 +4380,75 @@ def _authority_compile_command_from_workflow(
         ),
         "runnable": True,
     }
+
+
+def _scope_extension_abandon_setup_command_from_workflow(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+    expected_setup_status: str,
+) -> dict[str, Any]:
+    """Build a guarded scope-extension setup abandonment command."""
+    workflow_state = _workflow_state_mapping(workflow)
+    spec_hash = workflow_state.get("setup_spec_hash")
+    spec_version_id = _concrete_int(workflow_state.get("setup_spec_version_id"))
+    if not isinstance(spec_hash, str) or not spec_hash.strip():
+        return {
+            "command": "agileforge scope extension abandon-setup",
+            "runnable": False,
+            "reason": "Abandon setup requires setup_spec_hash in workflow state.",
+        }
+    if spec_version_id is None:
+        return {
+            "command": "agileforge scope extension abandon-setup",
+            "runnable": False,
+            "reason": (
+                "Abandon setup requires setup_spec_version_id in workflow state."
+            ),
+        }
+    return {
+        "command": (
+            "agileforge scope extension abandon-setup "
+            f"--project-id {project_id} "
+            f"--spec-version-id {spec_version_id} "
+            f"--expected-spec-hash {quote(spec_hash)} "
+            "--expected-state SETUP_REQUIRED "
+            f"--expected-setup-status {expected_setup_status} "
+            "--idempotency-key <idempotency_key>"
+        ),
+        "runnable": True,
+    }
+
+
+def _has_newer_accepted_scope_extension_draft(
+    *,
+    project_id: int,
+    workflow: dict[str, Any],
+) -> bool:
+    workflow_state = _workflow_state_mapping(workflow)
+    context = workflow_state.get("scope_extension_context")
+    if not isinstance(context, Mapping):
+        return False
+    if context.get("schema") != "agileforge.scope_extension.v1":
+        return False
+    pending_draft_id = _concrete_int(context.get("spec_amendment_draft_id"))
+    if pending_draft_id is None:
+        return False
+    with Session(get_engine()) as session:
+        draft_id_column = cast(
+            "Any",
+            DiscoverySpecAmendmentDraft.spec_amendment_draft_id,
+        )
+        latest = session.exec(
+            select(DiscoverySpecAmendmentDraft)
+            .where(DiscoverySpecAmendmentDraft.project_id == project_id)
+            .where(DiscoverySpecAmendmentDraft.status == "accepted")
+            .order_by(draft_id_column.desc())
+        ).first()
+    if latest is None:
+        return False
+    latest_id = _concrete_int(latest.spec_amendment_draft_id)
+    return latest_id is not None and latest_id > pending_draft_id
 
 
 def _failed_setup_retry_command(

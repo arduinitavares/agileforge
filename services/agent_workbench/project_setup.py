@@ -27,7 +27,6 @@ from models.agent_workbench import (
 from models.core import Product
 from models.db import ensure_business_db_ready
 from models.specs import CompiledSpecAuthority, SpecRegistry
-from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
@@ -2996,6 +2995,10 @@ def _compiled_authority_fingerprint(
     authority_id: int | None,
 ) -> str | None:
     """Return the public fingerprint for a compiled authority row."""
+    from services.agent_workbench.authority_projection import (  # noqa: PLC0415
+        pending_authority_fingerprint,
+    )
+
     if authority_id is None:
         return None
     with Session(engine) as session:

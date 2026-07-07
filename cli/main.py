@@ -285,6 +285,20 @@ class _Application(Protocol):
         """Start guarded scope extension through the runner."""
         ...
 
+    def scope_extension_abandon_setup(  # noqa: PLR0913
+        self,
+        *,
+        project_id: int,
+        spec_version_id: int,
+        expected_spec_hash: str,
+        expected_state: str,
+        expected_setup_status: str,
+        idempotency_key: str,
+        changed_by: str = "cli-agent",
+    ) -> JsonObject:
+        """Abandon pending scope-extension setup through the runner."""
+        ...
+
     def discovery_challenge_record(
         self,
         *,
@@ -2049,6 +2063,24 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     scope_extension_start.add_argument("--idempotency-key", required=True)
     scope_extension_start.add_argument("--changed-by", default="cli-agent")
     scope_extension_start.set_defaults(command_handler=_scope_extension_start)
+    scope_extension_abandon = scope_extension_sub.add_parser(
+        "abandon-setup",
+        help="Abandon a pending scope-extension setup before authority compile.",
+    )
+    scope_extension_abandon.add_argument("--project-id", type=int, required=True)
+    scope_extension_abandon.add_argument(
+        "--spec-version-id",
+        type=int,
+        required=True,
+    )
+    scope_extension_abandon.add_argument("--expected-spec-hash", required=True)
+    scope_extension_abandon.add_argument("--expected-state", required=True)
+    scope_extension_abandon.add_argument("--expected-setup-status", required=True)
+    scope_extension_abandon.add_argument("--idempotency-key", required=True)
+    scope_extension_abandon.add_argument("--changed-by", default="cli-agent")
+    scope_extension_abandon.set_defaults(
+        command_handler=_scope_extension_abandon_setup
+    )
 
     authority = subparsers.add_parser(
         "authority",
@@ -3624,6 +3656,30 @@ def _scope_extension_start(
         base_spec_version_id=None,
         spec_amendment_draft_id=args.spec_amendment_draft_id,
         expected_state=args.expected_state,
+        idempotency_key=args.idempotency_key.strip(),
+        changed_by=args.changed_by,
+    )
+
+
+def _scope_extension_abandon_setup(
+    args: argparse.Namespace,
+    application: _Application,
+) -> CommandResult:
+    """Route guarded scope extension setup abandonment to the application."""
+    command = "agileforge scope extension abandon-setup"
+    if not str(args.idempotency_key).strip():
+        return _invalid_command(
+            command,
+            "Scope extension abandon-setup requires a non-blank idempotency key.",
+            details={"blank": ["idempotency_key"]},
+            remediation=["Pass a non-blank --idempotency-key value."],
+        )
+    return command, application.scope_extension_abandon_setup(
+        project_id=args.project_id,
+        spec_version_id=args.spec_version_id,
+        expected_spec_hash=args.expected_spec_hash,
+        expected_state=args.expected_state,
+        expected_setup_status=args.expected_setup_status,
         idempotency_key=args.idempotency_key.strip(),
         changed_by=args.changed_by,
     )
