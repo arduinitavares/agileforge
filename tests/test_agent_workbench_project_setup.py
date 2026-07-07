@@ -1503,6 +1503,65 @@ def test_authority_compile_succeeds_from_compile_required(
     assert (
         workflow_state["setup_compile_mutation_event_id"] == data["mutation_event_id"]
     )
+    assert workflow_state["pending_authority_id"] == data["compiled_authority_id"]
+    assert workflow_state["pending_compiled_spec_version_id"] == data["spec_version_id"]
+    assert workflow_state["pending_authority_fingerprint"]
+
+
+def test_authority_compile_refreshes_stale_pending_authority_workflow_fields(
+    engine: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful compile must overwrite stale pending authority session fields."""
+    ensure_schema_current(engine)
+    spec_file = _write_spec(tmp_path)
+    _install_fast_compiler(monkeypatch)
+    workflow = FakeWorkflowPort()
+    runner = ProjectSetupMutationRunner(engine=engine, workflow=workflow)
+    created = runner.create_project(
+        _accepted_greenfield_create_request(
+            engine,
+            spec_file,
+            name="Authority Compile Stale Pending Project",
+            idempotency_key="create-compile-stale-pending-001",
+            changed_by="agent",
+        )
+    )
+    assert created["ok"] is True
+    project_id = created["data"]["project_id"]
+    stale_authority_id = 12
+    stale_spec_version_id = 7
+    stale_fingerprint = "sha256:" + "1" * 64
+    workflow.sessions[str(project_id)].update(
+        {
+            "pending_authority_id": stale_authority_id,
+            "pending_compiled_spec_version_id": stale_spec_version_id,
+            "pending_authority_fingerprint": stale_fingerprint,
+        }
+    )
+
+    compiled = runner.compile_authority(
+        AuthorityCompileRequest(
+            project_id=project_id,
+            spec_version_id=created["data"]["spec_version_id"],
+            expected_spec_hash=created["data"]["spec_hash"],
+            expected_state="SETUP_REQUIRED",
+            expected_setup_status="authority_compile_required",
+            idempotency_key="compile-stale-pending-001",
+            changed_by="agent",
+        )
+    )
+
+    assert compiled["ok"] is True
+    data = compiled["data"]
+    workflow_state = workflow.sessions[str(project_id)]
+    assert workflow_state["setup_status"] == "authority_pending_review"
+    assert workflow_state["pending_authority_id"] == data["compiled_authority_id"]
+    assert workflow_state["pending_compiled_spec_version_id"] == data["spec_version_id"]
+    assert workflow_state["pending_authority_id"] != stale_authority_id
+    assert workflow_state["pending_compiled_spec_version_id"] != stale_spec_version_id
+    assert workflow_state["pending_authority_fingerprint"] != stale_fingerprint
 
 
 def test_authority_compile_pins_guarded_spec_version(

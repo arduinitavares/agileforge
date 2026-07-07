@@ -3952,6 +3952,9 @@ def _apply_authority_pending_review_routing(
             "reason": "Review pending authority before accepting or rejecting it.",
         }
     ]
+    data["next_valid_commands"] = [
+        str(action["command"]) for action in data["next_actions"]
+    ]
     review_summary = _authority_review_summary(review)
     accept_reason = "Record accepted authority only after review passes."
     accept_action: dict[str, Any] = {

@@ -7458,7 +7458,9 @@ def test_workflow_next_routes_pending_authority_to_review_and_decision_templates
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7 --open"
+    ]
     assert len(result["data"]["next_actions"]) == 1
     command_text = result["data"]["next_actions"][0]["command"]
     assert "agileforge authority review --project-id 7 --open" in command_text
@@ -7721,7 +7723,9 @@ def test_workflow_next_routes_regenerated_rejected_authority_to_review() -> None
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7 --open"
+    ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
     assert len(result["data"]["next_actions"]) == 1
@@ -7764,7 +7768,9 @@ def test_workflow_next_no_longer_calls_sprint_context_pack_when_setup_pending_re
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7 --open"
+    ]
     assert result["data"]["next_actions"][0]["command"] == (
         "agileforge authority review --project-id 7 --open"
     )
@@ -7780,7 +7786,9 @@ def test_workflow_next_pending_review_emits_installed_authority_command() -> Non
     result = app.workflow_next(project_id=PROJECT_ID)
 
     assert result["ok"] is True
-    assert result["data"]["next_valid_commands"] == []
+    assert result["data"]["next_valid_commands"] == [
+        "agileforge authority review --project-id 7 --open"
+    ]
     assert result["data"]["next_actions"][0]["installed"] is True
     assert result["data"]["next_actions"][0]["requires_cli_installation"] is False
 

@@ -27,6 +27,7 @@ from models.agent_workbench import (
 from models.core import Product
 from models.db import ensure_business_db_ready
 from models.specs import CompiledSpecAuthority, SpecRegistry
+from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
@@ -1309,6 +1310,10 @@ class ProjectSetupMutationRunner:
             str(authority_result.get("spec_version_id") or spec_version_id)
         )
         authority_id = _optional_int(authority_result.get("authority_id"))
+        authority_fingerprint = _compiled_authority_fingerprint(
+            engine=self._engine,
+            authority_id=authority_id,
+        )
         try:
             self._write_authority_compile_workflow_state(
                 project_id=request.project_id,
@@ -1317,6 +1322,9 @@ class ProjectSetupMutationRunner:
                 spec_hash=compiled_spec_hash,
                 spec_version_id=compiled_spec_version_id,
                 mutation_event_id=mutation_event_id,
+                pending_authority_id=authority_id,
+                pending_compiled_spec_version_id=compiled_spec_version_id,
+                pending_authority_fingerprint=authority_fingerprint,
             )
         except Exception as exc:  # noqa: BLE001
             return self._mark_authority_compile_recovery_required(
@@ -1437,6 +1445,9 @@ class ProjectSetupMutationRunner:
         spec_hash: str,
         spec_version_id: int,
         mutation_event_id: int,
+        pending_authority_id: int | None = None,
+        pending_compiled_spec_version_id: int | None = None,
+        pending_authority_fingerprint: str | None = None,
         failure_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         state: dict[str, Any] = {
@@ -1449,6 +1460,9 @@ class ProjectSetupMutationRunner:
             "setup_spec_hash": spec_hash,
             "setup_spec_version_id": spec_version_id,
             "setup_compile_mutation_event_id": mutation_event_id,
+            "pending_authority_id": pending_authority_id,
+            "pending_compiled_spec_version_id": pending_compiled_spec_version_id,
+            "pending_authority_fingerprint": pending_authority_fingerprint,
         }
         if status in {"authority_compiling", AUTHORITY_PENDING_REVIEW}:
             state.update(_cleared_authority_compile_failure_metadata())
@@ -2974,6 +2988,19 @@ def _optional_int(value: object) -> int | None:
         return int(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _compiled_authority_fingerprint(
+    *,
+    engine: Engine,
+    authority_id: int | None,
+) -> str | None:
+    """Return the public fingerprint for a compiled authority row."""
+    if authority_id is None:
+        return None
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, authority_id)
+    return pending_authority_fingerprint(authority)
 
 
 def _optional_str(value: object) -> str | None:
