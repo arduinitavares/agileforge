@@ -6895,6 +6895,74 @@ def test_workflow_next_routes_accepted_spec_amendment_to_scope_start(
     }
 
 
+def test_workflow_next_suppresses_scope_start_when_draft_applied(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppress scope extension start when draft matches accepted spec."""
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(application_mod, "get_engine", lambda: engine, raising=False)
+    monkeypatch.setattr(
+        post_sprint_triage_module,
+        "canonical_hash",
+        lambda _payload: "sha256:triage",
+    )
+    with Session(engine) as session:
+        artifact = _discovery_challenge_artifact(session)
+        prd = _discovery_prd(
+            session,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        draft = _discovery_spec_amendment_draft(
+            session,
+            prd=prd,
+            challenge_artifact_id=artifact.challenge_artifact_id or 0,
+            status="accepted",
+        )
+        spec = SpecRegistry(
+            product_id=PROJECT_ID,
+            spec_hash=draft.amended_spec_hash,
+            content="{}",
+            status="approved",
+        )
+        session.add(spec)
+        session.commit()
+        session.refresh(spec)
+
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=PROJECT_ID,
+                spec_version_id=spec.spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="test",
+                compiler_version="test",
+                prompt_hash="prompt",
+                spec_hash=spec.spec_hash,
+            )
+        )
+        session.commit()
+
+    app = AgentWorkbenchApplication(
+        read_projection=_SprintCompleteTriagedNoneNoRefinedCandidatesReadProjection(
+            impact="none",
+        ),
+        authority_projection=_CurrentAuthorityProjection(),
+    )
+
+    result = app.workflow_next(project_id=PROJECT_ID)
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "project_complete"
+    assert data["next_actions"] == []
+    assert not any(
+        cmd.startswith("agileforge scope extension")
+        for cmd in data["next_valid_commands"]
+    )
+
+
 def test_workflow_next_scope_extension_blocked_preserves_blocker_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

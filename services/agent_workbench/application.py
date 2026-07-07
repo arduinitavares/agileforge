@@ -32,6 +32,7 @@ from models.agent_workbench import (
     DiscoveryPrd,
     DiscoverySpecAmendmentDraft,
 )
+from models.specs import SpecAuthorityAcceptance, SpecRegistry
 from services.agent_workbench.command_registry import (
     command_is_available,
     installed_command_names,
@@ -6261,6 +6262,18 @@ def _post_sprint_scope_extension_next(
         if discovery_next is not None:
             return discovery_next
 
+        if not _uncovered_story_requirements(workflow):
+            status = "project_complete"
+            return _sprint_complete_next_response(
+                project_id=project_id,
+                workflow=workflow,
+                next_valid_commands=next_valid_commands,
+                blocked_commands=[],
+                blocked_future_commands=blocked_future_commands,
+                status=status,
+                next_actions=[],
+            )
+
     validate_command = (
         f"agileforge scope extension validate --project-id {project_id} "
         "--spec-file <amended_spec_file>"
@@ -6330,6 +6343,43 @@ def _post_sprint_scope_extension_next(
     )
 
 
+def _latest_accepted_spec_for_project(
+    session: Session,
+    *,
+    project_id: int,
+) -> SpecRegistry | None:
+    """Return the latest accepted Spec Registry row for project routing."""
+    accepted = session.exec(
+        select(SpecAuthorityAcceptance)
+        .where(SpecAuthorityAcceptance.product_id == project_id)
+        .where(SpecAuthorityAcceptance.status == "accepted")
+        .order_by(
+            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+            cast("Any", SpecAuthorityAcceptance.id).desc(),
+        )
+    ).first()
+    if accepted is None:
+        return None
+    return session.get(SpecRegistry, accepted.spec_version_id)
+
+
+def _spec_amendment_already_applied(
+    *,
+    session: Session,
+    project_id: int,
+    spec_amendment: DiscoverySpecAmendmentDraft,
+) -> bool:
+    """Return whether an accepted amendment already matches accepted authority."""
+    amended_spec_hash = spec_amendment.amended_spec_hash
+    if amended_spec_hash is None:
+        return False
+    latest_spec = _latest_accepted_spec_for_project(
+        session,
+        project_id=project_id,
+    )
+    return latest_spec is not None and latest_spec.spec_hash == amended_spec_hash
+
+
 def _scope_discovery_next_response(
     *,
     project_id: int,
@@ -6383,6 +6433,15 @@ def _scope_discovery_next_response(
                     ).desc()
                 )
             ).first()
+        )
+        spec_amendment_already_applied = (
+            spec_amendment is not None
+            and spec_amendment.status == "accepted"
+            and _spec_amendment_already_applied(
+                session=session,
+                project_id=project_id,
+                spec_amendment=spec_amendment,
+            )
         )
     if challenge_artifact is None:
         response = _scope_discovery_missing_challenge_next_response(
@@ -6447,6 +6506,7 @@ def _scope_discovery_next_response(
             workflow=workflow,
             commands=commands,
             spec_amendment=spec_amendment,
+            spec_amendment_already_applied=spec_amendment_already_applied,
         )
     return response
 
@@ -6612,8 +6672,12 @@ def _scope_discovery_scope_extension_start_next_response(
     workflow: dict[str, Any],
     commands: list[tuple[str, str]],
     spec_amendment: DiscoverySpecAmendmentDraft,
-) -> dict[str, Any]:
+    spec_amendment_already_applied: bool = False,
+) -> dict[str, Any] | None:
     """Return guidance for starting scope extension from accepted discovery."""
+    if spec_amendment_already_applied:
+        return None
+
     status = "scope_discovery_ready_for_scope_extension_start"
     start_command = (
         f"agileforge scope extension start --project-id {project_id} "
