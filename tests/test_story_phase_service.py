@@ -1527,8 +1527,29 @@ async def test_generate_story_draft_soft_gates_weak_feedback() -> None:
     assert len(runtime["attempt_history"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("latest_classification", "latest_is_reusable", "latest_draft_kind"),
+    [
+        pytest.param(
+            "quality_gate_failed",
+            False,
+            "quality_blocked_draft",
+            id="quality-blocked-draft",
+        ),
+        pytest.param(
+            "reusable_content_result",
+            True,
+            "incomplete_draft",
+            id="reusable-incomplete-draft",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_generate_story_draft_clarification_answer_runs_generation() -> None:
+async def test_generate_story_draft_clarification_answer_runs_generation(
+    latest_classification: str,
+    latest_is_reusable: bool,
+    latest_draft_kind: str,
+) -> None:
     """Answers to current clarifying questions should not hit the refinement gate."""
     parent_requirement = "First Model Baseline Evaluation and Reporting"
     artifact = _story_artifact(parent_requirement, "Validation-only draft")
@@ -1571,14 +1592,23 @@ async def test_generate_story_draft_clarification_answer_runs_generation() -> No
                     "attempt_history": [
                         {
                             "attempt_id": "attempt-1",
-                            "classification": "quality_gate_failed",
-                            "is_reusable": False,
+                            "classification": latest_classification,
+                            "is_reusable": latest_is_reusable,
                             "retryable": False,
-                            "draft_kind": "quality_blocked_draft",
+                            "draft_kind": latest_draft_kind,
                             "output_artifact": current_artifact,
                         }
                     ],
-                    "draft_projection": {},
+                    "draft_projection": (
+                        {
+                            "latest_reusable_attempt_id": "attempt-1",
+                            "kind": "incomplete_draft",
+                            "is_complete": False,
+                            "updated_at": "2026-07-01T00:00:00Z",
+                        }
+                        if latest_is_reusable
+                        else {}
+                    ),
                     "feedback_projection": {"items": [], "next_feedback_sequence": 0},
                     "request_projection": {
                         "payload": {
