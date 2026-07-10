@@ -1151,7 +1151,10 @@ def test_phase1_cli_drives_real_application_facade(
                         "--idempotency-key <idempotency_key>"
                     ),
                     f"agileforge sprint candidates --project-id {project_id}",
-                    f"agileforge sprint generate --project-id {project_id}",
+                    (
+                        f"agileforge sprint generate --project-id {project_id} "
+                        "--max-story-points <points>"
+                    ),
                 ]
             ),
         ),
@@ -1202,7 +1205,10 @@ def test_phase1_cli_drives_real_application_facade(
                 data["next_valid_commands"]
                 == [
                     f"agileforge sprint candidates --project-id {project_id}",
-                    f"agileforge sprint generate --project-id {project_id}",
+                    (
+                        f"agileforge sprint generate --project-id {project_id} "
+                        "--max-story-points <points>"
+                    ),
                 ]
                 and data["blocked_future_commands"] == []
                 and data["blocked_commands"] == []

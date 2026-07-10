@@ -6196,11 +6196,17 @@ def _post_sprint_none_next(
         commands.append(
             (
                 "agileforge sprint generate",
-                f"agileforge sprint generate --project-id {project_id}",
+                (
+                    f"agileforge sprint generate --project-id {project_id} "
+                    "--max-story-points <points>"
+                ),
             )
         )
         primary_command_name = "agileforge sprint generate"
-        primary_command = f"agileforge sprint generate --project-id {project_id}"
+        primary_command = (
+            f"agileforge sprint generate --project-id {project_id} "
+            "--max-story-points <points>"
+        )
         status = "post_sprint_story_continuation_available"
     else:
         primary_command = _post_sprint_planned_sprint_start_command(
@@ -7628,7 +7634,10 @@ def _sprint_command_candidates(
             ),
             (
                 "agileforge sprint generate",
-                f"agileforge sprint generate --project-id {project_id}",
+                (
+                    f"agileforge sprint generate --project-id {project_id} "
+                    "--max-story-points <points>"
+                ),
             ),
         ]
     if fsm_state == "SPRINT_DRAFT":
@@ -7656,7 +7665,7 @@ def _sprint_command_candidates(
                 "agileforge sprint generate",
                 (
                     f"agileforge sprint generate --project-id {project_id} "
-                    "--input <feedback>"
+                    "--max-story-points <points> --input <feedback>"
                 ),
             ),
         ]
