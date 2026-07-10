@@ -15,6 +15,40 @@ TERMINAL_DECISION_INDEX_PREDICATE = "terminal_decision_key IS NOT NULL"
 AUTHORITY_CURATION_RUNNING_INDEX = "uq_authority_curation_running_authority"
 AUTHORITY_CURATION_RUNNING_INDEX_PREDICATE = "status = 'running'"
 
+DISCOVERY_CHALLENGE_ARTIFACTS_TABLE = "discovery_challenge_artifacts"
+DISCOVERY_CHALLENGE_ARTIFACTS_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "challenge_artifact_id",
+    "project_id",
+    "producer",
+    "readiness",
+    "original_idea",
+    "content_json",
+    "artifact_fingerprint",
+    "request_hash",
+    "idempotency_key",
+    "changed_by",
+    "created_at",
+    "updated_at",
+)
+DISCOVERY_CHALLENGE_ARTIFACTS_REQUIREMENTS: tuple[SchemaRequirement, ...] = (
+    SchemaRequirement(
+        table=DISCOVERY_CHALLENGE_ARTIFACTS_TABLE,
+        columns=DISCOVERY_CHALLENGE_ARTIFACTS_REQUIRED_COLUMNS,
+        indexes=(
+            "ix_discovery_challenge_artifacts_project_id",
+            "ix_discovery_challenge_artifacts_producer",
+            "ix_discovery_challenge_artifacts_readiness",
+            "ix_discovery_challenge_artifacts_artifact_fingerprint",
+            "ix_discovery_challenge_artifacts_request_hash",
+            "ix_discovery_challenge_artifacts_idempotency_key",
+            "ix_discovery_challenge_artifacts_changed_by",
+        ),
+        unique_columns=(
+            ("project_id", "idempotency_key"),
+        ),
+    ),
+)
+
 
 @dataclass(frozen=True)
 class SchemaRequirement:
@@ -520,6 +554,11 @@ def check_authority_decision_readiness(engine: Engine) -> SchemaReadiness:
 def check_authority_curation_readiness(engine: Engine) -> SchemaReadiness:
     """Return readiness for authority feedback and curation storage."""
     return check_schema_readiness(engine, AUTHORITY_CURATION_REQUIREMENTS)
+
+
+def check_discovery_challenge_readiness(engine: Engine) -> SchemaReadiness:
+    """Return readiness for scope discovery challenge artifact storage."""
+    return check_schema_readiness(engine, DISCOVERY_CHALLENGE_ARTIFACTS_REQUIREMENTS)
 
 
 def _is_missing_sqlite_file(engine: Engine) -> bool:
