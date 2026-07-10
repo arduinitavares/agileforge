@@ -4569,7 +4569,7 @@ def test_application_context_pack_facade_composes_sprint_planning_pack() -> None
     ]
     assert data["next_valid_commands"] == [
         "agileforge sprint candidates --project-id 7",
-        "agileforge sprint generate --project-id 7",
+        "agileforge sprint generate --project-id 7 --max-story-points <points>",
     ]
     assert data["blocked_commands"] == []
     assert data["blocked_future_commands"] == []
@@ -5520,7 +5520,7 @@ def test_application_workflow_next_derives_from_sprint_planning_pack() -> None:
                     "--idempotency-key <idempotency_key>"
                 ),
                 "agileforge sprint candidates --project-id 7",
-                "agileforge sprint generate --project-id 7",
+                "agileforge sprint generate --project-id 7 --max-story-points <points>",
             ],
             "blocked_commands": [],
             "blocked_future_commands": [],
@@ -5544,9 +5544,10 @@ def test_workflow_next_blocks_generate_for_blocked_candidate_readiness() -> None
 
     assert result["ok"] is True
     data = result["data"]
-    assert "agileforge sprint generate --project-id 7" not in data[
-        "next_valid_commands"
-    ]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
+    )
     assert {
         "command": "agileforge sprint generate",
         "reason": "SPRINT_CANDIDATES_NOT_PLANNING_READY",
@@ -5580,8 +5581,9 @@ def test_workflow_next_blocks_generate_for_stale_story_scope(
     assert result["ok"] is True
     data = result["data"]
     assert data["status"] == "sprint_setup_story_scope_repair_required"
-    assert (
-        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
     )
     assert (
         "agileforge story repair-readiness --project-id 7 "
@@ -5743,8 +5745,9 @@ def test_workflow_next_routes_zero_candidates_to_pending_story_generation() -> N
     assert result["ok"] is True
     data = result["data"]
     assert data["status"] == "sprint_setup_story_generation_required"
-    assert (
-        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
     )
     assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
     assert (
@@ -5821,7 +5824,10 @@ def test_workflow_next_routes_sprint_draft_to_guarded_save() -> None:
             "--expected-state SPRINT_DRAFT "
             "--idempotency-key <idempotency_key>"
         ),
-        "agileforge sprint generate --project-id 7 --input <feedback>",
+        (
+            "agileforge sprint generate --project-id 7 "
+            "--max-story-points <points> --input <feedback>"
+        ),
     ]
     assert result["data"]["blocked_commands"] == []
     assert result["data"]["blocked_future_commands"] == []
@@ -6041,13 +6047,18 @@ def test_workflow_next_routes_impact_none_to_story_and_sprint_continuation(
     assert data["status"] == "post_sprint_story_continuation_available"
     assert "agileforge story pending --project-id 7" in data["next_valid_commands"]
     assert "agileforge sprint candidates --project-id 7" in data["next_valid_commands"]
-    assert "agileforge sprint generate --project-id 7" in data["next_valid_commands"]
+    assert (
+        "agileforge sprint generate --project-id 7 --max-story-points <points>"
+        in data["next_valid_commands"]
+    )
     assert not any(
         command.startswith("agileforge backlog refine")
         for command in data["next_valid_commands"]
     )
     assert {
-        "command": "agileforge sprint generate --project-id 7",
+        "command": (
+            "agileforge sprint generate --project-id 7 --max-story-points <points>"
+        ),
         "status": "post_sprint_story_continuation_available",
         "reason": "Post-sprint triage recorded no follow-up impact.",
         "runnable": True,
@@ -6150,8 +6161,9 @@ def test_workflow_next_routes_exhausted_default_app_to_scope_discovery(
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert (
-        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
     )
     assert data["next_actions"] == [
         {
@@ -6346,8 +6358,9 @@ def test_workflow_next_scope_extension_available_when_execution_scope_exhausted(
         "agileforge story pending --project-id 7",
         "agileforge sprint candidates --project-id 7",
     ]
-    assert (
-        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
     )
     assert data["next_actions"][0] == {
         "command": challenge_command,
@@ -6985,8 +6998,9 @@ def test_workflow_next_scope_extension_blocked_preserves_blocker_reason(
     assert result["ok"] is True
     data = result["data"]
     assert data["status"] == "project_scope_extension_blocked"
-    assert (
-        "agileforge sprint generate --project-id 7" not in data["next_valid_commands"]
+    assert not any(
+        command.startswith("agileforge sprint generate --")
+        for command in data["next_valid_commands"]
     )
     assert not any(
         action["command"].startswith("agileforge sprint generate")
@@ -7120,7 +7134,9 @@ def test_workflow_next_routes_impact_roadmap_to_roadmap_reconciliation(
         ]
     )
     assert not any("backlog refine" in command for command in all_commands)
-    assert "agileforge sprint generate --project-id 7" not in all_commands
+    assert not any(
+        command.startswith("agileforge sprint generate --") for command in all_commands
+    )
     assert data["blocked_commands"] == [
         {
             "command": "agileforge story generate",

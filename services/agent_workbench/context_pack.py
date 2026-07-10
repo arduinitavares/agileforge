@@ -266,7 +266,10 @@ def _sprint_planning_commands(
 ) -> tuple[list[str], list[JsonDict], list[str]]:
     """Return installed and future commands relevant to sprint planning."""
     candidate_command = f"{SPRINT_CANDIDATES_COMMAND} --project-id {project_id}"
-    generate_command = f"{SPRINT_GENERATE_COMMAND} --project-id {project_id}"
+    generate_command = (
+        f"{SPRINT_GENERATE_COMMAND} --project-id {project_id} "
+        "--max-story-points <points>"
+    )
     next_valid: list[str] = []
     blocked_commands: list[JsonDict] = []
     blocked_future: list[str] = []
