@@ -742,16 +742,15 @@ def _should_soft_gate_story_feedback(
 ) -> bool:
     if not feedback_quality.get("needs_revision") or force_feedback:
         return False
+    if _attempt_has_clarifying_questions(latest_attempt):
+        return False
     latest_classification = (
         latest_attempt.get("classification")
         if isinstance(latest_attempt, dict)
         else None
     )
     if latest_classification == "quality_gate_failed":
-        return not (
-            _attempt_has_clarifying_questions(latest_attempt)
-            or _attempt_has_dependency_preflight_blocker(latest_attempt)
-        )
+        return not _attempt_has_dependency_preflight_blocker(latest_attempt)
     if (
         isinstance(latest_classification, str)
         and latest_classification.startswith("nonreusable_")
