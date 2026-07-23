@@ -168,7 +168,9 @@ Every structured claim carries:
 ```
 
 `artifact_id` must equal the canonical `TechnicalSpecArtifact.artifact_id`.
-`source_item_ids` must be unique and stored in lexical order.
+`source_item_ids` must be unique. Duplicate IDs are invalid and are never
+silently removed. After uniqueness validation succeeds, the normalizer stores
+the list in lexical order.
 
 Provenance emitted by the compiler is untrusted input. The normalizer validates
 it against the canonical spec. It does not invent, widen, or silently repair
@@ -288,6 +290,12 @@ invalid: One item was accepted: REQ.alpha.
 The four examples from #195 and the old #177 sentence are invalid free-text
 assumptions in v3.
 
+This predicate is the complete deterministic free-text detection contract. It
+does not claim to recognize every semantic paraphrase. For example,
+`REQ.alpha alone is approved` falls outside the documented cue set unless a
+future schema version adds those exact tokens. Arbitrary English equivalence
+remains a non-goal; reviewer-visible free text remains subject to human review.
+
 ## Validation and Data Flow
 
 ### Compiler Output Boundary
@@ -302,8 +310,8 @@ The normalizer performs these steps:
 3. Map the free-text validator's stable
    `assumption_claim_requires_typed_form` Pydantic error type to the dedicated
    compiler failure before generic validation-error conversion.
-4. Reject duplicates, unknown fields, unknown kinds, and empty free text.
-5. Sort unique `item_ids` and `source_item_ids`.
+4. Reject duplicate IDs, unknown fields, unknown kinds, and empty free text.
+5. Sort `item_ids` and `source_item_ids` only after uniqueness validation.
 6. If structured claims exist, parse the supplied source as
    `TechnicalSpecArtifact`. Free-text-only output does not require a structured
    source.
@@ -323,8 +331,9 @@ string append operations are removed.
 
 ### Grounding Result
 
-Grounding is a reusable typed service, not review-specific regex logic. It
-accepts:
+Grounding is a reusable typed service, not review-specific regex logic. Callers
+must parse and validate the source as `TechnicalSpecArtifact` before invoking
+it. The service accepts:
 
 - one v3 assumption entry; and
 - one canonical `TechnicalSpecArtifact`.
@@ -439,12 +448,16 @@ one typed variant. All other semantic claim failures remain non-retryable.
 ### Quality Processing
 
 - Free-text assumptions deduplicate by normalized `text`.
-- Structured claims deduplicate by canonical JSON.
+- Structured claims deduplicate through one shared
+  `canonical_assumption_key()` function.
 - Different claim kinds or values never merge.
 - Noisy/Jaccard grouping operates only on `FreeTextAssumption.text`.
   Structured claims are excluded from token-based similarity grouping.
-- Compact-IR assumption target hashing uses canonical JSON for every typed
-  assumption object. It never calls string normalization on an object.
+- `canonical_assumption_key()` serializes every variant as sorted,
+  separator-stable canonical JSON. Quality deduplication, compilation merge,
+  compact-IR target hashing, review finding identity, rendering lookup, and
+  curation targeting all use that function. No consumer defines a second
+  assumption identity rule.
 - Quality report identifiers remain positional for v3. Stable assumption IDs
   are outside this issue.
 
@@ -493,7 +506,9 @@ in a new authority row.
 
 This requires an append-only persistence correction:
 
-- `force_recompile=True` always inserts a new `CompiledSpecAuthority` row;
+- every `force_recompile=True` operation inserts a new
+  `CompiledSpecAuthority` row, including when the previous candidate has no
+  terminal decision;
 - no successful compile path updates an existing authority row in place;
 - a row referenced by a terminal `SpecAuthorityAcceptance` is immutable;
 - regeneration publishes the authority ID returned by compilation;
@@ -648,7 +663,7 @@ Implementation must not add:
   deterministically.
 - False structured claims cannot be persisted.
 - Tampered stored claims block authority review.
-- Claim-like free text fails explicitly.
+- Free text matching the finite reserved predicate fails explicitly.
 - Ordinary free text remains supported.
 - V2 artifacts fail closed with regeneration guidance.
 - Accepted authority rows are immutable; regeneration is append-only.
