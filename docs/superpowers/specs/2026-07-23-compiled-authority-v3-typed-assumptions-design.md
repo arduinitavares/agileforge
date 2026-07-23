@@ -516,6 +516,24 @@ This requires an append-only persistence correction:
 - mutation-ledger replay returns the already-created authority instead of
   inserting another row.
 
+Append-only storage also requires one row-selection contract across all
+consumers:
+
+- compiler and mutation results are loaded by the exact returned authority ID;
+- a terminal decision is loaded by its exact `pending_authority_id`;
+- execution validation resolves the accepted terminal decision and must not use a
+  newer pending candidate;
+- a pending/current lookup without an exact ID selects
+  `authority_id DESC`; and
+- an unordered `CompiledSpecAuthority` lookup by `spec_version_id` is invalid.
+
+This contract applies to story validation, orchestrator context backfill,
+pending-authority setup, snapshot export, authority projections, and compiler
+cache/status reads. Retaining a v2 row must never make one of those consumers
+select it accidentally after a newer v3 row has been produced. Conversely, a
+newer pending v3 row must not become execution authority until its own
+acceptance references it.
+
 This follows the existing compiled-authority migration policy: regenerate
 authoritative derived data from the accepted spec instead of guessing how an
 old free-text claim should be typed.
@@ -612,6 +630,11 @@ For item status, accepted count, and accepted set:
 - regeneration inserts a new authority row and leaves accepted v2 content
   unchanged;
 - mutation-ledger replay returns the same regenerated authority row;
+- two-row v2-to-v3 fixtures prove exact/accepted/latest selection for story
+  validation, context backfill, pending compilation, snapshot export, and
+  authority projections;
+- story validation remains bound to accepted v2 until the v3 row is explicitly
+  accepted;
 - true claims remain `accept_ready` without unrelated blockers;
 - false or tampered claims block and are non-overrideable;
 - rendered JSON remains typed;
@@ -629,6 +652,7 @@ Run the focused suites for:
 - authority review and decision;
 - authority curation and diff;
 - regeneration and unsupported-schema routing; and
+- append-only multi-row readers; and
 - compact-IR validation paths that enumerate assumptions.
 
 Then run `uv run --frozen pyrepo-check --all`.
@@ -643,8 +667,11 @@ Expected implementation areas:
 - `orchestrator_agent/agent_tools/spec_authority_compiler_agent/normalizer.py`
 - `services/specs/compiler_service.py`
 - `services/specs/authority_quality.py`
+- a shared compiled-authority row-selection module
 - `services/agent_workbench/authority_review.py`
 - `services/agent_workbench/authority_regenerate.py`
+- story validation, orchestrator context, pending-authority, projection, and
+  snapshot readers
 - authority curation and curation-diff services
 - affected tests and operator-facing schema-version assertions
 
@@ -668,6 +695,8 @@ Implementation must not add:
 - V2 artifacts fail closed with regeneration guidance.
 - Accepted authority rows are immutable; regeneration is append-only.
 - Regeneration produces a pending v3 authority without auto-acceptance.
+- Retained v2 history cannot win an unordered row lookup after v3 regeneration.
+- A pending v3 row cannot replace accepted execution authority before review.
 - Partial-scope aggregate claims cannot leak into merged full authority.
 - Host-generated assumptions and compact-IR hashes use typed canonical objects.
 - The legacy exclusivity regex and compatibility helpers are deleted.
