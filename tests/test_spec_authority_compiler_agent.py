@@ -22,6 +22,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contr
 )
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_source import (
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
+    SPEC_AUTHORITY_COMPILER_VERSION,
 )
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (
     normalize_compiler_output,
@@ -85,6 +86,14 @@ def test_compiler_instructions_document_behavioral_authority_types() -> None:
     assert "source_item_id" in instructions
     assert "source_level" in instructions
     assert "Do not compress event-driven behavior into REQUIRED_FIELD" in instructions
+
+
+def test_compiler_contract_version_is_v3() -> None:
+    """The prompt source advertises the breaking v3 compiler contract."""
+    assert SPEC_AUTHORITY_COMPILER_VERSION == "3.0.0"
+    assert '"schema_version": "agileforge.compiled_authority.v3"' in (
+        _compiler_instructions()
+    )
 
 
 def test_compiler_instructions_require_accepted_must_coverage() -> None:

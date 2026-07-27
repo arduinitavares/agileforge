@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from utils.spec_authority_ir import (
     AuthorityTargetKind,
     CoverageStatus,
@@ -828,3 +830,43 @@ def test_generated_gap_and_assumption_ids_are_stable() -> None:
     assert changed_gap_text.authority_item_id != first[0].authority_item_id
     assert changed_assumption_text.authority_item_id != first[1].authority_item_id
     assert changed_candidate.authority_item_id != first[0].authority_item_id
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "prefix"),
+    [
+        ("gap", "GAP-"),
+        ("eligible_feature_rule", "EFR-"),
+        ("rejected_feature", "RF-"),
+        ("invariant", "INV-"),
+        ("unknown", "UNK-"),
+    ],
+)
+@pytest.mark.parametrize("target_text", ["", "Only accepted items are used."])
+def test_non_assumption_generated_ids_do_not_validate_free_text(
+    target_kind: str,
+    prefix: str,
+    target_text: str,
+) -> None:
+    """Non-assumption target IDs tolerate text invalid for free-text assumptions."""
+    sections, _diagnostics = parse_markdown_sections(
+        "# Requirements\n\nThe API must return problem details.\n"
+    )
+    candidate = extract_requirement_candidates(source_units_from_sections(sections))[0]
+
+    mappings = build_authority_mappings(
+        [candidate],
+        [],
+        [
+            {
+                "candidate_id": candidate.candidate_id,
+                "authority_target_kind": target_kind,
+                "target_text": target_text,
+                "source_quote_hash": candidate.quote_hash,
+                "mapping_provenance": "model_quote",
+            }
+        ],
+    )
+
+    assert len(mappings) == 1
+    assert mappings[0].authority_item_id.startswith(prefix)

@@ -93,7 +93,37 @@ def v3_compiled_authority_payload() -> dict[str, Any]:
         "eligible_feature_rules": [],
         "rejected_features": [],
         "gaps": [],
-        "assumptions": [],
+        "assumptions": [
+            {"kind": "free_text", "text": "Audit evidence is retained."},
+            {
+                "kind": "item_status",
+                "item_id": "REQ.alpha",
+                "status": "accepted",
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.loader",
+                    "source_item_ids": ["REQ.alpha"],
+                },
+            },
+            {
+                "kind": "accepted_normative_count",
+                "count": 2,
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.loader",
+                    "source_item_ids": ["CONSTRAINT.beta", "REQ.alpha"],
+                },
+            },
+            {
+                "kind": "accepted_normative_set",
+                "item_ids": ["CONSTRAINT.beta", "REQ.alpha"],
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.loader",
+                    "source_item_ids": ["CONSTRAINT.beta", "REQ.alpha"],
+                },
+            },
+        ],
         "source_map": [],
         "compiler_version": "2.0.0",
         "prompt_hash": "a" * 64,
@@ -589,7 +619,7 @@ def _create_compiled_authority(
 
 
 def test_load_compiled_artifact_returns_success_payload() -> None:
-    """Verify load compiled artifact returns success result for v2 payloads."""
+    """Verify the loader round-trips every typed v3 assumption variant."""
     from services.specs.compiler_service import (  # noqa: PLC0415
         CompiledArtifactLoadResult,
         load_compiled_artifact,
@@ -624,12 +654,18 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     assert result.artifact.schema_version == "agileforge.compiled_authority.v3"
     assert result.artifact.invariants[0].source_item_id == "REQ.payments.email"
     assert result.artifact.invariants[0].source_level == "MUST"
+    assert [assumption.kind for assumption in result.artifact.assumptions] == [
+        "free_text",
+        "item_status",
+        "accepted_normative_count",
+        "accepted_normative_set",
+    ]
     with pytest.raises(FrozenInstanceError):
         result.status = "missing"  # type: ignore[misc]
 
 
 def test_compiled_authority_artifact_json_round_trips_through_loader() -> None:
-    """Stored-artifact serializer should emit a v2 envelope the loader accepts."""
+    """Stored-artifact serializer emits a v3 envelope the loader accepts."""
     from services.specs.compiler_service import (  # noqa: PLC0415
         _compiled_authority_artifact_json,
         load_compiled_artifact,
@@ -697,7 +733,7 @@ def test_load_compiled_artifact_raw_sniffs_missing_schema_version() -> None:
 
 
 def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
-    """Verify stored artifacts with non-v2 schema_version fail before validation."""
+    """Verify stored artifacts with a non-v3 schema fail before validation."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
     payload = v3_compiled_authority_payload()
@@ -732,10 +768,10 @@ def test_load_compiled_artifact_rejects_historical_v2_payload() -> None:
     assert result.observed_schema_version == "agileforge.compiled_authority.v2"
 
 
-def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload() -> (
+def test_load_compiled_artifact_reports_validation_error_for_invalid_v3_payload() -> (
     None
 ):
-    """Verify invalid v2 payloads expose schema-invalid result details."""
+    """Verify invalid v3 payloads expose schema-invalid result details."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
     payload = v3_compiled_authority_payload()
@@ -3784,12 +3820,12 @@ def test_schema_retry_stops_after_one_retry(
     ]
 
 
-def test_semantic_source_mismatch_does_not_trigger_schema_retry(
+def test_false_structured_claim_does_not_retry_or_persist(
     session: Session,
     sample_product: Product,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Semantic/source failures must fail closed without schema retry."""
+    """A false structured claim fails closed without retry or persistence."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     attempts: list[dict[str, object]] = []
@@ -3821,7 +3857,17 @@ def test_semantic_source_mismatch_does_not_trigger_schema_retry(
             "eligible_feature_rules": [],
             "rejected_features": [],
             "gaps": [],
-            "assumptions": [],
+            "assumptions": [
+                {
+                    "kind": "accepted_normative_count",
+                    "count": 1,
+                    "provenance": {
+                        "source": "structured_spec",
+                        "artifact_id": "SPEC.test",
+                        "source_item_ids": [],
+                    },
+                }
+            ],
             "source_map": [
                 {
                     "invariant_id": "INV-0123456789abcdef",
@@ -3852,10 +3898,12 @@ def test_semantic_source_mismatch_does_not_trigger_schema_retry(
 
     assert result["success"] is False
     assert result["failure_stage"] == "output_validation"
+    assert result["reason"] == "ASSUMPTION_CLAIM_MISMATCH"
     assert len(attempts) == 1
     assert result["schema_retry_attempted"] is False
     assert result["schema_retry_reason"] is None
     assert result["schema_retry_attempts"] == 0
+    assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
 def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(

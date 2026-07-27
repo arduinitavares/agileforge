@@ -1031,43 +1031,27 @@ def _authority_item_id(
     finding_code = (
         _string_field(entry, "finding_code") or "AUTHORITY_CANDIDATE_UNCOVERED"
     )
-    generated_ids = {
-        AuthorityTargetKind.GAP: _generated_gap_id(
+    if target_kind == AuthorityTargetKind.ASSUMPTION:
+        assumption = FreeTextAssumption(kind="free_text", text=target_text)
+        return _generated_assumption_id(candidate_id, target_kind, assumption)
+    if target_kind == AuthorityTargetKind.GAP:
+        return _generated_gap_id(
             candidate_id,
             finding_code,
             target_text,
-        ),
-        AuthorityTargetKind.ASSUMPTION: _generated_assumption_id(
-            candidate_id,
-            target_kind,
-            FreeTextAssumption(kind="free_text", text=target_text),
-        ),
-        AuthorityTargetKind.ELIGIBLE_FEATURE_RULE: _generated_target_id(
-            "EFR",
-            candidate_id,
-            target_kind,
-            target_text,
-        ),
-        AuthorityTargetKind.REJECTED_FEATURE: _generated_target_id(
-            "RF",
-            candidate_id,
-            target_kind,
-            target_text,
-        ),
-        AuthorityTargetKind.INVARIANT: _generated_target_id(
-            "INV",
-            candidate_id,
-            target_kind,
-            target_text,
-        ),
-        AuthorityTargetKind.UNKNOWN: _generated_target_id(
-            "UNK",
-            candidate_id,
-            target_kind,
-            target_text,
-        ),
+        )
+    prefixes = {
+        AuthorityTargetKind.ELIGIBLE_FEATURE_RULE: "EFR",
+        AuthorityTargetKind.REJECTED_FEATURE: "RF",
+        AuthorityTargetKind.INVARIANT: "INV",
+        AuthorityTargetKind.UNKNOWN: "UNK",
     }
-    return generated_ids[target_kind]
+    return _generated_target_id(
+        prefixes[target_kind],
+        candidate_id,
+        target_kind,
+        target_text,
+    )
 
 
 def _target_text(entry: object, item: object | None) -> str:

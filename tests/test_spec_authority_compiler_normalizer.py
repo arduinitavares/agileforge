@@ -455,6 +455,67 @@ def test_normalizer_grounds_typed_claim_before_empty_invariant_success() -> None
     assert normalized.root.assumptions[0].kind == "accepted_normative_set"
 
 
+def test_normalizer_revalidates_no_invariant_success_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-invariants exit runs final full-model revalidation."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (  # noqa: PLC0415
+        normalizer,
+    )
+
+    original = normalizer.SpecAuthorityCompilationSuccess.model_validate
+    validated_payloads: list[object] = []
+
+    def track_validation(cls: type[SpecAuthorityCompilationSuccess], value: object) -> SpecAuthorityCompilationSuccess:  # noqa: E501
+        del cls
+        validated_payloads.append(value)
+        return original(value)
+
+    monkeypatch.setattr(
+        normalizer.SpecAuthorityCompilationSuccess,
+        "model_validate",
+        classmethod(track_validation),
+    )
+    payload = _legacy_success_payload()
+    payload["invariants"] = []
+    payload["source_map"] = []
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(validated_payloads) == 1
+    assert isinstance(validated_payloads[0], dict)
+
+
+def test_normalizer_revalidates_full_success_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary success exit runs final full-model revalidation too."""
+    from orchestrator_agent.agent_tools.spec_authority_compiler_agent import (  # noqa: PLC0415
+        normalizer,
+    )
+
+    original = normalizer.SpecAuthorityCompilationSuccess.model_validate
+    validated_payloads: list[object] = []
+
+    def track_validation(cls: type[SpecAuthorityCompilationSuccess], value: object) -> SpecAuthorityCompilationSuccess:  # noqa: E501
+        del cls
+        validated_payloads.append(value)
+        return original(value)
+
+    monkeypatch.setattr(
+        normalizer.SpecAuthorityCompilationSuccess,
+        "model_validate",
+        classmethod(track_validation),
+    )
+
+    normalized = normalize_compiler_output(json.dumps(_legacy_success_payload()))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert len(validated_payloads) == 1
+    assert isinstance(validated_payloads[0], dict)
+
+
 def test_normalizer_rejects_ungrounded_typed_claim() -> None:
     """A false structured claim cannot enter a normalized success artifact."""
     payload = _legacy_success_payload()
