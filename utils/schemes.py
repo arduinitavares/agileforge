@@ -14,12 +14,6 @@ from .api_schemas import (
     TaskExecutionReadResponse,
     TaskExecutionWriteRequest,
 )
-from .spec_authority_assumptions import (
-    AcceptedNormativeCountAssumptionClaim,
-    AcceptedNormativeSetAssumptionClaim,
-    FreeTextAssumption,
-    ItemStatusAssumptionClaim,
-)
 from .spec_schemas import (
     AlignmentFinding,
     AuthorityQualityMergedItem,
@@ -55,8 +49,6 @@ from .spec_schemas import (
 )
 
 __all__ = [
-    "AcceptedNormativeCountAssumptionClaim",
-    "AcceptedNormativeSetAssumptionClaim",
     "AlignmentFinding",
     "AuthorityQualityMergedItem",
     "AuthorityQualityReport",
@@ -65,11 +57,9 @@ __all__ = [
     "DataContractParams",
     "EligibleFeatureRule",
     "ForbiddenCapabilityParams",
-    "FreeTextAssumption",
     "Invariant",
     "InvariantParameters",
     "InvariantType",
-    "ItemStatusAssumptionClaim",
     "MaxValueParams",
     "NegationCheckInput",
     "NegationCheckOutput",

@@ -256,22 +256,3 @@ def test_compat_schemes_reexports_authority_quality_models() -> None:
         is spec_schemas.AuthorityQualityReviewGroup
     )
     assert schemes.AuthorityQualityMergedItem is spec_schemas.AuthorityQualityMergedItem
-
-
-def test_compat_schemes_reexports_typed_assumption_contract() -> None:
-    """Compatibility schemas expose the typed assumption boundary unchanged."""
-    from utils import schemes, spec_authority_assumptions  # noqa: PLC0415
-
-    assert schemes.FreeTextAssumption is spec_authority_assumptions.FreeTextAssumption
-    assert (
-        schemes.ItemStatusAssumptionClaim
-        is spec_authority_assumptions.ItemStatusAssumptionClaim
-    )
-    assert (
-        schemes.AcceptedNormativeCountAssumptionClaim
-        is spec_authority_assumptions.AcceptedNormativeCountAssumptionClaim
-    )
-    assert (
-        schemes.AcceptedNormativeSetAssumptionClaim
-        is spec_authority_assumptions.AcceptedNormativeSetAssumptionClaim
-    )

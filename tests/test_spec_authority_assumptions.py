@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.spec_authority_assumptions import (
@@ -129,6 +129,28 @@ def test_assumption_adapter_rejects_invalid_contract_shapes(payload: object) -> 
         AUTHORITY_ASSUMPTION_ADAPTER.validate_python(payload)
 
 
+def test_structured_claim_requires_provenance_source() -> None:
+    """Structured provenance rejects an object that omits its required source."""
+    payload = {
+        "kind": "item_status",
+        "item_id": "REQ.alpha",
+        "status": "accepted",
+        "provenance": {
+            "artifact_id": "SPEC.authority-review",
+            "source_item_ids": ["REQ.alpha"],
+        },
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        AUTHORITY_ASSUMPTION_ADAPTER.validate_python(payload)
+
+    assert any(
+        error["loc"] == ("item_status", "provenance", "source")
+        and error["type"] == "missing"
+        for error in exc_info.value.errors()
+    )
+
+
 @pytest.mark.parametrize(
 "text",
 [
@@ -211,12 +233,32 @@ def test_unique_claim_ids_are_sorted_canonically() -> None:
 
 
 def test_discriminator_does_not_depend_on_union_trial_order() -> None:
-    """A kind selects its model independently from union declaration order."""
-    assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(
-        {"kind": "free_text", "text": "An external provider is available."}
-    )
+    """An equivalent reversed union selects the same discriminated variant."""
+    reversed_authority_assumption = Annotated[
+        AcceptedNormativeSetAssumptionClaim
+        | AcceptedNormativeCountAssumptionClaim
+        | ItemStatusAssumptionClaim
+        | FreeTextAssumption,
+        Field(discriminator="kind"),
+    ]
+    reversed_adapter = TypeAdapter(reversed_authority_assumption)
+    payload = {
+        "kind": "item_status",
+        "item_id": "REQ.alpha",
+        "status": "accepted",
+        "provenance": {
+            "source": "structured_spec",
+            "artifact_id": "SPEC.authority-review",
+            "source_item_ids": ["REQ.alpha"],
+        },
+    }
 
-    assert isinstance(assumption, FreeTextAssumption)
+    canonical_assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(payload)
+    reversed_assumption = reversed_adapter.validate_python(payload)
+
+    assert isinstance(canonical_assumption, ItemStatusAssumptionClaim)
+    assert isinstance(reversed_assumption, ItemStatusAssumptionClaim)
+    assert reversed_assumption == canonical_assumption
 
 
 def test_canonical_free_text_identity_normalizes_unicode_and_case() -> None:
@@ -439,35 +481,71 @@ def test_grounding_checks_accepted_normative_set(
         assert result.actual_value == ["CONSTRAINT.beta", "REQ.alpha"]
 
 
-@pytest.mark.parametrize(
-    ("artifact_id", "source_item_ids", "reason"),
-[
-    ("SPEC.other", ["REQ.alpha"], "ASSUMPTION_CLAIM_SOURCE_MISMATCH"),
-    ("SPEC.authority-review", ["CONSTRAINT.beta"], "ASSUMPTION_CLAIM_SOURCE_MISMATCH"),
-],
-)
-def test_grounding_rejects_wrong_or_incomplete_provenance(
+def test_grounding_rejects_wrong_artifact_provenance(
     structured_spec: TechnicalSpecArtifact,
-    artifact_id: str,
-    source_item_ids: list[str],
-    reason: str,
 ) -> None:
-    """Claims never gain missing or invented evidence during grounding."""
+    """A claim cannot be grounded against a different structured artifact."""
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.alpha",
         status="accepted",
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
-            artifact_id=artifact_id,
-            source_item_ids=source_item_ids,
+            artifact_id="SPEC.other",
+            source_item_ids=["REQ.alpha"],
         ),
     )
 
     result = ground_assumption(claim, structured_spec)
 
     assert isinstance(result, GroundingFailure)
-    assert result.reason == reason
+    assert result.reason == "ASSUMPTION_CLAIM_SOURCE_MISMATCH"
+
+
+def test_grounding_rejects_incomplete_item_status_provenance(
+    structured_spec: TechnicalSpecArtifact,
+) -> None:
+    """Missing required evidence is not widened to repair a valid claim."""
+    claim = ItemStatusAssumptionClaim(
+        kind="item_status",
+        item_id="REQ.alpha",
+        status="accepted",
+        provenance=StructuredSpecClaimProvenance(
+            source="structured_spec",
+            artifact_id=structured_spec.artifact_id,
+            source_item_ids=[],
+        ),
+    )
+
+    result = ground_assumption(claim, structured_spec)
+
+    assert isinstance(result, GroundingFailure)
+    assert result.reason == "ASSUMPTION_CLAIM_SOURCE_MISMATCH"
+    assert result.claimed_source_item_ids == ()
+    assert result.actual_source_item_ids == ("REQ.alpha",)
+
+
+def test_grounding_rejects_invented_item_status_provenance(
+    structured_spec: TechnicalSpecArtifact,
+) -> None:
+    """Extra evidence is not silently removed to repair a valid claim."""
+    claim = ItemStatusAssumptionClaim(
+        kind="item_status",
+        item_id="REQ.alpha",
+        status="accepted",
+        provenance=StructuredSpecClaimProvenance(
+            source="structured_spec",
+            artifact_id=structured_spec.artifact_id,
+            source_item_ids=["CONSTRAINT.beta", "REQ.alpha"],
+        ),
+    )
+
+    result = ground_assumption(claim, structured_spec)
+
+    assert isinstance(result, GroundingFailure)
+    assert result.reason == "ASSUMPTION_CLAIM_SOURCE_MISMATCH"
+    assert result.claimed_source_item_ids == ("CONSTRAINT.beta", "REQ.alpha")
+    assert result.actual_source_item_ids == ("REQ.alpha",)
 
 
 def test_grounding_rejects_missing_item(structured_spec: TechnicalSpecArtifact) -> None:
