@@ -19,6 +19,7 @@ from scripts.authority_quality_benchmark import (
     write_json,
     write_text,
 )
+from utils.spec_schemas import SpecAuthorityCompilationSuccess
 
 if TYPE_CHECKING:
     import pytest
@@ -1054,11 +1055,11 @@ def test_todomvc_fixture_is_rejected_by_semantic_guardrails() -> None:
     gold_spec = json.loads(
         (fixture_dir / "agileforge/gold-spec/spec.json").read_text(encoding="utf-8")
     )
-    authority = json.loads(
+    authority = SpecAuthorityCompilationSuccess.model_validate_json(
         (fixture_dir / "agileforge/compiled-authority.json").read_text(
             encoding="utf-8"
         )
-    )
+    ).model_dump(mode="json")
     review_summary = json.loads(
         (fixture_dir / "agileforge/review-summary.json").read_text(encoding="utf-8")
     )
@@ -1079,6 +1080,54 @@ def test_todomvc_fixture_is_rejected_by_semantic_guardrails() -> None:
         "EXAMPLE_USED_AS_NORMATIVE_SOURCE",
         "FALSE_POSITIVE_ACCEPT_READY",
     } <= finding_codes
+
+
+def test_todomvc_manifest_compiler_contract_matches_artifact() -> None:
+    """Committed run manifest records the migrated artifact compiler contract."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc/agileforge"
+    artifact = json.loads(
+        (fixture_dir / "compiled-authority.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (fixture_dir / "run-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["compiler_version"] == artifact["compiler_version"] == "3.0.0"
+
+
+def test_todomvc_manifest_hash_matches_artifact() -> None:
+    """Committed run manifest fingerprints the exact migrated artifact bytes."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc/agileforge"
+    artifact_text = (fixture_dir / "compiled-authority.json").read_text(
+        encoding="utf-8"
+    )
+    manifest = json.loads(
+        (fixture_dir / "run-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["compiled_authority_sha256"] == sha256_text(artifact_text)
+
+
+def test_todomvc_manifest_records_contract_only_migration() -> None:
+    """Fixture provenance distinguishes contract migration from an LLM rerun."""
+    fixture_dir = REPO_ROOT / "benchmarks/authority-quality/todomvc/agileforge"
+    manifest = json.loads(
+        (fixture_dir / "run-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["artifact_contract_migration"] == {
+        "kind": "fixture_contract_migration",
+        "llm_rerun": False,
+        "prompt_hash_basis": (
+            "TodoMVC benchmark fixture contract migration to "
+            "agileforge.compiled_authority.v3; no compiler or LLM rerun."
+        ),
+        "semantic_content": "preserved",
+        "source_artifact_contract": "legacy_unversioned",
+        "source_compiler_version": "1.0.0",
+        "target_artifact_contract": "agileforge.compiled_authority.v3",
+        "target_compiler_version": "3.0.0",
+    }
 
 
 def test_todomvc_guardrails_use_top_level_source_map_for_coverage() -> None:

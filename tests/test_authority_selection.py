@@ -35,16 +35,16 @@ def _history(
     rows = [
         CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version=version,
+            compiler_version="3.0.0",
             prompt_hash=prompt,
-            compiled_artifact_json=f'{{"row":"{version}"}}',
+            compiled_artifact_json=f'{{"prompt_hash":"{prompt}"}}',
             scope_themes="[]",
             invariants="[]",
             eligible_feature_ids="[]",
             rejected_features="[]",
             spec_gaps="[]",
         )
-        for version, prompt in (("2.0.0", "a" * 64), ("3.0.0", "b" * 64))
+        for prompt in ("a" * 64, "b" * 64)
     ]
     session.add_all(rows)
     session.commit()

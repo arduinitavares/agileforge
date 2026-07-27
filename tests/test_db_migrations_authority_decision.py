@@ -346,7 +346,7 @@ def test_spec_authority_migration_removes_unique_compiled_spec_constraint(
                   rejected_features,
                   spec_gaps
                 )
-                VALUES (1, 11, '2.0.0', 'a', '2026-05-17 09:00:00',
+                VALUES (1, 11, '3.0.0', 'a', '2026-05-17 09:00:00',
                         '{}', '[]', '[]', '[]', '[]', '[]')
                 """
             )
@@ -384,7 +384,7 @@ def test_spec_authority_migration_removes_unique_compiled_spec_constraint(
                   rejected_features,
                   spec_gaps
                 )
-                VALUES (2, 11, '2.0.0', 'b', '2026-05-17 10:00:00',
+                VALUES (2, 11, '3.0.0', 'b', '2026-05-17 10:00:00',
                         '{}', '[]', '[]', '[]', '[]', '[]')
                 """
             )

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict, Unpack
 
 from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry
+from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
@@ -250,7 +252,7 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
     assert refreshed.compiled_authority_json is None
 
 
-def test_context_fallback_backfills_newest_authority_row(
+def test_context_fallback_backfills_newest_v3_row_over_historical_v2(
     session: Session,
 ) -> None:
     """Fallback chooses the newest v3 row rather than older unsupported history."""
@@ -265,23 +267,33 @@ def test_context_fallback_backfills_newest_authority_row(
     spec = _create_approved_spec(session, product_id)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
     newest_json = _compiled_v3_json()
-    for version, prompt_hash, artifact_json in (
-        ("2.0.0", "a" * 64, '{"invariants":[]}'),
-        ("3.0.0", "b" * 64, newest_json),
-    ):
-        session.add(
+    historical = historical_v2_compiled_authority(prompt_hash="a" * 64)
+    session.add_all(
+        [
             CompiledSpecAuthority(
                 spec_version_id=spec_version_id,
-                compiler_version=version,
-                prompt_hash=prompt_hash,
-                compiled_artifact_json=artifact_json,
+                compiler_version=str(historical["compiler_version"]),
+                prompt_hash=str(historical["prompt_hash"]),
+                compiled_artifact_json=json.dumps(historical),
                 scope_themes="[]",
                 invariants="[]",
                 eligible_feature_ids="[]",
                 rejected_features="[]",
                 spec_gaps="[]",
-            )
-        )
+            ),
+            CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version="3.0.0",
+                prompt_hash="b" * 64,
+                compiled_artifact_json=newest_json,
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            ),
+        ]
+    )
     session.commit()
 
     context = MockToolContext({})

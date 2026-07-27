@@ -2,14 +2,24 @@
   "acceptance_mutation_status": "not_run",
   "agileforge_branch": "dev/authority-coverage-matrix-phase-2e",
   "agileforge_commit": "420b064",
+  "artifact_contract_migration": {
+    "kind": "fixture_contract_migration",
+    "llm_rerun": false,
+    "prompt_hash_basis": "TodoMVC benchmark fixture contract migration to agileforge.compiled_authority.v3; no compiler or LLM rerun.",
+    "semantic_content": "preserved",
+    "source_artifact_contract": "legacy_unversioned",
+    "source_compiler_version": "1.0.0",
+    "target_artifact_contract": "agileforge.compiled_authority.v3",
+    "target_compiler_version": "3.0.0"
+  },
   "authority_compiler_model": "configured-agileforge-default",
   "commands": {
     "create": "agileforge project create --name TodoMVC Authority Quality Benchmark --spec-file benchmarks/authority-quality/todomvc/agileforge/gold-spec/spec.json --idempotency-key REDACTED",
     "extraction": "uv run --frozen python scripts/authority_quality_benchmark.py extract-review --fixture-dir benchmarks/authority-quality/todomvc --review-packet REDACTED",
     "review": "agileforge authority review --project-id REDACTED --include-spec full"
   },
-  "compiled_authority_sha256": "sha256:828ebd1af841724f27565384347a612e46820273fabe80de2e5cefe41824ca06",
-  "compiler_version": "1.0.0",
+  "compiled_authority_sha256": "sha256:1c2b87c81be8089ffa77d2b71d121f28a5cc82599d2370324218e0d3e06e3e04",
+  "compiler_version": "3.0.0",
   "generated_at": "2026-05-20T14:45:44Z",
   "gold_spec_sha256": "sha256:74c1b951b1c832564e9d08c5af9929e51681add96857def816e52584bec9ce50",
   "normalized_source_sha256": "sha256:5bf3ac910c720533c9fb57708fc2a5e964ea6a4d59436d145c929b4059521094",

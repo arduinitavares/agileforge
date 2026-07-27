@@ -207,7 +207,7 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
     rows = [
         CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version=version,
+            compiler_version="3.0.0",
             prompt_hash=prompt,
             compiled_artifact_json="{}",
             scope_themes="[]",
@@ -216,7 +216,7 @@ def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candida
             rejected_features="[]",
             spec_gaps="[]",
         )
-        for version, prompt in (("2.0.0", "a" * 64), ("3.0.0", "b" * 64))
+        for prompt in ("a" * 64, "b" * 64)
     ]
     session.add_all(rows)
     session.commit()
@@ -303,7 +303,7 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
     rows = [
         CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version=version,
+            compiler_version="3.0.0",
             prompt_hash=prompt,
             compiled_artifact_json="{}",
             scope_themes="[]",
@@ -312,7 +312,7 @@ def test_story_validation_moves_only_to_exact_newly_accepted_row(
             rejected_features="[]",
             spec_gaps="[]",
         )
-        for version, prompt in (("2.0.0", "a" * 64), ("3.0.0", "b" * 64))
+        for prompt in ("a" * 64, "b" * 64)
     ]
     session.add_all(rows)
     session.commit()
