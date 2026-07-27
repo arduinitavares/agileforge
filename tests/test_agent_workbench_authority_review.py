@@ -17,6 +17,8 @@ from services.agent_workbench.authority_projection import pending_authority_fing
 from services.agent_workbench.authority_review import (
     REVIEW_TOKEN_SCHEMA,
     AuthorityReviewService,
+    _compiled_claim_finding,
+    _fallback_classification_evidence,
     build_authority_review_snapshot,
     canonical_json_hash,
     coverage_summary_fingerprint,
@@ -728,11 +730,17 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     )
     malformed_artifact["assumptions"] = [
         {
-            "id": "ASM-7",
-            "text": "Review assumes CLI output is JSON.",
-            "support": "direct",
-            "source_refs": ["REQ.guard-tokens.statement"],
-            "source_excerpt": "The review output must include guard tokens.",
+            "kind": "accepted_normative_count",
+            "count": 1,
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.authority-review",
+                "source_item_ids": ["REQ.guard-tokens"],
+            },
+        },
+        {
+            "kind": "accepted_normative_count",
+            "count": "not-an-integer",
         }
     ]
     malformed_artifact["invariants"] = "bad"
@@ -799,7 +807,7 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     )
     assert invalid["severity"] == "blocking"
     assert invalid["override_allowed"] is False
-    assert "Review assumes CLI output is JSON." in result["data"]["text"]
+    assert "1 accepted normative items" in result["data"]["text"]
     artifact = result["data"]["pending_authority"]["artifact"]
     assert artifact["eligible_feature_rules"] == [
         {
@@ -830,13 +838,73 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     ]
     assert artifact["assumptions"] == [
         {
-            "id": "ASM-7",
-            "text": "Review assumes CLI output is JSON.",
-            "support": "direct",
-            "source_refs": ["REQ.guard-tokens.statement"],
-            "source_excerpt": "The review output must include guard tokens.",
-        }
+            "id": "ASM-1",
+            "text": "1 accepted normative items",
+            "support": "inferred",
+            "source_refs": [],
+            "source_excerpt": None,
+            "assumption_key": (
+                '{"count":1,"kind":"accepted_normative_count","provenance":'
+                '{"artifact_id":"SPEC.authority-review","source":'
+                '"structured_spec","source_item_ids":["REQ.guard-tokens"]}}'
+            ),
+        },
+        {
+            "id": "ASM-2",
+            "text": (
+                "{'kind': 'accepted_normative_count', "
+                "'count': 'not-an-integer'}"
+            ),
+            "support": "inferred",
+            "source_refs": [],
+            "source_excerpt": None,
+        },
     ]
+    classification_evidence = _fallback_classification_evidence(artifact)
+    assumption_evidence = [
+        evidence.text
+        for evidence in classification_evidence
+        if evidence.kind == "assumption"
+    ]
+    assert assumption_evidence[0] == "1 accepted normative items"
+    assert "'kind': 'accepted_normative_count'" not in assumption_evidence[0]
+
+
+def test_compiled_claim_finding_identity_changes_with_finding_code() -> None:
+    """Finding identity includes its code even for the same canonical claim."""
+    assumption = AcceptedNormativeCountAssumptionClaim(
+        kind="accepted_normative_count",
+        count=1,
+        provenance=StructuredSpecClaimProvenance(
+            source="structured_spec",
+            artifact_id="SPEC.authority-review",
+            source_item_ids=["REQ.guard-tokens"],
+        ),
+    )
+    details = {
+        "claimed_value": 1,
+        "actual_value": None,
+        "artifact_id": "SPEC.authority-review",
+        "claimed_source_item_ids": ["REQ.guard-tokens"],
+        "actual_source_item_ids": [],
+    }
+
+    mismatch = _compiled_claim_finding(
+        code="COMPILER_ASSUMPTION_CLAIM_MISMATCH",
+        assumption_index=1,
+        assumption=assumption,
+        details=details,
+        message="Claim mismatches.",
+    )
+    unavailable = _compiled_claim_finding(
+        code="COMPILER_ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE",
+        assumption_index=1,
+        assumption=assumption,
+        details=details,
+        message="Source is unavailable.",
+    )
+
+    assert mismatch["finding_id"] != unavailable["finding_id"]
 
 
 def test_review_includes_full_source_under_default_limit(

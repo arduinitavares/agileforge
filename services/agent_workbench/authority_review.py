@@ -1480,19 +1480,9 @@ def _render_review_text(packet: JsonDict) -> str:
     lines.append("")
     lines.append("Assumptions:")
     assumptions = artifact.get("assumptions")
-    review_findings = _as_list(packet.get("review_findings"))
-    has_invalid_artifact = any(
-        isinstance(finding, Mapping)
-        and finding.get("code") == "COMPILED_AUTHORITY_INVALID"
-        for finding in review_findings
-    )
     _append_text_item_lines(
         lines,
-        (
-            _rendered_assumption_items(assumptions)
-            if not has_invalid_artifact and _has_typed_assumption_objects(assumptions)
-            else assumptions
-        ),
+        _rendered_assumption_items(assumptions),
         empty_line="No assumptions recorded.",
     )
     lines.append("")
@@ -1516,27 +1506,26 @@ def _render_review_text(packet: JsonDict) -> str:
     return "\n".join(lines)
 
 
-def _has_typed_assumption_objects(value: object) -> bool:
-    """Return whether a rendered artifact contains typed assumption objects."""
-    assumptions = _as_list(value)
-    return bool(assumptions) and all(
-        isinstance(assumption, Mapping) and "kind" in assumption
-        for assumption in assumptions
-    )
-
-
 def _rendered_assumption_items(value: object) -> list[JsonDict]:
-    """Render canonical typed assumptions for text-only review consumers."""
+    """Render valid typed assumptions and safely preserve malformed entries."""
     rendered: list[JsonDict] = []
     for index, raw_assumption in enumerate(_as_list(value), start=1):
-        assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(raw_assumption)
-        rendered.append(
-            {
-                "id": f"ASM-{index}",
-                "text": render_assumption_text(assumption),
-                "assumption_key": canonical_assumption_key(assumption),
-            }
+        try:
+            assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(raw_assumption)
+        except ValidationError:
+            rendered.append(
+                _normalized_persisted_item(
+                    raw_assumption,
+                    fallback_id=f"ASM-{index}",
+                )
+            )
+            continue
+        item = _plain_item(
+            item_id=f"ASM-{index}",
+            text=render_assumption_text(assumption),
         )
+        item["assumption_key"] = canonical_assumption_key(assumption)
+        rendered.append(item)
     return rendered
 
 
@@ -1894,9 +1883,8 @@ def _authority_artifact_payload(
 
 
 def _fallback_authority_artifact(authority: CompiledSpecAuthority) -> JsonDict:
-    assumptions = _normalized_persisted_items(
-        _fallback_assumption_items(authority.compiled_artifact_json),
-        prefix="ASM",
+    assumptions = _rendered_assumption_items(
+        _fallback_assumption_items(authority.compiled_artifact_json)
     )
     return {
         "domain": None,
@@ -1965,7 +1953,7 @@ def _fallback_classification_evidence(
         ("rejected_features", "rejected_feature"),
     ):
         items = artifact.get(key)
-        if key == "assumptions" and _has_typed_assumption_objects(items):
+        if key == "assumptions":
             items = _rendered_assumption_items(items)
         if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
             continue
@@ -2023,24 +2011,28 @@ def _fallback_assumption_items(raw: str | None) -> list[Any]:
 def _normalized_persisted_items(items: list[Any], *, prefix: str) -> list[JsonDict]:
     normalized: list[JsonDict] = []
     for index, item in enumerate(items, start=1):
-        fallback_id = f"{prefix}-{index}"
-        if isinstance(item, Mapping):
-            source_refs = _dedupe_sorted(_as_list(item.get("source_refs")))
-            source_excerpt = item.get("source_excerpt")
-            normalized.append(
-                {
-                    "id": str(item.get("id") or fallback_id),
-                    "text": _persisted_item_text(item),
-                    "support": _persisted_item_support(item, source_refs),
-                    "source_refs": source_refs,
-                    "source_excerpt": (
-                        str(source_excerpt) if source_excerpt is not None else None
-                    ),
-                }
-            )
-        else:
-            normalized.append(_plain_item(item_id=fallback_id, text=str(item)))
+        normalized.append(
+            _normalized_persisted_item(item, fallback_id=f"{prefix}-{index}")
+        )
     return normalized
+
+
+def _normalized_persisted_item(item: object, *, fallback_id: str) -> JsonDict:
+    """Return the established safe display object for one persisted item."""
+    if not isinstance(item, Mapping):
+        return _plain_item(item_id=fallback_id, text=str(item))
+    item_mapping = cast("Mapping[str, Any]", item)
+    source_refs = _dedupe_sorted(_as_list(item_mapping.get("source_refs")))
+    source_excerpt = item_mapping.get("source_excerpt")
+    return {
+        "id": str(item_mapping.get("id") or fallback_id),
+        "text": _persisted_item_text(item_mapping),
+        "support": _persisted_item_support(item_mapping, source_refs),
+        "source_refs": source_refs,
+        "source_excerpt": (
+            str(source_excerpt) if source_excerpt is not None else None
+        ),
+    }
 
 
 def _persisted_item_text(item: Mapping[str, Any]) -> str:
