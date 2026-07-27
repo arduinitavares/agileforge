@@ -952,10 +952,10 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
         product_id=require_id(sample_product.product_id, "product_id"),
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
         status="accepted",
-        policy="auto",
-        decided_by="system",
+        policy="manual",
+        decided_by="reviewer",
         decided_at=datetime.now(UTC),
-        rationale="Auto-accepted for test",
+        rationale="Explicitly accepted for test",
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
         spec_hash=spec_row.spec_hash,
@@ -1073,164 +1073,17 @@ def test_ensure_accepted_spec_authority_honors_legacy_tool_update_monkeypatch(
     assert captured["tool_context"] is None
 
 
-def test_ensure_spec_authority_accepted_inserts_new_acceptance(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verify ensure spec authority accepted inserts new acceptance."""
+def test_automatic_acceptance_compatibility_api_is_not_public() -> None:
+    """Only guarded review/decision services may persist acceptance."""
+    from services import specs  # noqa: PLC0415
     from services.specs import compiler_service  # noqa: PLC0415
+    from tools import spec_tools  # noqa: PLC0415
 
-    monkeypatch.setattr(
-        compiler_service,
-        "get_engine",
-        session.get_bind,
-    )
-
-    spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
-    )
-    authority = _create_compiled_authority(
-        session,
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_stored_compiled_success_json(),
-    )
-
-    acceptance = compiler_service.ensure_spec_authority_accepted(
-        product_id=require_id(sample_product.product_id, "product_id"),
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        policy="auto",
-        decided_by="system",
-        rationale="Auto-accepted on compile success",
-    )
-
-    assert acceptance.spec_version_id == require_id(
-        spec_row.spec_version_id, "spec_version_id"
-    )
-    assert acceptance.product_id == require_id(sample_product.product_id, "product_id")
-    assert acceptance.status == "accepted"
-    assert acceptance.policy == "auto"
-    assert acceptance.decided_by == "system"
-    assert acceptance.compiler_version == authority.compiler_version
-    assert acceptance.prompt_hash == authority.prompt_hash
-    assert acceptance.spec_hash == spec_row.spec_hash
-
-
-def test_ensure_spec_authority_accepted_returns_existing_acceptance(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verify ensure spec authority accepted returns existing acceptance."""
-    from agile_sqlmodel import SpecAuthorityAcceptance  # noqa: PLC0415
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        compiler_service,
-        "get_engine",
-        session.get_bind,
-    )
-
-    spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
-    )
-    authority = _create_compiled_authority(
-        session,
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_stored_compiled_success_json(),
-    )
-    existing = SpecAuthorityAcceptance(
-        product_id=require_id(sample_product.product_id, "product_id"),
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        status="accepted",
-        policy="human",
-        decided_by="reviewer",
-        decided_at=datetime.now(UTC),
-        rationale="Manual approval",
-        compiler_version=authority.compiler_version,
-        prompt_hash=authority.prompt_hash,
-        spec_hash=spec_row.spec_hash,
-    )
-    session.add(existing)
-    session.commit()
-    session.refresh(existing)
-
-    acceptance = compiler_service.ensure_spec_authority_accepted(
-        product_id=require_id(sample_product.product_id, "product_id"),
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        policy="auto",
-        decided_by="system",
-        rationale="Should be ignored",
-    )
-
-    assert acceptance.id == existing.id
-    assert acceptance.policy == "human"
-    assert acceptance.decided_by == "reviewer"
-
-
-def test_ensure_spec_authority_accepted_rejects_failure_artifact(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verify ensure spec authority accepted rejects failure artifact."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        compiler_service,
-        "get_engine",
-        session.get_bind,
-    )
-
-    spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
-    )
-    _create_compiled_authority(
-        session,
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=_compiled_failure_json(),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="compiled artifact invalid",
-    ):
-        compiler_service.ensure_spec_authority_accepted(
-            product_id=require_id(sample_product.product_id, "product_id"),
-            spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-            policy="auto",
-            decided_by="system",
-        )
-
-
-def test_ensure_spec_authority_accepted_rejects_unsupported_artifact_with_regenerate(
-    session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Acceptance must fail closed for unsupported stored artifacts."""
-    from services.specs import compiler_service  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        compiler_service,
-        "get_engine",
-        session.get_bind,
-    )
-
-    spec_row = _create_spec_version(
-        session, product_id=require_id(sample_product.product_id, "product_id")
-    )
-    _create_compiled_authority(
-        session,
-        spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"Compiled authority artifact schema is unsupported.*"
-            "agileforge authority regenerate"
-        ),
-    ):
-        compiler_service.ensure_spec_authority_accepted(
-            product_id=require_id(sample_product.product_id, "product_id"),
-            spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-            policy="auto",
-            decided_by="system",
-        )
+    removed_name = "ensure_spec_" "authority_accepted"
+    assert removed_name not in specs.__all__
+    assert not hasattr(specs, removed_name)
+    assert not hasattr(compiler_service, removed_name)
+    assert not hasattr(spec_tools, removed_name)
 
 
 def test_preview_spec_authority_returns_success_and_updates_cache(
@@ -4851,24 +4704,16 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
     assert compile_params["force_recompile"] is False
 
 
-def test_update_spec_and_compile_authority_ignores_tool_acceptance_override(
+def test_update_spec_and_compile_authority_never_persists_acceptance(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Update+compile never delegates to an acceptance adapter."""
+    """Update+compile returns a pending candidate without an acceptance row."""
     from services.specs import compiler_service  # noqa: PLC0415
-    from tools import spec_tools  # noqa: PLC0415
 
     monkeypatch.setattr(
         compiler_service,
         "get_engine",
         session.get_bind,
-    )
-    monkeypatch.setattr(
-        compiler_service,
-        "ensure_spec_authority_accepted",
-        lambda **_: (_ for _ in ()).throw(
-            AssertionError("service acceptance path should be bypassed")
-        ),
     )
 
     def fake_compile(
@@ -4904,13 +4749,6 @@ def test_update_spec_and_compile_authority_ignores_tool_acceptance_override(
         compiler_service,
         "compile_spec_authority_for_version",
         fake_compile,
-    )
-    monkeypatch.setattr(
-        spec_tools,
-        "ensure_spec_authority_accepted",
-        lambda **_: (_ for _ in ()).throw(
-            AssertionError("tool acceptance path must not run")
-        ),
     )
 
     spec_content = _agileforge_spec_profile_json()

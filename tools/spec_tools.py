@@ -22,7 +22,7 @@ Usage:
 
 import logging
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Optional, Union, cast, overload
 
 from google.adk.tools import ToolContext
 from pydantic import BaseModel, Field
@@ -30,7 +30,7 @@ from sqlmodel import Session
 
 from models.core import Feature, UserStory
 from models.db import engine, get_engine
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
+from models.specs import CompiledSpecAuthority
 from services.specs.compiler_service import (
     CheckSpecAuthorityStatusInput as _service_CheckSpecAuthorityStatusInput,
 )
@@ -81,9 +81,6 @@ from services.specs.compiler_service import (
 )
 from services.specs.compiler_service import (
     ensure_accepted_spec_authority as _service_ensure_accepted_spec_authority,
-)
-from services.specs.compiler_service import (
-    ensure_spec_authority_accepted as _service_ensure_spec_authority_accepted,
 )
 from services.specs.compiler_service import (
     get_compiled_authority_by_version as _service_get_compiled_authority_by_version,
@@ -327,24 +324,6 @@ def _load_compiled_artifact(
     return _service_load_compiled_artifact(authority)
 
 
-def ensure_spec_authority_accepted(
-    *,
-    product_id: int,
-    spec_version_id: int,
-    policy: Literal["auto", "human"],
-    decided_by: str,
-    rationale: str | None = None,
-) -> SpecAuthorityAcceptance:
-    """Compatibility adapter over the public compiler service boundary."""
-    return _service_ensure_spec_authority_accepted(
-        product_id=product_id,
-        spec_version_id=spec_version_id,
-        policy=policy,
-        decided_by=decided_by,
-        rationale=rationale,
-    )
-
-
 # =============================================================================
 # SPECIFICATION AUTHORITY V1 — VERSIONING, APPROVAL, AND COMPILATION
 # =============================================================================
@@ -482,9 +461,10 @@ def ensure_accepted_spec_authority(
     Behavior:
     1. If an accepted spec authority already exists for the product, return
        its `spec_version_id`.
-    2. Otherwise, call `update_spec_and_compile_authority()` to create and
-       auto-accept one.
-    3. Require success==True and accepted==True; otherwise raise RuntimeError.
+    2. Otherwise, call `update_spec_and_compile_authority()` to create a pending
+       exact candidate for explicit review.
+    3. Require a separately accepted authority; otherwise raise RuntimeError so
+       the caller stops for review and records a guarded decision.
 
     Args:
         product_id: The product ID to check/create authority for.

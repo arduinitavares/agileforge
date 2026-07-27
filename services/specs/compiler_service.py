@@ -146,57 +146,6 @@ CompiledAuthorityLoadStatus = Literal[
 ]
 
 
-class SpecAuthorityAcceptanceError(ValueError):
-    """Raised when acceptance persistence preconditions are not satisfied."""
-
-    @classmethod
-    def spec_version_not_found(
-        cls, spec_version_id: int
-    ) -> SpecAuthorityAcceptanceError:
-        """Build the canonical missing spec-version error."""
-        return cls(f"Spec version {spec_version_id} not found")
-
-    @classmethod
-    def wrong_product(
-        cls, spec_version_id: int, product_id: int
-    ) -> SpecAuthorityAcceptanceError:
-        """Build the canonical product-mismatch error."""
-        return cls(
-            f"Spec version {spec_version_id} does not belong to product {product_id}"
-        )
-
-    @classmethod
-    def not_compiled(cls, spec_version_id: int) -> SpecAuthorityAcceptanceError:
-        """Build the canonical not-compiled error."""
-        return cls(f"spec_version_id {spec_version_id} is not compiled")
-
-    @classmethod
-    def invalid_artifact(cls, spec_version_id: int) -> SpecAuthorityAcceptanceError:
-        """Build the canonical invalid-artifact error."""
-        return cls(f"spec_version_id {spec_version_id} compiled artifact invalid")
-
-    @classmethod
-    def unsupported_artifact(
-        cls,
-        *,
-        product_id: int,
-        spec_version_id: int,
-        observed_schema_version: str | None,
-    ) -> SpecAuthorityAcceptanceError:
-        """Build the canonical unsupported-schema acceptance error."""
-        remediation = " ".join(
-            compiled_authority_schema_unsupported_remediation(
-                project_id=product_id,
-                spec_version_id=spec_version_id,
-            )
-        )
-        observed = observed_schema_version or "missing"
-        return cls(
-            "Compiled authority artifact schema is unsupported. "
-            f"Observed schema version: {observed}. {remediation}"
-        )
-
-
 class SpecAuthorityGateError(RuntimeError):
     """Raised when the story-generation authority gate cannot be satisfied."""
 
@@ -694,41 +643,6 @@ def _compiled_authority_artifact_json(
     return json.dumps(payload)
 
 
-def _load_acceptance_context(
-    session: Session,
-    *,
-    product_id: int,
-    spec_version_id: int,
-) -> tuple[SpecRegistry, CompiledSpecAuthority]:
-    """Load the spec version and compiled authority required for acceptance."""
-    spec_version = session.get(SpecRegistry, spec_version_id)
-    if not spec_version:
-        raise SpecAuthorityAcceptanceError.spec_version_not_found(spec_version_id)
-    if spec_version.product_id != product_id:
-        raise SpecAuthorityAcceptanceError.wrong_product(
-            spec_version_id,
-            product_id,
-        )
-
-    authority = latest_compiled_authority(
-        session,
-        spec_version_id=spec_version_id,
-    )
-    if not authority:
-        raise SpecAuthorityAcceptanceError.not_compiled(spec_version_id)
-
-    load_result = load_compiled_artifact(authority)
-    if load_result.unsupported:
-        raise SpecAuthorityAcceptanceError.unsupported_artifact(
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=load_result.observed_schema_version,
-        )
-    if not load_result.ok or load_result.artifact is None:
-        raise SpecAuthorityAcceptanceError.invalid_artifact(spec_version_id)
-    return spec_version, authority
-
-
 def _lookup_reusable_accepted_authority(
     session: Session,
     *,
@@ -893,49 +807,6 @@ def _validate_gate_compile_result(
         },
     )
     return int(spec_version_id)
-
-
-def ensure_spec_authority_accepted(
-    *,
-    product_id: int,
-    spec_version_id: int,
-    policy: str,
-    decided_by: str,
-    rationale: str | None = None,
-) -> SpecAuthorityAcceptance:
-    """Ensure an accepted authority decision exists for a compiled spec version."""
-    with Session(_resolve_engine()) as session:
-        spec_version, authority = _load_acceptance_context(
-            session,
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-        )
-
-        existing = session.exec(
-            select(SpecAuthorityAcceptance).where(
-                SpecAuthorityAcceptance.spec_version_id == spec_version_id,
-                SpecAuthorityAcceptance.status == "accepted",
-            )
-        ).first()
-        if existing:
-            return existing
-
-        acceptance = SpecAuthorityAcceptance(
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-            status="accepted",
-            policy=policy,
-            decided_by=decided_by,
-            decided_at=datetime.now(UTC),
-            rationale=rationale,
-            compiler_version=authority.compiler_version,
-            prompt_hash=authority.prompt_hash,
-            spec_hash=spec_version.spec_hash,
-        )
-        session.add(acceptance)
-        session.commit()
-        session.refresh(acceptance)
-        return acceptance
 
 
 def ensure_accepted_spec_authority(
