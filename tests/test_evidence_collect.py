@@ -610,7 +610,7 @@ def test_targets_from_compiled_authority_uses_item_and_invariant_ids() -> None:
 
 def test_targets_from_compiled_authority_reads_v2_top_level_provenance() -> None:
     """Verify v2 invariant provenance uses top-level source_item_id."""
-    compiled = _compiled_authority_v2(
+    compiled = _compiled_authority_v3(
         invariants=[
             {
                 "id": "INV-0000000000000001",
@@ -645,7 +645,7 @@ def test_targets_from_compiled_authority_reads_v2_top_level_provenance() -> None
 
 def test_targets_from_compiled_authority_falls_back_to_source_map_location() -> None:
     """Verify v2 invariant provenance falls back to source_map location."""
-    compiled = _compiled_authority_v2(
+    compiled = _compiled_authority_v3(
         invariants=[
             {
                 "id": "INV-0000000000000001",
@@ -831,7 +831,7 @@ def _seed_authority(
             prompt_hash="prompt",
             compiled_at=datetime(2026, 5, 27, tzinfo=UTC),
             compiled_artifact_json=json.dumps(
-                compiled_artifact or _compiled_authority_v2()
+                compiled_artifact or _compiled_authority_v3()
             ),
             scope_themes="[]",
             invariants="[]",
@@ -860,11 +860,11 @@ def _seed_authority(
         return authority_fingerprint
 
 
-def _compiled_authority_v2(
+def _compiled_authority_v3(
     *,
     invariants: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Build a minimal stored compiled-authority v2 artifact for runner tests."""
+    """Build a minimal stored compiled-authority v3 artifact for runner tests."""
     invariant_items = (
         invariants
         if invariants is not None
@@ -879,7 +879,7 @@ def _compiled_authority_v2(
         ]
     )
     return {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["Evidence"],
         "domain": "evidence",
         "invariants": invariant_items,
@@ -942,7 +942,7 @@ def test_runner_caches_empty_report_when_authority_has_no_supported_targets(
     SQLModel.metadata.create_all(engine)
     _seed_authority(
         engine,
-        compiled_artifact=_compiled_authority_v2(invariants=[]),
+        compiled_artifact=_compiled_authority_v3(invariants=[]),
     )
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1107,6 +1107,53 @@ def test_runner_rejects_authority_row_mismatched_to_acceptance(
     assert _mapping(result["errors"][0])["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
 
 
+def test_evidence_missing_exact_accepted_row_never_falls_forward(
+    tmp_path: Path,
+) -> None:
+    """A dangling accepted id fails closed even when a newer row is available."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    with Session(engine) as session:
+        original = session.get(CompiledSpecAuthority, 1)
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert original is not None
+        assert acceptance is not None
+        pending = CompiledSpecAuthority(
+            spec_version_id=original.spec_version_id,
+            compiler_version=original.compiler_version,
+            prompt_hash=original.prompt_hash,
+            compiled_artifact_json=original.compiled_artifact_json,
+            scope_themes=original.scope_themes,
+            invariants=original.invariants,
+            eligible_feature_ids=original.eligible_feature_ids,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        acceptance.pending_authority_id = 999_999
+        acceptance.authority_fingerprint = pending_authority_fingerprint(pending)
+        session.add(acceptance)
+        session.commit()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runner = EvidenceCollectionRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.collect(
+        project_id=1,
+        repo_path=str(repo),
+        from_file=None,
+        idempotency_key="missing-exact-accepted-row",
+    )
+
+    assert result["ok"] is False
+    assert _mapping(result["errors"][0])["code"] == "AUTHORITY_NOT_COMPILED"
+
+
 def test_runner_rejects_authority_artifact_mismatched_to_acceptance(
     tmp_path: Path,
 ) -> None:
@@ -1256,7 +1303,7 @@ def test_runner_rejects_unsupported_compiled_authority_schema(
         "project_id": 1,
         "spec_version_id": 1,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert error["remediation"] == [
         "Run agileforge authority regenerate "

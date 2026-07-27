@@ -257,6 +257,47 @@ def test_compile_pending_authority_creates_artifact_without_acceptance(
     assert acceptances == []
 
 
+def test_pending_authority_returns_exact_compiler_provided_id(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Pending compilation never replaces the compiler id with a version query."""
+    service = _pending_service()
+    product = _create_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec_path = _write_spec(tmp_path)
+    expected_authority_id: int | None = None
+
+    def compile_authority(
+        spec_version_id: int,
+        **_: object,
+    ) -> dict[str, object]:
+        nonlocal expected_authority_id
+        _persist_authority(session, spec_version_id=spec_version_id)
+        compiled = _persist_authority(session, spec_version_id=spec_version_id)
+        expected_authority_id = require_id(compiled.authority_id, "authority_id")
+        return {
+            "success": True,
+            "authority_id": expected_authority_id,
+            "spec_version_id": spec_version_id,
+            "compiler_version": compiled.compiler_version,
+            "prompt_hash": compiled.prompt_hash,
+        }
+
+    result = service.compile_pending_authority_for_project(
+        session=session,
+        product_id=product_id,
+        spec_path=spec_path,
+        approved_by="cli-project-create",
+        compile_authority=compile_authority,
+        lease_guard=lambda _boundary: True,
+        record_progress=lambda _boundary: True,
+    )
+
+    assert result.ok is True
+    assert result.authority_id == expected_authority_id
+
+
 def test_compile_pending_authority_for_project_rejects_missing_spec_file(
     session: Session, tmp_path: Path
 ) -> None:

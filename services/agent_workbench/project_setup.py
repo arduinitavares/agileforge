@@ -26,7 +26,7 @@ from models.agent_workbench import (
 )
 from models.core import Product
 from models.db import ensure_business_db_ready
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.specs import SpecRegistry
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
 from services.agent_workbench.mutation_ledger import (
@@ -46,6 +46,10 @@ from services.agent_workbench.project_setup_fingerprints import (
     PROJECT_SETUP_RETRY_COMMAND,
     setup_retry_context_fingerprint,
     setup_spec_hash,
+)
+from services.specs.authority_selection import (
+    compiled_authority_by_id,
+    latest_compiled_authority,
 )
 from services.specs.pending_authority_service import (
     compile_pending_authority_for_project,
@@ -2705,11 +2709,10 @@ class ProjectSetupMutationRunner:
             ).first()
             if spec is None or spec.spec_version_id is None:
                 return None
-            authority = session.exec(
-                select(CompiledSpecAuthority)
-                .where(CompiledSpecAuthority.spec_version_id == spec.spec_version_id)
-                .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-            ).first()
+            authority = latest_compiled_authority(
+                session,
+                spec_version_id=spec.spec_version_id,
+            )
             if authority is None:
                 return None
             return {
@@ -3002,7 +3005,10 @@ def _compiled_authority_fingerprint(
     if authority_id is None:
         return None
     with Session(engine) as session:
-        authority = session.get(CompiledSpecAuthority, authority_id)
+        authority = compiled_authority_by_id(
+            session,
+            authority_id=authority_id,
+        )
     return pending_authority_fingerprint(authority)
 
 

@@ -178,7 +178,7 @@ def _seed_authority(
     compiled_authority: dict[str, object] | None = None,
 ) -> str:
     """Seed one accepted authority row for runner tests."""
-    authority_json = json.dumps(_compiled_authority_v2(compiled_authority))
+    authority_json = json.dumps(_compiled_authority_v3(compiled_authority))
     with Session(engine) as session:
         product = Product(name="As-Built Project")
         session.add(product)
@@ -224,20 +224,20 @@ def _seed_authority(
         return authority_fingerprint
 
 
-def _compiled_authority_v2(
+def _compiled_authority_v3(
     authority: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build a valid stored compiled-authority v2 artifact for runner tests."""
+    """Build a valid stored compiled-authority v3 artifact for runner tests."""
     source = authority or CARTOLA_AUTHORITY
     raw_invariants = source.get("invariants")
     invariants = raw_invariants if isinstance(raw_invariants, list) else []
     normalized_invariants = [
-        _compiled_authority_v2_invariant(cast("dict[str, object]", invariant))
+        _compiled_authority_v3_invariant(cast("dict[str, object]", invariant))
         for invariant in invariants
         if isinstance(invariant, dict)
     ]
     return {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["As-Built"],
         "domain": "as-built",
         "invariants": normalized_invariants,
@@ -260,10 +260,10 @@ def _compiled_authority_v2(
     }
 
 
-def _compiled_authority_v2_invariant(
+def _compiled_authority_v3_invariant(
     invariant: dict[str, object],
 ) -> dict[str, object]:
-    """Normalize legacy test invariant dictionaries into the v2 closed schema."""
+    """Normalize test invariant dictionaries into the v3 closed schema."""
     parameters = cast("dict[str, object]", invariant.get("parameters") or {})
     source_item_id = str(invariant.get("source_item_id") or "")
     invariant_type = str(invariant["type"])
@@ -475,7 +475,7 @@ def test_build_authority_targets_extracts_cartola_invariants_without_items() -> 
 
 def test_build_authority_targets_reads_v2_top_level_provenance() -> None:
     """v2 invariant provenance comes from top-level source fields."""
-    compiled = _compiled_authority_v2(
+    compiled = _compiled_authority_v3(
         {
             "invariants": [
                 {
@@ -1238,7 +1238,7 @@ def test_runner_rejects_unsupported_compiled_authority_schema(
         "project_id": 1,
         "spec_version_id": 1,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["data"]["next_actions"] == [
         {
@@ -1254,6 +1254,55 @@ def test_runner_rejects_unsupported_compiled_authority_schema(
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     with Session(engine) as session:
         assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_as_built_missing_exact_accepted_row_never_falls_forward(
+    tmp_path: Path,
+) -> None:
+    """A dangling accepted id fails closed even when a newer row is available."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    with Session(engine) as session:
+        original = session.get(CompiledSpecAuthority, 1)
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert original is not None
+        assert acceptance is not None
+        pending = CompiledSpecAuthority(
+            spec_version_id=original.spec_version_id,
+            compiler_version=original.compiler_version,
+            prompt_hash=original.prompt_hash,
+            compiled_artifact_json=original.compiled_artifact_json,
+            scope_themes=original.scope_themes,
+            invariants=original.invariants,
+            eligible_feature_ids=original.eligible_feature_ids,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        acceptance.pending_authority_id = 999_999
+        acceptance.authority_fingerprint = pending_authority_fingerprint(pending)
+        session.add(acceptance)
+        session.commit()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runner = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=_WorkflowStub(),
+    )
+
+    result = runner.assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="missing-exact-accepted-row",
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_NOT_COMPILED"
 
 
 def test_runner_invokes_assessor_in_batches_and_merges_cache(

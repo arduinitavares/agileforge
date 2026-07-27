@@ -15,7 +15,8 @@ from typing import Any, Protocol
 from sqlmodel import Session, select
 
 from models.core import Product
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from models.specs import SpecAuthorityAcceptance, SpecRegistry
+from services.specs.authority_selection import compiled_authority_by_id
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
@@ -487,7 +488,7 @@ def ensure_pending_spec_version_for_project(  # noqa: C901, PLR0911, PLR0913
     )
 
 
-def compile_pending_authority_for_project(  # noqa: PLR0913
+def compile_pending_authority_for_project(  # noqa: PLR0911, PLR0913
     *,
     session: Session,
     product_id: int,
@@ -597,19 +598,26 @@ def compile_pending_authority_for_project(  # noqa: PLR0913
             compile_result=compile_result,
         )
 
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
     compile_authority_id = compile_result.get("authority_id")
-    authority_id = (
-        int(str(compile_authority_id))
-        if compile_authority_id is not None
+    authority = (
+        compiled_authority_by_id(
+            session,
+            authority_id=compile_authority_id,
+            expected_spec_version_id=spec_version_id,
+        )
+        if isinstance(compile_authority_id, int)
         else None
     )
-    if authority is not None and authority.authority_id is not None:
-        authority_id = authority.authority_id
+    if authority is None or authority.authority_id is None:
+        return _result(
+            ok=False,
+            product_id=product_id,
+            spec_path=resolved_path,
+            error_code="MUTATION_FAILED",
+            spec_hash=spec_hash,
+            spec_version_id=spec_version_id,
+            error="Compiler did not return a matching persisted authority id.",
+        )
 
     return _result(
         ok=True,
@@ -617,7 +625,7 @@ def compile_pending_authority_for_project(  # noqa: PLR0913
         spec_path=resolved_path,
         spec_hash=spec_hash,
         spec_version_id=spec_version_id,
-        authority_id=authority_id,
+        authority_id=authority.authority_id,
         compiler_version=_optional_str(compile_result.get("compiler_version")),
         prompt_hash=_optional_str(compile_result.get("prompt_hash")),
     )

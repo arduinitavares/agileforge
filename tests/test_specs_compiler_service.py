@@ -3757,6 +3757,125 @@ def test_compile_spec_authority_for_version_returns_cached_authority(
     assert sample_product.compiled_authority_json == existing.compiled_artifact_json
 
 
+def test_force_recompile_inserts_without_mutating_existing_history(
+    engine: Engine,
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced recompilation appends a candidate and preserves accepted v2 history."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _raw_compiler_output_json(),
+    )
+    spec = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    existing = _create_compiled_authority(
+        session,
+        spec_version_id=spec_version_id,
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+    existing_id = require_id(existing.authority_id, "authority_id")
+    acceptance = SpecAuthorityAcceptance(
+        product_id=require_id(sample_product.product_id, "product_id"),
+        spec_version_id=spec_version_id,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        rationale="Historical v2 acceptance.",
+        compiler_version=existing.compiler_version,
+        prompt_hash=existing.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=existing_id,
+        authority_fingerprint="immutable-history",
+        terminal_decision_key=(
+            f"{require_id(sample_product.product_id, 'product_id')}:"
+            f"{spec_version_id}:{existing_id}"
+        ),
+        provenance_source="legacy_backfill",
+    )
+    session.add(acceptance)
+    session.commit()
+    session.refresh(existing)
+    session.refresh(acceptance)
+    acceptance_id = require_id(acceptance.id, "acceptance_id")
+    before_authority = existing.model_dump()
+    before_acceptance = acceptance.model_dump()
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=engine,
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    session.expire_all()
+    rows = session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).asc())
+    ).all()
+    preserved_acceptance = session.get(SpecAuthorityAcceptance, acceptance_id)
+    session.refresh(sample_product)
+
+    assert result["success"] is True
+    assert result["recompiled"] is True
+    assert len(rows) == 2  # noqa: PLR2004
+    assert rows[0].authority_id == existing_id
+    assert rows[0].model_dump() == before_authority
+    assert preserved_acceptance is not None
+    assert preserved_acceptance.model_dump() == before_acceptance
+    assert result["authority_id"] == rows[1].authority_id
+    assert sample_product.compiled_authority_json == rows[1].compiled_artifact_json
+
+
+def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
+    engine: Engine,
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced recompilation appends even when the existing candidate is pending."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        lambda **_: _raw_compiler_output_json(),
+    )
+    spec = _create_spec_version(
+        session,
+        product_id=require_id(sample_product.product_id, "product_id"),
+    )
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    existing = _create_compiled_authority(
+        session,
+        spec_version_id=spec_version_id,
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+    existing_id = require_id(existing.authority_id, "authority_id")
+
+    result = compiler_service.compile_spec_authority_for_version_with_engine(
+        engine=engine,
+        spec_version_id=spec_version_id,
+        force_recompile=True,
+    )
+
+    rows = session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).asc())
+    ).all()
+    assert len(rows) == 2  # noqa: PLR2004
+    assert rows[0].authority_id == existing_id
+    assert result["authority_id"] == rows[1].authority_id
+
+
 def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority(
     engine: Engine,
     session: Session,

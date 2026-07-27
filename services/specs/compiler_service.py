@@ -38,6 +38,11 @@ from services.agent_workbench.error_codes import ErrorCode
 from services.agent_workbench.fingerprints import canonical_hash
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
+from services.specs.authority_selection import (
+    compiled_authority_for_acceptance,
+    latest_accepted_authority_decision,
+    latest_compiled_authority,
+)
 from services.specs.profile_content import (
     STRUCTURED_SPEC_FORMAT,
     SpecContentNormalizationError,
@@ -704,11 +709,10 @@ def _load_acceptance_context(
             product_id,
         )
 
-    authority = session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-    ).first()
+    authority = latest_compiled_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
     if not authority:
         raise SpecAuthorityAcceptanceError.not_compiled(spec_version_id)
 
@@ -747,25 +751,10 @@ def _lookup_reusable_accepted_authority(
             compiled_artifact_success=False,
         )
 
-    compiled = (
-        session.get(CompiledSpecAuthority, existing_acceptance.pending_authority_id)
-        if existing_acceptance.pending_authority_id is not None
-        else None
+    compiled = compiled_authority_for_acceptance(
+        session,
+        acceptance=existing_acceptance,
     )
-    if (
-        compiled is not None
-        and compiled.spec_version_id != existing_acceptance.spec_version_id
-    ):
-        compiled = None
-    if compiled is None:
-        compiled = session.exec(
-            select(CompiledSpecAuthority)
-            .where(
-                CompiledSpecAuthority.spec_version_id
-                == existing_acceptance.spec_version_id
-            )
-            .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-        ).first()
     if compiled is None:
         return _AcceptedAuthorityLookup(
             reusable_spec_version_id=None,
@@ -2925,11 +2914,10 @@ def compile_spec_authority(
                 "error": "Spec version is missing its primary key",
             }
 
-        existing_authority: CompiledSpecAuthority | None = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == parsed.spec_version_id
-            )
-        ).first()
+        existing_authority = latest_compiled_authority(
+            session,
+            spec_version_id=parsed.spec_version_id,
+        )
         if existing_authority:
             return {
                 "success": False,
@@ -3030,11 +3018,10 @@ def _load_compile_version_context(
         }
 
     product = session.get(Product, spec_version.product_id)
-    existing_authority = session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-    ).first()
+    existing_authority = latest_compiled_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
     return _CompilerVersionContext(
         spec_version=spec_version,
         product=product,
@@ -3598,29 +3585,17 @@ def _latest_matching_base_authority(
     acceptance: SpecAuthorityAcceptance,
 ) -> CompiledSpecAuthority | None:
     """Return a base authority only when it still matches the accepted decision."""
-    if acceptance.pending_authority_id is not None:
-        authority = session.get(CompiledSpecAuthority, acceptance.pending_authority_id)
-        if (
-            authority is not None
-            and authority.spec_version_id == marker.base_spec_version_id
-            and _accepted_authority_identity_matches(authority, acceptance)
-        ):
-            return authority
-        return None
-
-    rows = session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == marker.base_spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-    ).all()
-    return next(
-        (
-            authority
-            for authority in rows
-            if _accepted_authority_identity_matches(authority, acceptance)
-        ),
-        None,
+    authority = compiled_authority_for_acceptance(
+        session,
+        acceptance=acceptance,
     )
+    if (
+        authority is not None
+        and authority.spec_version_id == marker.base_spec_version_id
+        and _accepted_authority_identity_matches(authority, acceptance)
+    ):
+        return authority
+    return None
 
 
 def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
@@ -3651,18 +3626,11 @@ def _accepted_base_authority_for_scope_extension(  # noqa: PLR0911
             ),
         )
 
-    acceptance = session.exec(
-        select(SpecAuthorityAcceptance)
-        .where(
-            SpecAuthorityAcceptance.product_id == spec_version.product_id,
-            SpecAuthorityAcceptance.spec_version_id == marker.base_spec_version_id,
-            SpecAuthorityAcceptance.status == "accepted",
-        )
-        .order_by(
-            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
-            cast("Any", SpecAuthorityAcceptance.id).desc(),
-        )
-    ).first()
+    acceptance = latest_accepted_authority_decision(
+        session,
+        product_id=spec_version.product_id,
+        spec_version_id=marker.base_spec_version_id,
+    )
     if acceptance is None:
         return _scope_extension_compile_failure(
             spec_version,
@@ -3897,7 +3865,7 @@ def _persist_compiled_authority(  # noqa: PLR0913
     lease_guard: Callable[[str], bool] | None = None,
     record_progress: Callable[[str], bool] | None = None,
 ) -> _PersistedCompilation | dict[str, Any]:
-    """Persist a compiled artifact, either by updating or inserting a row."""
+    """Append one compiled artifact row."""
     success = apply_authority_quality_gate(success)
     compiled_artifact_json = _compiled_authority_artifact_json(success)
     prompt_hash = compute_prompt_hash(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
@@ -3907,44 +3875,25 @@ def _persist_compiled_authority(  # noqa: PLR0913
     spec_gaps = success.gaps
 
     boundary = "compiled_authority_persisted"
-    if context.existing_authority and force_recompile:
-        if lease_guard is not None and not lease_guard(boundary):
-            session.rollback()
-            return _mutation_lease_lost_result()
-        authority = context.existing_authority
-        authority.compiler_version = compiler_version
-        authority.prompt_hash = prompt_hash
-        authority.compiled_at = datetime.now(UTC)
-        authority.compiled_artifact_json = compiled_artifact_json
-        authority.scope_themes = json.dumps(scope_themes)
-        authority.invariants = json.dumps(invariants)
-        authority.eligible_feature_ids = json.dumps([])
-        authority.rejected_features = json.dumps([])
-        authority.spec_gaps = json.dumps(spec_gaps)
-        session.add(authority)
-        session.commit()
-        session.refresh(authority)
-        recompiled = True
-    else:
-        if lease_guard is not None and not lease_guard(boundary):
-            session.rollback()
-            return _mutation_lease_lost_result()
-        authority = CompiledSpecAuthority(
-            spec_version_id=spec_version_id,
-            compiler_version=compiler_version,
-            prompt_hash=prompt_hash,
-            compiled_at=datetime.now(UTC),
-            compiled_artifact_json=compiled_artifact_json,
-            scope_themes=json.dumps(scope_themes),
-            invariants=json.dumps(invariants),
-            eligible_feature_ids=json.dumps([]),
-            rejected_features=json.dumps([]),
-            spec_gaps=json.dumps(spec_gaps),
-        )
-        session.add(authority)
-        session.commit()
-        session.refresh(authority)
-        recompiled = False
+    if lease_guard is not None and not lease_guard(boundary):
+        session.rollback()
+        return _mutation_lease_lost_result()
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version=compiler_version,
+        prompt_hash=prompt_hash,
+        compiled_at=datetime.now(UTC),
+        compiled_artifact_json=compiled_artifact_json,
+        scope_themes=json.dumps(scope_themes),
+        invariants=json.dumps(invariants),
+        eligible_feature_ids=json.dumps([]),
+        rejected_features=json.dumps([]),
+        spec_gaps=json.dumps(spec_gaps),
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    recompiled = force_recompile
 
     progress_error = _record_mutation_progress(record_progress, boundary)
     if progress_error is not None:
@@ -4273,11 +4222,10 @@ def _load_compiled_authority_or_error(
     spec_version_id: int,
 ) -> CompiledSpecAuthority | dict[str, Any]:
     """Load the compiled authority row created for the given spec version."""
-    authority = session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-    ).first()
+    authority = latest_compiled_authority(
+        session,
+        spec_version_id=spec_version_id,
+    )
     if authority is None:
         return {
             "success": False,
@@ -4448,15 +4396,10 @@ def check_spec_authority_status(  # noqa: PLR0911
                 "success": False,
                 "error": "Latest approved spec is missing its primary key",
             }
-        latest_authority = session.exec(
-            select(CompiledSpecAuthority)
-            .join(SpecRegistry)
-            .where(SpecRegistry.product_id == parsed.product_id)
-            .order_by(
-                cast("Any", CompiledSpecAuthority.spec_version_id).desc(),
-                cast("Any", CompiledSpecAuthority.authority_id).desc(),
-            )
-        ).first()
+        latest_authority = latest_compiled_authority(
+            session,
+            spec_version_id=latest_approved_spec_version_id,
+        )
 
         if not latest_authority:
             return {
@@ -4540,11 +4483,10 @@ def get_compiled_authority_by_version(
                 ),
             }
 
-        authority = session.exec(
-            select(CompiledSpecAuthority)
-            .where(CompiledSpecAuthority.spec_version_id == parsed.spec_version_id)
-            .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-        ).first()
+        authority = latest_compiled_authority(
+            session,
+            spec_version_id=parsed.spec_version_id,
+        )
 
         if not authority:
             return {

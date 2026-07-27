@@ -32,6 +32,10 @@ from services.agent_workbench.schema_readiness import (
     SchemaRequirement,
     check_schema_readiness,
 )
+from services.specs.authority_selection import (
+    compiled_authority_for_acceptance,
+    latest_compiled_authority,
+)
 from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
@@ -977,36 +981,6 @@ def _latest_rejected(
     ).first()
 
 
-def _compiled_authority(
-    session: Session,
-    spec_version_id: int,
-) -> CompiledSpecAuthority | None:
-    """Return the latest compiled authority for a spec version."""
-    return session.exec(
-        select(CompiledSpecAuthority)
-        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-        .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-    ).first()
-
-
-def _compiled_authority_for_acceptance(
-    session: Session,
-    acceptance: SpecAuthorityAcceptance,
-) -> CompiledSpecAuthority | None:
-    """Return the authority candidate recorded by a terminal decision."""
-    if acceptance.pending_authority_id is not None:
-        authority = session.get(
-            CompiledSpecAuthority,
-            acceptance.pending_authority_id,
-        )
-        if (
-            authority is not None
-            and authority.spec_version_id == acceptance.spec_version_id
-        ):
-            return authority
-    return _compiled_authority(session, acceptance.spec_version_id)
-
-
 def _authority_matches_acceptance(
     *,
     authority: CompiledSpecAuthority,
@@ -1034,7 +1008,10 @@ def _load_authority_selection(
         else None
     )
     authority = (
-        _compiled_authority_for_acceptance(session, accepted)
+        compiled_authority_for_acceptance(
+            session,
+            acceptance=accepted,
+        )
         if accepted is not None
         else None
     )
@@ -1066,7 +1043,10 @@ def _pending_authority(
     """Return the latest compiled authority awaiting acceptance, if any."""
     if latest_spec is None or latest_spec.spec_version_id is None:
         return None
-    candidate = _compiled_authority(session, latest_spec.spec_version_id)
+    candidate = latest_compiled_authority(
+        session,
+        spec_version_id=latest_spec.spec_version_id,
+    )
     if candidate is None or candidate.authority_id is None:
         return None
     if (
@@ -1304,7 +1284,10 @@ class AuthorityProjectionService:
         if spec_version is None or spec_version.product_id != project_id:
             return _spec_version_not_found_error(project_id, selected_id)
 
-        authority = _compiled_authority(session, selected_id)
+        authority = latest_compiled_authority(
+            session,
+            spec_version_id=selected_id,
+        )
         if authority is None:
             return _authority_not_compiled_error(project_id, selected_id)
         load_result = load_compiled_artifact(authority)

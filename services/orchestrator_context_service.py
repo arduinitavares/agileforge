@@ -12,10 +12,8 @@ from sqlmodel import Session, select
 from models.core import Epic, Feature, Theme
 from models.core import Product, Sprint, UserStory
 from models.db import get_engine
-from models.specs import (
-    CompiledSpecAuthority,
-    SpecRegistry,
-)
+from models.specs import SpecRegistry
+from services.specs.authority_selection import latest_compiled_authority
 from services.specs.compiler_service import (
     CompileSpecAuthorityForVersionInput,
     compiled_authority_schema_unsupported_details,
@@ -247,11 +245,10 @@ def _load_authority_fallback(
 ) -> str | dict[str, Any] | None:
     """Load compiled authority for the given version, compiling on demand if needed."""
     with Session(get_engine()) as session:
-        authority = session.exec(
-            select(CompiledSpecAuthority)
-            .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-            .limit(1)
-        ).first()
+        authority = latest_compiled_authority(
+            session,
+            spec_version_id=spec_version_id,
+        )
         if authority and authority.compiled_artifact_json:
             load_result = load_compiled_artifact(authority)
             if load_result.unsupported:

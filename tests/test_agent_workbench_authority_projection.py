@@ -310,6 +310,41 @@ def _reject_spec(
     return rejection
 
 
+def test_authority_selection_never_falls_forward_from_missing_accepted_id(
+    session: Session,
+) -> None:
+    """Status selection keeps a dangling accepted decision detached from pending."""
+    from services.agent_workbench import authority_projection  # noqa: PLC0415
+
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="accepted-id")
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    pending = _seed_authority(session, spec_version_id=spec_version_id)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=pending.compiler_version,
+            prompt_hash=pending.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=999_999,
+        )
+    )
+    session.commit()
+
+    selection = authority_projection._load_authority_selection(
+        session,
+        project_id=product_id,
+    )
+
+    assert selection.authority is None
+    assert selection.pending_authority is pending
+
+
 def _seed_feedback_attempt(  # noqa: PLR0913
     session: Session,
     *,

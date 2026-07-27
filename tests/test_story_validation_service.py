@@ -6,7 +6,13 @@ from types import SimpleNamespace
 import pytest
 from sqlmodel import Session
 
-from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry, UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
     ForbiddenCapabilityParams,
@@ -114,6 +120,47 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
     )
     session.add(authority)
     session.commit()
+    session.refresh(authority)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec_version.spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+    )
+    session.commit()
+    pending_artifact = SpecAuthorityCompilationSuccess(
+        scope_themes=["pending-v3"],
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version="3.0.0",
+        prompt_hash="b" * 64,
+    )
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="b" * 64,
+            scope_themes='["pending-v3"]',
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+            compiled_artifact_json=SpecAuthorityCompilerOutput(
+                root=pending_artifact
+            ).model_dump_json(),
+        )
+    )
+    session.commit()
 
     result = story_validation_service.validate_story_with_spec_authority(
         {
@@ -126,6 +173,200 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
     assert result["passed"] is False
     assert "Compiled authority artifact schema is unsupported." in result["error"]
     assert "agileforge authority regenerate" in result["error"]
+
+
+def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candidate(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer pending compile cannot replace the accepted execution authority."""
+    from services.specs import story_validation_service  # noqa: PLC0415
+
+    product = Product(name="Pinned Validation", vision="Test")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    story = UserStory(
+        product_id=product_id,
+        title="Pinned story",
+        story_description="Description",
+        acceptance_criteria="Criteria",
+    )
+    spec = SpecRegistry(
+        product_id=product_id,
+        content="# Spec",
+        spec_hash="pinned",
+        status="approved",
+    )
+    session.add_all([story, spec])
+    session.commit()
+    session.refresh(story)
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    rows = [
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version=version,
+            prompt_hash=prompt,
+            compiled_artifact_json="{}",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        for version, prompt in (("2.0.0", "a" * 64), ("3.0.0", "b" * 64))
+    ]
+    session.add_all(rows)
+    session.commit()
+    for row in rows:
+        session.refresh(row)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=rows[0].compiler_version,
+            prompt_hash=rows[0].prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=rows[0].authority_id,
+        )
+    )
+    session.commit()
+    selected: list[int | None] = []
+    monkeypatch.setattr(story_validation_service, "_resolve_engine", session.get_bind)
+
+    result = story_validation_service.validate_story_with_spec_authority(
+        {
+            "story_id": require_id(story.story_id, "story_id"),
+            "spec_version_id": spec_version_id,
+        },
+        run_structural_story_checks=lambda _story: ([], [], []),
+        run_deterministic_alignment_checks=lambda _story, authority: (
+            selected.append(authority.authority_id) or [],
+            [],
+            [],
+        ),
+        load_compiled_artifact_fn=lambda _authority: SimpleNamespace(
+            unsupported=False,
+            ok=True,
+            artifact=SpecAuthorityCompilationSuccess(
+                scope_themes=[],
+                invariants=[],
+                eligible_feature_rules=[],
+                gaps=[],
+                assumptions=[],
+                source_map=[],
+                compiler_version="3.0.0",
+                prompt_hash="b" * 64,
+            ),
+        ),
+        persist_validation_evidence=lambda *_args: None,
+    )
+
+    assert result["success"] is True
+    assert selected == [rows[0].authority_id]
+
+
+def test_story_validation_moves_only_to_exact_newly_accepted_row(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal acceptance moves validation to the referenced v3 row."""
+    from services.specs import story_validation_service  # noqa: PLC0415
+
+    product = Product(name="Accepted V3 Validation", vision="Test")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    story = UserStory(
+        product_id=product_id,
+        title="Accepted story",
+        story_description="Description",
+        acceptance_criteria="Criteria",
+    )
+    spec = SpecRegistry(
+        product_id=product_id,
+        content="# Spec",
+        spec_hash="accepted-v3",
+        status="approved",
+    )
+    session.add_all([story, spec])
+    session.commit()
+    session.refresh(story)
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    rows = [
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version=version,
+            prompt_hash=prompt,
+            compiled_artifact_json="{}",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        for version, prompt in (("2.0.0", "a" * 64), ("3.0.0", "b" * 64))
+    ]
+    session.add_all(rows)
+    session.commit()
+    for row in rows:
+        session.refresh(row)
+    for index, row in enumerate(rows):
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product_id,
+                spec_version_id=spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="test",
+                decided_at=datetime.now(UTC).replace(microsecond=index),
+                compiler_version=row.compiler_version,
+                prompt_hash=row.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=row.authority_id,
+            )
+        )
+    session.commit()
+    selected: list[int | None] = []
+    monkeypatch.setattr(story_validation_service, "_resolve_engine", session.get_bind)
+
+    result = story_validation_service.validate_story_with_spec_authority(
+        {
+            "story_id": require_id(story.story_id, "story_id"),
+            "spec_version_id": spec_version_id,
+        },
+        run_structural_story_checks=lambda _story: ([], [], []),
+        run_deterministic_alignment_checks=lambda _story, authority: (
+            selected.append(authority.authority_id) or [],
+            [],
+            [],
+        ),
+        load_compiled_artifact_fn=lambda _authority: SimpleNamespace(
+            unsupported=False,
+            ok=True,
+            artifact=SpecAuthorityCompilationSuccess(
+                scope_themes=[],
+                invariants=[],
+                eligible_feature_rules=[],
+                gaps=[],
+                assumptions=[],
+                source_map=[],
+                compiler_version="3.0.0",
+                prompt_hash="b" * 64,
+            ),
+        ),
+        persist_validation_evidence=lambda *_args: None,
+    )
+
+    assert result["success"] is True
+    assert selected == [rows[1].authority_id]
 
 
 def test_resolve_engine_honors_legacy_spec_tools_engine(
@@ -423,6 +664,21 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
         ).model_dump_json(),
     )
     session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec_version.spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+    )
     session.commit()
 
     monkeypatch.setattr(

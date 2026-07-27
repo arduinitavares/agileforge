@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 from models import db as model_db
 from models.core import Epic, Feature, Product, Sprint, SprintStory, Theme, UserStory
 from models.enums import SprintStatus, StoryStatus
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.specs import SpecRegistry
 from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash
@@ -29,6 +29,7 @@ from services.agent_workbench.schema_readiness import (
 )
 from services.agent_workbench.session_reader import ReadOnlySessionReader
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
+from services.specs.authority_selection import latest_compiled_authority
 from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
@@ -672,11 +673,10 @@ class ReadProjectionService:
                     latest_spec.spec_version_id if latest_spec is not None else None
                 )
             if spec_version_id is not None:
-                authority = session.exec(
-                    select(CompiledSpecAuthority)
-                    .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
-                    .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
-                ).first()
+                authority = latest_compiled_authority(
+                    session,
+                    spec_version_id=spec_version_id,
+                )
                 if authority is not None:
                     load_result = load_compiled_artifact(authority)
                     if load_result.unsupported:

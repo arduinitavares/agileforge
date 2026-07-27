@@ -13,13 +13,17 @@ from sqlmodel import Session, select
 from models.core import Epic, Feature, Product, Sprint, SprintStory, Theme, UserStory
 from models.db import engine as default_engine
 from models.enums import StoryStatus
-from models.specs import CompiledSpecAuthority, SpecRegistry
+from models.specs import SpecRegistry
+from services.specs.authority_selection import (
+    compiled_authority_for_acceptance,
+    latest_accepted_authority_decision,
+    latest_compiled_authority,
+)
+from services.specs.compiler_service import load_compiled_artifact
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
-    SpecAuthorityCompilationFailure,
     SpecAuthorityCompilationSuccess,
-    SpecAuthorityCompilerOutput,
 )
 
 if TYPE_CHECKING:
@@ -185,21 +189,29 @@ def _load_compiled_authority(
     if not approved_spec or not approved_spec.spec_version_id:
         return None
 
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == approved_spec.spec_version_id
+    acceptance = latest_accepted_authority_decision(
+        session,
+        product_id=approved_spec.product_id,
+        spec_version_id=approved_spec.spec_version_id,
+    )
+    authority = (
+        compiled_authority_for_acceptance(
+            session,
+            acceptance=acceptance,
         )
-    ).first()
+        if acceptance is not None
+        else latest_compiled_authority(
+            session,
+            spec_version_id=approved_spec.spec_version_id,
+        )
+    )
     if not authority or not authority.compiled_artifact_json:
         return None
 
-    parsed = SpecAuthorityCompilerOutput.model_validate_json(
-        authority.compiled_artifact_json
-    )
-
-    if isinstance(parsed.root, SpecAuthorityCompilationFailure):
+    loaded = load_compiled_artifact(authority)
+    if not loaded.ok or loaded.artifact is None:
         return None
-    return parsed.root
+    return loaded.artifact
 
 
 def _render_snapshot_html(context: _SnapshotRenderContext) -> str:

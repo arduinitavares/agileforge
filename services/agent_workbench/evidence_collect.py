@@ -29,6 +29,7 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
+from services.specs.authority_selection import compiled_authority_for_acceptance
 from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
@@ -668,7 +669,10 @@ class EvidenceCollectionRunner:
                 select(SpecAuthorityAcceptance)
                 .where(SpecAuthorityAcceptance.product_id == project_id)
                 .where(SpecAuthorityAcceptance.status == "accepted")
-                .order_by(cast("Any", SpecAuthorityAcceptance.decided_at).desc())
+                .order_by(
+                    cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+                    cast("Any", SpecAuthorityAcceptance.id).desc(),
+                )
             ).first()
             if accepted is None or not accepted.authority_fingerprint:
                 return error_envelope(
@@ -676,22 +680,10 @@ class EvidenceCollectionRunner:
                     error=_authority_not_accepted(project_id),
                 )
 
-            authority = (
-                session.get(CompiledSpecAuthority, accepted.pending_authority_id)
-                if accepted.pending_authority_id is not None
-                else None
+            authority = compiled_authority_for_acceptance(
+                session,
+                acceptance=accepted,
             )
-            if authority is None:
-                authority = session.exec(
-                    select(CompiledSpecAuthority)
-                    .where(
-                        CompiledSpecAuthority.spec_version_id
-                        == accepted.spec_version_id
-                    )
-                    .order_by(
-                        cast("Any", CompiledSpecAuthority.authority_id).desc()
-                    )
-                ).first()
             if authority is None or not authority.compiled_artifact_json:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,

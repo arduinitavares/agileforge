@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, Field, ValidationError
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from models.core import Feature, UserStory
 from models.db import get_engine
@@ -25,6 +25,10 @@ from orchestrator_agent.agent_tools.spec_validator_agent.schemes import (
     SpecValidationResult,
 )
 from services.specs._engine_resolution import resolve_spec_engine
+from services.specs.authority_selection import (
+    compiled_authority_for_acceptance,
+    latest_accepted_authority_decision,
+)
 from services.specs.compiler_service import (
     compiled_authority_schema_unsupported_remediation,
     load_compiled_artifact,
@@ -1113,11 +1117,19 @@ def validate_story_with_spec_authority(
                 ),
             )
 
-        authority = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == parsed.spec_version_id
+        acceptance = latest_accepted_authority_decision(
+            session,
+            product_id=story.product_id,
+            spec_version_id=parsed.spec_version_id,
+        )
+        authority = (
+            compiled_authority_for_acceptance(
+                session,
+                acceptance=acceptance,
             )
-        ).first()
+            if acceptance is not None
+            else None
+        )
 
         if not authority:
             not_compiled_message = (

@@ -166,7 +166,7 @@ def test_regenerate_dry_run_validates_guards_without_mutation(
     assert before_authority_count == after_authority_count
 
 
-def test_regenerate_persists_pending_v2_authority_and_does_not_accept(
+def test_regenerate_persists_pending_v3_authority_and_does_not_accept(
     authority_regenerate_runner: AuthorityRegenerateRunner,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -215,7 +215,7 @@ def test_regenerate_persists_pending_v2_authority_and_does_not_accept(
     assert result["ok"] is True
     assert result["data"]["status"] == "authority_pending_review"
     assert result["data"]["compiled_authority_schema_version"] == (
-        "agileforge.compiled_authority.v2"
+        "agileforge.compiled_authority.v3"
     )
     assert result["data"]["accepted_authority_id"] is None
     assert result["data"]["next_actions"][0]["command"] == "agileforge authority review"
@@ -266,6 +266,8 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     )
     session.add(rejected)
     session.commit()
+    session.refresh(old_authority)
+    before_old = old_authority.model_dump()
 
     def fake_compile(  # noqa: PLR0913
         *,
@@ -278,22 +280,12 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     ) -> dict[str, object]:
         del tool_context, lease_guard, record_progress
         assert force_recompile is True
-        with Session(engine) as compile_session:
-            authority = compile_session.get(CompiledSpecAuthority, old_authority_id)
-            assert authority is not None
-            authority.prompt_hash = "b" * 64
-            authority.compiled_at = datetime.now(UTC)
-            authority.compiled_artifact_json = _compiled_authority_json("b" * 64)
-            compile_session.add(authority)
-            compile_session.commit()
-        return {
-            "success": True,
-            "authority_id": old_authority_id,
-            "spec_version_id": spec_version_id,
-            "compiler_version": "2.0.0",
-            "prompt_hash": ("b" * 64)[:8],
-            "cached": False,
-        }
+        return _persist_compiled_authority(
+            engine=engine,
+            product_id=product_id,
+            prompt_hash="b" * 64,
+            spec_version_id=spec_version_id,
+        )
 
     monkeypatch.setattr(
         authority_regenerate_mod,
@@ -322,14 +314,103 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     assert result["data"]["authority_id"] != old_authority_id
     assert result["data"]["pending_authority_id"] == result["data"]["authority_id"]
     assert len(authority_rows) == 2  # noqa: PLR2004
+    assert authority_rows[0].model_dump() == before_old
     assert {row.authority_id for row in authority_rows} == {
         old_authority_id,
         result["data"]["authority_id"],
     }
 
 
+def test_regenerate_uses_exact_compiler_id_without_post_compile_clone(
+    authority_regenerate_runner: AuthorityRegenerateRunner,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    product_id: int,
+    approved_spec_version_id: int,
+) -> None:
+    """Regeneration binds to compiler output even if another row becomes newest."""
+    compiled_id: int | None = None
+
+    def fake_compile(  # noqa: PLR0913
+        *,
+        engine: Engine,
+        spec_version_id: int,
+        force_recompile: bool | None = None,
+        tool_context: object | None = None,
+        lease_guard: object | None = None,
+        record_progress: object | None = None,
+    ) -> dict[str, object]:
+        nonlocal compiled_id
+        del tool_context, lease_guard, record_progress
+        assert force_recompile is True
+        compiled = _persist_compiled_authority(
+            engine=engine,
+            product_id=product_id,
+            prompt_hash="c" * 64,
+            spec_version_id=spec_version_id,
+        )
+        compiled_id = cast("int", compiled["authority_id"])
+        with Session(engine) as compile_session:
+            unrelated = CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version="unrelated",
+                prompt_hash="d" * 64,
+                compiled_artifact_json=_compiled_authority_json("d" * 64),
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+            compile_session.add(unrelated)
+            compile_session.commit()
+            compile_session.refresh(unrelated)
+            unrelated_id = require_id(unrelated.authority_id, "authority_id")
+            compile_session.add(
+                SpecAuthorityAcceptance(
+                    product_id=product_id,
+                    spec_version_id=spec_version_id,
+                    status="rejected",
+                    policy="test",
+                    decided_by="test",
+                    compiler_version=unrelated.compiler_version,
+                    prompt_hash=unrelated.prompt_hash,
+                    spec_hash="sha256:approved-spec",
+                    pending_authority_id=unrelated_id,
+                )
+            )
+            compile_session.commit()
+        return compiled
+
+    monkeypatch.setattr(
+        authority_regenerate_mod,
+        "compile_spec_authority_for_version_with_engine",
+        fake_compile,
+    )
+
+    result = authority_regenerate_runner.regenerate(
+        AuthorityRegenerateRequest(
+            project_id=product_id,
+            spec_version_id=approved_spec_version_id,
+            idempotency_key="regen-exact-compiler-id",
+            changed_by="test",
+        )
+    )
+
+    rows = session.exec(
+        select(CompiledSpecAuthority).where(
+            CompiledSpecAuthority.spec_version_id == approved_spec_version_id
+        )
+    ).all()
+    assert result["ok"] is True
+    assert result["data"]["authority_id"] == compiled_id
+    assert result["data"]["pending_authority_id"] == compiled_id
+    assert len(rows) == 2  # noqa: PLR2004
+
+
 def test_regenerate_idempotency_replays_completed_mutation(
     authority_regenerate_runner: AuthorityRegenerateRunner,
+    session: Session,
     monkeypatch: pytest.MonkeyPatch,
     product_id: int,
     approved_spec_version_id: int,
@@ -369,11 +450,15 @@ def test_regenerate_idempotency_replays_completed_mutation(
     )
 
     first = authority_regenerate_runner.regenerate(request)
+    first_row_count = len(session.exec(select(CompiledSpecAuthority)).all())
     second = authority_regenerate_runner.regenerate(request)
+    second_row_count = len(session.exec(select(CompiledSpecAuthority)).all())
 
     assert first["ok"] is True
     assert second["ok"] is True
     assert second["data"]["mutation_event_id"] == first["data"]["mutation_event_id"]
+    assert second["data"]["authority_id"] == first["data"]["authority_id"]
+    assert second_row_count == first_row_count == 1
     assert compile_calls == [(approved_spec_version_id, True)]
 
 

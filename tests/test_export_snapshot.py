@@ -11,6 +11,7 @@ from sqlmodel import Session
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
+    SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
     SprintStatus,
@@ -183,6 +184,179 @@ def _insert_approved_spec_with_authority(
     session.commit()
 
     return spec
+
+
+def _snapshot_authority(
+    session: Session,
+    *,
+    spec_version_id: int,
+    compiler_version: str,
+    theme: str,
+) -> CompiledSpecAuthority:
+    prompt_hash = compiler_version[0] * 64
+    artifact = SpecAuthorityCompilationSuccess(
+        scope_themes=[theme],
+        invariants=[],
+        eligible_feature_rules=[],
+        gaps=[],
+        assumptions=[],
+        source_map=[],
+        compiler_version=compiler_version,
+        prompt_hash=prompt_hash,
+    )
+    row = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version=compiler_version,
+        prompt_hash=prompt_hash,
+        scope_themes=json.dumps([theme]),
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+        compiled_artifact_json=SpecAuthorityCompilerOutput(
+            root=artifact
+        ).model_dump_json(),
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def test_snapshot_loader_uses_exact_acceptance_bound_row(
+    session: Session,
+) -> None:
+    """Accepted exports never fall to an older or newer candidate row."""
+    from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
+
+    product = _insert_basic_project(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="snapshot-accepted",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="1.0.0",
+        theme="Older",
+    )
+    accepted = _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="2.0.0",
+        theme="Accepted",
+    )
+    _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        theme="Pending",
+    )
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=accepted.authority_id,
+        )
+    )
+    session.commit()
+
+    loaded = _load_compiled_authority(session, spec)
+
+    assert loaded is not None
+    assert loaded.scope_themes == ["Accepted"]
+
+
+def test_snapshot_loader_without_acceptance_uses_newest_row(
+    session: Session,
+) -> None:
+    """Unaccepted exports choose newest insertion deterministically."""
+    from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
+
+    product = _insert_basic_project(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="snapshot-pending",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="2.0.0",
+        theme="Older",
+    )
+    _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        theme="Newest",
+    )
+
+    loaded = _load_compiled_authority(session, spec)
+
+    assert loaded is not None
+    assert loaded.scope_themes == ["Newest"]
+
+
+def test_snapshot_loader_missing_exact_accepted_row_fails_closed(
+    session: Session,
+) -> None:
+    """Accepted export never substitutes an available pending candidate."""
+    from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
+
+    product = _insert_basic_project(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="snapshot-missing-accepted",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    pending = _snapshot_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        theme="Pending",
+    )
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=pending.compiler_version,
+            prompt_hash=pending.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=999_999,
+        )
+    )
+    session.commit()
+
+    assert _load_compiled_authority(session, spec) is None
 
 
 def test_export_snapshot_html_basic(engine: Engine, tmp_path: Path) -> None:

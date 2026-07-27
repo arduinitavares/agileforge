@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, Any, TypedDict, Unpack
 
 from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry
 from tests.typing_helpers import require_id
+from utils.spec_schemas import (
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerOutput,
+)
 
 JsonDict = dict[str, Any]
 
@@ -68,6 +72,21 @@ def _create_approved_spec(session: Session, product_id: int) -> SpecRegistry:
     return spec
 
 
+def _compiled_v3_json() -> str:
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationSuccess(
+            scope_themes=[],
+            invariants=[],
+            eligible_feature_rules=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version="3.0.0",
+            prompt_hash="b" * 64,
+        )
+    ).model_dump_json()
+
+
 def test_context_service_get_project_details_includes_spec_fields(
     session: Session,
 ) -> None:
@@ -77,10 +96,11 @@ def test_context_service_get_project_details_includes_spec_fields(
     )
 
     spec_loaded_at = datetime.now(UTC)
+    compiled_json = _compiled_v3_json()
     product = _create_product(
         session,
         technical_spec="Spec body",
-        compiled_authority_json='{"schema_version":"agileforge.compiled_authority.v2"}',
+        compiled_authority_json=compiled_json,
         spec_file_path="specs/spec.md",
         spec_loaded_at=spec_loaded_at,
         description="Desc",
@@ -92,9 +112,7 @@ def test_context_service_get_project_details_includes_spec_fields(
     assert result["success"] is True
     details = result["product"]
     assert details["technical_spec"] == "Spec body"
-    assert details["compiled_authority_json"] == (
-        '{"schema_version":"agileforge.compiled_authority.v2"}'
-    )
+    assert details["compiled_authority_json"] == compiled_json
     assert details["spec_file_path"] == "specs/spec.md"
     expected_loaded_at = spec_loaded_at.replace(tzinfo=None).isoformat()
     assert details["spec_loaded_at"] == expected_loaded_at
@@ -110,10 +128,11 @@ def test_context_service_select_project_hydrates_spec_and_authority(
     from services.orchestrator_context_service import select_project  # noqa: PLC0415
 
     spec_loaded_at = datetime.now(UTC)
+    compiled_json = _compiled_v3_json()
     product = _create_product(
         session,
         technical_spec="Spec body",
-        compiled_authority_json='{"schema_version":"agileforge.compiled_authority.v2"}',
+        compiled_authority_json=compiled_json,
         spec_file_path="specs/spec.md",
         spec_loaded_at=spec_loaded_at,
         description="Desc",
@@ -133,9 +152,7 @@ def test_context_service_select_project_hydrates_spec_and_authority(
     assert result["success"] is True
     assert context.state["pending_spec_content"] == "Spec body"
     assert context.state["pending_spec_path"] == "specs/spec.md"
-    assert context.state["compiled_authority_cached"] == (
-        '{"schema_version":"agileforge.compiled_authority.v2"}'
-    )
+    assert context.state["compiled_authority_cached"] == compiled_json
     assert context.state["latest_spec_version_id"] == require_id(
         spec.spec_version_id, "spec_version_id"
     )
@@ -144,9 +161,7 @@ def test_context_service_select_project_hydrates_spec_and_authority(
     active_project = context.state["active_project"]
     assert active_project["description"] == "Desc"
     assert active_project["technical_spec"] == "Spec body"
-    assert active_project["compiled_authority_json"] == (
-        '{"schema_version":"agileforge.compiled_authority.v2"}'
-    )
+    assert active_project["compiled_authority_json"] == compiled_json
     assert active_project["spec_file_path"] == "specs/spec.md"
     expected_loaded_at = spec_loaded_at.replace(tzinfo=None).isoformat()
     assert active_project["spec_loaded_at"] == expected_loaded_at
@@ -219,7 +234,7 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
         "project_id": product_id,
         "spec_version_id": spec_version_id,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["error"]["remediation"] == [
         (
@@ -233,3 +248,47 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
     refreshed = session.get(Product, product_id)
     assert refreshed is not None
     assert refreshed.compiled_authority_json is None
+
+
+def test_context_fallback_backfills_newest_authority_row(
+    session: Session,
+) -> None:
+    """Fallback chooses the newest v3 row rather than older unsupported history."""
+    from services.orchestrator_context_service import select_project  # noqa: PLC0415
+
+    product = _create_product(
+        session,
+        technical_spec="Spec body",
+        spec_file_path="specs/spec.md",
+    )
+    product_id = require_id(product.product_id, "product_id")
+    spec = _create_approved_spec(session, product_id)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    newest_json = _compiled_v3_json()
+    for version, prompt_hash, artifact_json in (
+        ("2.0.0", "a" * 64, '{"invariants":[]}'),
+        ("3.0.0", "b" * 64, newest_json),
+    ):
+        session.add(
+            CompiledSpecAuthority(
+                spec_version_id=spec_version_id,
+                compiler_version=version,
+                prompt_hash=prompt_hash,
+                compiled_artifact_json=artifact_json,
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+        )
+    session.commit()
+
+    context = MockToolContext({})
+    result = select_project(product_id, context)
+
+    assert result["success"] is True
+    assert context.state["compiled_authority_cached"] == newest_json
+    refreshed = session.get(Product, product_id)
+    assert refreshed is not None
+    assert refreshed.compiled_authority_json == newest_json
