@@ -34,10 +34,10 @@ def _approved_spec_content() -> str:
 
 def _compiled_authority_json(prompt_hash: str) -> str:
     return (
-        '{"schema_version":"agileforge.compiled_authority.v2",'
+        '{"schema_version":"agileforge.compiled_authority.v3",'
         '"scope_themes":[],"domain":"operations","invariants":[],'
         '"eligible_feature_rules":[],"rejected_features":[],"gaps":[],'
-        '"assumptions":[],"source_map":[],"compiler_version":"2.0.0",'
+        '"assumptions":[],"source_map":[],"compiler_version":"3.0.0",'
         f'"prompt_hash":"{prompt_hash}","ir_schema_version":null,'
         '"ir_provenance":null}'
     )
@@ -53,7 +53,7 @@ def _persist_compiled_authority(
     with Session(engine) as compile_session:
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash=prompt_hash,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_compiled_authority_json(prompt_hash),
@@ -74,7 +74,7 @@ def _persist_compiled_authority(
             "success": True,
             "authority_id": require_id(authority.authority_id, "authority_id"),
             "spec_version_id": spec_version_id,
-            "compiler_version": "2.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": prompt_hash[:8],
             "cached": False,
         }
@@ -223,7 +223,7 @@ def test_regenerate_persists_pending_v3_authority_and_does_not_accept(
     assert ledger_rows[0].status == "succeeded"
     assert len(authority_rows) == 1
     assert authority_rows[0].spec_version_id == approved_spec_version_id
-    assert authority_rows[0].compiler_version == "2.0.0"
+    assert authority_rows[0].compiler_version == "3.0.0"
     assert acceptance_rows == []
 
 
@@ -237,7 +237,7 @@ def test_regenerate_rejected_authority_creates_new_pending_authority(
     """Regenerating rejected authority must not reuse the rejected authority id."""
     old_authority = CompiledSpecAuthority(
         spec_version_id=approved_spec_version_id,
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
         compiled_at=datetime.now(UTC),
         compiled_artifact_json=_compiled_authority_json("a" * 64),

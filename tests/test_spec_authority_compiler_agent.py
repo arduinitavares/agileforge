@@ -308,13 +308,13 @@ class TestCompilerOutputSchema:
                     "location": "spec:line:1",
                 }
             ],
-            "compiler_version": "1.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
         }
 
         parsed = SpecAuthorityCompilerOutput.model_validate_json(json.dumps(payload))
         assert isinstance(parsed.root, SpecAuthorityCompilationSuccess)
-        assert parsed.root.compiler_version == "1.0.0"
+        assert parsed.root.compiler_version == "3.0.0"
 
     def test_failure_payload_valid_json(self) -> None:
         """Verify failure payload valid json."""
@@ -349,7 +349,7 @@ class TestCompilerOutputSchema:
                     "location": "spec:line:1",
                 }
             ],
-            "compiler_version": "1.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
         }
 
@@ -398,7 +398,7 @@ class TestCompilerOutputSchema:
             "gaps": [],
             "assumptions": [],
             "source_map": [],
-            "compiler_version": "1.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
         }
 
@@ -434,7 +434,7 @@ class TestCompilerOutputSchema:
                     "location": "Requirements",
                 }
             ],
-            "compiler_version": "1.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "0" * 64,
         }
 
@@ -544,7 +544,7 @@ class TestCorrectedExpectedOutput:
                     "location": "spec:line:1",
                 }
             ],
-            "compiler_version": "1.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a"
             * 64,  # Schema requires 64 hex chars; actual value from agent
         }

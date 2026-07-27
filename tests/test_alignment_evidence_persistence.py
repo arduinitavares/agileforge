@@ -13,6 +13,7 @@ from sqlmodel import Session
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
+    SpecAuthorityAcceptance,
     SpecRegistry,
     UserStory,
 )
@@ -85,12 +86,12 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
                 location=None,
             ),
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="test",
         scope_themes='["core"]',
         invariants='["FORBIDDEN_CAPABILITY:web"]',
@@ -103,6 +104,21 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
         compiled_at=datetime.now(UTC),
     )
     session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="tester",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec_version.spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+    )
     session.commit()
 
     return product, spec_version_id
@@ -218,12 +234,12 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
         gaps=["No invariants extracted from spec"],
         assumptions=[],
         source_map=[],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         scope_themes='["notes-only"]',
         invariants="[]",
@@ -235,6 +251,23 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
         ).model_dump_json(),
     )
     session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    accepted_spec = session.get(SpecRegistry, spec_version_id)
+    assert accepted_spec is not None
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=_require_id(product.product_id, "product.product_id"),
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="tester",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=accepted_spec.spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+    )
     session.commit()
 
     story: UserStory = _create_story(

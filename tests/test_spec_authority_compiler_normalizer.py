@@ -370,7 +370,7 @@ def _legacy_success_payload() -> dict[str, Any]:
                 "location": "spec:line:1",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -386,7 +386,7 @@ def _base_success_payload() -> dict[str, object]:
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "2.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "a" * 64,
     }
 
@@ -1364,7 +1364,7 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
                 "location": "REQ.include-review-token.statement",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -1478,7 +1478,7 @@ def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
                 "location": "REQ.review-packet.statement",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -1565,7 +1565,7 @@ def test_normalizer_keeps_decision_hard_ban_with_unknown_source_ref() -> None:
                 "location": "REQ.unknown-hard-ban.statement",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -1638,7 +1638,7 @@ def test_normalizer_keeps_decision_hard_ban_with_unparseable_source_ref() -> Non
                 "location": "architecture notes",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -2118,7 +2118,7 @@ def test_normalizer_repairs_invalid_prompt_hash_before_validation() -> None:
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "not-a-valid-hash",
     }
 
@@ -2153,7 +2153,7 @@ def test_normalizer_repairs_missing_prompt_hash_before_validation() -> None:
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
     }
 
     normalized = normalize_compiler_output(json.dumps(raw))
@@ -2186,7 +2186,7 @@ def test_normalizer_repairs_missing_hash_and_source_map_before_validation() -> N
         "eligible_feature_rules": [],
         "gaps": [],
         "assumptions": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
     }
 
     normalized = normalize_compiler_output(json.dumps(raw))
@@ -2221,7 +2221,7 @@ def test_normalizer_repairs_invalid_envelope_prompt_hash_before_validation() -> 
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "",
     }
 
@@ -2255,7 +2255,7 @@ def test_normalizer_repairs_missing_envelope_hash_and_source_map() -> None:
         "eligible_feature_rules": [],
         "gaps": [],
         "assumptions": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
     }
 
     normalized = normalize_compiler_output(json.dumps({"result": result_payload}))
@@ -4286,7 +4286,7 @@ def test_normalizer_allows_missing_source_map_with_semantic_ids() -> None:
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "a" * 64,
     }
 
@@ -4360,7 +4360,7 @@ def test_normalizer_handles_duplicate_placeholder_invariant_ids() -> None:
                 "location": None,
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4420,7 +4420,7 @@ def test_normalizer_repairs_invalid_placeholder_ids_before_validation() -> None:
                 "location": "NFR.auth.statement",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4491,7 +4491,7 @@ def test_normalizer_ids_include_parameters_when_excerpt_and_type_repeat() -> Non
             }
             for _ in range(4)
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4543,7 +4543,7 @@ def test_normalizer_preserves_source_map_that_does_not_support_field() -> None:
                 "location": "FR-003",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4589,7 +4589,7 @@ def test_normalizer_allows_forbidden_capability_safety_guard_excerpt() -> None:
                 "location": "FR-016",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4634,7 +4634,7 @@ def test_normalizer_repairs_table_row_evidence_from_source_text() -> None:
                 "location": "6.2 Functional Requirements / FR-002",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4675,7 +4675,7 @@ def test_normalizer_removes_duplicate_semantic_invariants() -> None:
                 "location": "FR-003",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4712,7 +4712,7 @@ def test_normalizer_preserves_max_value_when_excerpt_lacks_bound() -> None:
                 "location": "FR-003",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4778,7 +4778,7 @@ def test_normalizer_drops_max_value_from_command_example() -> None:
                 "location": "FR-003",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4817,7 +4817,7 @@ def test_normalizer_preserves_zero_max_value_when_excerpt_lacks_zero_bound() -> 
                 "location": "FR-003",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4860,7 +4860,7 @@ def test_normalizer_preserves_relation_constraint_for_dynamic_budget() -> None:
                 "location": "FR-003",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4896,7 +4896,7 @@ def test_normalizer_preserves_relation_constraint_without_operator_evidence() ->
                 "location": "FR-001",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -4968,7 +4968,7 @@ def test_normalizer_handles_duplicate_ids_different_types_length_mismatch() -> N
                 "location": "spec:section:1:para:2",
             },
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5013,7 +5013,7 @@ def test_normalize_zero_invariants_returns_success_with_warning() -> None:
                 "location": "spec:notes",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5037,7 +5037,7 @@ def test_normalize_empty_invariants_allows_empty_source_map() -> None:
         "gaps": [],
         "assumptions": [],
         "source_map": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5074,7 +5074,7 @@ def test_normalizer_extracts_json_from_wrapped_text() -> None:
                 "location": "spec:line:1",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5118,7 +5118,7 @@ def test_normalizer_accepts_enveloped_result_payload() -> None:
                 "location": "spec:line:2",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5146,7 +5146,7 @@ def test_normalizer_does_not_convert_failure_wrapper_result_to_success() -> None
         "eligible_feature_rules": [],
         "gaps": [],
         "assumptions": [],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
     }
     raw: dict[str, Any] = {
         "error": "SPEC_COMPILATION_FAILED",
@@ -5192,7 +5192,7 @@ def test_normalizer_filters_meta_policy_invariant_from_plagiarism_section() -> N
                 "location": "Plagiarism Policy",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5236,7 +5236,7 @@ def test_normalizer_preserves_real_product_forbidden_capability() -> None:
                 "location": "Product Constraints",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 
@@ -5276,7 +5276,7 @@ def test_normalizer_does_not_filter_product_invariant_from_api_references_sectio
                 "location": "API References",
             }
         ],
-        "compiler_version": "1.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 

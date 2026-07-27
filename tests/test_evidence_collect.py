@@ -608,8 +608,8 @@ def test_targets_from_compiled_authority_uses_item_and_invariant_ids() -> None:
     ]
 
 
-def test_targets_from_compiled_authority_reads_v2_top_level_provenance() -> None:
-    """Verify v2 invariant provenance uses top-level source_item_id."""
+def test_targets_from_compiled_authority_reads_v3_top_level_provenance() -> None:
+    """Verify v3 invariant provenance uses top-level source_item_id."""
     compiled = _compiled_authority_v3(
         invariants=[
             {
@@ -644,7 +644,7 @@ def test_targets_from_compiled_authority_reads_v2_top_level_provenance() -> None
 
 
 def test_targets_from_compiled_authority_falls_back_to_source_map_location() -> None:
-    """Verify v2 invariant provenance falls back to source_map location."""
+    """Verify v3 invariant provenance falls back to source_map location."""
     compiled = _compiled_authority_v3(
         invariants=[
             {

@@ -473,8 +473,8 @@ def test_build_authority_targets_extracts_cartola_invariants_without_items() -> 
     assert "Recommend a live squad while the market is open." in first.terms
 
 
-def test_build_authority_targets_reads_v2_top_level_provenance() -> None:
-    """v2 invariant provenance comes from top-level source fields."""
+def test_build_authority_targets_reads_v3_top_level_provenance() -> None:
+    """v3 invariant provenance comes from top-level source fields."""
     compiled = _compiled_authority_v3(
         {
             "invariants": [
@@ -505,9 +505,9 @@ def test_build_authority_targets_reads_v2_top_level_provenance() -> None:
 
 
 def test_build_authority_targets_falls_back_to_source_map_location() -> None:
-    """v2 invariant provenance falls back to matching source_map location."""
+    """v3 invariant provenance falls back to matching source_map location."""
     compiled = {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["As-Built"],
         "domain": "as-built",
         "invariants": [
@@ -535,7 +535,7 @@ def test_build_authority_targets_falls_back_to_source_map_location() -> None:
                 "excerpt": "Recommend a live squad while the market is open.",
             }
         ],
-        "compiler_version": "1",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
     }
 

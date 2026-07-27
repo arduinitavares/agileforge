@@ -8,7 +8,13 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
-from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry, UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 from models.core import Epic, Feature, Theme
 from tests.typing_helpers import require_id
 from tools import spec_tools
@@ -58,12 +64,12 @@ def _create_compiled_spec(session: Session, product_id: int) -> int:
                 location="spec",
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     compiled = CompiledSpecAuthority(
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         compiled_at=datetime.now(UTC),
         scope_themes=json.dumps(["core"]),
@@ -76,6 +82,21 @@ def _create_compiled_spec(session: Session, product_id: int) -> int:
         ).model_dump_json(),
     )
     session.add(compiled)
+    session.commit()
+    session.refresh(compiled)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+            status="accepted",
+            policy="test",
+            decided_by="tester",
+            compiler_version=compiled.compiler_version,
+            prompt_hash=compiled.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=compiled.authority_id,
+        )
+    )
     session.commit()
 
     return require_id(spec.spec_version_id, "spec_version_id")
@@ -140,12 +161,12 @@ def _build_authority_for_alignment(
         gaps=[],
         assumptions=[],
         source_map=source_map,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     return CompiledSpecAuthority(
         spec_version_id=1,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         compiled_at=datetime.now(UTC),
         scope_themes=json.dumps(["core"]),
@@ -768,12 +789,12 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
                 location="Plagiarism Policy",
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     compiled = CompiledSpecAuthority(
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         compiled_at=datetime.now(UTC),
         scope_themes=json.dumps(["assignment policy"]),
@@ -786,6 +807,21 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
         ).model_dump_json(),
     )
     session.add(compiled)
+    session.commit()
+    session.refresh(compiled)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=require_id(product.product_id, "product_id"),
+            spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+            status="accepted",
+            policy="test",
+            decided_by="tester",
+            compiler_version=compiled.compiler_version,
+            prompt_hash=compiled.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=compiled.authority_id,
+        )
+    )
     session.commit()
 
     monkeypatch.setattr(

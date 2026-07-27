@@ -3032,7 +3032,7 @@ def _accepted_cli_base_spec(session: Session, artifact: JsonObject) -> int:
         status="accepted",
         policy="test",
         decided_by="test",
-        compiler_version="test",
+        compiler_version="3.0.0",
         prompt_hash="prompt",
         spec_hash=spec.spec_hash,
     )

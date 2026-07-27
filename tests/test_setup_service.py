@@ -105,7 +105,7 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
             "fsm_state": "SETUP_REQUIRED",
             "pending_spec_content": "SPEC",
             "compiled_authority_cached": (
-                '{"schema_version":"agileforge.compiled_authority.v2"}'
+                '{"schema_version":"agileforge.compiled_authority.v3"}'
             ),
         },
         session_id="7",
@@ -143,7 +143,7 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
             product_id=project_id,
             spec_file_path=__file__,
             compiled_authority_json=(
-                '{"schema_version":"agileforge.compiled_authority.v2"}'
+                '{"schema_version":"agileforge.compiled_authority.v3"}'
             ),
         )
 

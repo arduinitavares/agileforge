@@ -476,7 +476,7 @@ def test_build_run_manifest_records_hashes_without_project_ids() -> None:
         agileforge_commit="abc1234",
         agileforge_branch="dev/authority-coverage-matrix-phase-2e",
         schema_version="agileforge.spec.v1",
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         spec_generation_model="manual",
         authority_compiler_model="openrouter/openai/gpt-5.4-mini",
         prompt_versions=["writing-technical-specs@local"],
@@ -496,7 +496,7 @@ def test_build_run_manifest_records_hashes_without_project_ids() -> None:
     assert manifest["agileforge_commit"] == "abc1234"
     assert manifest["agileforge_branch"] == "dev/authority-coverage-matrix-phase-2e"
     assert manifest["schema_version"] == "agileforge.spec.v1"
-    assert manifest["compiler_version"] == "1.0.0"
+    assert manifest["compiler_version"] == "3.0.0"
     assert manifest["spec_generation_model"] == "manual"
     assert manifest["authority_compiler_model"] == "openrouter/openai/gpt-5.4-mini"
     assert manifest["prompt_versions"] == ["writing-technical-specs@local"]
@@ -520,7 +520,7 @@ def test_build_run_manifest_redacts_local_command_artifacts() -> None:
         agileforge_commit="abc1234",
         agileforge_branch="dev/authority-coverage-matrix-phase-2e",
         schema_version="agileforge.spec.v1",
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         spec_generation_model="manual",
         authority_compiler_model="openrouter/openai/gpt-5.4-mini",
         prompt_versions=["writing-technical-specs@local"],

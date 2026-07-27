@@ -25,6 +25,7 @@ from services.agent_workbench.authority_projection import (
     pending_authority_fingerprint,
 )
 from services.agent_workbench.error_codes import ErrorCode, error_metadata
+from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
     TechnicalSpecArtifact,
@@ -163,7 +164,7 @@ def _seed_authority(  # noqa: PLR0913
     session: Session,
     *,
     spec_version_id: int,
-    compiler_version: str = "1.0.0",
+    compiler_version: str = "3.0.0",
     prompt_hash: str = "a" * 64,
     invariants: str = '[{"id":"INV-1","text":"Must stay in scope"}]',
     compiled_artifact_json: str | None = None,
@@ -191,13 +192,9 @@ def _seed_authority(  # noqa: PLR0913
     return authority
 
 
-def _legacy_compiled_authority_json() -> str:
-    return json.dumps({"invariants": [{"id": "INV-1", "text": "Must stay in scope"}]})
-
-
 def _compiled_authority_json(
     *,
-    compiler_version: str = "1.0.0",
+    compiler_version: str = "3.0.0",
     prompt_hash: str = "a" * 64,
 ) -> str:
     from services.specs.compiler_service import (  # noqa: PLC0415
@@ -260,7 +257,7 @@ def _accept_spec(
         decided_by="reviewer",
         decided_at=decided_at or datetime(2026, 5, 14, 13, tzinfo=UTC),
         rationale="Accepted for test",
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
         spec_hash=spec.spec_hash,
         pending_authority_id=pending_authority_id,
@@ -530,7 +527,7 @@ def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
         == spec.spec_version_id
     )
     assert result["data"]["pending_compiled_at"] == "2026-05-14T12:00:00Z"
-    assert result["data"]["pending_compiler_version"] == "1.0.0"
+    assert result["data"]["pending_compiler_version"] == "3.0.0"
     assert result["data"]["pending_prompt_hash"] == "a" * 64
     assert result["data"]["pending_invariant_count"] == 1
     assert result["data"]["pending_authority_fingerprint"].startswith("sha256:")
@@ -711,7 +708,7 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
     source_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     feedback = _seed_feedback_attempt(
@@ -730,7 +727,7 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
     candidate_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
     candidate_authority_id = require_id(
@@ -844,7 +841,7 @@ def test_authority_status_ignores_same_spec_rejection_without_curation_link(
     rejected_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     feedback = _seed_feedback_attempt(
@@ -874,7 +871,7 @@ def test_authority_status_ignores_same_spec_rejection_without_curation_link(
     pending_authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
 
@@ -1308,7 +1305,8 @@ def test_authority_status_marks_compiler_prompt_mismatch_stale(
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
+        prompt_hash="b" * 64,
     )
     _accept_spec(
         session,
@@ -1336,7 +1334,9 @@ def test_authority_status_reports_regenerate_for_unsupported_schema(
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiled_artifact_json=_legacy_compiled_authority_json(),
+        compiled_artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     _accept_spec(session, product_id=product_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
@@ -1369,7 +1369,9 @@ def test_authority_status_prefers_pending_unsupported_over_supported_accepted(
     pending_authority = _seed_authority(
         session,
         spec_version_id=require_id(pending_spec.spec_version_id, "spec_version_id"),
-        compiled_artifact_json=_legacy_compiled_authority_json(),
+        compiled_artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     _accept_spec(session, product_id=product_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
@@ -1405,7 +1407,9 @@ def test_authority_status_unsupported_schema_preserves_status_payload_shape(
     pending_authority = _seed_authority(
         session,
         spec_version_id=require_id(pending_spec.spec_version_id, "spec_version_id"),
-        compiled_artifact_json=_legacy_compiled_authority_json(),
+        compiled_artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     _accept_spec(session, product_id=product_id, spec=accepted_spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
@@ -1732,7 +1736,7 @@ def test_invariants_default_rejects_unaccepted_recompile(
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
     _accept_spec(session, product_id=product_id, spec=spec)
@@ -1746,9 +1750,9 @@ def test_invariants_default_rejects_unaccepted_recompile(
     assert result["errors"][0]["details"] == {
         "project_id": product_id,
         "spec_version_id": spec.spec_version_id,
-        "accepted_compiler_version": "1.0.0",
+        "accepted_compiler_version": "3.0.0",
         "accepted_prompt_hash": "a" * 64,
-        "compiled_compiler_version": "2.0.0",
+        "compiled_compiler_version": "3.0.0",
         "compiled_prompt_hash": "b" * 64,
     }
 
@@ -1765,14 +1769,14 @@ def test_invariants_default_keeps_pending_recompile_out_of_accepted_projection(
     accepted_authority = _seed_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     _accept_spec(session, product_id=product_id, spec=spec)
     pending_authority = _seed_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
 
@@ -1798,14 +1802,14 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
     authority_a = _seed_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     _accept_spec(session, product_id=product_id, spec=spec)
     authority_b = _seed_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="b" * 64,
     )
     authority_b_id = require_id(authority_b.authority_id, "authority_id")
@@ -1847,7 +1851,9 @@ def test_invariants_reports_regenerate_for_unsupported_schema(
     _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiled_artifact_json=_legacy_compiled_authority_json(),
+        compiled_artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     _accept_spec(session, product_id=product_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)

@@ -205,7 +205,7 @@ def test_vision_generate_blocks_unsupported_authority_before_agent(
                     "project_id": product_id,
                     "spec_version_id": 12,
                     "observed_schema_version": None,
-                    "required_schema_version": "agileforge.compiled_authority.v2",
+                    "required_schema_version": "agileforge.compiled_authority.v3",
                 },
                 "remediation": [
                     "Run agileforge authority regenerate --project-id 2 "
@@ -256,7 +256,7 @@ def test_vision_generate_blocks_unsupported_authority_before_agent(
         "project_id": 2,
         "spec_version_id": 12,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["errors"][0]["remediation"] == [
         "Run agileforge authority regenerate --project-id 2 "

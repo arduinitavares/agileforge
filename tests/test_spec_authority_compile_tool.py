@@ -59,7 +59,11 @@ from utils.spec_schemas import (
 )
 
 _INSTRUCTION_REQUIRED_TERMS = (
-    "agileforge.compiled_authority.v2",
+    "agileforge.compiled_authority.v3",
+    '"kind": "free_text"',
+    '"kind": "item_status"',
+    '"kind": "accepted_normative_count"',
+    '"kind": "accepted_normative_set"',
     "source_map.location",
     "source_map.excerpt",
     "semantic fields only",
@@ -74,12 +78,12 @@ _INSTRUCTION_FORBIDDEN_TERMS = (
 )
 
 
-def _assert_v2_instruction_contract(instructions: str) -> None:
-    """Assert the durable v2 instruction contract without prose-coupling."""
+def _assert_v3_instruction_contract(instructions: str) -> None:
+    """Assert the durable v3 instruction contract without prose-coupling."""
     for required_term in _INSTRUCTION_REQUIRED_TERMS:
         assert required_term in instructions
 
-    assert '"schema_version": "agileforge.compiled_authority.v2"' in instructions
+    assert '"schema_version": "agileforge.compiled_authority.v3"' in instructions
     assert 'USER_INTERACTION => invariant: {"type": "USER_INTERACTION"' in instructions
 
     for forbidden_term in _INSTRUCTION_FORBIDDEN_TERMS:
@@ -346,9 +350,9 @@ def test_tool_compiler_failure_and_extractor_helpers_delegate_to_service(
     }
 
 
-def test_compiler_instructions_require_v2_provenance_contract() -> None:
-    """Compiler instructions must require the v2 provenance layout."""
-    _assert_v2_instruction_contract(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
+def test_compiler_instructions_require_v3_typed_assumption_contract() -> None:
+    """Compiler instructions must require v3 typed assumptions and provenance."""
+    _assert_v3_instruction_contract(SPEC_AUTHORITY_COMPILER_INSTRUCTIONS)
 
 
 def test_compile_tool_compiles_and_returns_summary(

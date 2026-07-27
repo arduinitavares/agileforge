@@ -162,7 +162,7 @@ def test_authority_curation_runner_repairs_legacy_missing_mutation_event_id(
 def _compiled_artifact_json() -> str:
     return json.dumps(
         {
-            "schema_version": "agileforge.compiled_authority.v2",
+            "schema_version": "agileforge.compiled_authority.v3",
             "scope_themes": [],
             "domain": "operations",
             "invariants": [
@@ -195,7 +195,7 @@ def _compiled_artifact_json() -> str:
                 {"id": "SRC-curation-1"},
                 {"id": "SRC-curation-untargeted"},
             ],
-            "compiler_version": "2.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
             "ir_schema_version": None,
             "ir_provenance": None,
@@ -236,7 +236,7 @@ def _seed_pending_authority(
 
         authority = CompiledSpecAuthority(
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash="a" * 64,
             compiled_at=datetime(2026, 6, 16, 13, tzinfo=UTC),
             compiled_artifact_json=_compiled_artifact_json(),
@@ -1628,7 +1628,7 @@ def test_authority_curate_uses_positional_ids_after_final_assumption_dedup() -> 
                 FreeTextAssumption(kind="free_text", text="Beta assumption."),
             ],
             source_map=[],
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash="a" * 64,
         )
     )
@@ -3497,7 +3497,7 @@ def test_authority_curate_publishes_pending_review_candidate(
     assert acceptances[0].status == "rejected"
     assert pending_authority is not None
     assert pending_authority.spec_version_id == fixture.spec_version_id
-    assert pending_authority.compiler_version == "2.0.0"
+    assert pending_authority.compiler_version == "3.0.0"
     assert pending_authority.prompt_hash == "a" * 64
     assert json.loads(pending_authority.compiled_artifact_json or "{}") == (
         _targeted_repair_curation_result(fixture)["candidate_authority_json"]
@@ -3964,7 +3964,7 @@ def test_authority_curate_recovery_rejects_candidate_mismatch_from_original_resp
     with Session(engine) as session:
         wrong_authority = CompiledSpecAuthority(
             spec_version_id=fixture.spec_version_id,
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash="b" * 64,
             compiled_artifact_json=json.dumps(
                 wrong_candidate_json,
@@ -4505,7 +4505,7 @@ def test_authority_curate_expired_recovery_keeps_published_candidate_manual(
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
         candidate = CompiledSpecAuthority(
             spec_version_id=fixture.spec_version_id,
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash="b" * 64,
             compiled_artifact_json=_compiled_artifact_json(),
             scope_themes="[]",

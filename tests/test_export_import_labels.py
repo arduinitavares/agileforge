@@ -102,12 +102,12 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
                 location="spec",
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     compiled = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         compiled_at=datetime.now(UTC),
         scope_themes=json.dumps(["core"]),

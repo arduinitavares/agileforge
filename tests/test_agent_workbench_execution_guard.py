@@ -168,7 +168,7 @@ def _seed_current_authority_project(session: Session) -> int:
     assert spec.spec_version_id is not None
     authority = CompiledSpecAuthority(
         spec_version_id=spec.spec_version_id,
-        compiler_version="test",
+        compiler_version="3.0.0",
         prompt_hash=prompt_hash,
         compiled_artifact_json=_compiled_authority_artifact_json(
             SpecAuthorityCompilationSuccess(
@@ -180,7 +180,7 @@ def _seed_current_authority_project(session: Session) -> int:
                 gaps=[],
                 assumptions=[],
                 source_map=[],
-                compiler_version="test",
+                compiler_version="3.0.0",
                 prompt_hash=prompt_hash,
             )
         ),
@@ -200,7 +200,7 @@ def _seed_current_authority_project(session: Session) -> int:
         status="accepted",
         policy="test",
         decided_by="test",
-        compiler_version="test",
+        compiler_version="3.0.0",
         prompt_hash=prompt_hash,
         spec_hash=spec.spec_hash,
         pending_authority_id=authority.authority_id,

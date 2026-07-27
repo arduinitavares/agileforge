@@ -1,17 +1,13 @@
 {
+  "schema_version": "agileforge.compiled_authority.v3",
+  "compiler_version": "3.0.0",
   "assumptions": [
     {
-      "id": "ASM-1",
-      "source_excerpt": null,
-      "source_refs": [],
-      "support": "inferred",
+      "kind": "free_text",
       "text": "Source document is treated as the full authority for benchmark scope, and linked external references do not add behavior beyond the source."
     },
     {
-      "id": "ASM-2",
-      "source_excerpt": null,
-      "source_refs": [],
-      "support": "inferred",
+      "kind": "free_text",
       "text": "Where the source states SHOULD-level guidance without explicit required artifacts or measurable constraints, it is not promoted to a hard invariant."
     }
   ],

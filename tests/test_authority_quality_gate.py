@@ -47,7 +47,7 @@ def _success(
         gaps=[],
         assumptions=assumptions or [],
         source_map=source_map or [],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
 

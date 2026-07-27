@@ -484,10 +484,10 @@ class TestExplicitCompilation:
         ).first()
 
         assert authority is not None
-        assert authority.compiler_version == "2.0.0"  # Expected constant
+        assert authority.compiler_version == "3.0.0"  # Expected constant
         assert authority.compiled_artifact_json is not None
         payload = json.loads(authority.compiled_artifact_json)
-        assert payload["schema_version"] == "agileforge.compiled_authority.v2"
+        assert payload["schema_version"] == "agileforge.compiled_authority.v3"
         assert len(authority.prompt_hash) == 64  # SHA-256 hex digest  # noqa: PLR2004
 
 

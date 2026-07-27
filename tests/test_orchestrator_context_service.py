@@ -209,7 +209,7 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
     session.add(
         CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.0.0",
+            compiler_version="3.0.0",
             prompt_hash="legacy",
             compiled_artifact_json='{"invariants":[]}',
             scope_themes="[]",

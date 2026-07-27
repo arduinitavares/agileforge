@@ -69,7 +69,7 @@ type JsonObject = dict[str, object]
 
 SCHEMA_VERSION = "agileforge.cli.v1"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-COMPILER_VERSION = "1.0.0"
+COMPILER_VERSION = "3.0.0"
 PROMPT_HASH = "a" * 64
 SEEDED_STORY_COUNT = 2
 SCHEMA_NOT_READY_EXIT_CODE = 5
@@ -150,10 +150,10 @@ def _phase1_compiled_authority_json(
     *,
     source_item_id: str = "REQ.phase1-context",
 ) -> str:
-    """Return a supported v2 compiled-authority artifact for Phase 1 fixtures."""
+    """Return a supported v3 compiled-authority artifact for Phase 1 fixtures."""
     return json.dumps(
         {
-            "schema_version": "agileforge.compiled_authority.v2",
+            "schema_version": "agileforge.compiled_authority.v3",
             "scope_themes": ["read-only cli"],
             "domain": None,
             "invariants": [

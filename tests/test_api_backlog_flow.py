@@ -13,7 +13,7 @@ HTTP_OK = 200
 HTTP_CONFLICT = 409
 HTTP_TEAPOT = 418
 EXPECTED_HISTORY_COUNT = 2
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
 
 
 class _StateContext(Protocol):

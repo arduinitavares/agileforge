@@ -158,14 +158,14 @@ def _insert_approved_spec_with_authority(
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     compiled_json = SpecAuthorityCompilerOutput(success).model_dump_json()
 
     authority = CompiledSpecAuthority(
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
         scope_themes=json.dumps(["Payments"]),
         invariants=json.dumps(
@@ -244,13 +244,13 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
     _snapshot_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         theme="Older",
     )
     accepted = _snapshot_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         theme="Accepted",
     )
     _snapshot_authority(
@@ -301,7 +301,7 @@ def test_snapshot_loader_without_acceptance_uses_newest_row(
     _snapshot_authority(
         session,
         spec_version_id=spec_version_id,
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         theme="Older",
     )
     _snapshot_authority(

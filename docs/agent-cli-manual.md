@@ -1754,11 +1754,13 @@ Use `authority review` before any decision. The normal accept path uses the
 reviewed pending authority for the project and does not require agents to pass
 review tokens or idempotency keys in the command text.
 
-Use `authority regenerate` only for an approved spec version that needs fresh v2
-compiled authority, including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`.
-It saves v2 compiled authority and stops at pending authority review. It does
-not accept or reject authority and does not advance Vision, Backlog, Roadmap,
-Story, or Sprint.
+Use `authority regenerate` only for an approved spec version that needs fresh
+pending v3 authority, including after
+`COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`. Historical v2 authority is unsupported
+history. Regeneration appends a new pending v3 row without rewriting the v2 row
+or transferring its acceptance. An operator must explicitly review the new row
+and run `authority accept`; regeneration does not accept or reject authority and
+does not advance Vision, Backlog, Roadmap, Story, or Sprint.
 
 ### Vision Commands
 
@@ -2333,8 +2335,9 @@ agileforge authority curate \
 Curation stops at `authority_pending_review`. Human review and explicit
 `authority accept` are still required.
 
-Regenerate when an approved spec version needs fresh v2 compiled authority,
-including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`:
+Regenerate when an approved spec version needs fresh pending v3 authority,
+including after `COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED`. Stored v2 authority is
+unsupported history:
 
 ```sh
 agileforge authority regenerate \
@@ -2343,9 +2346,15 @@ agileforge authority regenerate \
   --idempotency-key "authority-regenerate-$PROJECT_ID-$SPEC_VERSION_ID-001"
 ```
 
-This command saves v2 compiled authority and stops at pending authority review.
-It performs no accept/reject decision and does not advance Vision, Backlog,
-Roadmap, Story, or Sprint. Review the regenerated packet before deciding.
+This command appends a new pending v3 authority row and leaves historical v2
+rows unchanged. It does not transfer the historical row's acceptance, perform
+an accept/reject decision, or advance Vision, Backlog, Roadmap, Story, or
+Sprint. Review the regenerated packet and explicitly run `authority accept`
+before using it as accepted authority.
+
+Rollback is forward-fix only. If operators restore a v2 runtime, that runtime
+must retain append-only authority persistence and must not rewrite historical
+rows. Repair by appending a new candidate after the v3 runtime is restored.
 
 If the source spec is missing or unreadable at decision time, accept/reject
 fails closed before writing a decision row. `AUTHORITY_SOURCE_UNAVAILABLE`

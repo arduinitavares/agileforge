@@ -24,6 +24,7 @@ from services.agent_workbench.authority_review import (
     coverage_summary_fingerprint,
     sha256_prefixed,
 )
+from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
     TechnicalSpecArtifact,
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from sqlmodel import Session
 
 PROMPT_HASH = "a" * 64
-COMPILER_VERSION = "1.0.0"
+COMPILER_VERSION = "3.0.0"
 INVARIANT_ID = "INV-0123456789abcdef"
 
 
@@ -116,12 +117,6 @@ def _stored_compiled_success_json(
         source_excerpt=source_excerpt,
         source_location=source_location,
     )
-
-
-def _legacy_compiled_success_json(*, source_excerpt: str) -> str:
-    payload = json.loads(_compiled_success_json(source_excerpt=source_excerpt))
-    payload.pop("schema_version", None)
-    return json.dumps(payload)
 
 
 def _seed_pending_review_project(  # noqa: PLR0913
@@ -662,11 +657,11 @@ def test_review_preserves_rejected_features_from_valid_compiled_authority(
     ]
 
 
-def test_review_accepts_v2_stored_compiled_artifact(
+def test_review_accepts_v3_stored_compiled_artifact(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Authority review should accept the compiler-service stored v2 envelope."""
+    """Authority review should accept the compiler-service stored v3 envelope."""
     project_id, _spec_version_id, _authority_id, _spec_path = (
         _seed_pending_review_project(
             session,
@@ -702,8 +697,8 @@ def test_review_rejects_unsupported_compiled_authority_schema(
             session,
             tmp_path=tmp_path,
             spec_content=_base_spec(),
-            artifact_json=_legacy_compiled_success_json(
-                source_excerpt="The review output must include guard tokens."
+            artifact_json=json.dumps(
+                historical_v2_compiled_authority(prompt_hash=PROMPT_HASH)
             ),
         )
     )

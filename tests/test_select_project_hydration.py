@@ -10,7 +10,7 @@ from tests.typing_helpers import require_id
 from tools.orchestrator_tools import get_project_details, select_project
 
 JsonDict = dict[str, Any]
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext

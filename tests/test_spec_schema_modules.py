@@ -123,7 +123,7 @@ def test_spec_authority_success_defaults_v3_and_rejects_strings() -> None:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
 
@@ -181,7 +181,7 @@ def test_behavioral_invariants_keep_provenance_top_level() -> None:
 
 
 def test_authority_quality_report_schema_is_optional_and_strict() -> None:
-    """Compiled authority v2 supports optional quality report metadata."""
+    """Compiled authority v3 supports optional quality report metadata."""
     from utils.spec_schemas import (  # noqa: PLC0415
         AuthorityQualityMergedItem,
         AuthorityQualityReport,
@@ -198,7 +198,7 @@ def test_authority_quality_report_schema_is_optional_and_strict() -> None:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     assert success.authority_quality is None

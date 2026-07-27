@@ -20,7 +20,7 @@ if TYPE_CHECKING:
         SaveStoryPatchInput,
     )
 
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
 EXPECTED_REFINEMENT_ATTEMPT_COUNT = 2
 
 

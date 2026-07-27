@@ -25,6 +25,10 @@ from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
+from tests.authority_assumption_fixtures import (
+    free_text_assumption,
+    historical_v2_compiled_authority,
+)
 from tests.typing_helpers import make_tool_context, require_id
 from utils import failure_artifacts
 from utils.agileforge_spec_profile import TechnicalSpecArtifact
@@ -84,7 +88,7 @@ def _scope_merge_success(
             "gaps": [],
             "assumptions": [assumption],
             "source_map": [],
-            "compiler_version": "2.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
         }
     )
@@ -145,7 +149,7 @@ def _compiled_success_json() -> str:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -174,7 +178,7 @@ def v3_compiled_authority_payload() -> dict[str, Any]:
         "rejected_features": [],
         "gaps": [],
         "assumptions": [
-            {"kind": "free_text", "text": "Audit evidence is retained."},
+            free_text_assumption("Audit evidence is retained."),
             {
                 "kind": "item_status",
                 "item_id": "REQ.alpha",
@@ -205,7 +209,7 @@ def v3_compiled_authority_payload() -> dict[str, Any]:
             },
         ],
         "source_map": [],
-        "compiler_version": "2.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "a" * 64,
         "ir_schema_version": None,
         "ir_provenance": None,
@@ -226,7 +230,7 @@ def legacy_compiled_authority_payload() -> dict[str, Any]:
     assert isinstance(parameters, dict)
     parameters["source_item_id"] = invariant.pop("source_item_id")
     parameters["source_level"] = invariant.pop("source_level")
-    payload["compiler_version"] = "1.0.0"
+    payload["compiler_version"] = "3.0.0"
     return payload
 
 
@@ -259,7 +263,7 @@ def _vacant_success_json() -> str:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -286,7 +290,7 @@ def _raw_compiler_output_json() -> str:
                 location=None,
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -317,7 +321,7 @@ def _duplicate_required_field_compiler_output_json() -> str:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -349,7 +353,7 @@ def _structured_retry_success_payload() -> dict[str, Any]:
                 "location": "REQ.test.audit",
             }
         ],
-        "compiler_version": "2.0.0",
+        "compiler_version": "3.0.0",
         "prompt_hash": "a" * 64,
     }
 
@@ -495,7 +499,7 @@ def _behavioral_payload_json(
                 location=source_item_id,
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -573,7 +577,7 @@ def _compiled_success_json_for_source_item(source_item_id: str) -> str:
                 location=f"{source_item_id}.acceptance[0]",
             )
         ],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     return SpecAuthorityCompilerOutput(root=success).model_dump_json()
@@ -680,9 +684,13 @@ def _create_compiled_authority(
     spec_version_id: int,
     artifact_json: str,
 ) -> CompiledSpecAuthority:
+    payload = json.loads(artifact_json)
+    assert isinstance(payload, dict)
+    compiler_version = payload.get("compiler_version", "3.0.0")
+    assert isinstance(compiler_version, str)
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.2.3",
+        compiler_version=compiler_version,
         prompt_hash="e" * 64,
         compiled_at=datetime.now(UTC),
         compiled_artifact_json=artifact_json,
@@ -836,8 +844,7 @@ def test_load_compiled_artifact_rejects_historical_v2_payload() -> None:
     """Historical v2 rows remain immutable and unsupported at the v3 boundary."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
-    payload = v3_compiled_authority_payload()
-    payload["schema_version"] = "agileforge.compiled_authority.v2"
+    payload = historical_v2_compiled_authority(prompt_hash="a" * 64)
     authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
 
     result = load_compiled_artifact(authority)
@@ -983,7 +990,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
     first_authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(first_spec.spec_version_id, "spec_version_id"),
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+        artifact_json=json.dumps(v3_compiled_authority_payload()),
     )
     session.add(
         SpecAuthorityAcceptance(
@@ -1408,7 +1415,7 @@ def test_preview_spec_authority_repairs_merged_structured_source_map(
             gaps=[],
             assumptions=[],
             source_map=[],
-            compiler_version="1.0.0",
+            compiler_version="3.0.0",
             prompt_hash="a" * 64,
         )
 
@@ -1655,7 +1662,7 @@ def test_preview_spec_authority_does_not_retry_semantic_focused_item_failure(
                         "location": item_id,
                     }
                 ],
-                "compiler_version": "2.0.0",
+                "compiler_version": "3.0.0",
                 "prompt_hash": "a" * 64,
             }
             return json.dumps(invalid_payload)
@@ -2078,7 +2085,7 @@ def test_compile_spec_authority_for_version_persists_quality_report(
             gaps=[],
             assumptions=[],
             source_map=[],
-            compiler_version="2.0.0",
+            compiler_version="3.0.0",
             prompt_hash="a" * 64,
         )
         output = SpecAuthorityCompilerOutput(root=success)
@@ -2163,7 +2170,7 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     second_output = compiler_service.normalize_compiler_output(
@@ -2387,7 +2394,7 @@ def test_merge_compilation_successes_reports_cross_success_duplicate_merges() ->
                 location="REQ.test.audit.acceptance[0]",
             )
         ],
-        compiler_version="2.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
     second = first.model_copy(
@@ -3675,7 +3682,9 @@ def test_force_recompile_inserts_without_mutating_existing_history(
     existing = _create_compiled_authority(
         session,
         spec_version_id=spec_version_id,
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+        artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     existing_id = require_id(existing.authority_id, "authority_id")
     acceptance = SpecAuthorityAcceptance(
@@ -3752,7 +3761,7 @@ def test_force_recompile_inserts_when_existing_row_has_no_terminal_decision(
     existing = _create_compiled_authority(
         session,
         spec_version_id=spec_version_id,
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+        artifact_json=json.dumps(v3_compiled_authority_payload()),
     )
     existing_id = require_id(existing.authority_id, "authority_id")
 
@@ -3793,7 +3802,9 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+        artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
     tool_context = make_tool_context()
 
@@ -3811,7 +3822,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
     assert result["details"] == {
         "project_id": project_id,
         "spec_version_id": spec_version_id,
-        "observed_schema_version": None,
+        "observed_schema_version": "agileforge.compiled_authority.v2",
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["remediation"] == [
@@ -4162,7 +4173,7 @@ def test_false_structured_claim_does_not_retry_or_persist(
                     "location": "REQ.test.audit",
                 }
             ],
-            "compiler_version": "2.0.0",
+            "compiler_version": "3.0.0",
             "prompt_hash": "a" * 64,
         }
         return json.dumps(invalid_payload)
@@ -4338,10 +4349,10 @@ def test_check_spec_authority_status_prefers_pending_review_over_stale(
     }
 
 
-def test_check_spec_authority_status_does_not_report_legacy_artifact_current(
+def test_check_spec_authority_status_does_not_report_historical_v2_artifact_current(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Legacy stored artifacts without schema_version are not CURRENT."""
+    """Historical v2 stored artifacts are not CURRENT."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -4357,7 +4368,9 @@ def test_check_spec_authority_status_does_not_report_legacy_artifact_current(
     authority = _create_compiled_authority(
         session,
         spec_version_id=require_id(spec_row.spec_version_id, "spec_version_id"),
-        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+        artifact_json=json.dumps(
+            historical_v2_compiled_authority(prompt_hash="a" * 64)
+        ),
     )
 
     result = compiler_service.check_spec_authority_status(
@@ -4585,7 +4598,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
 
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.2.3",
+            compiler_version="3.0.0",
             prompt_hash="b" * 64,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_stored_compiled_success_json(),
@@ -4666,7 +4679,7 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
         assert isinstance(spec_version_id, int)
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.2.3",
+            compiler_version="3.0.0",
             prompt_hash="f" * 64,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_stored_compiled_success_json(),
@@ -4726,7 +4739,7 @@ def test_update_spec_and_compile_authority_never_persists_acceptance(
         del force_recompile, tool_context, compiler_model
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.2.3",
+            compiler_version="3.0.0",
             prompt_hash="a" * 64,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_stored_compiled_success_json(),
@@ -4795,7 +4808,7 @@ def test_update_spec_and_compile_authority_loads_content_ref(
         del force_recompile, tool_context, compiler_model
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.2.3",
+            compiler_version="3.0.0",
             prompt_hash="c" * 64,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_stored_compiled_success_json(),
@@ -4874,7 +4887,7 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
             authority_counter["value"] += 1
             authority = CompiledSpecAuthority(
                 spec_version_id=spec_version_id,
-                compiler_version="1.2.3",
+                compiler_version="3.0.0",
                 prompt_hash=f"{authority_counter['value']:064d}"[-64:],
                 compiled_at=datetime.now(UTC),
                 compiled_artifact_json=_stored_compiled_success_json(),
@@ -4961,7 +4974,7 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
         compile_calls["force_recompile"] = force_recompile
         authority = CompiledSpecAuthority(
             spec_version_id=spec_version_id,
-            compiler_version="1.2.3",
+            compiler_version="3.0.0",
             prompt_hash="d" * 64,
             compiled_at=datetime.now(UTC),
             compiled_artifact_json=_stored_compiled_success_json(),

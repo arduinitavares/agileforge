@@ -22,7 +22,13 @@ from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
-from agile_sqlmodel import Product, SpecRegistry, UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 from models.core import Epic, Feature, Theme
 from tools import spec_tools
 from tools.spec_tools import (
@@ -86,7 +92,7 @@ def _fake_compilation_artifact() -> SpecAuthorityCompilationSuccess:
                 location="spec:line:1",
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="a" * 64,
     )
 
@@ -174,13 +180,29 @@ def compiled_spec(session: Session, sample_product: Product) -> SpecRegistry:
         "tools.spec_tools._extract_spec_authority_llm",
         return_value=_fake_compilation_artifact(),
     ):
-        compile_spec_authority(
+        compile_result = compile_spec_authority(
             {"spec_version_id": spec_version_id},
             tool_context=None,
         )
 
     spec = session.get(SpecRegistry, spec_version_id)
     assert spec is not None
+    authority = session.get(CompiledSpecAuthority, compile_result["authority_id"])
+    assert authority is not None
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=_require_id(sample_product.product_id, "product_id"),
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test_reviewer",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+    )
+    session.commit()
     session.refresh(spec)
     return spec
 

@@ -2177,7 +2177,7 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
         "project_id": product.product_id,
         "spec_version_id": 9,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert error["remediation"] == [
         (
@@ -2259,7 +2259,7 @@ def test_phase_generate_blocks_legacy_cached_authority(
         "project_id": product.product_id,
         "spec_version_id": 9,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert error["remediation"] == [
         (

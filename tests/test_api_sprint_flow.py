@@ -89,7 +89,7 @@ TASK_PACKET_PARENT_PROMPT_NOTE = (
     "This prompt assumes the session was already initialized with the parent "
     "story prompt. If not, restart with Copy Story Prompt."
 )
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
 
 
 def _require_id(value: int | None, label: str) -> int:
@@ -482,7 +482,7 @@ def _seed_task_packet_context(
                     location="Spec §1",
                 )
             ],
-            compiler_version="1.0.0",
+            compiler_version="3.0.0",
             prompt_hash="0" * 64,
         )
         authority = CompiledSpecAuthority(
@@ -490,7 +490,7 @@ def _seed_task_packet_context(
                 spec_version.spec_version_id,
                 "spec_version_id",
             ),
-            compiler_version="1.0.0",
+            compiler_version="3.0.0",
             prompt_hash="0" * 64,
             scope_themes='["API"]',
             invariants='["REQUIRED_FIELD:user_id"]',

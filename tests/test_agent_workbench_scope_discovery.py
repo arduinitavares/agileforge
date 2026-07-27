@@ -359,7 +359,7 @@ def _accepted_base_spec(
         status="accepted",
         policy="test",
         decided_by="test",
-        compiler_version="test",
+        compiler_version="3.0.0",
         prompt_hash="prompt",
         spec_hash=spec.spec_hash,
     )

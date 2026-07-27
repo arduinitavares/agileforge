@@ -102,7 +102,7 @@ def test_workflow_state_blocks_legacy_authority_phase_start(
         "project_id": product_id,
         "spec_version_id": spec_version_id,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["data"]["next_actions"] == [
         {

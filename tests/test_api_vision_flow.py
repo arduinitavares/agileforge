@@ -11,7 +11,7 @@ import api as api_module
 from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
 from utils import failure_artifacts
 
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v2"}'
+COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
 
 
 @dataclass

@@ -109,7 +109,7 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
 
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         scope_themes="[]",
         invariants="[]",
@@ -497,7 +497,7 @@ def test_run_llm_spec_validation_uses_injected_helpers() -> None:
     )
     authority = CompiledSpecAuthority(
         spec_version_id=42,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         scope_themes="[]",
         invariants="[]",
@@ -647,12 +647,12 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
                 location="spec",
             )
         ],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         scope_themes='["core"]',
         invariants="[]",
@@ -780,12 +780,12 @@ def test_run_deterministic_alignment_checks_unwraps_loader_result_success() -> N
         gaps=[],
         assumptions=[],
         source_map=[],
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
     )
     authority = CompiledSpecAuthority(
         spec_version_id=1,
-        compiler_version="1.0.0",
+        compiler_version="3.0.0",
         prompt_hash="0" * 64,
         scope_themes='["ui"]',
         invariants='["FORBIDDEN_CAPABILITY:direct DOM access"]',
