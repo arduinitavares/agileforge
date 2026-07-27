@@ -3029,13 +3029,22 @@ def _candidate_authority_from_workflow_result(
     )
 
 
-def _candidate_authority_from_v2_selection(
+def _candidate_authority_from_v2_selection(  # noqa: PLR0911
     *,
     context: _PatchApplicationContext,
     loaded: _LoadedCurationInputs,
     workflow_result: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply v2 host-menu selections and reject legacy output shapes."""
+    read_only_target_id = _structured_assumption_feedback_target_id(
+        source_authority_json=loaded.source_authority_json,
+        feedback_json=loaded.feedback_json,
+    )
+    if read_only_target_id is not None:
+        return _authority_curation_target_read_only_response(
+            context=context,
+            target_id=read_only_target_id,
+        )
     if workflow_result.get("candidate_authority_json") is not None:
         return _authority_repair_intent_invalid_response(
             context=context,
@@ -4161,6 +4170,24 @@ def _find_assumption_target(
         return None
     assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(value[index])
     return value, index, assumption
+
+
+def _structured_assumption_feedback_target_id(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_json: str,
+) -> str | None:
+    """Return a feedback target that names a non-editable structured claim."""
+    for target_kind, target_id in _feedback_target_keys(feedback_json):
+        if target_kind != "assumption":
+            continue
+        target = _find_assumption_target(
+            source_authority_json.get("assumptions"),
+            target_id=target_id,
+        )
+        if target is not None and is_structured_assumption(target[2]):
+            return target_id
+    return None
 
 
 def _changed_structured_assumption_target_id(

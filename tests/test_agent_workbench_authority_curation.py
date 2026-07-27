@@ -1770,6 +1770,107 @@ def test_authority_curate_rejects_structured_assumption_patch_before_publish(
     assert "candidate_publication_completed" not in [event["step"] for event in events]
 
 
+@pytest.mark.parametrize(
+    "structured_assumption",
+    [
+        {
+            "kind": "item_status",
+            "item_id": "REQ.alpha",
+            "status": "accepted",
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+        {
+            "kind": "accepted_normative_count",
+            "count": 1,
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+        {
+            "kind": "accepted_normative_set",
+            "item_ids": ["REQ.alpha"],
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+    ],
+)
+def test_authority_curate_v2_rejects_structured_feedback_before_publication(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    structured_assumption: dict[str, object],
+) -> None:
+    """V2 empty selections cannot bypass feedback on a structured claim."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[structured_assumption],
+        feedback_item={
+            "feedback_id": "AFB-structured-v2",
+            "target_kind": "assumption",
+            "target_id": "ASM-1",
+            "issue_type": "invalid_assumption",
+            "severity": "blocking",
+            "instruction": "Change the structured claim.",
+        },
+    )
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {"repairs": []},
+            "quality_report": {"status": "passed"},
+        },
+    )
+
+    result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key=f"curate-v2-structured-{structured_assumption['kind']}",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATION_TARGET_READ_ONLY"
+    assert (
+        fake_workflow.get_session_status(str(fixture.project_id))["setup_status"]
+        == "authority_rejected"
+    )
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        ledger = session.exec(select(CliMutationLedger)).one()
+    assert len(authorities) == 1
+    assert attempt.status == "failed"
+    assert ledger.status == "domain_failed_no_side_effects"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(attempt.mutation_event_id, "mutation_event_id")
+    )
+    assert "candidate_publication_completed" not in [event["step"] for event in events]
+    assert events[-1]["step"] == "mutation_finalize_completed"
+
+
 @pytest.mark.parametrize("contract_version", [None, "authority_curation.v2"])
 def test_authority_curate_replaces_plain_gap_text_and_persists_candidate(
     engine: Engine,
