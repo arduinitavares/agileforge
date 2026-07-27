@@ -37,17 +37,22 @@ from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
 )
+from services.specs.authority_quality import apply_authority_quality_gate
 from tests.typing_helpers import require_id
 from utils import failure_artifacts
 from utils.spec_authority_assumptions import (
     FreeTextAssumption,
     canonical_assumption_key,
 )
+from utils.spec_schemas import SpecAuthorityCompilationSuccess
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+
+
+EXPECTED_CANDIDATE_AUTHORITY_COUNT: int = 2
 
 
 @dataclass(frozen=True)
@@ -359,6 +364,34 @@ def _replace_assumptions_for_curation_test(
         assert authority is not None
         artifact = json.loads(str(authority.compiled_artifact_json))
         artifact["assumptions"] = assumptions
+        authority.compiled_artifact_json = json.dumps(artifact, sort_keys=True)
+        fingerprint = pending_authority_fingerprint(authority)
+        assert fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = fingerprint
+        feedback.feedback_json = json.dumps(
+            {"feedback_items": [feedback_item]},
+            sort_keys=True,
+        )
+        session.add(authority)
+        session.add(feedback)
+        session.commit()
+    return replace(fixture, authority_fingerprint=fingerprint)
+
+
+def _replace_gaps_for_curation_test(
+    engine: Engine,
+    fixture: RejectedAuthorityFixture,
+    *,
+    gaps: list[object],
+    feedback_item: dict[str, object],
+) -> RejectedAuthorityFixture:
+    """Replace a fixture's gaps and bind feedback to its new fingerprint."""
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        artifact = json.loads(str(authority.compiled_artifact_json))
+        artifact["gaps"] = gaps
         authority.compiled_artifact_json = json.dumps(artifact, sort_keys=True)
         fingerprint = pending_authority_fingerprint(authority)
         assert fingerprint is not None
@@ -1579,6 +1612,58 @@ def test_authority_curate_free_text_menu_hash_uses_canonical_assumption_key() ->
     )
 
 
+def test_authority_curate_uses_positional_ids_after_final_assumption_dedup() -> None:
+    """Repair handles follow the final canonical assumption list, not raw inputs."""
+    final_authority = apply_authority_quality_gate(
+        SpecAuthorityCompilationSuccess(
+            scope_themes=["Project"],
+            domain=None,
+            invariants=[],
+            eligible_feature_rules=[],
+            rejected_features=[],
+            gaps=[],
+            assumptions=[
+                FreeTextAssumption(kind="free_text", text="Alpha assumption."),
+                FreeTextAssumption(kind="free_text", text="alpha assumption."),
+                FreeTextAssumption(kind="free_text", text="Beta assumption."),
+            ],
+            source_map=[],
+            compiler_version="2.0.0",
+            prompt_hash="a" * 64,
+        )
+    )
+
+    menu = curation_mod._build_repair_menu(
+        source_authority_json=final_authority.model_dump(mode="json"),
+        feedback_json={
+            "feedback_items": [
+                {
+                    "feedback_id": "AFB-final-first",
+                    "target_kind": "assumption",
+                    "target_id": "ASM-1",
+                    "issue_type": "invalid_assumption",
+                    "severity": "blocking",
+                    "instruction": "Clarify the first final assumption.",
+                },
+                {
+                    "feedback_id": "AFB-final-second",
+                    "target_kind": "assumption",
+                    "target_id": "ASM-2",
+                    "issue_type": "invalid_assumption",
+                    "severity": "blocking",
+                    "instruction": "Clarify the second final assumption.",
+                },
+            ]
+        },
+    )
+
+    assert [assumption.text for assumption in final_authority.assumptions] == [
+        "Alpha assumption.",
+        "Beta assumption.",
+    ]
+    assert [entry["target_id"] for entry in menu] == ["ASM-1", "ASM-2"]
+
+
 @pytest.mark.parametrize(
     "structured_assumption",
     [
@@ -1639,9 +1724,11 @@ def test_authority_curate_rejects_structured_assumption_patch_before_publish(
         str(fixture.project_id),
         {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
     )
-    monkeypatch.setattr(
-        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
-        lambda **_: {
+    workflow_calls: list[None] = []
+
+    def structured_patch_workflow(**_: object) -> dict[str, object]:
+        workflow_calls.append(None)
+        return {
             "ok": True,
             "patches": [
                 {
@@ -1651,7 +1738,11 @@ def test_authority_curate_rejects_structured_assumption_patch_before_publish(
                     "new_text": "Only REQ.alpha was accepted.",
                 }
             ],
-        },
+        }
+
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        structured_patch_workflow,
     )
 
     result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
@@ -1667,6 +1758,7 @@ def test_authority_curate_rejects_structured_assumption_patch_before_publish(
 
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_CURATION_TARGET_READ_ONLY"
+    assert workflow_calls == [None]
     with Session(engine) as session:
         authorities = session.exec(select(CompiledSpecAuthority)).all()
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
@@ -1675,21 +1767,99 @@ def test_authority_curate_rejects_structured_assumption_patch_before_publish(
     events = trace_mod.read_trace_events(
         mutation_event_id=require_id(attempt.mutation_event_id, "mutation_event_id")
     )
-    assert "candidate_publication_started" not in [event["step"] for event in events]
+    assert "candidate_publication_completed" not in [event["step"] for event in events]
 
 
-@pytest.mark.parametrize("changed_field", ["status", "artifact_id", "source_item_ids"])
-def test_authority_curate_rejects_full_candidate_structured_claim_change(
+@pytest.mark.parametrize("contract_version", [None, "authority_curation.v2"])
+def test_authority_curate_replaces_plain_gap_text_and_persists_candidate(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
-    changed_field: str,
+    tmp_path: Path,
+    contract_version: str | None,
 ) -> None:
-    """Full candidates cannot alter structured claim value or provenance."""
+    """Ordinary positional string gaps remain editable in both curation paths."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
     ensure_schema_current(engine)
-    fixture = _replace_assumptions_for_curation_test(
+    fixture = _replace_gaps_for_curation_test(
         engine,
         _insert_rejected_authority_with_feedback(engine),
-        assumptions=[
+        gaps=["Original gap text."],
+        feedback_item={
+            "feedback_id": "AFB-gap-text",
+            "target_kind": "gap",
+            "target_id": "GAP-1",
+            "issue_type": "invalid_gap",
+            "severity": "blocking",
+            "instruction": "Clarify the gap text.",
+        },
+    )
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    workflow_result: dict[str, object] = {
+        "ok": True,
+        "quality_report": {"status": "passed"},
+    }
+    if contract_version is None:
+        workflow_result["patches"] = [
+            {
+                "target_kind": "gap",
+                "target_id": "GAP-1",
+                "op": "replace_text",
+                "new_text": "Clarified gap text.",
+            }
+        ]
+    else:
+        workflow_result["contract_version"] = contract_version
+        workflow_result["selection_payload"] = {
+            "repairs": [
+                {
+                    "feedback_id": "AFB-gap-text",
+                    "target_handle": "R1",
+                    "repair_kind": "replace_text",
+                    "replacement_text": "Clarified gap text.",
+                }
+            ]
+        }
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: workflow_result,
+    )
+
+    result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key=f"curate-gap-text-{contract_version or 'patch'}",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    assert candidate["gaps"] == ["Clarified gap text."]
+    with Session(engine) as session:
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+        assert (
+            len(session.exec(select(CompiledSpecAuthority)).all())
+            == EXPECTED_CANDIDATE_AUTHORITY_COUNT
+        )
+    assert attempt.status == "succeeded"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(attempt.mutation_event_id, "mutation_event_id")
+    )
+    assert "candidate_publication_completed" in [event["step"] for event in events]
+    assert events[-1]["step"] == "mutation_finalize_completed"
+
+
+@pytest.mark.parametrize(
+    ("structured_assumption", "value_field", "replacement_value"),
+    [
+        (
             {
                 "kind": "item_status",
                 "item_id": "REQ.alpha",
@@ -1699,8 +1869,55 @@ def test_authority_curate_rejects_full_candidate_structured_claim_change(
                     "artifact_id": "SPEC.curation",
                     "source_item_ids": ["REQ.alpha"],
                 },
-            }
-        ],
+            },
+            "status",
+            "rejected",
+        ),
+        (
+            {
+                "kind": "accepted_normative_count",
+                "count": 1,
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.curation",
+                    "source_item_ids": ["REQ.alpha"],
+                },
+            },
+            "count",
+            2,
+        ),
+        (
+            {
+                "kind": "accepted_normative_set",
+                "item_ids": ["REQ.alpha"],
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.curation",
+                    "source_item_ids": ["REQ.alpha"],
+                },
+            },
+            "item_ids",
+            ["REQ.beta"],
+        ),
+    ],
+)
+@pytest.mark.parametrize("change_kind", ["value", "artifact_id", "source_item_ids"])
+def test_authority_curate_rejects_full_candidate_structured_claim_change(  # noqa: PLR0913
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    structured_assumption: dict[str, object],
+    value_field: str,
+    replacement_value: object,
+    change_kind: str,
+) -> None:
+    """Full candidates cannot alter structured claim value or provenance."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[structured_assumption],
         feedback_item={
             "feedback_id": "AFB-structured-full",
             "target_kind": "invariant",
@@ -1712,9 +1929,9 @@ def test_authority_curate_rejects_full_candidate_structured_claim_change(
     )
     candidate = _latest_authority_artifact(engine)
     structured = candidate["assumptions"][0]
-    if changed_field == "status":
-        structured["status"] = "rejected"
-    elif changed_field == "artifact_id":
+    if change_kind == "value":
+        structured[value_field] = replacement_value
+    elif change_kind == "artifact_id":
         structured["provenance"]["artifact_id"] = "SPEC.other"
     else:
         structured["provenance"]["source_item_ids"] = ["REQ.other"]
@@ -1735,7 +1952,10 @@ def test_authority_curate_rejects_full_candidate_structured_claim_change(
             source_authority_id=fixture.authority_id,
             expected_source_authority_fingerprint=fixture.authority_fingerprint,
             feedback_attempt_id=fixture.feedback_attempt_id,
-            idempotency_key=f"curate-structured-full-{changed_field}",
+            idempotency_key=(
+                "curate-structured-full-"
+                f"{structured_assumption['kind']}-{change_kind}"
+            ),
         )
     )
 
@@ -1743,6 +1963,12 @@ def test_authority_curate_rejects_full_candidate_structured_claim_change(
     assert result["errors"][0]["code"] == "AUTHORITY_CURATION_TARGET_READ_ONLY"
     with Session(engine) as session:
         assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert attempt.status != "succeeded"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(attempt.mutation_event_id, "mutation_event_id")
+    )
+    assert "candidate_publication_completed" not in [event["step"] for event in events]
 
 
 def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:

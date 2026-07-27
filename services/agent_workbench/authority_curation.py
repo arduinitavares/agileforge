@@ -1113,7 +1113,7 @@ class AuthorityCurationRunner:
             },
         )
 
-    def _run_curation_after_status_update(  # noqa: C901, PLR0911, PLR0915
+    def _run_curation_after_status_update(  # noqa: PLR0911
         self,
         *,
         request: AuthorityCurationRequest,
@@ -1166,28 +1166,6 @@ class AuthorityCurationRunner:
             correlation_id=request.correlation_id,
             attributes=_curation_trace_attributes(request),
         )
-
-        read_only_target_id = _structured_assumption_feedback_target_id(
-            source_authority_json=loaded_inputs.source_authority_json,
-            feedback_json=loaded_inputs.feedback_json,
-        )
-        if read_only_target_id is not None:
-            response = _authority_curation_target_read_only_response(
-                context=_PatchApplicationContext(
-                    request=request,
-                    attempt=attempt,
-                    mutation_event_id=active_mutation.mutation_event_id,
-                ),
-                target_id=read_only_target_id,
-            )
-            self._finalize_failed_curation(
-                request=request,
-                active_mutation=active_mutation,
-                attempt=attempt,
-                response=response,
-                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
-            )
-            return response
 
         repair_menu = _build_repair_menu(
             source_authority_json=loaded_inputs.source_authority_json,
@@ -3578,6 +3556,9 @@ def _apply_replace_text_selection(
             text=replacement_text,
         ).model_dump(mode="json")
         return None
+    if target.target_kind == "gap" and isinstance(target.item, str):
+        target.container[target.index] = replacement_text
+        return None
     item_payload = cast("dict[str, Any]", target.item)
     if target.target_field in _INVARIANT_PARAMETER_TEXT_FIELDS:
         parameters = item_payload.get("parameters")
@@ -4182,24 +4163,6 @@ def _find_assumption_target(
     return value, index, assumption
 
 
-def _structured_assumption_feedback_target_id(
-    *,
-    source_authority_json: dict[str, Any],
-    feedback_json: str,
-) -> str | None:
-    """Return a blocking structured claim targeted for curation repair."""
-    for target_kind, target_id in _feedback_target_keys(feedback_json):
-        if target_kind != "assumption":
-            continue
-        target = _find_assumption_target(
-            source_authority_json.get("assumptions"),
-            target_id=target_id,
-        )
-        if target is not None and is_structured_assumption(target[2]):
-            return target_id
-    return None
-
-
 def _changed_structured_assumption_target_id(
     *,
     source_authority_json: dict[str, Any],
@@ -4310,6 +4273,9 @@ def _apply_replace_text_patch(
             kind="free_text",
             text=new_text,
         ).model_dump(mode="json")
+        return None
+    if target_kind == "gap" and isinstance(item, str):
+        container[index] = new_text
         return None
     if not isinstance(item, dict):
         return "patch_target_not_textual"
