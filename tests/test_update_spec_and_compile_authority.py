@@ -2,13 +2,20 @@
 
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
+from services.specs.profile_content import normalize_spec_content_for_registry
 from tools import spec_tools
 from tools.spec_tools import update_spec_and_compile_authority
 from utils.spec_schemas import (
@@ -207,7 +214,7 @@ def test_content_ref_path(
 def test_recompile_behavior(
     session: Session, sample_product: Product, compiler_stub: object
 ) -> None:
-    """Recompile should update compiled_at when requested."""
+    """Recompile should append a newer authority row when requested."""
     del compiler_stub
     first = update_spec_and_compile_authority(
         {
@@ -240,13 +247,126 @@ def test_recompile_behavior(
 
     session.expire_all()
 
-    authority_after = session.exec(
+    authorities = session.exec(
         select(CompiledSpecAuthority).where(
             CompiledSpecAuthority.spec_version_id == first["spec_version_id"]
         )
-    ).first()
+    ).all()
+    authority_after = session.get(CompiledSpecAuthority, second["authority_id"])
     assert authority_after is not None
+    assert len(authorities) == 2  # noqa: PLR2004
+    assert authority_before.compiled_at == compiled_at_before
     assert authority_after.compiled_at != compiled_at_before
+
+
+def test_recompile_returns_exact_candidate_without_transferring_acceptance(
+    session: Session,
+    sample_product: Product,
+    compiler_stub: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced compile returns its exact pending row without accepting it."""
+    del compiler_stub
+    normalized = normalize_spec_content_for_registry(
+        _structured_spec_content("Spec A")
+    )
+    spec = SpecRegistry(
+        product_id=sample_product.product_id,
+        spec_hash=normalized.spec_hash,
+        content=normalized.content,
+        status="approved",
+        approved_at=datetime(2026, 7, 27, tzinfo=UTC),
+        approved_by="reviewer",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    first = spec_tools.compile_spec_authority_for_version(
+        {"spec_version_id": spec.spec_version_id},
+        tool_context=None,
+    )
+    assert first["success"] is True
+    first_authority_id = first["authority_id"]
+    first_authority = session.get(CompiledSpecAuthority, first_authority_id)
+    assert first_authority is not None
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=sample_product.product_id,
+            spec_version_id=spec.spec_version_id,
+            status="accepted",
+            policy="manual",
+            decided_by="reviewer",
+            decided_at=datetime(2026, 7, 27, tzinfo=UTC),
+            compiler_version=first_authority.compiler_version,
+            prompt_hash=first_authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=first_authority_id,
+            terminal_decision_key=(
+                f"{sample_product.product_id}:{spec.spec_version_id}:"
+                f"{first_authority_id}"
+            ),
+        )
+    )
+    session.commit()
+
+    original_compile = spec_tools.compile_spec_authority_for_version
+    compiled_candidate_id: int | None = None
+
+    def compile_then_append_newer_row(
+        params: object,
+        tool_context: object = None,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal compiled_candidate_id
+        result = original_compile(params, tool_context=tool_context, **kwargs)
+        candidate_id = result["authority_id"]
+        assert isinstance(candidate_id, int)
+        compiled_candidate_id = candidate_id
+        candidate = session.get(CompiledSpecAuthority, candidate_id)
+        assert candidate is not None
+        session.add(
+            CompiledSpecAuthority(
+                spec_version_id=candidate.spec_version_id,
+                compiler_version="unrelated-newer",
+                prompt_hash="f" * 64,
+                compiled_at=datetime.now(UTC),
+                compiled_artifact_json=candidate.compiled_artifact_json,
+                scope_themes=candidate.scope_themes,
+                invariants=candidate.invariants,
+                eligible_feature_ids=candidate.eligible_feature_ids,
+                rejected_features=candidate.rejected_features,
+                spec_gaps=candidate.spec_gaps,
+            )
+        )
+        session.commit()
+        return result
+
+    monkeypatch.setattr(
+        spec_tools,
+        "compile_spec_authority_for_version",
+        compile_then_append_newer_row,
+    )
+
+    result = update_spec_and_compile_authority(
+        {
+            "product_id": sample_product.product_id,
+            "spec_content": _structured_spec_content("Spec A"),
+            "recompile": True,
+        },
+        tool_context=None,
+    )
+
+    assert result["success"] is True
+    assert result["authority_id"] == compiled_candidate_id
+    assert result["accepted"] is False
+    assert result["authority_status"] == "pending_acceptance"
+    acceptances = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.product_id == sample_product.product_id
+        )
+    ).all()
+    assert len(acceptances) == 1
+    assert acceptances[0].pending_authority_id == first_authority_id
 
 
 def test_input_validation() -> None:

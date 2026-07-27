@@ -1052,19 +1052,13 @@ def _pending_authority(
     if (
         accepted is not None
         and accepted.spec_version_id == latest_spec.spec_version_id
-        and (
-            accepted.pending_authority_id is None
-            or accepted.pending_authority_id == candidate.authority_id
-        )
+        and accepted.pending_authority_id == candidate.authority_id
     ):
         return None
     if (
         rejected is not None
         and rejected.spec_version_id == latest_spec.spec_version_id
-        and (
-            rejected.pending_authority_id is None
-            or rejected.pending_authority_id == candidate.authority_id
-        )
+        and rejected.pending_authority_id == candidate.authority_id
     ):
         return None
     return candidate
@@ -1284,9 +1278,16 @@ class AuthorityProjectionService:
         if spec_version is None or spec_version.product_id != project_id:
             return _spec_version_not_found_error(project_id, selected_id)
 
-        authority = latest_compiled_authority(
-            session,
-            spec_version_id=selected_id,
+        authority = (
+            compiled_authority_for_acceptance(
+                session,
+                acceptance=selection.accepted,
+            )
+            if selection.accepted is not None
+            else latest_compiled_authority(
+                session,
+                spec_version_id=selected_id,
+            )
         )
         if authority is None:
             return _authority_not_compiled_error(project_id, selected_id)

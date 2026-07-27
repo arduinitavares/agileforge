@@ -18,6 +18,7 @@ from models.core import (
     UserStoryDependency,
 )
 from models.enums import SprintStatus, StoryStatus
+from models.specs import CompiledSpecAuthority, SpecRegistry
 from services.agent_workbench.read_projection import ReadProjectionService
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
 from tests.typing_helpers import require_id
@@ -197,6 +198,64 @@ def test_workflow_state_uses_injected_read_only_session_reader(
     assert result["data"]["project_id"] == product_id
     assert result["data"]["state"]["fsm_state"] == "SPRINT_SETUP"
     assert result["data"]["source_fingerprint"].startswith("sha256:")
+
+
+def test_workflow_state_does_not_load_foreign_project_authority(
+    session: Session,
+) -> None:
+    """A stale cross-project spec ID cannot select another project's authority."""
+    project_id, _story_id, _sprint_id, _task_id = _seed_project_with_story(session)
+    other = Product(name="Other Project", description="Foreign")
+    session.add(other)
+    session.commit()
+    session.refresh(other)
+    foreign_spec = SpecRegistry(
+        product_id=require_id(other.product_id, "product_id"),
+        spec_hash="f" * 64,
+        content="# Foreign\n",
+        status="approved",
+        approved_at=datetime(2026, 5, 14, tzinfo=UTC),
+        approved_by="test",
+    )
+    session.add(foreign_spec)
+    session.commit()
+    session.refresh(foreign_spec)
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=require_id(
+                foreign_spec.spec_version_id,
+                "spec_version_id",
+            ),
+            compiler_version="legacy",
+            prompt_hash="f" * 64,
+            compiled_at=datetime(2026, 5, 14, tzinfo=UTC),
+            compiled_artifact_json="{}",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+    )
+    session.commit()
+    reader = _FakeSessionReader(
+        {
+            "fsm_state": "SPRINT_SETUP",
+            "setup_status": "ready",
+            "latest_spec_version_id": foreign_spec.spec_version_id,
+        }
+    )
+    service = ReadProjectionService(
+        engine=_engine(session),
+        session_reader=cast("ReadOnlySessionReader", reader),
+    )
+
+    result = service.workflow_state(project_id=project_id)
+
+    assert result["ok"] is True
+    assert result["data"]["state"]["latest_spec_version_id"] == (
+        foreign_spec.spec_version_id
+    )
 
 
 def test_workflow_state_reconciles_completed_active_sprint(

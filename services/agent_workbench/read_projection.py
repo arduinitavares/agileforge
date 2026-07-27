@@ -673,9 +673,15 @@ class ReadProjectionService:
                     latest_spec.spec_version_id if latest_spec is not None else None
                 )
             if spec_version_id is not None:
-                authority = latest_compiled_authority(
-                    session,
-                    spec_version_id=spec_version_id,
+                selected_spec = session.get(SpecRegistry, spec_version_id)
+                authority = (
+                    latest_compiled_authority(
+                        session,
+                        spec_version_id=spec_version_id,
+                    )
+                    if selected_spec is not None
+                    and selected_spec.product_id == project_id
+                    else None
                 )
                 if authority is not None:
                     load_result = load_compiled_artifact(authority)

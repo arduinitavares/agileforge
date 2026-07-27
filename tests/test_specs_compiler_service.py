@@ -970,6 +970,66 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
     assert result == require_id(spec_row.spec_version_id, "spec_version_id")
 
 
+def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
+    session: Session,
+    sample_product: Product,
+) -> None:
+    """Equal timestamps select the newest inserted accepted decision."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    product_id = require_id(sample_product.product_id, "product_id")
+    decided_at = datetime(2026, 7, 27, tzinfo=UTC)
+    first_spec = _create_spec_version(session, product_id=product_id)
+    first_authority = _create_compiled_authority(
+        session,
+        spec_version_id=require_id(first_spec.spec_version_id, "spec_version_id"),
+        artifact_json=json.dumps(legacy_compiled_authority_payload()),
+    )
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=require_id(first_spec.spec_version_id, "spec_version_id"),
+            status="accepted",
+            policy="manual",
+            decided_by="reviewer",
+            decided_at=decided_at,
+            compiler_version=first_authority.compiler_version,
+            prompt_hash=first_authority.prompt_hash,
+            spec_hash=first_spec.spec_hash,
+            pending_authority_id=first_authority.authority_id,
+        )
+    )
+    session.commit()
+    second_spec = _create_spec_version(session, product_id=product_id)
+    second_authority = _create_compiled_authority(
+        session,
+        spec_version_id=require_id(second_spec.spec_version_id, "spec_version_id"),
+        artifact_json=_stored_compiled_success_json(),
+    )
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=require_id(second_spec.spec_version_id, "spec_version_id"),
+            status="accepted",
+            policy="manual",
+            decided_by="reviewer",
+            decided_at=decided_at,
+            compiler_version=second_authority.compiler_version,
+            prompt_hash=second_authority.prompt_hash,
+            spec_hash=second_spec.spec_hash,
+            pending_authority_id=second_authority.authority_id,
+        )
+    )
+    session.commit()
+
+    lookup = compiler_service._lookup_reusable_accepted_authority(
+        session,
+        product_id=product_id,
+    )
+
+    assert lookup.reusable_spec_version_id == second_spec.spec_version_id
+
+
 def test_ensure_accepted_spec_authority_honors_legacy_tool_update_monkeypatch(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3293,7 +3353,7 @@ def test_compile_spec_authority_for_version_iteratively_persists_must_coverage(
 def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_authority(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Vacant authority blocks update+compile before persistence and auto-accept."""
+    """Vacant authority blocks update+compile before persistence."""
     from services.specs import compiler_service  # noqa: PLC0415
 
     monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
@@ -3301,23 +3361,6 @@ def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_aut
         compiler_service,
         "_invoke_spec_authority_compiler",
         lambda **_: _vacant_success_json(),
-    )
-
-    accept_calls: list[object] = []
-
-    def record_accept_call(**kwargs: object) -> object:
-        accept_calls.append(kwargs)
-        return SimpleNamespace(
-            status="accepted",
-            policy="auto",
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-05-21T00:00:00+00:00"),
-            decided_by="system",
-        )
-
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        record_accept_call,
     )
 
     result = compiler_service.update_spec_and_compile_authority(
@@ -3332,8 +3375,8 @@ def test_update_spec_and_compile_authority_suppresses_auto_accept_for_vacant_aut
     assert result["error"] == "SPEC_AUTHORITY_VACANT"
     assert result["reason"] == "NO_INVARIANTS_EXTRACTED"
     assert result["blocking_gaps"] == ["No invariants extracted from spec"]
-    assert accept_calls == []
     assert session.exec(select(CompiledSpecAuthority)).all() == []
+    assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
 def test_compile_spec_authority_for_version_with_engine_uses_supplied_engine(
@@ -4675,8 +4718,6 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
     )
 
     compile_calls: dict[str, object] = {}
-    acceptance_calls: dict[str, object] = {}
-
     def fake_compile(
         *,
         spec_version_id: int,
@@ -4711,39 +4752,12 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
             "authority_id": require_id(authority.authority_id, "authority_id"),
         }
 
-    def fake_accept(
-        *,
-        product_id: int,
-        spec_version_id: int,
-        policy: str,
-        decided_by: str,
-        rationale: str | None = None,
-    ) -> object:
-        acceptance_calls["product_id"] = product_id
-        acceptance_calls["spec_version_id"] = spec_version_id
-        acceptance_calls["policy"] = policy
-        acceptance_calls["decided_by"] = decided_by
-        acceptance_calls["rationale"] = rationale
-        return SimpleNamespace(
-            status="accepted",
-            policy=policy,
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by=decided_by,
-        )
-
     monkeypatch.setattr(
         compiler_service,
         "compile_spec_authority_for_version",
         fake_compile,
         raising=False,
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        fake_accept,
-        raising=False,
-    )
-
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
@@ -4756,11 +4770,10 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
     assert result["success"] is True
     assert result["product_id"] == require_id(sample_product.product_id, "product_id")
     assert result["cache_hit"] is False
-    assert result["accepted"] is True
+    assert result["accepted"] is False
+    assert result["authority_status"] == "pending_acceptance"
     assert compile_calls["force_recompile"] is False
-    assert acceptance_calls["product_id"] == require_id(
-        sample_product.product_id, "product_id"
-    )
+    assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
     spec_row = session.get(SpecRegistry, result["spec_version_id"])
     assert spec_row is not None
@@ -4824,18 +4837,6 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
         "compile_spec_authority_for_version",
         fake_tool_compile,
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        lambda **_: SimpleNamespace(
-            status="accepted",
-            policy="auto",
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by="system",
-        ),
-        raising=False,
-    )
-
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {
@@ -4850,10 +4851,10 @@ def test_update_spec_and_compile_authority_honors_tool_compile_override(
     assert compile_params["force_recompile"] is False
 
 
-def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
+def test_update_spec_and_compile_authority_ignores_tool_acceptance_override(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify update spec and compile authority honors tool acceptance override."""
+    """Update+compile never delegates to an acceptance adapter."""
     from services.specs import compiler_service  # noqa: PLC0415
     from tools import spec_tools  # noqa: PLC0415
 
@@ -4899,28 +4900,6 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
             "authority_id": require_id(authority.authority_id, "authority_id"),
         }
 
-    acceptance_calls: dict[str, object] = {}
-
-    def fake_tool_ensure(
-        *,
-        product_id: int,
-        spec_version_id: int,
-        policy: str,
-        decided_by: str,
-        rationale: str | None = None,
-    ) -> object:
-        acceptance_calls["product_id"] = product_id
-        acceptance_calls["spec_version_id"] = spec_version_id
-        acceptance_calls["policy"] = policy
-        acceptance_calls["decided_by"] = decided_by
-        acceptance_calls["rationale"] = rationale
-        return SimpleNamespace(
-            status="accepted",
-            policy=policy,
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by=decided_by,
-        )
-
     monkeypatch.setattr(
         compiler_service,
         "compile_spec_authority_for_version",
@@ -4929,7 +4908,9 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
     monkeypatch.setattr(
         spec_tools,
         "ensure_spec_authority_accepted",
-        fake_tool_ensure,
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("tool acceptance path must not run")
+        ),
     )
 
     spec_content = _agileforge_spec_profile_json()
@@ -4942,11 +4923,9 @@ def test_update_spec_and_compile_authority_honors_tool_acceptance_override(
     )
 
     assert result["success"] is True
-    assert acceptance_calls["product_id"] == require_id(
-        sample_product.product_id, "product_id"
-    )
-    assert acceptance_calls["spec_version_id"] == result["spec_version_id"]
-    assert acceptance_calls["policy"] == "auto"
+    assert result["accepted"] is False
+    assert result["authority_status"] == "pending_acceptance"
+    assert session.exec(select(SpecAuthorityAcceptance)).all() == []
 
 
 def test_update_spec_and_compile_authority_loads_content_ref(
@@ -5003,18 +4982,6 @@ def test_update_spec_and_compile_authority_loads_content_ref(
         fake_compile,
         raising=False,
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        lambda **_: SimpleNamespace(
-            status="accepted",
-            policy="auto",
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by="system",
-        ),
-        raising=False,
-    )
-
     result = compiler_service.update_spec_and_compile_authority(
         {
             "product_id": require_id(sample_product.product_id, "product_id"),
@@ -5097,18 +5064,6 @@ def test_update_spec_and_compile_authority_reuses_existing_version_for_same_hash
         fake_compile,
         raising=False,
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        lambda **_: SimpleNamespace(
-            status="accepted",
-            policy="auto",
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by="system",
-        ),
-        raising=False,
-    )
-
     spec_content = _agileforge_spec_profile_json()
     first = compiler_service.update_spec_and_compile_authority(
         {
@@ -5193,18 +5148,6 @@ def test_update_spec_and_compile_authority_treats_recompile_none_as_false(
         fake_compile,
         raising=False,
     )
-    monkeypatch.setattr(
-        compiler_service,
-        "_ensure_spec_authority_accepted",
-        lambda **_: SimpleNamespace(
-            status="accepted",
-            policy="auto",
-            decided_at=SimpleNamespace(isoformat=lambda: "2026-04-05T00:00:00+00:00"),
-            decided_by="system",
-        ),
-        raising=False,
-    )
-
     spec_content = _agileforge_spec_profile_json()
     result = compiler_service.update_spec_and_compile_authority(
         {

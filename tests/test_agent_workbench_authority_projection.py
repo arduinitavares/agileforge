@@ -1051,6 +1051,45 @@ def test_authority_status_treats_new_candidate_after_rejection_as_pending(
     assert result["data"]["pending_prompt_hash"] == "b" * 64
 
 
+def test_pending_authority_does_not_treat_unbound_acceptance_as_terminal(
+    session: Session,
+) -> None:
+    """A null terminal binding cannot consume a compiled candidate."""
+    from services.agent_workbench import authority_projection  # noqa: PLC0415
+
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+    )
+    acceptance = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        status="accepted",
+        policy="legacy",
+        decided_by="legacy",
+        decided_at=datetime(2026, 5, 14, 13, tzinfo=UTC),
+        compiler_version=authority.compiler_version,
+        prompt_hash=authority.prompt_hash,
+        spec_hash=spec.spec_hash,
+        pending_authority_id=None,
+    )
+    session.add(acceptance)
+    session.commit()
+
+    pending = authority_projection._pending_authority(
+        session=session,
+        latest_spec=spec,
+        accepted=acceptance,
+        rejected=None,
+    )
+
+    assert pending is not None
+    assert pending.authority_id == authority.authority_id
+
+
 def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
     session: Session,
     tmp_path: Path,
@@ -1712,6 +1751,89 @@ def test_invariants_default_rejects_unaccepted_recompile(
         "compiled_compiler_version": "2.0.0",
         "compiled_prompt_hash": "b" * 64,
     }
+
+
+def test_invariants_default_keeps_pending_recompile_out_of_accepted_projection(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Default invariants stay bound to accepted A while B remains pending."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    accepted_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    pending_authority = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="2.0.0",
+        prompt_hash="b" * 64,
+    )
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).invariants(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["authority_id"] == accepted_authority.authority_id
+    assert result["data"]["authority_id"] != pending_authority.authority_id
+
+
+def test_invariants_default_uses_exact_newest_accepted_authority(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Default invariants load exact B after an explicit decision accepts B."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    authority_a = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="1.0.0",
+        prompt_hash="a" * 64,
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    authority_b = _seed_authority(
+        session,
+        spec_version_id=spec_version_id,
+        compiler_version="2.0.0",
+        prompt_hash="b" * 64,
+    )
+    authority_b_id = require_id(authority_b.authority_id, "authority_id")
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="manual",
+            decided_by="reviewer",
+            decided_at=datetime(2026, 5, 14, 14, tzinfo=UTC),
+            compiler_version=authority_b.compiler_version,
+            prompt_hash=authority_b.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority_b_id,
+            terminal_decision_key=f"{product_id}:{spec_version_id}:{authority_b_id}",
+        )
+    )
+    session.commit()
+
+    result = AuthorityProjectionService(
+        engine=_engine(session),
+        repo_root=tmp_path,
+    ).invariants(project_id=product_id)
+
+    assert result["ok"] is True
+    assert result["data"]["authority_id"] == authority_b_id
+    assert result["data"]["authority_id"] != authority_a.authority_id
 
 
 def test_invariants_reports_regenerate_for_unsupported_schema(

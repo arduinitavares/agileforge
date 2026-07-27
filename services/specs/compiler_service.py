@@ -39,6 +39,7 @@ from services.agent_workbench.fingerprints import canonical_hash
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.authority_selection import (
+    compiled_authority_by_id,
     compiled_authority_for_acceptance,
     latest_accepted_authority_decision,
     latest_compiled_authority,
@@ -740,7 +741,10 @@ def _lookup_reusable_accepted_authority(
             SpecAuthorityAcceptance.product_id == product_id,
             SpecAuthorityAcceptance.status == "accepted",
         )
-        .order_by(cast("Any", SpecAuthorityAcceptance.decided_at).desc())
+        .order_by(
+            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+            cast("Any", SpecAuthorityAcceptance.id).desc(),
+        )
     ).first()
     if not existing_acceptance:
         return _AcceptedAuthorityLookup(
@@ -4076,32 +4080,6 @@ def compile_spec_authority_for_version_with_engine(  # noqa: PLR0913
         )
 
 
-def _ensure_spec_authority_accepted(
-    *,
-    product_id: int,
-    spec_version_id: int,
-    policy: str,
-    decided_by: str,
-    rationale: str | None = None,
-) -> SpecAuthorityAcceptance:
-    tool_ensure = _resolve_ensure_spec_authority_accepted()
-    if tool_ensure is not None:
-        return tool_ensure(
-            product_id=product_id,
-            spec_version_id=spec_version_id,
-            policy=policy,
-            decided_by=decided_by,
-            rationale=rationale,
-        )
-    return ensure_spec_authority_accepted(
-        product_id=product_id,
-        spec_version_id=spec_version_id,
-        policy=policy,
-        decided_by=decided_by,
-        rationale=rationale,
-    )
-
-
 def _resolve_compile_spec_authority_for_version() -> (
     Callable[..., dict[str, Any]] | None
 ):
@@ -4112,18 +4090,6 @@ def _resolve_compile_spec_authority_for_version() -> (
         default_function_name="compile_spec_authority_for_version",
     )
     return cast("Callable[..., dict[str, Any]] | None", tool_compile)
-
-
-def _resolve_ensure_spec_authority_accepted() -> (
-    Callable[..., SpecAuthorityAcceptance] | None
-):
-    """Preserve legacy tool-level monkeypatch seam for acceptance delegation."""
-    tool_ensure = _resolve_tool_override(
-        "ensure_spec_authority_accepted",
-        default_module_name="tools.spec_tools",
-        default_function_name="ensure_spec_authority_accepted",
-    )
-    return cast("Callable[..., SpecAuthorityAcceptance] | None", tool_ensure)
 
 
 def _resolve_update_spec_and_compile_authority() -> (
@@ -4220,16 +4186,21 @@ def _load_compiled_authority_or_error(
     session: Session,
     *,
     spec_version_id: int,
+    authority_id: int,
 ) -> CompiledSpecAuthority | dict[str, Any]:
     """Load the compiled authority row created for the given spec version."""
-    authority = latest_compiled_authority(
+    authority = compiled_authority_by_id(
         session,
-        spec_version_id=spec_version_id,
+        authority_id=authority_id,
+        expected_spec_version_id=spec_version_id,
     )
     if authority is None:
         return {
             "success": False,
-            "error": f"Compiled authority missing for spec version {spec_version_id}",
+            "error": (
+                f"Compiled authority {authority_id} missing for "
+                f"spec version {spec_version_id}"
+            ),
         }
     return authority
 
@@ -4257,7 +4228,7 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
     params: dict[str, Any] | UpdateSpecAndCompileAuthorityInput,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Persist spec content, compile authority, and auto-accept the result."""
+    """Persist spec content and compile an authority candidate for review."""
     parsed = UpdateSpecAndCompileAuthorityInput.model_validate(
         _normalize_input_params(params)
     )
@@ -4298,30 +4269,22 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
 
     if not compile_result.get("success"):
         return compile_result
+    authority_id = compile_result.get("authority_id")
+    if not isinstance(authority_id, int):
+        return {
+            "success": False,
+            "error": "Compiler result is missing authority_id",
+        }
 
     with Session(_resolve_engine()) as session:
         authority_result = _load_compiled_authority_or_error(
             session,
             spec_version_id=spec_version_id,
+            authority_id=authority_id,
         )
         if isinstance(authority_result, dict):
             return authority_result
         authority = authority_result
-
-    try:
-        acceptance = _ensure_spec_authority_accepted(
-            product_id=parsed.product_id,
-            spec_version_id=spec_version_id,
-            policy="auto",
-            decided_by="system",
-            rationale="Auto-accepted on compile success",
-        )
-    except ValueError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "accepted": False,
-        }
 
     scope_themes_count, invariants_count, eligible_feature_ids_count = (
         _compiled_authority_metrics(authority)
@@ -4339,13 +4302,14 @@ def update_spec_and_compile_authority(  # noqa: PLR0911
         "num_invariants": invariants_count,
         "num_eligible_feature_ids": eligible_feature_ids_count,
         "cache_hit": bool(compile_result.get("cached")) and not force_recompile,
-        "accepted": acceptance.status == "accepted",
-        "acceptance_policy": acceptance.policy,
-        "acceptance_decided_at": acceptance.decided_at.isoformat(),
-        "acceptance_decided_by": acceptance.decided_by,
+        "accepted": False,
+        "authority_status": "pending_acceptance",
+        "acceptance_policy": None,
+        "acceptance_decided_at": None,
+        "acceptance_decided_by": None,
         "message": (
-            f"Spec v{spec_version_id} ready. Use this spec_version_id for "
-            "story validation and generation."
+            f"Spec v{spec_version_id} authority {authority.authority_id} compiled "
+            "and awaiting explicit review and acceptance."
         ),
     }
 
