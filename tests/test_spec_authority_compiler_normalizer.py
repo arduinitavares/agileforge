@@ -427,6 +427,31 @@ def test_normalizer_requires_structured_source_for_typed_claim() -> None:
     assert normalized.root.reason == "ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE"
 
 
+def test_normalizer_rejects_malformed_structured_source_for_typed_claim() -> None:
+    """Typed claims fail closed when canonical structured source is malformed."""
+    payload = _legacy_success_payload()
+    payload["assumptions"] = [
+        {
+            "kind": "accepted_normative_set",
+            "item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.normalizer",
+                "source_item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text='{"schema_version":"agileforge.spec.v1","artifact_id":"SPEC.normalizer"}',
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE"
+
+
 def test_normalizer_grounds_typed_claim_before_empty_invariant_success() -> None:
     """A valid structured claim is grounded even when no invariants were found."""
     payload = _legacy_success_payload()

@@ -3906,6 +3906,72 @@ def test_false_structured_claim_does_not_retry_or_persist(
     assert session.exec(select(CompiledSpecAuthority)).all() == []
 
 
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "",
+        '{"schema_version":"agileforge.spec.v1","artifact_id":"SPEC.test"}',
+    ],
+    ids=["missing", "malformed"],
+)
+def test_unavailable_structured_claim_source_does_not_retry_or_persist(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+    source_text: str,
+) -> None:
+    """Missing or malformed source reaches claim grounding without persistence."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    attempts: list[str] = []
+    payload = _structured_retry_success_payload()
+    payload["assumptions"] = [
+        {
+            "kind": "accepted_normative_count",
+            "count": 1,
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.test",
+                "source_item_ids": [],
+            },
+        }
+    ]
+
+    def fake_compiler(**kwargs: object) -> str:
+        spec_content = kwargs.get("spec_content")
+        assert spec_content == source_text
+        attempts.append(cast("str", spec_content))
+        return json.dumps(payload)
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "_load_spec_content_for_compile",
+        lambda _spec_version: (source_text, "test_override"),
+    )
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_spec_authority_compiler",
+        fake_compiler,
+    )
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE"
+    assert attempts == [source_text]
+    assert result["schema_retry_attempted"] is False
+    assert result["schema_retry_reason"] is None
+    assert result["schema_retry_attempts"] == 0
+    assert session.exec(select(CompiledSpecAuthority)).all() == []
+
+
 def test_check_spec_authority_status_returns_not_compiled_when_no_spec_versions(
     session: Session, sample_product: Product, monkeypatch: pytest.MonkeyPatch
 ) -> None:
