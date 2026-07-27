@@ -27,6 +27,7 @@ from services.specs.profile_content import (
 )
 from tests.typing_helpers import make_tool_context, require_id
 from utils import failure_artifacts
+from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.failure_artifacts import AgentInvocationError
 from utils.spec_schemas import (
     Invariant,
@@ -48,6 +49,85 @@ _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT = 2
 _EXPECTED_REPAIR_CALLS = 2
 _EXPECTED_COVERAGE_REPAIR_CALLS = 5
 _EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS = 4
+
+
+def _scope_merge_spec(*item_ids: str) -> TechnicalSpecArtifact:
+    """Return a full accepted spec for scope-aware merge assertions."""
+    payload = _agileforge_spec_profile_payload()
+    payload["items"] = [
+        {
+            "id": item_id,
+            "type": "REQ",
+            "status": "accepted",
+            "level": "MUST",
+            "title": item_id,
+            "statement": f"The system MUST implement {item_id}.",
+            "verification": "system-test",
+            "acceptance": [f"{item_id} is implemented."],
+        }
+        for item_id in item_ids
+    ]
+    return TechnicalSpecArtifact.model_validate(payload)
+
+
+def _scope_merge_success(
+    assumption: dict[str, object],
+) -> SpecAuthorityCompilationSuccess:
+    """Return a minimal compiler success with one typed assumption."""
+    return SpecAuthorityCompilationSuccess.model_validate(
+        {
+            "scope_themes": ["Scope merge"],
+            "domain": None,
+            "invariants": [],
+            "eligible_feature_rules": [],
+            "rejected_features": [],
+            "gaps": [],
+            "assumptions": [assumption],
+            "source_map": [],
+            "compiler_version": "2.0.0",
+            "prompt_hash": "a" * 64,
+        }
+    )
+
+
+def _true_count_claim(*, count: int, source_item_ids: list[str]) -> dict[str, object]:
+    """Return a count claim grounded to the given canonical item IDs."""
+    return {
+        "kind": "accepted_normative_count",
+        "count": count,
+        "provenance": {
+            "source": "structured_spec",
+            "artifact_id": "SPEC.test",
+            "source_item_ids": source_item_ids,
+        },
+    }
+
+
+def _true_set_claim(*, item_ids: list[str]) -> dict[str, object]:
+    """Return a set claim grounded to the given canonical item IDs."""
+    return {
+        "kind": "accepted_normative_set",
+        "item_ids": item_ids,
+        "provenance": {
+            "source": "structured_spec",
+            "artifact_id": "SPEC.test",
+            "source_item_ids": item_ids,
+        },
+    }
+
+
+def _item_status_claim(item_id: str) -> dict[str, object]:
+    """Return an accepted item-status claim grounded to one source item."""
+    return {
+        "kind": "item_status",
+        "item_id": item_id,
+        "status": "accepted",
+        "provenance": {
+            "source": "structured_spec",
+            "artifact_id": "SPEC.test",
+            "source_item_ids": [item_id],
+        },
+    }
 
 
 def _compiled_success_json() -> str:
@@ -2180,11 +2260,135 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
     assert second_output.root.authority_quality is not None
     assert second_output.root.authority_quality.summary.merged_invariant_count == 1
 
-    merged = compiler_service._merge_compilation_successes([first, second_output.root])
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FULL_SPEC,
+                success=first,
+            ),
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FOCUSED_ITEM,
+                success=second_output.root,
+            ),
+        ],
+        final_spec=None,
+    )
 
     assert merged.authority_quality is not None
     assert merged.authority_quality.summary.merged_invariant_count == 1
     assert len(merged.authority_quality.merged_items) == 1
+
+
+def test_scope_extension_invalidates_base_aggregate_claim() -> None:
+    """Extension-only input removes stale accepted-base aggregate claims."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.ACCEPTED_BASE,
+                success=_scope_merge_success(
+                    _true_count_claim(count=1, source_item_ids=["REQ.alpha"])
+                ),
+            ),
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.EXTENSION_ONLY,
+                success=_scope_merge_success(_item_status_claim("REQ.beta")),
+            ),
+        ],
+        final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
+    )
+
+    assert all(
+        assumption.kind != "accepted_normative_count"
+        for assumption in merged.assumptions
+    )
+    assert merged.authority_quality is not None
+    assert merged.authority_quality.invalidated_items[0].removed_id == "ASM-1"
+    assert merged.authority_quality.invalidated_items[0].assumption_kind == (
+        "accepted_normative_count"
+    )
+    assert merged.authority_quality.invalidated_items[0].reason == (
+        "aggregate_claim_invalidated_by_scope_extension"
+    )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["FOCUSED_ITEM", "REPAIR_ITEM", "EXTENSION_ONLY"],
+)
+@pytest.mark.parametrize(
+    "claim",
+    [
+        _true_count_claim(count=1, source_item_ids=["REQ.alpha"]),
+        _true_set_claim(item_ids=["REQ.alpha"]),
+    ],
+)
+def test_partial_scope_rejects_aggregate_assumption_claims(
+    scope: str,
+    claim: dict[str, object],
+) -> None:
+    """Partial inputs cannot make aggregate claims about a full spec."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="ASSUMPTION_CLAIM_SCOPE_INVALID"):
+        compiler_service._merge_compilation_successes(
+            [
+                compiler_service.ScopedCompilationSuccess(
+                    scope=compiler_service.CompilationScope(scope.lower()),
+                    success=_scope_merge_success(claim),
+                )
+            ],
+            final_spec=_scope_merge_spec("REQ.alpha"),
+        )
+
+
+def test_full_spec_aggregate_claims_are_retained_when_grounded() -> None:
+    """Full-spec aggregate claims survive a one-success semantic merge."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FULL_SPEC,
+                success=_scope_merge_success(
+                    _true_count_claim(
+                        count=2,
+                        source_item_ids=["REQ.alpha", "REQ.beta"],
+                    )
+                ),
+            ),
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FULL_SPEC,
+                success=_scope_merge_success(
+                    _true_set_claim(item_ids=["REQ.alpha", "REQ.beta"])
+                ),
+            ),
+        ],
+        final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
+    )
+
+    assert [assumption.kind for assumption in merged.assumptions] == [
+        "accepted_normative_count",
+        "accepted_normative_set",
+    ]
+
+
+def test_partial_item_status_claims_re_ground_against_final_full_spec() -> None:
+    """Retained partial claims validate against the complete parsed artifact."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FOCUSED_ITEM,
+                success=_scope_merge_success(_item_status_claim("REQ.beta")),
+            )
+        ],
+        final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
+    )
+
+    assert [assumption.item_id for assumption in merged.assumptions] == ["REQ.beta"]
 
 
 def test_merge_compilation_successes_reports_cross_success_duplicate_merges() -> None:
@@ -2230,7 +2434,19 @@ def test_merge_compilation_successes_reports_cross_success_duplicate_merges() ->
         },
     )
 
-    merged = compiler_service._merge_compilation_successes([first, second])
+    merged = compiler_service._merge_compilation_successes(
+        [
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FULL_SPEC,
+                success=first,
+            ),
+            compiler_service.ScopedCompilationSuccess(
+                scope=compiler_service.CompilationScope.FOCUSED_ITEM,
+                success=second,
+            ),
+        ],
+        final_spec=None,
+    )
 
     assert len(merged.invariants) == 1
     assert len(merged.source_map) == _EXPECTED_CROSS_SUCCESS_SOURCE_EVIDENCE_COUNT

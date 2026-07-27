@@ -5,8 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.specs.authority_quality import apply_authority_quality_gate
-from utils.spec_authority_assumptions import AuthorityAssumption, FreeTextAssumption
+from utils.spec_authority_assumptions import (
+    AcceptedNormativeCountAssumptionClaim,
+    AuthorityAssumption,
+    FreeTextAssumption,
+    ItemStatusAssumptionClaim,
+    StructuredSpecClaimProvenance,
+)
 from utils.spec_schemas import (
+    AuthorityQualityInvalidatedItem,
+    AuthorityQualityReport,
+    AuthorityQualitySummary,
     DataContractParams,
     Invariant,
     InvariantType,
@@ -230,6 +239,98 @@ def test_quality_gate_keeps_non_identical_noisy_assumptions_unmerged() -> None:
         group.group_type == "noisy_assumptions"
         for group in gated.authority_quality.review_groups
     )
+
+
+def test_quality_gate_keeps_different_structured_assumption_values() -> None:
+    """Canonical identity does not collapse structured claims with different values."""
+    provenance = StructuredSpecClaimProvenance(
+        source="structured_spec",
+        artifact_id="SPEC.test",
+        source_item_ids=["REQ.alpha"],
+    )
+    gated = apply_authority_quality_gate(
+        _success(
+            invariants=[],
+            assumptions=[
+                AcceptedNormativeCountAssumptionClaim(
+                    kind="accepted_normative_count",
+                    count=1,
+                    provenance=provenance,
+                ),
+                AcceptedNormativeCountAssumptionClaim(
+                    kind="accepted_normative_count",
+                    count=2,
+                    provenance=provenance,
+                ),
+            ],
+        )
+    )
+
+    assert [assumption.count for assumption in gated.assumptions] == [1, 2]
+    assert gated.authority_quality is not None
+    assert gated.authority_quality.summary.merged_assumption_count == 0
+
+
+def test_quality_gate_noisy_grouping_ignores_structured_assumptions() -> None:
+    """Only free text participates in review-only noisy grouping."""
+    provenance = StructuredSpecClaimProvenance(
+        source="structured_spec",
+        artifact_id="SPEC.test",
+        source_item_ids=["REQ.alpha"],
+    )
+    gated = apply_authority_quality_gate(
+        _success(
+            invariants=[],
+            assumptions=[
+                ItemStatusAssumptionClaim(
+                    kind="item_status",
+                    item_id="REQ.alpha",
+                    status="accepted",
+                    provenance=provenance,
+                ),
+                AcceptedNormativeCountAssumptionClaim(
+                    kind="accepted_normative_count",
+                    count=1,
+                    provenance=provenance,
+                ),
+            ],
+        )
+    )
+
+    assert gated.authority_quality is not None
+    assert gated.authority_quality.summary.noisy_assumption_group_count == 0
+
+
+def test_quality_gate_preserves_and_renumbers_scope_invalidations() -> None:
+    """Quality rebuilds keep scope-extension invalidation history stable."""
+    success = _success(invariants=[])
+    success.authority_quality = AuthorityQualityReport(
+        summary=AuthorityQualitySummary(
+            original_invariant_count=0,
+            final_invariant_count=0,
+            merged_invariant_count=0,
+            merged_assumption_count=0,
+            review_group_count=0,
+            near_duplicate_group_count=0,
+            over_split_group_count=0,
+            noisy_assumption_group_count=0,
+        ),
+        invalidated_items=[
+            AuthorityQualityInvalidatedItem(
+                invalidation_id="temporary",
+                removed_id="ASM-1",
+                assumption_kind="accepted_normative_count",
+                reason="aggregate_claim_invalidated_by_scope_extension",
+            )
+        ],
+    )
+
+    gated = apply_authority_quality_gate(success)
+
+    assert gated.authority_quality is not None
+    assert [
+        item.invalidation_id for item in gated.authority_quality.invalidated_items
+    ] == ["AQ-INVALIDATE-001"]
 
 
 def test_authority_quality_gate_has_no_project_specific_terms() -> None:

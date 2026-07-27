@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
@@ -55,10 +56,16 @@ from utils.failure_artifacts import (
 )
 from utils.runtime_config import SPEC_AUTHORITY_COMPILER_IDENTITY
 from utils.spec_authority_assumptions import (
+    AcceptedNormativeCountAssumptionClaim,
+    AcceptedNormativeSetAssumptionClaim,
     AuthorityAssumption,
+    GroundingFailure,
     canonical_assumption_key,
+    ground_assumption,
+    is_structured_assumption,
 )
 from utils.spec_schemas import (
+    AuthorityQualityInvalidatedItem,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualitySummary,
@@ -73,7 +80,7 @@ from utils.spec_schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from google.adk.tools import ToolContext
     from sqlalchemy.engine import Connection, Engine
@@ -254,6 +261,46 @@ class _EmptyCompilerSuccessMergeError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("At least one compiler success is required")
+
+
+class CompilationScope(StrEnum):
+    """Closed provenance scope for one normalized compiler success."""
+
+    FULL_SPEC = "full_spec"
+    FOCUSED_ITEM = "focused_item"
+    REPAIR_ITEM = "repair_item"
+    ACCEPTED_BASE = "accepted_base"
+    EXTENSION_ONLY = "extension_only"
+
+
+@dataclass(frozen=True)
+class ScopedCompilationSuccess:
+    """One compiler success with the source scope used to create it."""
+
+    scope: CompilationScope
+    success: SpecAuthorityCompilationSuccess
+
+
+class _AssumptionClaimMergeError(ValueError):
+    """A semantic merge validation failure before a compiler result is persisted."""
+
+    def __init__(self, *, reason: str, blocking_gap: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.blocking_gap = blocking_gap
+
+
+def _merge_failure_output(
+    error: _AssumptionClaimMergeError,
+) -> SpecAuthorityCompilerOutput:
+    """Convert a semantic merge failure into the compiler's failure envelope."""
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationFailure(
+            error="COMPILATION_FAILED",
+            reason=error.reason,
+            blocking_gaps=[error.blocking_gap],
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -1839,14 +1886,14 @@ def _coverage_repair_result(
 def _repair_missing_iterative_authority(  # noqa: PLR0913
     *,
     artifact: TechnicalSpecArtifact,
-    existing_successes: list[SpecAuthorityCompilationSuccess],
+    existing_successes: list[ScopedCompilationSuccess],
     missing_item_ids: list[str],
     product_id: int | None,
     spec_version_id: int | None,
     compiler_model: str | None,
 ) -> SpecAuthorityCompilerOutput:
     """Repair missing item coverage once and return success or fail-closed output."""
-    repair_successes: list[SpecAuthorityCompilationSuccess] = []
+    repair_successes: list[ScopedCompilationSuccess] = []
     item_ids = _iterative_authority_item_ids(artifact)
     for item_id in missing_item_ids:
         repaired = _invoke_coverage_repair_authority(
@@ -1862,12 +1909,22 @@ def _repair_missing_iterative_authority(  # noqa: PLR0913
                 missing_item_ids=missing_item_ids,
                 total_item_count=len(item_ids),
             )
-        repair_successes.append(repaired)
+        repair_successes.append(
+            ScopedCompilationSuccess(
+                scope=CompilationScope.REPAIR_ITEM,
+                success=repaired,
+            )
+        )
 
+    try:
+        merged_success = _merge_compilation_successes(
+            [*existing_successes, *repair_successes],
+            final_spec=artifact,
+        )
+    except _AssumptionClaimMergeError as exc:
+        return _merge_failure_output(exc)
     merged_output = normalize_compiler_output(
-        SpecAuthorityCompilerOutput(
-            root=_merge_compilation_successes([*existing_successes, *repair_successes])
-        ).model_dump_json(),
+        SpecAuthorityCompilerOutput(root=merged_success).model_dump_json(),
         source_text=canonical_spec_json(artifact),
         source_format="agileforge.spec.v1",
     )
@@ -1917,13 +1974,34 @@ def _authority_postcondition_failure(
 
 
 def _merge_compilation_successes(
-    successes: list[SpecAuthorityCompilationSuccess],
+    compilations: Sequence[ScopedCompilationSuccess],
+    *,
+    final_spec: TechnicalSpecArtifact | None,
 ) -> SpecAuthorityCompilationSuccess:
-    """Merge normalized full-spec and item-pass compiler outputs."""
-    if not successes:
+    """Merge scope-declared successes after final-artifact claim validation."""
+    if not compilations:
         raise _EmptyCompilerSuccessMergeError()
-    if len(successes) == 1:
-        return successes[0]
+
+    invalidated_items = _validate_and_filter_scope_assumptions(compilations)
+    successes = [compilation.success for compilation in compilations]
+    merged_assumptions = _dedupe_assumptions(
+        [
+            assumption
+            for compilation in compilations
+            for assumption in compilation.success.assumptions
+            if not (
+                _is_aggregate_assumption(assumption)
+                and _is_invalidated_accepted_base_aggregate(
+                    compilation,
+                    has_extension_only=any(
+                        candidate.scope == CompilationScope.EXTENSION_ONLY
+                        for candidate in compilations
+                    ),
+                )
+            )
+        ]
+    )
+    _ground_merged_assumptions(merged_assumptions, final_spec=final_spec)
 
     merged_source_map = _dedupe_source_map_entries(successes)
     merged_invariants = _dedupe_invariants(successes)
@@ -1954,13 +2032,10 @@ def _merge_compilation_successes(
             "gaps": _dedupe_strings(
                 [gap for success in successes for gap in success.gaps]
             ),
-            "assumptions": _dedupe_assumptions(
-                [
-                    assumption
-                    for success in successes
-                    for assumption in success.assumptions
-                ]
-            ),
+            "assumptions": [
+                assumption.model_dump(mode="json")
+                for assumption in merged_assumptions
+            ],
             "source_map": [
                 entry.model_dump(mode="json") for entry in merged_source_map
             ],
@@ -1968,10 +2043,102 @@ def _merge_compilation_successes(
                 successes,
                 final_invariant_count=len(merged_invariants),
                 merged_source_map=merged_source_map,
+                invalidated_items=invalidated_items,
             ),
         }
     )
     return SpecAuthorityCompilationSuccess.model_validate(merged_payload)
+
+
+def _validate_and_filter_scope_assumptions(
+    compilations: Sequence[ScopedCompilationSuccess],
+) -> list[AuthorityQualityInvalidatedItem]:
+    """Reject partial aggregates and record accepted-base invalidations."""
+    has_extension_only = any(
+        compilation.scope == CompilationScope.EXTENSION_ONLY
+        for compilation in compilations
+    )
+    invalidated_items: list[AuthorityQualityInvalidatedItem] = []
+    assumption_index = 0
+    for compilation in compilations:
+        for assumption in compilation.success.assumptions:
+            assumption_index += 1
+            if not _is_aggregate_assumption(assumption):
+                continue
+            if compilation.scope in {
+                CompilationScope.FOCUSED_ITEM,
+                CompilationScope.REPAIR_ITEM,
+                CompilationScope.EXTENSION_ONLY,
+            }:
+                raise _AssumptionClaimMergeError(
+                    reason="ASSUMPTION_CLAIM_SCOPE_INVALID",
+                    blocking_gap=(
+                        f"assumptions.{assumption_index}: {assumption.kind} "
+                        f"is invalid for {compilation.scope.value} scope."
+                    ),
+                )
+            if (
+                has_extension_only
+                and compilation.scope == CompilationScope.ACCEPTED_BASE
+            ):
+                invalidated_items.append(
+                    AuthorityQualityInvalidatedItem(
+                        invalidation_id="AQ-INVALIDATE-000",
+                        item_kind="assumption",
+                        removed_id=f"ASM-{assumption_index}",
+                        assumption_kind=assumption.kind,
+                        reason="aggregate_claim_invalidated_by_scope_extension",
+                    )
+                )
+    return invalidated_items
+
+
+def _is_aggregate_assumption(assumption: AuthorityAssumption) -> bool:
+    """Return whether an assumption claims a full accepted normative aggregate."""
+    return isinstance(
+        assumption,
+        AcceptedNormativeCountAssumptionClaim | AcceptedNormativeSetAssumptionClaim,
+    )
+
+
+def _is_invalidated_accepted_base_aggregate(
+    compilation: ScopedCompilationSuccess,
+    *,
+    has_extension_only: bool,
+) -> bool:
+    """Return whether this input's aggregate assumptions are stale by construction."""
+    return (
+        has_extension_only
+        and compilation.scope == CompilationScope.ACCEPTED_BASE
+    )
+
+
+def _ground_merged_assumptions(
+    assumptions: list[AuthorityAssumption],
+    *,
+    final_spec: TechnicalSpecArtifact | None,
+) -> None:
+    """Validate every retained structured assumption against the final artifact."""
+    for index, assumption in enumerate(assumptions, start=1):
+        if not is_structured_assumption(assumption):
+            continue
+        if final_spec is None:
+            raise _AssumptionClaimMergeError(
+                reason="ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE",
+                blocking_gap=(
+                    f"assumptions.{index}: structured claim requires the final "
+                    "parsed technical specification."
+                ),
+            )
+        grounded = ground_assumption(assumption, final_spec)
+        if isinstance(grounded, GroundingFailure):
+            raise _AssumptionClaimMergeError(
+                reason=grounded.reason,
+                blocking_gap=(
+                    f"assumptions.{index}: {grounded.claim_kind} does not match "
+                    "the final technical specification."
+                ),
+            )
 
 
 def _merge_authority_quality_reports(
@@ -1979,6 +2146,7 @@ def _merge_authority_quality_reports(
     *,
     final_invariant_count: int,
     merged_source_map: list[SourceMapEntry],
+    invalidated_items: list[AuthorityQualityInvalidatedItem],
 ) -> dict[str, object] | None:
     """Merge host-derived quality metadata from all normalized outputs."""
     cross_success_merges = _cross_success_invariant_merges(successes)
@@ -1987,7 +2155,7 @@ def _merge_authority_quality_reports(
         for success in successes
         if success.authority_quality is not None
     ]
-    if not reports and not cross_success_merges:
+    if not reports and not cross_success_merges and not invalidated_items:
         return None
 
     merged_items = [item for report in reports for item in report.merged_items]
@@ -2006,6 +2174,10 @@ def _merge_authority_quality_reports(
         for kept_id, removed_ids in cross_success_merges.items()
     )
     review_groups = [group for report in reports for group in report.review_groups]
+    all_invalidated_items = [
+        item for report in reports for item in report.invalidated_items
+    ]
+    all_invalidated_items.extend(invalidated_items)
     merged_invariant_removed_count = sum(
         len(item.removed_ids) for item in merged_items if item.item_kind == "invariant"
     )
@@ -2038,6 +2210,12 @@ def _merge_authority_quality_reports(
         merged_items=[
             item.model_copy(update={"merge_id": f"AQ-MERGE-{index:03d}"})
             for index, item in enumerate(merged_items, start=1)
+        ],
+        invalidated_items=[
+            item.model_copy(
+                update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"}
+            )
+            for index, item in enumerate(all_invalidated_items, start=1)
         ],
         review_groups=[
             group.model_copy(update={"group_id": f"AQ-GROUP-{index:03d}"})
@@ -2108,19 +2286,24 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
 
     item_ids = _iterative_authority_item_ids(artifact)
     if not item_ids:
-        return full_invocation
+        return _merge_full_spec_invocation(full_invocation, artifact=artifact)
 
     if _unrecoverable_structured_full_failure(full_invocation.output.root):
         return full_invocation
 
-    successes: list[SpecAuthorityCompilationSuccess] = []
+    successes: list[ScopedCompilationSuccess] = []
     focused_failures: list[_FocusedItemCompilationFailure] = []
     if not isinstance(full_invocation.output.root, SpecAuthorityCompilationFailure):
         full_success = cast(
             "SpecAuthorityCompilationSuccess",
             full_invocation.output.root,
         )
-        successes.append(full_success)
+        successes.append(
+            ScopedCompilationSuccess(
+                scope=CompilationScope.FULL_SPEC,
+                success=full_success,
+            )
+        )
 
     for item_id in item_ids:
         item_result = _invoke_focused_structured_item_authority(
@@ -2133,7 +2316,12 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
         if isinstance(item_result, _FocusedItemCompilationFailure):
             focused_failures.append(item_result)
             continue
-        successes.append(item_result)
+        successes.append(
+            ScopedCompilationSuccess(
+                scope=CompilationScope.FOCUSED_ITEM,
+                success=item_result,
+            )
+        )
 
     if not successes:
         output = (
@@ -2150,10 +2338,15 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
             output=output,
         )
 
+    try:
+        merged_success = _merge_compilation_successes(successes, final_spec=artifact)
+    except _AssumptionClaimMergeError as exc:
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=_merge_failure_output(exc),
+        )
     merged_output = normalize_compiler_output(
-        SpecAuthorityCompilerOutput(
-            root=_merge_compilation_successes(successes)
-        ).model_dump_json(),
+        SpecAuthorityCompilerOutput(root=merged_success).model_dump_json(),
         source_text=spec_content,
         source_format=_detect_spec_source_format(spec_content),
     )
@@ -2202,6 +2395,35 @@ def _compile_spec_authority_output(  # noqa: C901, PLR0911, PLR0913
     return _NormalizedCompilerInvocation(
         raw_json=full_invocation.raw_json,
         output=merged_output,
+    )
+
+
+def _merge_full_spec_invocation(
+    full_invocation: _NormalizedCompilerInvocation,
+    *,
+    artifact: TechnicalSpecArtifact,
+) -> _NormalizedCompilerInvocation:
+    """Apply scope and grounding validation to one full-spec compiler success."""
+    if isinstance(full_invocation.output.root, SpecAuthorityCompilationFailure):
+        return full_invocation
+    try:
+        merged_success = _merge_compilation_successes(
+            [
+                ScopedCompilationSuccess(
+                    scope=CompilationScope.FULL_SPEC,
+                    success=full_invocation.output.root,
+                )
+            ],
+            final_spec=artifact,
+        )
+    except _AssumptionClaimMergeError as exc:
+        return _NormalizedCompilerInvocation(
+            raw_json=full_invocation.raw_json,
+            output=_merge_failure_output(exc),
+        )
+    return _NormalizedCompilerInvocation(
+        raw_json=full_invocation.raw_json,
+        output=SpecAuthorityCompilerOutput(root=merged_success),
     )
 
 
@@ -2515,9 +2737,9 @@ def _focused_repair_successes(  # noqa: PLR0913
     lease_guard: Callable[[str], bool] | None,
     heartbeat_interval_seconds: float,
     timeout_seconds: float,
-) -> list[SpecAuthorityCompilationSuccess] | _CompilerInvocationResult:
+) -> list[ScopedCompilationSuccess] | _CompilerInvocationResult:
     """Run focused repair attempts and return successes or a failure result."""
-    successes: list[SpecAuthorityCompilationSuccess] = []
+    successes: list[ScopedCompilationSuccess] = []
     attempted_item_ids: list[str] = []
     for candidate in candidates:
         attempted_item_ids.append(candidate.item_id)
@@ -2571,7 +2793,10 @@ def _focused_repair_successes(  # noqa: PLR0913
                 )
             )
         successes.append(
-            cast("SpecAuthorityCompilationSuccess", invocation.output.root)
+            ScopedCompilationSuccess(
+                scope=CompilationScope.REPAIR_ITEM,
+                success=cast("SpecAuthorityCompilationSuccess", invocation.output.root),
+            )
         )
     return successes
 
@@ -3049,7 +3274,7 @@ def _load_spec_content_for_compile(
         }
 
 
-def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
+def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0912, PLR0913
     spec_version: SpecRegistry,
     *,
     spec_content: str,
@@ -3124,7 +3349,35 @@ def _invoke_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
                 )
                 if isinstance(repaired, _CompilerInvocationResult):
                     return repaired
-                merged_success = _merge_compilation_successes(repaired)
+                try:
+                    merged_success = _merge_compilation_successes(
+                        repaired,
+                        final_spec=artifact,
+                    )
+                except _AssumptionClaimMergeError as exc:
+                    failure = _normalized_failure_result(
+                        spec_version,
+                        raw_json=raw_json,
+                        failure=cast(
+                            "SpecAuthorityCompilationFailure",
+                            _merge_failure_output(exc).root,
+                        ),
+                    )
+                    return _CompilerInvocationResult(
+                        failure=_attach_schema_retry_metadata(
+                            _with_repair_diagnostics(
+                                failure,
+                                repair_attempted=True,
+                                repair_item_ids=[
+                                    candidate.item_id for candidate in candidates
+                                ],
+                                repair_result="failed",
+                            ),
+                            attempted=False,
+                            reason=None,
+                            attempts=0,
+                        )
+                    )
                 merged_raw_json = SpecAuthorityCompilerOutput(
                     root=merged_success
                 ).model_dump_json()
@@ -3492,7 +3745,7 @@ def _scope_extension_normalized_failure(
     )
 
 
-def _invoke_scope_extension_compiler_for_version(  # noqa: PLR0911, PLR0913
+def _invoke_scope_extension_compiler_for_version(  # noqa: C901, PLR0911, PLR0913
     session: Session,
     *,
     spec_version: SpecRegistry,
@@ -3544,9 +3797,28 @@ def _invoke_scope_extension_compiler_for_version(  # noqa: PLR0911, PLR0913
     if extension_authority is None:
         raise _compiler_invocation_returned_no_success_artifact_error()
 
-    merged_raw_json = SpecAuthorityCompilerOutput(
-        root=_merge_compilation_successes([base_authority, extension_authority])
-    ).model_dump_json()
+    try:
+        merged_success = _merge_compilation_successes(
+            [
+                ScopedCompilationSuccess(
+                    scope=CompilationScope.ACCEPTED_BASE,
+                    success=base_authority,
+                ),
+                ScopedCompilationSuccess(
+                    scope=CompilationScope.EXTENSION_ONLY,
+                    success=extension_authority,
+                ),
+            ],
+            final_spec=artifact,
+        )
+    except _AssumptionClaimMergeError as exc:
+        merge_failure = _merge_failure_output(exc)
+        return _scope_extension_normalized_failure(
+            spec_version,
+            raw_json=merge_failure.model_dump_json(),
+            output=merge_failure,
+        )
+    merged_raw_json = SpecAuthorityCompilerOutput(root=merged_success).model_dump_json()
     merged_output = normalize_compiler_output(
         merged_raw_json,
         source_text=spec_content,
@@ -3580,7 +3852,16 @@ def _invoke_scope_extension_compiler_for_version(  # noqa: PLR0911, PLR0913
             )
         repaired_output = _repair_missing_iterative_authority(
             artifact=artifact,
-            existing_successes=[base_authority, extension_authority],
+            existing_successes=[
+                ScopedCompilationSuccess(
+                    scope=CompilationScope.ACCEPTED_BASE,
+                    success=base_authority,
+                ),
+                ScopedCompilationSuccess(
+                    scope=CompilationScope.EXTENSION_ONLY,
+                    success=extension_authority,
+                ),
+            ],
             missing_item_ids=missing_item_ids,
             product_id=spec_version.product_id,
             spec_version_id=spec_version.spec_version_id,

@@ -711,6 +711,21 @@ class AuthorityQualityMergedItem(BaseModel):
     source_evidence_count: Annotated[int, Field(ge=0)] = 0
 
 
+class AuthorityQualityInvalidatedItem(BaseModel):
+    """One scope-driven removal from otherwise accepted authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invalidation_id: Annotated[str, Field(min_length=1)]
+    item_kind: Literal["assumption"] = "assumption"
+    removed_id: Annotated[str, Field(min_length=1)]
+    assumption_kind: Literal[
+        "accepted_normative_count",
+        "accepted_normative_set",
+    ]
+    reason: Literal["aggregate_claim_invalidated_by_scope_extension"]
+
+
 class AuthorityQualityReviewGroup(BaseModel):
     """Related authority items that need human review."""
 
@@ -735,6 +750,9 @@ class AuthorityQualityReport(BaseModel):
     )
     summary: AuthorityQualitySummary
     merged_items: list[AuthorityQualityMergedItem] = Field(default_factory=list)
+    invalidated_items: list[AuthorityQualityInvalidatedItem] = Field(
+        default_factory=list
+    )
     review_groups: list[AuthorityQualityReviewGroup] = Field(default_factory=list)
 
 

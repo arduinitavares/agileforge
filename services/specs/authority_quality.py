@@ -14,6 +14,7 @@ from utils.spec_authority_assumptions import (
 )
 from utils.spec_schemas import (
     AuthorityQualityGroupType,
+    AuthorityQualityInvalidatedItem,
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
     AuthorityQualityReviewGroup,
@@ -71,6 +72,11 @@ def apply_authority_quality_gate(
     existing_merged_items = (
         list(existing_quality.merged_items) if existing_quality is not None else []
     )
+    existing_invalidated_items = (
+        list(existing_quality.invalidated_items)
+        if existing_quality is not None
+        else []
+    )
     existing_review_groups = (
         list(existing_quality.review_groups) if existing_quality is not None else []
     )
@@ -88,6 +94,7 @@ def apply_authority_quality_gate(
     merged_items = _renumber_merged_items(
         [*existing_merged_items, *merged_items]
     )
+    invalidated_items = _renumber_invalidated_items(existing_invalidated_items)
     review_groups = _dedupe_and_cap_groups(
         [*existing_review_groups, *review_groups]
     )
@@ -127,6 +134,7 @@ def apply_authority_quality_gate(
     gated.authority_quality = AuthorityQualityReport(
         summary=summary,
         merged_items=merged_items,
+        invalidated_items=invalidated_items,
         review_groups=review_groups,
     )
     return gated
@@ -149,6 +157,16 @@ def _renumber_merged_items(
     return [
         item.model_copy(update={"merge_id": f"AQ-MERGE-{index:03d}"})
         for index, item in enumerate(merged_items, start=1)
+    ]
+
+
+def _renumber_invalidated_items(
+    invalidated_items: list[AuthorityQualityInvalidatedItem],
+) -> list[AuthorityQualityInvalidatedItem]:
+    """Return scope invalidations with stable report-local identities."""
+    return [
+        item.model_copy(update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"})
+        for index, item in enumerate(invalidated_items, start=1)
     ]
 
 
