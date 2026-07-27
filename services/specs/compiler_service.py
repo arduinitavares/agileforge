@@ -54,6 +54,10 @@ from utils.failure_artifacts import (
     write_failure_artifact,
 )
 from utils.runtime_config import SPEC_AUTHORITY_COMPILER_IDENTITY
+from utils.spec_authority_assumptions import (
+    AuthorityAssumption,
+    canonical_assumption_key,
+)
 from utils.spec_schemas import (
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
@@ -69,7 +73,7 @@ from utils.spec_schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterable
 
     from google.adk.tools import ToolContext
     from sqlalchemy.engine import Connection, Engine
@@ -88,16 +92,22 @@ _NO_INVARIANTS_GAP: str = "No invariants extracted from spec"
 _SCHEMA_RETRY_MAX_ATTEMPTS: int = 1
 _SCHEMA_RETRY_TOTAL_ATTEMPTS: int = _SCHEMA_RETRY_MAX_ATTEMPTS + 1
 _SCHEMA_RETRY_FAILURES: frozenset[str] = frozenset(
-    {"INVALID_JSON", "JSON_VALIDATION_FAILED"}
+    {
+        "INVALID_JSON",
+        "JSON_VALIDATION_FAILED",
+        "ASSUMPTION_CLAIM_REQUIRES_TYPED_FORM",
+    }
 )
 _SCHEMA_RETRY_RAW_OUTPUT_PREVIEW_CHARS: int = 80
 _SCHEMA_RETRY_FEEDBACK = (
-    "Your previous output failed the compiled authority v2 schema.\n"
+    "Your previous output failed the compiled authority v3 schema.\n"
     "Return only valid JSON.\n"
     "Do not put source_item_id or source_level inside parameters.\n"
     "Place provenance at invariant.source_item_id and "
     "invariant.source_level.\n"
-    'schema_version must be "agileforge.compiled_authority.v2".'
+    'schema_version must be "agileforge.compiled_authority.v3".\n'
+    "Assumptions must be typed objects; use free_text, item_status, "
+    "accepted_normative_count, or accepted_normative_set."
 )
 _SOURCE_METADATA_MISMATCH: str = "SOURCE_METADATA_MISMATCH"
 _REPAIRABLE_SOURCE_METADATA_SUBCODE: str = "BEHAVIORAL_SOURCE_EVIDENCE_UNSUPPORTED"
@@ -105,7 +115,7 @@ _SOURCE_METADATA_EXCERPT_LIMIT: int = 500
 _SOURCE_METADATA_RETRY_COMPILER_MODEL: str = "openrouter/openai/gpt-5.2"
 DEFAULT_AUTHORITY_COMPILE_HEARTBEAT_SECONDS: float = 60.0
 DEFAULT_AUTHORITY_COMPILE_TIMEOUT_SECONDS: float = 1800.0
-COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v2"
+COMPILED_AUTHORITY_SCHEMA_VERSION = "agileforge.compiled_authority.v3"
 _COMPILED_AUTHORITY_PAYLOAD_OBJECT_ERROR = (
     "Compiled authority payload must serialize to an object."
 )
@@ -624,7 +634,7 @@ def load_compiled_artifact(  # noqa: PLR0911
 def _compiled_authority_artifact_json(
     success: SpecAuthorityCompilationSuccess,
 ) -> str:
-    """Serialize a stored compiled-authority artifact with the v2 envelope."""
+    """Serialize a stored compiled-authority artifact with the v3 envelope."""
     payload = success.model_dump(mode="json")
     if not isinstance(payload, dict):
         raise _compiled_authority_payload_object_type_error()
@@ -1521,6 +1531,21 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
+def _dedupe_assumptions(
+    assumptions: Iterable[AuthorityAssumption],
+) -> list[AuthorityAssumption]:
+    """Return typed assumptions unique by their canonical identity key."""
+    seen: set[str] = set()
+    result: list[AuthorityAssumption] = []
+    for assumption in assumptions:
+        key = canonical_assumption_key(assumption)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(assumption)
+    return result
+
+
 def _dedupe_invariants(
     successes: list[SpecAuthorityCompilationSuccess],
 ) -> list[Invariant]:
@@ -1929,7 +1954,7 @@ def _merge_compilation_successes(
             "gaps": _dedupe_strings(
                 [gap for success in successes for gap in success.gaps]
             ),
-            "assumptions": _dedupe_strings(
+            "assumptions": _dedupe_assumptions(
                 [
                     assumption
                     for success in successes

@@ -7,6 +7,11 @@ import re
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from utils.spec_authority_assumptions import (
+    AuthorityAssumption,
+    FreeTextAssumption,
+    canonical_assumption_key,
+)
 from utils.spec_schemas import (
     AuthorityQualityGroupType,
     AuthorityQualityMergedItem,
@@ -201,10 +206,10 @@ def _merge_exact_assumptions(
     merged_items: list[AuthorityQualityMergedItem],
 ) -> None:
     seen: dict[str, int] = {}
-    kept: list[str] = []
+    kept: list[AuthorityAssumption] = []
     removed_indexes_by_kept: dict[int, list[str]] = defaultdict(list)
     for index, assumption in enumerate(success.assumptions, start=1):
-        key = _normalize_exact_assumption(assumption)
+        key = canonical_assumption_key(assumption)
         kept_index = seen.get(key)
         if kept_index is None:
             seen[key] = len(kept) + 1
@@ -370,17 +375,19 @@ def _over_split_groups(
 
 
 def _noisy_assumption_groups(
-    assumptions: list[str],
+    assumptions: list[AuthorityAssumption],
 ) -> list[AuthorityQualityReviewGroup]:
-    members = [f"ASM-{index}" for index in range(1, len(assumptions) + 1)]
+    free_text_entries = [
+        (index, assumption.text)
+        for index, assumption in enumerate(assumptions, start=1)
+        if isinstance(assumption, FreeTextAssumption)
+    ]
+    members = [f"ASM-{index}" for index, _text in free_text_entries]
     selected: set[str] = set()
-    for left_index, left in enumerate(assumptions):
-        for right_index, right in enumerate(
-            assumptions[left_index + 1 :],
-            start=left_index + 2,
-        ):
+    for left_offset, (left_index, left) in enumerate(free_text_entries):
+        for right_index, right in free_text_entries[left_offset + 1 :]:
             if _jaccard(left, right) >= NOISY_ASSUMPTION_THRESHOLD:
-                selected.update({f"ASM-{left_index + 1}", f"ASM-{right_index}"})
+                selected.update({f"ASM-{left_index}", f"ASM-{right_index}"})
     if len(selected) < MIN_REVIEW_GROUP_MEMBERS:
         return []
     ordered = [member for member in members if member in selected]

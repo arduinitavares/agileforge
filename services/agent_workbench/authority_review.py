@@ -51,6 +51,7 @@ from utils.agileforge_spec_profile import (
     render_markdown,
     rendered_markdown_hash,
 )
+from utils.spec_authority_assumptions import render_assumption_text
 from utils.spec_authority_ir import (
     ContentBlock as _ContentBlock,
 )
@@ -1687,7 +1688,7 @@ def _compiled_artifact_shape_findings(
                     "details": {
                         "observed_schema_version": load_result.observed_schema_version,
                         "required_schema_version": (
-                            "agileforge.compiled_authority.v2"
+                            "agileforge.compiled_authority.v3"
                         ),
                     },
                 }
@@ -1770,7 +1771,10 @@ def _authority_artifact_payload(
         for index, gap in enumerate(artifact.gaps, start=1)
     ]
     assumptions = [
-        _plain_item(item_id=f"ASM-{index}", text=assumption)
+        _plain_item(
+            item_id=f"ASM-{index}",
+            text=render_assumption_text(assumption),
+        )
         for index, assumption in enumerate(artifact.assumptions, start=1)
     ]
     rejected_features = _normalized_persisted_items(

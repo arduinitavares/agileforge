@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
+from utils.spec_authority_assumptions import (
+    AuthorityAssumption,
+    canonical_assumption_key,
+)
 from utils.spec_authority_ir import (
     AuthorityTargetKind,
     CoverageStatus,
@@ -740,9 +744,9 @@ class SpecAuthorityCompilationSuccess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Annotated[
-        Literal["agileforge.compiled_authority.v2"],
+        Literal["agileforge.compiled_authority.v3"],
         Field(description="Stored compiled-authority schema version."),
-    ] = "agileforge.compiled_authority.v2"
+    ] = "agileforge.compiled_authority.v3"
     scope_themes: Annotated[
         list[str],
         Field(description="Top-level scope themes extracted from the spec."),
@@ -768,7 +772,7 @@ class SpecAuthorityCompilationSuccess(BaseModel):
         Field(description="Missing or ambiguous spec items."),
     ]
     assumptions: Annotated[
-        list[str],
+        list[AuthorityAssumption],
         Field(description="Explicit assumptions made during compilation."),
     ]
     source_map: Annotated[
@@ -941,13 +945,11 @@ def _generated_compact_gap_id(
 def _generated_compact_assumption_id(
     candidate_id: str,
     target_kind: AuthorityTargetKind,
-    normalized_assumption_text: str,
+    assumption: AuthorityAssumption,
 ) -> str:
     payload = {
+        "assumption_key": canonical_assumption_key(assumption),
         "candidate_id": candidate_id,
-        "normalized_assumption_text": _normalize_compact_ir_text(
-            normalized_assumption_text
-        ),
         "target_kind": target_kind.value,
     }
     return f"ASM-{_compact_ir_canonical_hash(payload)}"
@@ -973,9 +975,9 @@ class SpecAuthorityCompilationFailure(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Annotated[
-        Literal["agileforge.compiled_authority.v2"],
+        Literal["agileforge.compiled_authority.v3"],
         Field(description="Stored compiled-authority schema version."),
-    ] = "agileforge.compiled_authority.v2"
+    ] = "agileforge.compiled_authority.v3"
     error: Annotated[
         str,
         Field(description="Error code for compilation failure."),

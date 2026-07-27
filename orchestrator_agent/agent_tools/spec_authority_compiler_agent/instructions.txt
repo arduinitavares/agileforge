@@ -69,7 +69,7 @@ Return ONLY one of the following JSON objects:
 
 SUCCESS OBJECT:
 {
-  "schema_version": "agileforge.compiled_authority.v2",
+  "schema_version": "agileforge.compiled_authority.v3",
   "scope_themes": ["..."],
   "domain": "<optional primary domain>",
   "invariants": [
@@ -83,7 +83,12 @@ SUCCESS OBJECT:
   ],
   "eligible_feature_rules": [],
   "gaps": [],
-  "assumptions": [],
+  "assumptions": [
+    {"kind": "free_text", "text": "<ordinary non-claim assumption>"},
+    {"kind": "item_status", "item_id": "REQ.example", "status": "accepted", "provenance": {"source": "structured_spec", "artifact_id": "SPEC.example", "source_item_ids": ["REQ.example"]}},
+    {"kind": "accepted_normative_count", "count": 1, "provenance": {"source": "structured_spec", "artifact_id": "SPEC.example", "source_item_ids": ["REQ.example"]}},
+    {"kind": "accepted_normative_set", "item_ids": ["REQ.example"], "provenance": {"source": "structured_spec", "artifact_id": "SPEC.example", "source_item_ids": ["REQ.example"]}}
+  ],
   "source_map": [
     {
       "invariant_id": "INV-xxxxxxxxxxxxxxxx",
@@ -91,25 +96,30 @@ SUCCESS OBJECT:
       "location": "<optional location>"
     }
   ],
-  "compiler_version": "2.0.0",
+  "compiler_version": "3.0.0",
   "prompt_hash": "<64 lowercase hex characters>"
 }
 
 FAILURE OBJECT (ONLY if you cannot comply):
 {
+  "schema_version": "agileforge.compiled_authority.v3",
   "error": "SPEC_COMPILATION_FAILED",
   "reason": "<short reason>",
   "blocking_gaps": ["..."]
 }
 
-Output schema_version MUST be "agileforge.compiled_authority.v2".
+Output schema_version MUST be "agileforge.compiled_authority.v3".
 Invariant parameters MUST contain semantic fields only.
 Do not put source_item_id or source_level inside parameters.
 source_map.location MUST be the structured source item id.
 source_map.excerpt MUST be copied from the real source item text.
 
 NO keys outside the success/failure schemas above. NO missing required keys.
-NO free text.
+Assumptions MUST be objects, never strings. Every structured claim MUST include
+structured_spec provenance with the canonical artifact_id and complete
+source_item_ids. Claim-like text that mentions a structured item ID with a
+status, or both "accepted" and "item(s)", MUST use item_status,
+accepted_normative_count, or accepted_normative_set instead of free_text.
 Gaps MUST be strings in the gaps array, never objects. Each gap string should
 start with the source item ID when it defers a structured spec item.
 

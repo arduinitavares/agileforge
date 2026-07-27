@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final, cast
 
+from utils.spec_authority_assumptions import (
+    AuthorityAssumption,
+    FreeTextAssumption,
+    canonical_assumption_key,
+)
+
 JsonDict = dict[str, object]
 
 MAX_REVIEW_SOURCE_UNITS: Final[int] = 500
@@ -1034,7 +1040,7 @@ def _authority_item_id(
         AuthorityTargetKind.ASSUMPTION: _generated_assumption_id(
             candidate_id,
             target_kind,
-            target_text,
+            FreeTextAssumption(kind="free_text", text=target_text),
         ),
         AuthorityTargetKind.ELIGIBLE_FEATURE_RULE: _generated_target_id(
             "EFR",
@@ -1257,11 +1263,11 @@ def _generated_gap_id(
 def _generated_assumption_id(
     candidate_id: str,
     target_kind: AuthorityTargetKind,
-    normalized_assumption_text: str,
+    assumption: AuthorityAssumption,
 ) -> str:
     payload = {
+        "assumption_key": canonical_assumption_key(assumption),
         "candidate_id": candidate_id,
-        "normalized_assumption_text": _normalize_text(normalized_assumption_text),
         "target_kind": target_kind.value,
     }
     return f"ASM-{_canonical_hash(payload)}"

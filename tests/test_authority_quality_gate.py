@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.specs.authority_quality import apply_authority_quality_gate
+from utils.spec_authority_assumptions import AuthorityAssumption, FreeTextAssumption
 from utils.spec_schemas import (
     DataContractParams,
     Invariant,
@@ -24,7 +25,7 @@ EXPECTED_OVER_SPLIT_INVARIANT_COUNT: int = 5
 def _success(
     *,
     invariants: list[Invariant],
-    assumptions: list[str] | None = None,
+    assumptions: list[AuthorityAssumption] | None = None,
     source_map: list[SourceMapEntry] | None = None,
 ) -> SpecAuthorityCompilationSuccess:
     return SpecAuthorityCompilationSuccess(
@@ -170,16 +171,34 @@ def test_quality_gate_merges_exact_duplicate_assumptions_and_groups_noisy() -> N
         _success(
             invariants=[],
             assumptions=[
-                "Python runtime should be confirmed before implementation.",
-                "python runtime should be confirmed before implementation",
-                "Python runtime should be confirmed before implementation step.",
+                FreeTextAssumption(
+                    kind="free_text",
+                    text="Python runtime should be confirmed before implementation.",
+                ),
+                FreeTextAssumption(
+                    kind="free_text",
+                    text="python runtime should be confirmed before implementation.",
+                ),
+                FreeTextAssumption(
+                    kind="free_text",
+                    text=(
+                        "Python runtime should be confirmed before "
+                        "implementation step."
+                    ),
+                ),
             ],
         )
     )
 
     assert gated.assumptions == [
-        "Python runtime should be confirmed before implementation.",
-        "Python runtime should be confirmed before implementation step.",
+        FreeTextAssumption(
+            kind="free_text",
+            text="Python runtime should be confirmed before implementation.",
+        ),
+        FreeTextAssumption(
+            kind="free_text",
+            text="Python runtime should be confirmed before implementation step.",
+        ),
     ]
     assert gated.authority_quality is not None
     assert gated.authority_quality.summary.merged_assumption_count == 1
@@ -195,15 +214,15 @@ def test_quality_gate_keeps_non_identical_noisy_assumptions_unmerged() -> None:
         _success(
             invariants=[],
             assumptions=[
-                "API is stable.",
-                "API stable",
+                FreeTextAssumption(kind="free_text", text="API is stable."),
+                FreeTextAssumption(kind="free_text", text="API stable"),
             ],
         )
     )
 
     assert gated.assumptions == [
-        "API is stable.",
-        "API stable",
+        FreeTextAssumption(kind="free_text", text="API is stable."),
+        FreeTextAssumption(kind="free_text", text="API stable"),
     ]
     assert gated.authority_quality is not None
     assert gated.authority_quality.summary.merged_assumption_count == 0

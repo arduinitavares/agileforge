@@ -377,7 +377,7 @@ def _legacy_success_payload() -> dict[str, Any]:
 
 def _base_success_payload() -> dict[str, object]:
     return {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["Payments"],
         "domain": None,
         "invariants": [],
@@ -389,6 +389,95 @@ def _base_success_payload() -> dict[str, object]:
         "compiler_version": "2.0.0",
         "prompt_hash": "a" * 64,
     }
+
+
+def test_normalizer_maps_claim_like_free_text_to_contract_failure() -> None:
+    """Claim-like free text receives the dedicated typed-form failure."""
+    payload = _legacy_success_payload()
+    payload["assumptions"] = ["Only accepted items are used."]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "ASSUMPTION_CLAIM_REQUIRES_TYPED_FORM"
+    assert normalized.root.blocking_gaps == [
+        "assumptions.0.free_text.text: use item_status, "
+        "accepted_normative_count, or accepted_normative_set"
+    ]
+
+
+def test_normalizer_requires_structured_source_for_typed_claim() -> None:
+    """Typed claims fail closed when canonical structured source is unavailable."""
+    payload = _legacy_success_payload()
+    payload["assumptions"] = [
+        {
+            "kind": "accepted_normative_set",
+            "item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.normalizer",
+                "source_item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(json.dumps(payload))
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE"
+
+
+def test_normalizer_grounds_typed_claim_before_empty_invariant_success() -> None:
+    """A valid structured claim is grounded even when no invariants were found."""
+    payload = _legacy_success_payload()
+    payload["invariants"] = []
+    payload["source_map"] = []
+    payload["assumptions"] = [
+        {
+            "kind": "accepted_normative_set",
+            "item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.normalizer",
+                "source_item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert normalized.root.invariants == []
+    assert normalized.root.assumptions[0].kind == "accepted_normative_set"
+
+
+def test_normalizer_rejects_ungrounded_typed_claim() -> None:
+    """A false structured claim cannot enter a normalized success artifact."""
+    payload = _legacy_success_payload()
+    payload["assumptions"] = [
+        {
+            "kind": "accepted_normative_count",
+            "count": 1,
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.normalizer",
+                "source_item_ids": ["REQ.audit-evidence", "REQ.review-token"],
+            },
+        }
+    ]
+
+    normalized = normalize_compiler_output(
+        json.dumps(payload),
+        source_text=_structured_spec_source(),
+        source_format="agileforge.spec.v1",
+    )
+
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
+    assert normalized.root.reason == "ASSUMPTION_CLAIM_MISMATCH"
 
 
 def _compact_ir_success_payload() -> dict[str, Any]:
@@ -469,9 +558,16 @@ def _test_generated_gap_id(
 
 
 def _test_generated_assumption_id(candidate_id: str, text: str) -> str:
+    from utils.spec_authority_assumptions import (  # noqa: PLC0415
+        FreeTextAssumption,
+        canonical_assumption_key,
+    )
+
     payload = {
+        "assumption_key": canonical_assumption_key(
+            FreeTextAssumption(kind="free_text", text=text)
+        ),
         "candidate_id": candidate_id,
-        "normalized_assumption_text": " ".join(text.strip().split()),
         "target_kind": "assumption",
     }
     return f"ASM-{_test_compact_ir_hash(payload)}"
@@ -1201,8 +1297,10 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
         for entry in normalized.root.source_map
     )
     assert (
-        normalized.root.assumptions.count(
-            "Excluded non-normative source item from hard forbidden authority."
+        sum(
+            assumption.text
+            == "Excluded non-normative source item from hard forbidden authority."
+            for assumption in normalized.root.assumptions
         )
         == 1
     )
@@ -1313,8 +1411,10 @@ def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
         for entry in normalized.root.source_map
     )
     assert (
-        normalized.root.assumptions.count(
-            "Excluded non-normative source item from hard forbidden authority."
+        sum(
+            assumption.text
+            == "Excluded non-normative source item from hard forbidden authority."
+            for assumption in normalized.root.assumptions
         )
         == 1
     )
@@ -1733,7 +1833,7 @@ def test_success_schema_accepts_generated_non_invariant_mapping_ids() -> None:
     eligible_rule = "Future phase support is allowed after validation."
     rejected_feature = "Do not expose access tokens."
     payload["gaps"] = [gap_text]
-    payload["assumptions"] = [assumption_text]
+    payload["assumptions"] = [{"kind": "free_text", "text": assumption_text}]
     payload["eligible_feature_rules"] = [{"rule": eligible_rule}]
     payload["rejected_features"] = [rejected_feature]
     payload["authority_mappings"] = [
@@ -2384,8 +2484,8 @@ def test_model_emitted_exact_quote_mapping_is_discarded() -> None:
     assert success.source_map[0].invariant_id == success.invariants[0].id
 
 
-def test_structured_profile_replays_asa_source_metadata_failure_artifact() -> None:
-    """The saved ASA compiler output normalizes against its real structured spec."""
+def test_structured_profile_rejects_legacy_asa_source_metadata_artifact() -> None:
+    """A historical v2 ASA compiler output does not cross the v3 boundary."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -2402,18 +2502,17 @@ def test_structured_profile_replays_asa_source_metadata_failure_artifact() -> No
 
     artifact = json.loads(artifact_path.read_text())
     raw_output = artifact["raw_output"]
-
     normalized = normalize_compiler_output(
         raw_output if isinstance(raw_output, str) else json.dumps(raw_output),
         source_text=spec_path.read_text(),
         source_format="agileforge.spec.v1",
     )
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
 
 
-def test_structured_profile_replays_asa_ellipsis_source_failure_artifact() -> None:
-    """The ASA compiler output with ellipsis source excerpts normalizes."""
+def test_structured_profile_rejects_legacy_asa_ellipsis_artifact() -> None:
+    """A historical v2 ASA output with string assumptions remains unsupported."""
     from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (  # noqa: E501, PLC0415
         normalize_compiler_output,
     )
@@ -2430,14 +2529,13 @@ def test_structured_profile_replays_asa_ellipsis_source_failure_artifact() -> No
 
     artifact = json.loads(artifact_path.read_text())
     raw_output = artifact["raw_output"]
-
     normalized = normalize_compiler_output(
         raw_output if isinstance(raw_output, str) else json.dumps(raw_output),
         source_text=spec_path.read_text(),
         source_format="agileforge.spec.v1",
     )
 
-    assert isinstance(normalized.root, SpecAuthorityCompilationSuccess)
+    assert isinstance(normalized.root, SpecAuthorityCompilationFailure)
 
 
 def test_structured_profile_accepts_faithful_partial_source_excerpt() -> None:
@@ -5018,8 +5116,11 @@ def test_normalizer_filters_meta_policy_invariant_from_plagiarism_section() -> N
     assert normalized.root.invariants == []
     assert normalized.root.source_map == []
     assert (
-        "Excluded non-product policy/admin excerpts from compiled invariants."
-        in normalized.root.assumptions
+        any(
+            assumption.text
+            == "Excluded non-product policy/admin excerpts from compiled invariants."
+            for assumption in normalized.root.assumptions
+        )
     )
 
 

@@ -72,13 +72,13 @@ def _compiled_success_json() -> str:
 
 
 def _stored_compiled_success_json() -> str:
-    return json.dumps(v2_compiled_authority_payload())
+    return json.dumps(v3_compiled_authority_payload())
 
 
-def v2_compiled_authority_payload() -> dict[str, Any]:
-    """Return a stored v2 compiled-authority payload fixture."""
+def v3_compiled_authority_payload() -> dict[str, Any]:
+    """Return a stored v3 compiled-authority payload fixture."""
     return {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["Payments"],
         "domain": None,
         "invariants": [
@@ -108,7 +108,7 @@ def v2_compiled_authority_payload() -> dict[str, Any]:
 
 def legacy_compiled_authority_payload() -> dict[str, Any]:
     """Return a legacy stored payload fixture without schema_version."""
-    payload = v2_compiled_authority_payload()
+    payload = v3_compiled_authority_payload()
     payload.pop("schema_version")
     invariant = payload["invariants"][0]
     assert isinstance(invariant, dict)
@@ -132,7 +132,7 @@ def _compiled_failure_json() -> str:
 def _stored_compiler_failure_json() -> str:
     return json.dumps(
         {
-            "schema_version": "agileforge.compiled_authority.v2",
+            "schema_version": "agileforge.compiled_authority.v3",
             "error": "COMPILATION_FAILED",
             "reason": "Missing scope",
             "blocking_gaps": ["scope"],
@@ -216,7 +216,7 @@ def _duplicate_required_field_compiler_output_json() -> str:
 def _structured_retry_success_payload() -> dict[str, Any]:
     """Return a compile-success payload valid against structured source checks."""
     return {
-        "schema_version": "agileforge.compiled_authority.v2",
+        "schema_version": "agileforge.compiled_authority.v3",
         "scope_themes": ["Audit"],
         "domain": "operations",
         "invariants": [
@@ -596,7 +596,7 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     )
 
     authority = SimpleNamespace(
-        compiled_artifact_json=json.dumps(v2_compiled_authority_payload())
+        compiled_artifact_json=json.dumps(v3_compiled_authority_payload())
     )
 
     result = load_compiled_artifact(authority)
@@ -617,11 +617,11 @@ def test_load_compiled_artifact_returns_success_payload() -> None:
     assert result.artifact is not None
     assert result.error_code is None
     assert result.message is None
-    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.observed_schema_version == "agileforge.compiled_authority.v3"
     assert result.validation_error is None
     assert result.artifact.scope_themes == ["Payments"]
     assert result.artifact.invariants[0].id == "INV-0123456789abcdef"
-    assert result.artifact.schema_version == "agileforge.compiled_authority.v2"
+    assert result.artifact.schema_version == "agileforge.compiled_authority.v3"
     assert result.artifact.invariants[0].source_item_id == "REQ.payments.email"
     assert result.artifact.invariants[0].source_level == "MUST"
     with pytest.raises(FrozenInstanceError):
@@ -645,10 +645,10 @@ def test_compiled_authority_artifact_json_round_trips_through_loader() -> None:
         SimpleNamespace(compiled_artifact_json=artifact_json)
     )
 
-    assert payload["schema_version"] == "agileforge.compiled_authority.v2"
+    assert payload["schema_version"] == "agileforge.compiled_authority.v3"
     assert result.status == "success"
     assert result.artifact is not None
-    assert result.artifact.schema_version == "agileforge.compiled_authority.v2"
+    assert result.artifact.schema_version == "agileforge.compiled_authority.v3"
     assert result.artifact.scope_themes == success.scope_themes
 
 
@@ -700,7 +700,7 @@ def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
     """Verify stored artifacts with non-v2 schema_version fail before validation."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
-    payload = v2_compiled_authority_payload()
+    payload = v3_compiled_authority_payload()
     payload["schema_version"] = "agileforge.compiled_authority.v1"
     authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
 
@@ -716,13 +716,29 @@ def test_load_compiled_artifact_raw_sniffs_wrong_schema_version() -> None:
     assert result.validation_error is None
 
 
+def test_load_compiled_artifact_rejects_historical_v2_payload() -> None:
+    """Historical v2 rows remain immutable and unsupported at the v3 boundary."""
+    from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
+
+    payload = v3_compiled_authority_payload()
+    payload["schema_version"] = "agileforge.compiled_authority.v2"
+    authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
+
+    result = load_compiled_artifact(authority)
+
+    assert result.ok is False
+    assert result.status == "schema_unsupported"
+    assert result.error_code == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
+    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+
+
 def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload() -> (
     None
 ):
     """Verify invalid v2 payloads expose schema-invalid result details."""
     from services.specs.compiler_service import load_compiled_artifact  # noqa: PLC0415
 
-    payload = v2_compiled_authority_payload()
+    payload = v3_compiled_authority_payload()
     payload["invariants"] = "bad"
     authority = SimpleNamespace(compiled_artifact_json=json.dumps(payload))
 
@@ -734,7 +750,7 @@ def test_load_compiled_artifact_reports_validation_error_for_invalid_v2_payload(
     assert result.artifact is None
     assert result.error_code is None
     assert result.message == "Compiled authority artifact failed schema validation."
-    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.observed_schema_version == "agileforge.compiled_authority.v3"
     assert result.validation_error is not None
 
 
@@ -752,7 +768,7 @@ def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
     assert result.artifact is None
     assert result.error_code is None
     assert result.message == "Compiled authority artifact is a compiler failure."
-    assert result.observed_schema_version == "agileforge.compiled_authority.v2"
+    assert result.observed_schema_version == "agileforge.compiled_authority.v3"
     assert result.validation_error is None
 
 
@@ -1583,7 +1599,7 @@ def test_preview_spec_authority_does_not_retry_semantic_focused_item_failure(
         focused_attempts[item_id] = focused_attempts.get(item_id, 0) + 1
         if item_id == "REQ.todo-create":
             invalid_payload = {
-                "schema_version": "agileforge.compiled_authority.v2",
+                "schema_version": "agileforge.compiled_authority.v3",
                 "scope_themes": ["Audit"],
                 "domain": "todo",
                 "invariants": [
@@ -3473,7 +3489,7 @@ def test_compile_spec_authority_for_version_rejects_unsupported_cached_authority
         "project_id": project_id,
         "spec_version_id": spec_version_id,
         "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v2",
+        "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert result["remediation"] == [
         "Run agileforge authority regenerate "
@@ -3619,7 +3635,7 @@ def test_invalid_json_gets_one_schema_retry(
     assert payloads[0]["domain_hint"] is None
     retry_hint = payloads[1]["domain_hint"]
     assert isinstance(retry_hint, str)
-    assert 'schema_version must be "agileforge.compiled_authority.v2".' in retry_hint
+    assert 'schema_version must be "agileforge.compiled_authority.v3".' in retry_hint
     assert "Do not put source_item_id or source_level inside parameters." in retry_hint
     assert result["schema_retry_attempted"] is True
     assert result["schema_retry_reason"] == "INVALID_JSON"
@@ -3669,6 +3685,47 @@ def test_json_validation_failed_gets_one_schema_retry(
     assert len(attempts) == _EXPECTED_FOCUSED_RETRY_CALLS
     assert result["schema_retry_attempted"] is True
     assert result["schema_retry_reason"] == "JSON_VALIDATION_FAILED"
+    assert result["schema_retry_attempts"] == 1
+
+
+def test_claim_like_assumption_gets_one_schema_retry(
+    session: Session,
+    sample_product: Product,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dedicated typed-claim contract failure gets one retry only."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    attempts: list[dict[str, object]] = []
+
+    async def fake_invoke_agent_to_text(*args: object, **kwargs: object) -> str:
+        del args
+        payload_json = kwargs.get("payload_json")
+        assert isinstance(payload_json, str)
+        attempts.append(json.loads(payload_json))
+        payload = _structured_retry_success_payload()
+        if len(attempts) == 1:
+            payload["assumptions"] = ["Only accepted items are in scope."]
+        return json.dumps(payload)
+
+    monkeypatch.setattr(compiler_service, "get_engine", session.get_bind)
+    monkeypatch.setattr(
+        compiler_service,
+        "invoke_agent_to_text",
+        fake_invoke_agent_to_text,
+    )
+    spec_row = _create_spec_version(
+        session, product_id=require_id(sample_product.product_id, "product_id")
+    )
+
+    result = compiler_service.compile_spec_authority_for_version(
+        {"spec_version_id": require_id(spec_row.spec_version_id, "spec_version_id")},
+        tool_context=make_tool_context(),
+    )
+
+    assert result["success"] is True
+    assert len(attempts) == _EXPECTED_FOCUSED_RETRY_CALLS
+    assert result["schema_retry_reason"] == "ASSUMPTION_CLAIM_REQUIRES_TYPED_FORM"
     assert result["schema_retry_attempts"] == 1
 
 
@@ -3745,7 +3802,7 @@ def test_semantic_source_mismatch_does_not_trigger_schema_retry(
         assert isinstance(payload, dict)
         attempts.append(payload)
         invalid_payload = {
-            "schema_version": "agileforge.compiled_authority.v2",
+            "schema_version": "agileforge.compiled_authority.v3",
             "scope_themes": ["Audit"],
             "domain": "operations",
             "invariants": [

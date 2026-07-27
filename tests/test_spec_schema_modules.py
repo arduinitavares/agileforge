@@ -109,8 +109,8 @@ def test_python_modules_do_not_import_compat_schemes_directly() -> None:
     assert _python_files_importing_compat_schemes() == []
 
 
-def test_spec_authority_success_defaults_v2_schema_version() -> None:
-    """Compiled authority success artifacts default to the v2 schema version."""
+def test_spec_authority_success_defaults_v3_and_rejects_strings() -> None:
+    """Compiled authority v3 defaults to typed assumptions and rejects strings."""
     from utils.spec_schemas import (  # noqa: PLC0415
         SpecAuthorityCompilationSuccess,
     )
@@ -127,11 +127,20 @@ def test_spec_authority_success_defaults_v2_schema_version() -> None:
         prompt_hash="a" * 64,
     )
 
-    assert success.schema_version == "agileforge.compiled_authority.v2"
+    assert success.schema_version == "agileforge.compiled_authority.v3"
     assert (
         success.model_dump()["schema_version"]
-        == "agileforge.compiled_authority.v2"
+        == "agileforge.compiled_authority.v3"
     )
+
+    payload = success.model_dump(mode="json")
+    payload["assumptions"] = ["A free-text assumption"]
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
+
+    payload["assumptions"] = [{"kind": "unknown", "text": "invalid"}]
+    with pytest.raises(ValidationError):
+        SpecAuthorityCompilationSuccess.model_validate(payload)
 
 
 def test_behavioral_invariants_keep_provenance_top_level() -> None:

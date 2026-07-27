@@ -27,6 +27,15 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
+from utils.agileforge_spec_profile import TechnicalSpecArtifact
+from utils.spec_authority_assumptions import (
+    FreeTextAssumption,
+    GroundingFailure,
+    canonical_assumption_key,
+    free_text_requires_typed_claim,
+    ground_assumption,
+    is_structured_assumption,
+)
 from utils.spec_schemas import (
     AuthorityQualityMergedItem,
     AuthorityQualityReport,
@@ -70,14 +79,17 @@ _META_POLICY_EXCERPT_PATTERNS = (
     re.compile(r"\bsubmission requirements?\b", flags=re.IGNORECASE),
 )
 
-_META_POLICY_ASSUMPTION = (
-    "Excluded non-product policy/admin excerpts from compiled invariants."
+_META_POLICY_ASSUMPTION = FreeTextAssumption(
+    kind="free_text",
+    text="Excluded non-product policy/admin excerpts from compiled invariants.",
 )
-_DUPLICATE_INVARIANT_ASSUMPTION = (
-    "Removed duplicate compiled invariant entries with identical type and parameters."
+_DUPLICATE_INVARIANT_ASSUMPTION = FreeTextAssumption(
+    kind="free_text",
+    text="Removed duplicate compiled invariant entries with identical type and parameters.",
 )
-_NON_NORMATIVE_SOURCE_ASSUMPTION = (
-    "Excluded non-normative source item from hard forbidden authority."
+_NON_NORMATIVE_SOURCE_ASSUMPTION = FreeTextAssumption(
+    kind="free_text",
+    text="Excluded non-normative source item from hard forbidden authority.",
 )
 _FIELD_SUPPORT_RATIO_THRESHOLD = 1.0
 _RELATION_SUPPORT_RATIO_THRESHOLD = 0.75
@@ -180,6 +192,86 @@ def _failure(
             source_metadata_issues=source_metadata_issues,
         )
     )
+
+
+def _append_host_assumption(
+    success: SpecAuthorityCompilationSuccess,
+    assumption: FreeTextAssumption,
+) -> None:
+    """Append a host conclusion only when its semantic identity is new."""
+    existing = {canonical_assumption_key(item) for item in success.assumptions}
+    if canonical_assumption_key(assumption) not in existing:
+        success.assumptions.append(assumption)
+
+
+def _claim_like_assumption_failure(
+    exc: ValidationError,
+) -> SpecAuthorityCompilerOutput | None:
+    """Map the finite free-text cue boundary to actionable retry feedback."""
+    for error in exc.errors(include_url=False):
+        if error["type"] != "assumption_claim_requires_typed_form":
+            continue
+        location = ".".join(str(part) for part in error["loc"])
+        return _failure(
+            reason="ASSUMPTION_CLAIM_REQUIRES_TYPED_FORM",
+            blocking_gaps=[
+                f"{location}: use item_status, accepted_normative_count, "
+                "or accepted_normative_set"
+            ],
+        )
+    return None
+
+
+def _claim_like_free_text_payload_failure(
+    payload: object,
+) -> SpecAuthorityCompilerOutput | None:
+    """Reject raw string claims before union parsing erases their cue error."""
+    if not isinstance(payload, dict):
+        return None
+    candidate = payload.get("result", payload)
+    if not isinstance(candidate, dict):
+        return None
+    assumptions = candidate.get("assumptions")
+    if not isinstance(assumptions, list):
+        return None
+    for index, assumption in enumerate(assumptions):
+        if not isinstance(assumption, str) or not free_text_requires_typed_claim(
+            assumption
+        ):
+            continue
+        return _failure(
+            reason="ASSUMPTION_CLAIM_REQUIRES_TYPED_FORM",
+            blocking_gaps=[
+                f"assumptions.{index}.free_text.text: use item_status, "
+                "accepted_normative_count, or accepted_normative_set"
+            ],
+        )
+    return None
+
+
+def _grounding_failure_output(
+    *,
+    index: int,
+    failure: GroundingFailure,
+) -> SpecAuthorityCompilerOutput:
+    """Return a stable, non-retryable structured-claim grounding failure."""
+    return _failure(
+        reason=failure.reason,
+        blocking_gaps=[
+            f"assumptions.{index - 1}: {failure.claim_kind} does not match "
+            "the canonical structured spec"
+        ],
+    )
+
+
+def _validated_success_output(
+    success: SpecAuthorityCompilationSuccess,
+) -> SpecAuthorityCompilerOutput:
+    """Revalidate every success after host normalization mutations."""
+    validated = SpecAuthorityCompilationSuccess.model_validate(
+        success.model_dump(mode="json")
+    )
+    return SpecAuthorityCompilerOutput(root=validated)
 
 
 def _strip_markdown_fence(raw_text: str) -> str:
@@ -490,8 +582,7 @@ def _filter_meta_policy_invariants(success: SpecAuthorityCompilationSuccess) -> 
 
     success.invariants = kept_invariants
     success.source_map = filtered_source_map
-    if _META_POLICY_ASSUMPTION not in success.assumptions:
-        success.assumptions.append(_META_POLICY_ASSUMPTION)
+    _append_host_assumption(success, _META_POLICY_ASSUMPTION)
     if not success.invariants:
         gap = "No invariants extracted from spec after excluding non-product policy/admin excerpts"
         if gap not in success.gaps:
@@ -544,8 +635,7 @@ def _deduplicate_semantic_invariants(success: SpecAuthorityCompilationSuccess) -
         original_count=original_count,
         removed_by_kept=removed_by_kept,
     )
-    if _DUPLICATE_INVARIANT_ASSUMPTION not in success.assumptions:
-        success.assumptions.append(_DUPLICATE_INVARIANT_ASSUMPTION)
+    _append_host_assumption(success, _DUPLICATE_INVARIANT_ASSUMPTION)
     logger.info("Removed %s duplicate semantic invariant(s)", removed)
     return removed
 
@@ -1289,8 +1379,7 @@ def _filter_non_normative_source_hard_bans(
     success.source_map = [
         entry for entry in success.source_map if entry.invariant_id not in removed_ids
     ]
-    if _NON_NORMATIVE_SOURCE_ASSUMPTION not in success.assumptions:
-        success.assumptions.append(_NON_NORMATIVE_SOURCE_ASSUMPTION)
+    _append_host_assumption(success, _NON_NORMATIVE_SOURCE_ASSUMPTION)
     return len(removed_ids)
 
 
@@ -2364,11 +2453,17 @@ def normalize_compiler_output(
     _default_missing_source_map_for_success_payload(payload)
     _repair_param_level_provenance_for_validation(payload)
     _repair_invalid_invariant_ids_for_validation(payload)
+    claim_like_payload_failure = _claim_like_free_text_payload_failure(payload)
+    if claim_like_payload_failure is not None:
+        return claim_like_payload_failure
 
     try:
         parsed = SpecAuthorityCompilerOutput.model_validate(payload)
         logger.info("Parsed compiler output as SpecAuthorityCompilerOutput")
     except ValidationError as output_exc:
+        claim_like_failure = _claim_like_assumption_failure(output_exc)
+        if claim_like_failure is not None:
+            return claim_like_failure
         validation_gaps.append(_summarize_validation_error("output", output_exc))
 
         if isinstance(payload, dict) and "result" in payload and "error" not in payload:
@@ -2416,12 +2511,37 @@ def normalize_compiler_output(
         success.prompt_hash = expected_prompt_hash
     success.compiler_version = SPEC_AUTHORITY_COMPILER_VERSION
 
+    structured_claims = [
+        assumption
+        for assumption in success.assumptions
+        if is_structured_assumption(assumption)
+    ]
+    if structured_claims:
+        if source_format != "agileforge.spec.v1" or not source_text:
+            return _failure(
+                reason="ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE",
+                blocking_gaps=[
+                    "Structured assumption claims require canonical spec JSON."
+                ],
+            )
+        try:
+            spec_artifact = TechnicalSpecArtifact.model_validate_json(source_text)
+        except ValidationError as exc:
+            return _failure(
+                reason="ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE",
+                blocking_gaps=[_summarize_validation_error("structured source", exc)],
+            )
+        for index, assumption in enumerate(success.assumptions, start=1):
+            grounded = ground_assumption(assumption, spec_artifact)
+            if isinstance(grounded, GroundingFailure):
+                return _grounding_failure_output(index=index, failure=grounded)
+
     if not success.invariants:
         logger.warning("No invariants extracted from spec authority compiler output")
         if "No invariants extracted from spec" not in success.gaps:
             success.gaps.append("No invariants extracted from spec")
         _clear_compact_ir(success)
-        return SpecAuthorityCompilerOutput(root=success)
+        return _validated_success_output(success)
 
     original_source_map = list(success.source_map)
     should_repair_source_map = bool(success.source_map) or (
@@ -2484,4 +2604,4 @@ def normalize_compiler_output(
 
     _clear_compact_ir(success)
 
-    return SpecAuthorityCompilerOutput(root=success)
+    return _validated_success_output(success)
