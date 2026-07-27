@@ -53,7 +53,8 @@ def latest_compiled_authority_for_product(
         select(CompiledSpecAuthority)
         .join(
             SpecRegistry,
-            CompiledSpecAuthority.spec_version_id == SpecRegistry.spec_version_id,
+            cast("Any", CompiledSpecAuthority.spec_version_id)
+            == SpecRegistry.spec_version_id,
         )
         .where(SpecRegistry.product_id == product_id)
         .order_by(

@@ -228,10 +228,12 @@ def _claim_like_free_text_payload_failure(
     """Reject raw string claims before union parsing erases their cue error."""
     if not isinstance(payload, dict):
         return None
-    candidate = payload.get("result", payload)
+    payload_dict = cast("dict[str, object]", payload)
+    candidate = payload_dict.get("result", payload_dict)
     if not isinstance(candidate, dict):
         return None
-    assumptions = candidate.get("assumptions")
+    candidate_dict = cast("dict[str, object]", candidate)
+    assumptions = candidate_dict.get("assumptions")
     if not isinstance(assumptions, list):
         return None
     for index, assumption in enumerate(assumptions):

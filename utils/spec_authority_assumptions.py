@@ -6,7 +6,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeGuard
 
 from pydantic import (
     BaseModel,
@@ -52,8 +52,6 @@ _ACCEPTED_CUE_RE: re.Pattern[str] = re.compile(r"\baccepted\b")
 _ITEM_CUE_RE: re.Pattern[str] = re.compile(r"\bitems?\b")
 _DUPLICATE_SOURCE_ITEM_IDS_MESSAGE: str = "source_item_ids must be unique"
 _EMPTY_TEXT_MESSAGE: str = "text must not be empty"
-_CLAIM_LIKE_TEXT_ERROR_TYPE: str = "assumption_claim_requires_typed_form"
-_CLAIM_LIKE_TEXT_MESSAGE: str = "claim-like assumption must use a typed claim variant"
 _DUPLICATE_ITEM_IDS_MESSAGE: str = "item_ids must be unique"
 
 
@@ -125,8 +123,8 @@ class FreeTextAssumption(_StrictAssumptionModel):
             raise ValueError(_EMPTY_TEXT_MESSAGE)
         if free_text_requires_typed_claim(text):
             raise PydanticCustomError(
-                _CLAIM_LIKE_TEXT_ERROR_TYPE,
-                _CLAIM_LIKE_TEXT_MESSAGE,
+                "assumption_claim_requires_typed_form",  # noqa: EM101
+                "claim-like assumption must use a typed claim variant",
             )
         return text
 
@@ -171,6 +169,11 @@ AuthorityAssumption = Annotated[
     | AcceptedNormativeSetAssumptionClaim,
     Field(discriminator="kind"),
 ]
+type StructuredAuthorityAssumption = (
+    ItemStatusAssumptionClaim
+    | AcceptedNormativeCountAssumptionClaim
+    | AcceptedNormativeSetAssumptionClaim
+)
 AUTHORITY_ASSUMPTION_ADAPTER: TypeAdapter[AuthorityAssumption] = TypeAdapter(
     AuthorityAssumption
 )
@@ -194,7 +197,9 @@ class GroundingFailure:
     actual_source_item_ids: tuple[str, ...]
 
 
-def is_structured_assumption(assumption: AuthorityAssumption) -> bool:
+def is_structured_assumption(
+    assumption: AuthorityAssumption,
+) -> TypeGuard[StructuredAuthorityAssumption]:
     """Return whether an assumption requires structured-spec grounding."""
     return not isinstance(assumption, FreeTextAssumption)
 

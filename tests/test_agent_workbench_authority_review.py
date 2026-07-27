@@ -27,6 +27,7 @@ from services.agent_workbench.authority_review import (
 from tests.authority_assumption_fixtures import historical_v2_compiled_authority
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import (
+    AgileForgeSpecStatus,
     TechnicalSpecArtifact,
     canonical_spec_hash,
     canonical_spec_json,
@@ -1519,7 +1520,7 @@ def test_review_grounds_and_preserves_typed_assumptions(
             ItemStatusAssumptionClaim(
                 kind="item_status",
                 item_id="REQ.guard-tokens",
-                status="accepted",
+                status=AgileForgeSpecStatus.ACCEPTED,
                 provenance=provenance,
             ),
             AcceptedNormativeCountAssumptionClaim(
@@ -1614,7 +1615,7 @@ def test_review_blocks_tampered_typed_claims_with_full_details_and_identity(
             ItemStatusAssumptionClaim(
                 kind="item_status",
                 item_id="REQ.guard-tokens",
-                status="draft",
+                status=AgileForgeSpecStatus.DRAFT,
                 provenance=provenance,
             ),
             AcceptedNormativeCountAssumptionClaim(

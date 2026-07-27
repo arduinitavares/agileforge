@@ -17,6 +17,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.compiler_contr
 from orchestrator_agent.agent_tools.spec_authority_compiler_agent.normalizer import (
     normalize_compiler_output,
 )
+from utils.spec_authority_assumptions import FreeTextAssumption
 from utils.spec_schemas import (
     DataContractParams,
     InvariantType,
@@ -645,7 +646,6 @@ def _test_generated_gap_id(
 
 def _test_generated_assumption_id(candidate_id: str, text: str) -> str:
     from utils.spec_authority_assumptions import (  # noqa: PLC0415
-        FreeTextAssumption,
         canonical_assumption_key,
     )
 
@@ -1387,6 +1387,7 @@ def test_normalizer_filters_non_normative_decision_hard_ban() -> None:
             assumption.text
             == "Excluded non-normative source item from hard forbidden authority."
             for assumption in normalized.root.assumptions
+            if isinstance(assumption, FreeTextAssumption)
         )
         == 1
     )
@@ -1501,6 +1502,7 @@ def test_normalizer_filters_non_normative_open_question_hard_ban() -> None:
             assumption.text
             == "Excluded non-normative source item from hard forbidden authority."
             for assumption in normalized.root.assumptions
+            if isinstance(assumption, FreeTextAssumption)
         )
         == 1
     )
@@ -5206,6 +5208,7 @@ def test_normalizer_filters_meta_policy_invariant_from_plagiarism_section() -> N
             assumption.text
             == "Excluded non-product policy/admin excerpts from compiled invariants."
             for assumption in normalized.root.assumptions
+            if isinstance(assumption, FreeTextAssumption)
         )
     )
 

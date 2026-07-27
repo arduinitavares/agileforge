@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.specs.authority_quality import apply_authority_quality_gate
+from utils.agileforge_spec_profile import AgileForgeSpecStatus
 from utils.spec_authority_assumptions import (
     AcceptedNormativeCountAssumptionClaim,
     AcceptedNormativeSetAssumptionClaim,
@@ -267,7 +268,18 @@ def test_quality_gate_keeps_different_structured_assumption_values() -> None:
         )
     )
 
-    assert [assumption.count for assumption in gated.assumptions] == [1, 2]
+    assert gated.assumptions == [
+        AcceptedNormativeCountAssumptionClaim(
+            kind="accepted_normative_count",
+            count=1,
+            provenance=provenance,
+        ),
+        AcceptedNormativeCountAssumptionClaim(
+            kind="accepted_normative_count",
+            count=2,
+            provenance=provenance,
+        ),
+    ]
     assert gated.authority_quality is not None
     assert gated.authority_quality.summary.merged_assumption_count == 0
 
@@ -286,7 +298,7 @@ def test_quality_gate_noisy_grouping_ignores_structured_assumptions() -> None:
                 ItemStatusAssumptionClaim(
                     kind="item_status",
                     item_id="REQ.alpha",
-                    status="accepted",
+                    status=AgileForgeSpecStatus.ACCEPTED,
                     provenance=provenance,
                 ),
                 AcceptedNormativeCountAssumptionClaim(

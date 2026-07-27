@@ -8,11 +8,12 @@ from typing import Annotated, Any
 import pytest
 from pydantic import Field, TypeAdapter, ValidationError
 
-from utils.agileforge_spec_profile import TechnicalSpecArtifact
+from utils.agileforge_spec_profile import AgileForgeSpecStatus, TechnicalSpecArtifact
 from utils.spec_authority_assumptions import (
     AUTHORITY_ASSUMPTION_ADAPTER,
     AcceptedNormativeCountAssumptionClaim,
     AcceptedNormativeSetAssumptionClaim,
+    AuthorityAssumption,
     FreeTextAssumption,
     GroundingFailure,
     ItemStatusAssumptionClaim,
@@ -276,7 +277,7 @@ def test_canonical_free_text_identity_normalizes_unicode_and_case() -> None:
     ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.alpha",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id="SPEC.authority-review",
@@ -303,7 +304,9 @@ def test_canonical_free_text_identity_normalizes_unicode_and_case() -> None:
     ),
 ],
 )
-def test_canonical_keys_are_separator_stable_json(assumption: object) -> None:
+def test_canonical_keys_are_separator_stable_json(
+    assumption: AuthorityAssumption,
+) -> None:
     """Every variant uses one compact sorted JSON identity encoding."""
     assert canonical_assumption_key(assumption).replace(":", ":") == json.dumps(
         json.loads(canonical_assumption_key(assumption)),
@@ -341,7 +344,7 @@ def test_canonical_keys_distinguish_kinds_and_values() -> None:
         ItemStatusAssumptionClaim(
             kind="item_status",
             item_id="REQ.alpha",
-            status="accepted",
+            status=AgileForgeSpecStatus.ACCEPTED,
             provenance=StructuredSpecClaimProvenance(
                 source="structured_spec",
                 artifact_id="SPEC.authority-review",
@@ -376,7 +379,10 @@ def test_canonical_keys_distinguish_kinds_and_values() -> None:
     ),
 ],
 )
-def test_render_assumption_text_is_readable(assumption: object, expected: str) -> None:
+def test_render_assumption_text_is_readable(
+    assumption: AuthorityAssumption,
+    expected: str,
+) -> None:
     """Every variant has stable review-friendly text."""
     assert render_assumption_text(assumption) == expected
 
@@ -388,7 +394,7 @@ def test_grounding_accepts_true_item_status(
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="GOAL.gamma",
-        status="draft",
+        status=AgileForgeSpecStatus.DRAFT,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id=structured_spec.artifact_id,
@@ -406,7 +412,7 @@ def test_grounding_rejects_false_item_status(
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="GOAL.gamma",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id=structured_spec.artifact_id,
@@ -488,7 +494,7 @@ def test_grounding_rejects_wrong_artifact_provenance(
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.alpha",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id="SPEC.other",
@@ -509,7 +515,7 @@ def test_grounding_rejects_incomplete_item_status_provenance(
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.alpha",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id=structured_spec.artifact_id,
@@ -532,7 +538,7 @@ def test_grounding_rejects_invented_item_status_provenance(
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.alpha",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id=structured_spec.artifact_id,
@@ -553,7 +559,7 @@ def test_grounding_rejects_missing_item(structured_spec: TechnicalSpecArtifact) 
     claim = ItemStatusAssumptionClaim(
         kind="item_status",
         item_id="REQ.missing",
-        status="accepted",
+        status=AgileForgeSpecStatus.ACCEPTED,
         provenance=StructuredSpecClaimProvenance(
             source="structured_spec",
             artifact_id=structured_spec.artifact_id,

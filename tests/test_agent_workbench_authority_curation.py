@@ -1657,9 +1657,9 @@ def test_authority_curate_uses_positional_ids_after_final_assumption_dedup() -> 
         },
     )
 
-    assert [assumption.text for assumption in final_authority.assumptions] == [
-        "Alpha assumption.",
-        "Beta assumption.",
+    assert final_authority.assumptions == [
+        FreeTextAssumption(kind="free_text", text="Alpha assumption."),
+        FreeTextAssumption(kind="free_text", text="Beta assumption."),
     ]
     assert [entry["target_id"] for entry in menu] == ["ASM-1", "ASM-2"]
 

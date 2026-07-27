@@ -33,6 +33,7 @@ from tests.typing_helpers import make_tool_context, require_id
 from utils import failure_artifacts
 from utils.agileforge_spec_profile import TechnicalSpecArtifact
 from utils.failure_artifacts import AgentInvocationError
+from utils.spec_authority_assumptions import ItemStatusAssumptionClaim
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -2364,7 +2365,10 @@ def test_partial_item_status_claims_re_ground_against_final_full_spec() -> None:
         final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
     )
 
-    assert [assumption.item_id for assumption in merged.assumptions] == ["REQ.beta"]
+    assert len(merged.assumptions) == 1
+    assumption = merged.assumptions[0]
+    assert isinstance(assumption, ItemStatusAssumptionClaim)
+    assert assumption.item_id == "REQ.beta"
 
 
 def test_merge_compilation_successes_reports_cross_success_duplicate_merges() -> None:

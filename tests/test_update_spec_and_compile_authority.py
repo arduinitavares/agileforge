@@ -1,12 +1,13 @@
 """Tests for implicit approval spec update tool."""
 
+from __future__ import annotations
+
 import json
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from agile_sqlmodel import (
@@ -26,6 +27,12 @@ from utils.spec_schemas import (
     SpecAuthorityCompilationSuccess,
     SpecAuthorityCompilerOutput,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from google.adk.tools import ToolContext
+    from sqlalchemy.engine import Engine
 
 
 @pytest.fixture
@@ -313,12 +320,11 @@ def test_recompile_returns_exact_candidate_without_transferring_acceptance(
     compiled_candidate_id: int | None = None
 
     def compile_then_append_newer_row(
-        params: object,
-        tool_context: object = None,
-        **kwargs: object,
-    ) -> dict[str, object]:
+        params: dict[str, Any],
+        tool_context: ToolContext | None = None,
+    ) -> dict[str, Any]:
         nonlocal compiled_candidate_id
-        result = original_compile(params, tool_context=tool_context, **kwargs)
+        result = original_compile(params, tool_context=tool_context)
         candidate_id = result["authority_id"]
         assert isinstance(candidate_id, int)
         compiled_candidate_id = candidate_id

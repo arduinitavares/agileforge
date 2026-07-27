@@ -165,7 +165,7 @@ def test_export_snapshot_import_boundary() -> None:
     assert db_imports == {"engine"}
     assert db_bound_imports == {"default_engine"}
     assert enum_imports == {"StoryStatus"}
-    assert specs_imports == {"CompiledSpecAuthority", "SpecRegistry"}
+    assert specs_imports == {"SpecRegistry"}
     assert agile_imports == set()
     assert agile_aliases == set()
     assert not agile_attr_refs

@@ -63,7 +63,7 @@ def test_spec_tools_import_boundary() -> None:
     assert {"Feature", "UserStory"} <= core_bound_imports
     assert db_imports == {"engine", "get_engine"}
     assert db_bound_imports == {"engine", "get_engine"}
-    assert {"CompiledSpecAuthority", "SpecAuthorityAcceptance"} <= spec_imports
-    assert {"CompiledSpecAuthority", "SpecAuthorityAcceptance"} <= spec_bound_imports
+    assert spec_imports == {"CompiledSpecAuthority"}
+    assert spec_bound_imports == {"CompiledSpecAuthority"}
     assert not agile_imports
     assert not agile_aliases

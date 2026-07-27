@@ -53,8 +53,12 @@ from utils.agileforge_spec_profile import (
 )
 from utils.spec_authority_assumptions import (
     AUTHORITY_ASSUMPTION_ADAPTER,
+    AcceptedNormativeCountAssumptionClaim,
+    AcceptedNormativeSetAssumptionClaim,
     AuthorityAssumption,
     GroundingFailure,
+    ItemStatusAssumptionClaim,
+    StructuredAuthorityAssumption,
     canonical_assumption_key,
     ground_assumption,
     is_structured_assumption,
@@ -1095,7 +1099,7 @@ def _compiled_assumption_findings(
 def _compiled_claim_source_unavailable_finding(
     *,
     assumption_index: int,
-    assumption: AuthorityAssumption,
+    assumption: StructuredAuthorityAssumption,
 ) -> JsonDict:
     provenance = assumption.provenance
     return _compiled_claim_finding(
@@ -1174,13 +1178,16 @@ def _compiled_claim_finding(
     }
 
 
-def _assumption_claimed_value(assumption: AuthorityAssumption) -> object:
+def _assumption_claimed_value(assumption: StructuredAuthorityAssumption) -> object:
     """Return the claimed scalar or set value for an already typed claim."""
-    if assumption.kind == "item_status":
+    if isinstance(assumption, ItemStatusAssumptionClaim):
         return assumption.status.value
-    if assumption.kind == "accepted_normative_count":
+    if isinstance(assumption, AcceptedNormativeCountAssumptionClaim):
         return assumption.count
-    return list(assumption.item_ids)
+    if isinstance(assumption, AcceptedNormativeSetAssumptionClaim):
+        return list(assumption.item_ids)
+    msg = f"unsupported structured assumption: {type(assumption).__name__}"
+    raise TypeError(msg)
 
 
 def _artifact_with_review_findings(

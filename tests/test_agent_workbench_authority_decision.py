@@ -43,7 +43,11 @@ from services.agent_workbench.authority_review import (
 from services.agent_workbench.mutation_ledger import MutationStatus, _json_load
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from tests.typing_helpers import require_id
-from utils.agileforge_spec_profile import TechnicalSpecArtifact, canonical_spec_json
+from utils.agileforge_spec_profile import (
+    AgileForgeSpecStatus,
+    TechnicalSpecArtifact,
+    canonical_spec_json,
+)
 from utils.spec_authority_assumptions import (
     ItemStatusAssumptionClaim,
     StructuredSpecClaimProvenance,
@@ -1160,7 +1164,7 @@ def test_typed_claim_mismatch_blocks_accept(
             ItemStatusAssumptionClaim(
                 kind="item_status",
                 item_id="REQ.guard-tokens",
-                status="accepted",
+                status=AgileForgeSpecStatus.ACCEPTED,
                 provenance=StructuredSpecClaimProvenance(
                     source="structured_spec",
                     artifact_id="SPEC.authority-decision",
