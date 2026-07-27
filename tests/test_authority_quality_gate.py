@@ -7,6 +7,7 @@ from pathlib import Path
 from services.specs.authority_quality import apply_authority_quality_gate
 from utils.spec_authority_assumptions import (
     AcceptedNormativeCountAssumptionClaim,
+    AcceptedNormativeSetAssumptionClaim,
     AuthorityAssumption,
     FreeTextAssumption,
     ItemStatusAssumptionClaim,
@@ -291,6 +292,11 @@ def test_quality_gate_noisy_grouping_ignores_structured_assumptions() -> None:
                 AcceptedNormativeCountAssumptionClaim(
                     kind="accepted_normative_count",
                     count=1,
+                    provenance=provenance,
+                ),
+                AcceptedNormativeSetAssumptionClaim(
+                    kind="accepted_normative_set",
+                    item_ids=["REQ.alpha"],
                     provenance=provenance,
                 ),
             ],

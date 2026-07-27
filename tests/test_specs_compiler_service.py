@@ -2279,7 +2279,23 @@ def test_merge_compilation_successes_preserves_later_quality_reports() -> None:
     assert len(merged.authority_quality.merged_items) == 1
 
 
-def test_scope_extension_invalidates_base_aggregate_claim() -> None:
+@pytest.mark.parametrize(
+    ("claim", "assumption_kind"),
+    [
+        (
+            _true_count_claim(count=1, source_item_ids=["REQ.alpha"]),
+            "accepted_normative_count",
+        ),
+        (
+            _true_set_claim(item_ids=["REQ.alpha"]),
+            "accepted_normative_set",
+        ),
+    ],
+)
+def test_scope_extension_invalidates_base_aggregate_claim(
+    claim: dict[str, object],
+    assumption_kind: str,
+) -> None:
     """Extension-only input removes stale accepted-base aggregate claims."""
     from services.specs import compiler_service  # noqa: PLC0415
 
@@ -2287,9 +2303,7 @@ def test_scope_extension_invalidates_base_aggregate_claim() -> None:
         [
             compiler_service.ScopedCompilationSuccess(
                 scope=compiler_service.CompilationScope.ACCEPTED_BASE,
-                success=_scope_merge_success(
-                    _true_count_claim(count=1, source_item_ids=["REQ.alpha"])
-                ),
+                success=_scope_merge_success(claim),
             ),
             compiler_service.ScopedCompilationSuccess(
                 scope=compiler_service.CompilationScope.EXTENSION_ONLY,
@@ -2300,13 +2314,13 @@ def test_scope_extension_invalidates_base_aggregate_claim() -> None:
     )
 
     assert all(
-        assumption.kind != "accepted_normative_count"
-        for assumption in merged.assumptions
+        assumption.kind != assumption_kind for assumption in merged.assumptions
     )
     assert merged.authority_quality is not None
     assert merged.authority_quality.invalidated_items[0].removed_id == "ASM-1"
-    assert merged.authority_quality.invalidated_items[0].assumption_kind == (
-        "accepted_normative_count"
+    assert (
+        merged.authority_quality.invalidated_items[0].assumption_kind
+        == assumption_kind
     )
     assert merged.authority_quality.invalidated_items[0].reason == (
         "aggregate_claim_invalidated_by_scope_extension"
@@ -2343,7 +2357,26 @@ def test_partial_scope_rejects_aggregate_assumption_claims(
         )
 
 
-def test_full_spec_aggregate_claims_are_retained_when_grounded() -> None:
+@pytest.mark.parametrize(
+    ("claim", "assumption_kind"),
+    [
+        (
+            _true_count_claim(
+                count=2,
+                source_item_ids=["REQ.alpha", "REQ.beta"],
+            ),
+            "accepted_normative_count",
+        ),
+        (
+            _true_set_claim(item_ids=["REQ.alpha", "REQ.beta"]),
+            "accepted_normative_set",
+        ),
+    ],
+)
+def test_single_full_spec_aggregate_claim_is_retained_when_grounded(
+    claim: dict[str, object],
+    assumption_kind: str,
+) -> None:
     """Full-spec aggregate claims survive a one-success semantic merge."""
     from services.specs import compiler_service  # noqa: PLC0415
 
@@ -2351,27 +2384,50 @@ def test_full_spec_aggregate_claims_are_retained_when_grounded() -> None:
         [
             compiler_service.ScopedCompilationSuccess(
                 scope=compiler_service.CompilationScope.FULL_SPEC,
-                success=_scope_merge_success(
-                    _true_count_claim(
-                        count=2,
-                        source_item_ids=["REQ.alpha", "REQ.beta"],
-                    )
-                ),
-            ),
-            compiler_service.ScopedCompilationSuccess(
-                scope=compiler_service.CompilationScope.FULL_SPEC,
-                success=_scope_merge_success(
-                    _true_set_claim(item_ids=["REQ.alpha", "REQ.beta"])
-                ),
+                success=_scope_merge_success(claim),
             ),
         ],
         final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
     )
 
-    assert [assumption.kind for assumption in merged.assumptions] == [
-        "accepted_normative_count",
-        "accepted_normative_set",
-    ]
+    assert [assumption.kind for assumption in merged.assumptions] == [assumption_kind]
+
+
+def test_iterative_compilation_converts_scope_error_to_failure_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The iterative caller returns the exact partial-scope semantic failure."""
+    from services.specs import compiler_service  # noqa: PLC0415
+
+    artifact = _scope_merge_spec("REQ.alpha")
+    full_success = _scope_merge_success(_item_status_claim("REQ.alpha"))
+    focused_success = _scope_merge_success(
+        _true_count_claim(count=1, source_item_ids=["REQ.alpha"])
+    )
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_and_normalize_spec_authority",
+        lambda **_kwargs: SimpleNamespace(
+            raw_json=SpecAuthorityCompilerOutput(root=full_success).model_dump_json(),
+            output=SpecAuthorityCompilerOutput(root=full_success),
+        ),
+    )
+    monkeypatch.setattr(
+        compiler_service,
+        "_invoke_focused_structured_item_authority",
+        lambda *_args, **_kwargs: focused_success,
+    )
+
+    result = compiler_service._compile_spec_authority_output(
+        spec_content=artifact.model_dump_json(by_alias=True),
+        content_ref=None,
+        product_id=None,
+        spec_version_id=None,
+    )
+
+    assert isinstance(result.output.root, SpecAuthorityCompilationFailure)
+    assert result.output.root.error == "COMPILATION_FAILED"
+    assert result.output.root.reason == "ASSUMPTION_CLAIM_SCOPE_INVALID"
 
 
 def test_partial_item_status_claims_re_ground_against_final_full_spec() -> None:
