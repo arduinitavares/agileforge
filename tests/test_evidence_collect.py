@@ -827,8 +827,8 @@ def _seed_authority(
         session.commit()
         authority = CompiledSpecAuthority(
             spec_version_id=1,
-            compiler_version="1",
-            prompt_hash="prompt",
+            compiler_version="3.0.0",
+            prompt_hash="0" * 64,
             compiled_at=datetime(2026, 5, 27, tzinfo=UTC),
             compiled_artifact_json=json.dumps(
                 compiled_artifact or _compiled_authority_v3()
@@ -849,8 +849,8 @@ def _seed_authority(
                 policy="test",
                 decided_by="test",
                 decided_at=datetime(2026, 5, 27, tzinfo=UTC),
-                compiler_version="1",
-                prompt_hash="prompt",
+                compiler_version="3.0.0",
+                prompt_hash="0" * 64,
                 spec_hash="spec-hash",
                 pending_authority_id=1,
                 authority_fingerprint=authority_fingerprint,
@@ -896,8 +896,33 @@ def _compiled_authority_v3(
         ]
         if invariant_items
         else [],
-        "compiler_version": "1",
+        "compiler_version": "3.0.0",
         "prompt_hash": "0" * 64,
+    }
+
+
+def test_seed_authority_metadata_matches_current_v3_artifact() -> None:
+    """Runner fixture row and acceptance metadata match the stored v3 artifact."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert authority is not None
+        assert acceptance is not None
+        artifact = json.loads(authority.compiled_artifact_json or "{}")
+
+    expected = ("3.0.0", "0" * 64)
+    assert {
+        "artifact": (artifact["compiler_version"], artifact["prompt_hash"]),
+        "row": (authority.compiler_version, authority.prompt_hash),
+        "acceptance": (acceptance.compiler_version, acceptance.prompt_hash),
+    } == {
+        "artifact": expected,
+        "row": expected,
+        "acceptance": expected,
     }
 
 
