@@ -28,6 +28,13 @@ from utils.agileforge_spec_profile import (
     canonical_spec_hash,
     canonical_spec_json,
 )
+from utils.spec_authority_assumptions import (
+    AcceptedNormativeCountAssumptionClaim,
+    AcceptedNormativeSetAssumptionClaim,
+    FreeTextAssumption,
+    ItemStatusAssumptionClaim,
+    StructuredSpecClaimProvenance,
+)
 from utils.spec_schemas import (
     AuthorityQualityReport,
     Invariant,
@@ -339,7 +346,8 @@ def test_review_returns_pending_authority_packet_with_guard_tokens(
     )
 
     result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
+        project_id=project_id,
+        output_format="text",
     )
 
     assert result["ok"] is True
@@ -448,7 +456,8 @@ def test_review_project_without_pending_authority_returns_not_pending(
     session.commit()
 
     result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
+        project_id=project_id,
+        output_format="text",
     )
 
     assert result["ok"] is False
@@ -543,7 +552,10 @@ def test_review_text_format_summarizes_human_acceptance_decision(
         rejected_features=[],
         gaps=[],
         assumptions=[
-            "operator confirms export boundary before review-state export",
+            FreeTextAssumption(
+                kind="free_text",
+                text="operator confirms export boundary before review-state export",
+            ),
         ],
         source_map=[
             SourceMapEntry(
@@ -771,7 +783,8 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     session.commit()
 
     result = AuthorityReviewService(engine=_engine(session)).review(
-        project_id=project_id
+        project_id=project_id,
+        output_format="text",
     )
 
     assert result["ok"] is True
@@ -786,6 +799,7 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     )
     assert invalid["severity"] == "blocking"
     assert invalid["override_allowed"] is False
+    assert "Review assumes CLI output is JSON." in result["data"]["text"]
     artifact = result["data"]["pending_authority"]["artifact"]
     assert artifact["eligible_feature_rules"] == [
         {
@@ -1359,7 +1373,12 @@ def test_review_summary_counts_compiler_artifact_evidence(
         eligible_feature_rules=[],
         rejected_features=[],
         gaps=["Clarify retention policy."],
-        assumptions=["Audit evidence is stored with each decision."],
+        assumptions=[
+            FreeTextAssumption(
+                kind="free_text",
+                text="Audit evidence is stored with each decision.",
+            )
+        ],
         source_map=[
             SourceMapEntry(
                 invariant_id=INVARIANT_ID,
@@ -1396,11 +1415,11 @@ def test_review_summary_counts_compiler_artifact_evidence(
     assert summary["compiler_invariant_count"] == 1
 
 
-def test_review_allows_true_only_accepted_compiler_assumption(
+def test_review_grounds_and_preserves_typed_assumptions(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """True accepted-item exclusivity assumptions remain accept-ready."""
+    """Truthful typed claims remain ready and preserve typed JSON output."""
     payload = json.loads(
         _agileforge_spec_profile_payload(
             requirement_statement="The system must include audit evidence.",
@@ -1411,6 +1430,11 @@ def test_review_allows_true_only_accepted_compiler_assumption(
         if item["id"] == "REQ.guard-tokens":
             item["status"] = "accepted"
     spec_content = canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
+    provenance = StructuredSpecClaimProvenance(
+        source="structured_spec",
+        artifact_id="SPEC.authority-review",
+        source_item_ids=["REQ.guard-tokens"],
+    )
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Authority review"],
         domain="agent workbench",
@@ -1425,10 +1449,26 @@ def test_review_allows_true_only_accepted_compiler_assumption(
         rejected_features=[],
         gaps=[],
         assumptions=[
-            (
-                "Only REQ.guard-tokens was accepted; it governs authority "
-                "review evidence."
-            )
+            FreeTextAssumption(
+                kind="free_text",
+                text="An operator reviews the authority packet.",
+            ),
+            ItemStatusAssumptionClaim(
+                kind="item_status",
+                item_id="REQ.guard-tokens",
+                status="accepted",
+                provenance=provenance,
+            ),
+            AcceptedNormativeCountAssumptionClaim(
+                kind="accepted_normative_count",
+                count=1,
+                provenance=provenance,
+            ),
+            AcceptedNormativeSetAssumptionClaim(
+                kind="accepted_normative_set",
+                item_ids=["REQ.guard-tokens"],
+                provenance=provenance,
+            ),
         ],
         source_map=[
             SourceMapEntry(
@@ -1457,16 +1497,28 @@ def test_review_allows_true_only_accepted_compiler_assumption(
     )
 
     codes = {finding["code"] for finding in result["data"]["review_findings"]}
-    assert "COMPILER_ASSUMPTION_UNSUPPORTED" not in codes
+    assert "COMPILER_ASSUMPTION_CLAIM_MISMATCH" not in codes
     assert result["data"]["review_summary"]["acceptance_status"] == "accept_ready"
+    assert result["data"]["pending_authority"]["artifact"]["assumptions"] == [
+        assumption.model_dump(mode="json") for assumption in success.assumptions
+    ]
+
+    text_result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id,
+        output_format="text",
+    )
+    text = text_result["data"]["text"]
+    assert "An operator reviews the authority packet." in text
+    assert "REQ.guard-tokens status is accepted" in text
+    assert "1 accepted normative items" in text
+    assert "accepted normative items: REQ.guard-tokens" in text
 
 
-def test_review_blocks_false_only_accepted_compiler_assumption(
+def test_review_blocks_tampered_typed_claims_with_full_details_and_identity(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """False accepted-item exclusivity assumptions block authority review."""
-    expected_accepted_item_count = 2
+    """Claim kind, value, artifact, and provenance mismatches block review."""
     payload = json.loads(
         _agileforge_spec_profile_payload(
             requirement_statement="The system must include audit evidence.",
@@ -1476,19 +1528,12 @@ def test_review_blocks_false_only_accepted_compiler_assumption(
     for item in payload["items"]:
         if item["id"] == "REQ.guard-tokens":
             item["status"] = "accepted"
-    payload["items"].append(
-        {
-            "id": "CONSTRAINT.audit-log",
-            "type": "CONSTRAINT",
-            "status": "accepted",
-            "title": "Audit log retention",
-            "statement": "The system must retain authority audit logs.",
-            "level": "MUST",
-            "verification": "inspection",
-            "acceptance": ["Authority audit logs are retained."],
-        }
-    )
     spec_content = canonical_spec_json(TechnicalSpecArtifact.model_validate(payload))
+    provenance = StructuredSpecClaimProvenance(
+        source="structured_spec",
+        artifact_id="SPEC.authority-review",
+        source_item_ids=["REQ.guard-tokens"],
+    )
     success = SpecAuthorityCompilationSuccess(
         scope_themes=["Authority review"],
         domain="agent workbench",
@@ -1503,10 +1548,40 @@ def test_review_blocks_false_only_accepted_compiler_assumption(
         rejected_features=[],
         gaps=[],
         assumptions=[
-            (
-                "Only REQ.guard-tokens was accepted; it governs authority "
-                "review evidence."
-            )
+            ItemStatusAssumptionClaim(
+                kind="item_status",
+                item_id="REQ.guard-tokens",
+                status="draft",
+                provenance=provenance,
+            ),
+            AcceptedNormativeCountAssumptionClaim(
+                kind="accepted_normative_count",
+                count=2,
+                provenance=provenance,
+            ),
+            AcceptedNormativeSetAssumptionClaim(
+                kind="accepted_normative_set",
+                item_ids=["CONSTRAINT.audit-log"],
+                provenance=provenance,
+            ),
+            AcceptedNormativeCountAssumptionClaim(
+                kind="accepted_normative_count",
+                count=1,
+                provenance=StructuredSpecClaimProvenance(
+                    source="structured_spec",
+                    artifact_id="SPEC.other-artifact",
+                    source_item_ids=["REQ.guard-tokens"],
+                ),
+            ),
+            AcceptedNormativeCountAssumptionClaim(
+                kind="accepted_normative_count",
+                count=1,
+                provenance=StructuredSpecClaimProvenance(
+                    source="structured_spec",
+                    artifact_id="SPEC.authority-review",
+                    source_item_ids=["GOAL.review-evidence"],
+                ),
+            ),
         ],
         source_map=[
             SourceMapEntry(
@@ -1535,21 +1610,93 @@ def test_review_blocks_false_only_accepted_compiler_assumption(
     )
 
     findings = result["data"]["review_findings"]
-    codes = {finding["code"] for finding in findings}
-    assert "COMPILER_ASSUMPTION_UNSUPPORTED" in codes
-    finding = next(
+    findings = [
         finding
         for finding in findings
-        if finding["code"] == "COMPILER_ASSUMPTION_UNSUPPORTED"
+        if finding["code"] == "COMPILER_ASSUMPTION_CLAIM_MISMATCH"
+    ]
+    expected_mismatch_count = 5
+    assert len(findings) == expected_mismatch_count
+    assert {finding["details"]["claim_kind"] for finding in findings} == {
+        "item_status",
+        "accepted_normative_count",
+        "accepted_normative_set",
+    }
+    assert all(finding["severity"] == "blocking" for finding in findings)
+    assert all(finding["override_allowed"] is False for finding in findings)
+    assert all(
+        {
+            "assumption_index",
+            "claim_kind",
+            "claimed_value",
+            "actual_value",
+            "artifact_id",
+            "claimed_source_item_ids",
+            "actual_source_item_ids",
+        } <= finding["details"].keys()
+        for finding in findings
+    )
+    assert len({finding["finding_id"] for finding in findings}) == len(findings)
+    assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
+
+
+def test_review_blocks_typed_claim_when_structured_source_is_unavailable(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed claim without a parsed structured source is non-overrideable."""
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority review"],
+        domain="agent workbench",
+        invariants=[],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[
+            AcceptedNormativeCountAssumptionClaim(
+                kind="accepted_normative_count",
+                count=1,
+                provenance=StructuredSpecClaimProvenance(
+                    source="structured_spec",
+                    artifact_id="SPEC.authority-review",
+                    source_item_ids=["REQ.guard-tokens"],
+                ),
+            )
+        ],
+        source_map=[],
+        compiler_version=COMPILER_VERSION,
+        prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
+    )
+    project_id, _spec_version_id, _authority_id, _spec_path = (
+        _seed_pending_review_project(
+            session,
+            tmp_path=tmp_path,
+            spec_content=_base_spec(),
+            artifact_json=_stored_compiled_success_json_from_success(success),
+        )
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_review._structured_artifact_from_text",
+        lambda _text: None,
+    )
+
+    result = AuthorityReviewService(engine=_engine(session)).review(
+        project_id=project_id
+    )
+
+    finding = next(
+        finding
+        for finding in result["data"]["review_findings"]
+        if finding["code"] == "COMPILER_ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE"
     )
     assert finding["severity"] == "blocking"
     assert finding["override_allowed"] is False
     assert finding["details"]["assumption_index"] == 1
-    assert finding["details"]["claimed_item_id"] == "REQ.guard-tokens"
-    assert (
-        finding["details"]["accepted_item_count"] == expected_accepted_item_count
-    )
-    assert result["data"]["review_summary"]["acceptance_status"] == "blocked"
+    assert finding["details"]["claim_kind"] == "accepted_normative_count"
+    assert finding["details"]["claimed_source_item_ids"] == ["REQ.guard-tokens"]
 
 
 def test_review_packet_exposes_scope_discovery_provenance(

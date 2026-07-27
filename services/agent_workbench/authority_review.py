@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import asdict, dataclass
 from json import JSONDecodeError
@@ -34,6 +33,7 @@ from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
 from services.specs.compiler_service import (
+    COMPILED_AUTHORITY_SCHEMA_VERSION,
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
 )
@@ -51,7 +51,15 @@ from utils.agileforge_spec_profile import (
     render_markdown,
     rendered_markdown_hash,
 )
-from utils.spec_authority_assumptions import render_assumption_text
+from utils.spec_authority_assumptions import (
+    AUTHORITY_ASSUMPTION_ADAPTER,
+    AuthorityAssumption,
+    GroundingFailure,
+    canonical_assumption_key,
+    ground_assumption,
+    is_structured_assumption,
+    render_assumption_text,
+)
 from utils.spec_authority_ir import (
     ContentBlock as _ContentBlock,
 )
@@ -96,21 +104,6 @@ STRUCTURED_SPEC_ITEM_PREFIXES: Final[tuple[str, ...]] = (
     "EXAMPLE.",
     "OPEN_QUESTION.",
 )
-STRUCTURED_NORMATIVE_ITEM_PREFIXES: Final[tuple[str, ...]] = (
-    "REQ.",
-    "QUALITY.",
-    "CONSTRAINT.",
-    "INTERFACE.",
-    "DATA.",
-)
-ONLY_ACCEPTED_ASSUMPTION_RE: Final[re.Pattern[str]] = re.compile(
-    r"\bonly\s+"
-    r"((?:REQ|QUALITY|CONSTRAINT|INTERFACE|DATA)\.[a-z0-9][a-z0-9.-]{1,96})"
-    r"\s+(?:was|is|were|are)\s+accepted\b",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class _SourceLoad:
     """Decoded source bytes and resolved path metadata."""
@@ -590,6 +583,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
         include_spec == "auto" and len(source.raw_bytes) <= source_limit
     )
     content_truncated = not content_included and len(source.raw_bytes) > source_limit
+    compiled_artifact = _load_compiled_artifact(authority)
     artifact, authority_evidence, classification_evidence = (
         _authority_artifact_payload(authority)
     )
@@ -615,6 +609,7 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     ir_payload = _authority_ir_payload(
         diagnostics=diagnostics,
         artifact=artifact,
+        compiled_artifact=compiled_artifact,
         structured_artifact=structured_artifact,
         artifact_shape_findings=artifact_shape_findings,
     )
@@ -800,6 +795,7 @@ def _authority_ir_payload(
     *,
     diagnostics: Sequence[Mapping[str, Any]],
     artifact: Mapping[str, Any],
+    compiled_artifact: SpecAuthorityCompilationSuccess | None,
     structured_artifact: TechnicalSpecArtifact | None,
     artifact_shape_findings: Sequence[Mapping[str, Any]],
 ) -> JsonDict:
@@ -810,7 +806,7 @@ def _authority_ir_payload(
         spec_artifact=structured_artifact,
     )
     assumption_findings = _compiled_assumption_findings(
-        artifact=artifact,
+        artifact=compiled_artifact,
         spec_artifact=structured_artifact,
     )
     rendered_findings = [
@@ -1066,75 +1062,98 @@ def _structured_source_ref_findings(
 
 def _compiled_assumption_findings(
     *,
-    artifact: Mapping[str, Any],
+    artifact: SpecAuthorityCompilationSuccess | None,
     spec_artifact: TechnicalSpecArtifact | None,
 ) -> list[JsonDict]:
-    """Block compiler assumptions with false structured accepted-item claims."""
-    if spec_artifact is None:
+    """Return non-overrideable findings for ungrounded structured claims."""
+    if artifact is None:
         return []
-    assumptions = artifact.get("assumptions")
-    if not isinstance(assumptions, Sequence) or isinstance(
-        assumptions,
-        (str, bytes, bytearray),
-    ):
-        return []
-
-    accepted_item_ids = sorted(
-        item.id
-        for item in spec_artifact.items
-        if item.status == "accepted"
-        and item.id.startswith(STRUCTURED_NORMATIVE_ITEM_PREFIXES)
-    )
     findings: list[JsonDict] = []
-    for index, assumption in enumerate(assumptions, start=1):
-        text = _assumption_text(assumption)
-        if text is None:
+    for index, assumption in enumerate(artifact.assumptions, start=1):
+        if not is_structured_assumption(assumption):
             continue
-        match = ONLY_ACCEPTED_ASSUMPTION_RE.search(text)
-        if match is None:
-            continue
-        claimed_item_id = _normalize_structured_item_id(match.group(1))
-        if claimed_item_id in accepted_item_ids and len(accepted_item_ids) == 1:
-            continue
-        findings.append(
-            _compiled_assumption_finding(
-                assumption_index=index,
-                assumption_text=text,
-                claimed_item_id=claimed_item_id,
-                accepted_item_ids=accepted_item_ids,
+        if spec_artifact is None:
+            findings.append(
+                _compiled_claim_source_unavailable_finding(
+                    assumption_index=index,
+                    assumption=assumption,
+                )
             )
-        )
+            continue
+        grounded = ground_assumption(assumption, spec_artifact)
+        if isinstance(grounded, GroundingFailure):
+            findings.append(
+                _compiled_claim_mismatch_finding(
+                    assumption_index=index,
+                    assumption=assumption,
+                    failure=grounded,
+                )
+            )
     return findings
 
 
-def _assumption_text(value: object) -> str | None:
-    if isinstance(value, str):
-        text = value.strip()
-    elif isinstance(value, Mapping):
-        data = cast("Mapping[str, Any]", value)
-        text = str(data.get("text") or "").strip()
-    else:
-        return None
-    return text or None
-
-
-def _normalize_structured_item_id(item_id: str) -> str:
-    prefix, suffix = item_id.split(".", maxsplit=1)
-    return f"{prefix.upper()}.{suffix}"
-
-
-def _compiled_assumption_finding(
+def _compiled_claim_source_unavailable_finding(
     *,
     assumption_index: int,
-    assumption_text: str,
-    claimed_item_id: str,
-    accepted_item_ids: Sequence[str],
+    assumption: AuthorityAssumption,
 ) -> JsonDict:
-    accepted_count = len(accepted_item_ids)
+    provenance = assumption.provenance
+    return _compiled_claim_finding(
+        code="COMPILER_ASSUMPTION_CLAIM_SOURCE_UNAVAILABLE",
+        assumption_index=assumption_index,
+        assumption=assumption,
+        details={
+            "claimed_value": _assumption_claimed_value(assumption),
+            "actual_value": None,
+            "artifact_id": provenance.artifact_id,
+            "claimed_source_item_ids": list(provenance.source_item_ids),
+            "actual_source_item_ids": [],
+        },
+        message=(
+            "Compiler assumption requires a parsed structured specification "
+            "source that is unavailable during review."
+        ),
+    )
+
+
+def _compiled_claim_mismatch_finding(
+    *,
+    assumption_index: int,
+    assumption: AuthorityAssumption,
+    failure: GroundingFailure,
+) -> JsonDict:
+    return _compiled_claim_finding(
+        code="COMPILER_ASSUMPTION_CLAIM_MISMATCH",
+        assumption_index=assumption_index,
+        assumption=assumption,
+        details={
+            "claimed_value": failure.claimed_value,
+            "actual_value": failure.actual_value,
+            "artifact_id": failure.artifact_id,
+            "claimed_source_item_ids": list(failure.claimed_source_item_ids),
+            "actual_source_item_ids": list(failure.actual_source_item_ids),
+            "grounding_reason": failure.reason,
+        },
+        message=(
+            "Compiler assumption does not match the reviewed structured "
+            "specification."
+        ),
+    )
+
+
+def _compiled_claim_finding(
+    *,
+    code: str,
+    assumption_index: int,
+    assumption: AuthorityAssumption,
+    details: Mapping[str, object],
+    message: str,
+) -> JsonDict:
+    """Build a stable non-overrideable typed-claim finding."""
     payload = {
-        "assumption_index": assumption_index,
-        "claimed_item_id": claimed_item_id,
-        "code": "COMPILER_ASSUMPTION_UNSUPPORTED",
+        "assumption_key": canonical_assumption_key(assumption),
+        "code": code,
+        "claimed_source_item_ids": details["claimed_source_item_ids"],
     }
     finding_hash = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1142,21 +1161,26 @@ def _compiled_assumption_finding(
     return {
         "finding_id": f"ARF-{finding_hash}",
         "severity": "blocking",
-        "code": "COMPILER_ASSUMPTION_UNSUPPORTED",
-        "message": (
-            "Compiler assumption makes an unsupported accepted-item exclusivity "
-            f"claim: {assumption_text!r}."
-        ),
+        "code": code,
+        "message": message,
         "candidate_ids": [],
         "source_unit_ids": [],
         "override_allowed": False,
         "details": {
             "assumption_index": assumption_index,
-            "claimed_item_id": claimed_item_id,
-            "accepted_item_count": accepted_count,
-            "accepted_item_ids": list(accepted_item_ids),
+            "claim_kind": assumption.kind,
+            **details,
         },
     }
+
+
+def _assumption_claimed_value(assumption: AuthorityAssumption) -> object:
+    """Return the claimed scalar or set value for an already typed claim."""
+    if assumption.kind == "item_status":
+        return assumption.status.value
+    if assumption.kind == "accepted_normative_count":
+        return assumption.count
+    return list(assumption.item_ids)
 
 
 def _artifact_with_review_findings(
@@ -1455,9 +1479,20 @@ def _render_review_text(packet: JsonDict) -> str:
     )
     lines.append("")
     lines.append("Assumptions:")
+    assumptions = artifact.get("assumptions")
+    review_findings = _as_list(packet.get("review_findings"))
+    has_invalid_artifact = any(
+        isinstance(finding, Mapping)
+        and finding.get("code") == "COMPILED_AUTHORITY_INVALID"
+        for finding in review_findings
+    )
     _append_text_item_lines(
         lines,
-        artifact.get("assumptions"),
+        (
+            _rendered_assumption_items(assumptions)
+            if not has_invalid_artifact and _has_typed_assumption_objects(assumptions)
+            else assumptions
+        ),
         empty_line="No assumptions recorded.",
     )
     lines.append("")
@@ -1479,6 +1514,30 @@ def _render_review_text(packet: JsonDict) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _has_typed_assumption_objects(value: object) -> bool:
+    """Return whether a rendered artifact contains typed assumption objects."""
+    assumptions = _as_list(value)
+    return bool(assumptions) and all(
+        isinstance(assumption, Mapping) and "kind" in assumption
+        for assumption in assumptions
+    )
+
+
+def _rendered_assumption_items(value: object) -> list[JsonDict]:
+    """Render canonical typed assumptions for text-only review consumers."""
+    rendered: list[JsonDict] = []
+    for index, raw_assumption in enumerate(_as_list(value), start=1):
+        assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(raw_assumption)
+        rendered.append(
+            {
+                "id": f"ASM-{index}",
+                "text": render_assumption_text(assumption),
+                "assumption_key": canonical_assumption_key(assumption),
+            }
+        )
+    return rendered
 
 
 def _append_text_item_lines(
@@ -1687,9 +1746,7 @@ def _compiled_artifact_shape_findings(
                     "override_allowed": False,
                     "details": {
                         "observed_schema_version": load_result.observed_schema_version,
-                        "required_schema_version": (
-                            "agileforge.compiled_authority.v3"
-                        ),
+                        "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
                     },
                 }
             ]
@@ -1771,11 +1828,7 @@ def _authority_artifact_payload(
         for index, gap in enumerate(artifact.gaps, start=1)
     ]
     assumptions = [
-        _plain_item(
-            item_id=f"ASM-{index}",
-            text=render_assumption_text(assumption),
-        )
-        for index, assumption in enumerate(artifact.assumptions, start=1)
+        assumption.model_dump(mode="json") for assumption in artifact.assumptions
     ]
     rejected_features = _normalized_persisted_items(
         _json_list(authority.rejected_features),
@@ -1796,7 +1849,7 @@ def _authority_artifact_payload(
                 text=str(item["text"]),
                 kind="assumption",
             )
-            for item in assumptions
+            for item in _rendered_assumption_items(assumptions)
         ],
         *[
             _ClassificationEvidence(
@@ -1912,6 +1965,8 @@ def _fallback_classification_evidence(
         ("rejected_features", "rejected_feature"),
     ):
         items = artifact.get(key)
+        if key == "assumptions" and _has_typed_assumption_objects(items):
+            items = _rendered_assumption_items(items)
         if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
             continue
         for item in items:

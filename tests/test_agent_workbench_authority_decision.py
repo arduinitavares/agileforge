@@ -44,6 +44,10 @@ from services.agent_workbench.mutation_ledger import MutationStatus, _json_load
 from services.agent_workbench.version import STORAGE_SCHEMA_VERSION
 from tests.typing_helpers import require_id
 from utils.agileforge_spec_profile import TechnicalSpecArtifact, canonical_spec_json
+from utils.spec_authority_assumptions import (
+    ItemStatusAssumptionClaim,
+    StructuredSpecClaimProvenance,
+)
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -1131,6 +1135,61 @@ def test_fatal_non_candidate_finding_blocks_accept(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
     assert result["errors"][0]["details"]["blocking_findings"] == [fatal_finding]
+
+
+def test_typed_claim_mismatch_blocks_accept(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Non-overrideable typed claim findings prevent authority acceptance."""
+    _make_schema_v3_ready(_engine(session))
+    project_id, _spec_version_id, authority_id, _path = _seed_pending_review_project(
+        session,
+        tmp_path=tmp_path,
+    )
+    authority = session.get(CompiledSpecAuthority, authority_id)
+    assert authority is not None
+    success = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority review"],
+        domain="agent workbench",
+        invariants=[],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=[],
+        assumptions=[
+            ItemStatusAssumptionClaim(
+                kind="item_status",
+                item_id="REQ.guard-tokens",
+                status="accepted",
+                provenance=StructuredSpecClaimProvenance(
+                    source="structured_spec",
+                    artifact_id="SPEC.authority-decision",
+                    source_item_ids=["REQ.guard-tokens"],
+                ),
+            )
+        ],
+        source_map=[],
+        compiler_version=COMPILER_VERSION,
+        prompt_hash=PROMPT_HASH,
+        ir_schema_version=None,
+        ir_provenance=None,
+    )
+    authority.compiled_artifact_json = SpecAuthorityCompilerOutput(
+        root=success
+    ).model_dump_json()
+    session.add(authority)
+    session.commit()
+    snapshot = _snapshot(session, project_id)
+
+    result = _runner(session, _workflow_for(project_id)).accept(
+        _accept_request(project_id=project_id, review_token=snapshot.review_token)
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_REVIEW_INCOMPLETE"
+    assert result["errors"][0]["details"]["blocking_findings"][0]["code"] == (
+        "COMPILER_ASSUMPTION_CLAIM_MISMATCH"
+    )
 
 
 def test_explicit_accept_missing_completeness_guards_fails(
