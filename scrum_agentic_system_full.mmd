@@ -331,13 +331,14 @@ flowchart TD
         InvokeCompiler["_invoke_spec_authority_compiler\n(spec_authority_compiler_agent)"]:::process
         Normalize["normalize_compiler_output"]:::process
         SaveAuthority["Persist CompiledSpecAuthority"]:::process
-        EnsureAccepted["ensure_spec_authority_accepted (auto)"]:::process
+        PendingReview["Pending authority review"]:::guardrail
+        ExplicitDecision["authority accept / reject\n(explicit guarded decision)"]:::process
         AuthorityDB[("SpecRegistry + CompiledSpecAuthority\nSpecAuthorityAcceptance")]:::data
         CompilerAgent["spec_authority_compiler_agent (Agent)"]:::agent
 
         UpdateSpec --> CompileSpec --> InvokeCompiler --> CompilerAgent
         InvokeCompiler --> Normalize --> SaveAuthority --> AuthorityDB
-        UpdateSpec --> EnsureAccepted --> AuthorityDB
+        SaveAuthority --> PendingReview --> ExplicitDecision --> AuthorityDB
     end
 
     CompileSpecVersion --> SpecAuthority

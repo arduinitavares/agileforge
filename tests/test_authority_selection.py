@@ -81,6 +81,74 @@ def test_latest_compiled_authority_orders_by_authority_id_desc(
     assert selected.authority_id == newest.authority_id
 
 
+def test_latest_compiled_authority_for_product_prefers_newest_spec_then_row(
+    session: Session,
+) -> None:
+    """Cross-spec status selection stays project-owned and deterministic."""
+    product = Product(name="Selected Product")
+    other_product = Product(name="Other Product")
+    session.add_all([product, other_product])
+    session.commit()
+    session.refresh(product)
+    session.refresh(other_product)
+    product_id = require_id(product.product_id, "product_id")
+    other_product_id = require_id(other_product.product_id, "product_id")
+    specs = [
+        SpecRegistry(
+            product_id=owner_id,
+            spec_hash=spec_hash,
+            content=spec_hash,
+            status="approved",
+        )
+        for owner_id, spec_hash in (
+            (product_id, "sha256:selected-old"),
+            (product_id, "sha256:selected-new"),
+            (other_product_id, "sha256:other"),
+        )
+    ]
+    session.add_all(specs)
+    session.commit()
+    for spec in specs:
+        session.refresh(spec)
+
+    def authority(spec: SpecRegistry, prompt: str) -> CompiledSpecAuthority:
+        return CompiledSpecAuthority(
+            spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+            compiler_version="3.0.0",
+            prompt_hash=prompt,
+            compiled_artifact_json="{}",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+
+    newest_spec_old_row = authority(specs[1], "a" * 64)
+    newest_spec_new_row = authority(specs[1], "b" * 64)
+    foreign_row = authority(specs[2], "c" * 64)
+    older_spec_late_row = authority(specs[0], "d" * 64)
+    session.add_all(
+        [
+            newest_spec_old_row,
+            newest_spec_new_row,
+            foreign_row,
+            older_spec_late_row,
+        ]
+    )
+    session.commit()
+
+    selected = authority_selection.latest_compiled_authority_for_product(
+        session,
+        product_id=product_id,
+    )
+
+    assert selected is not None
+    assert selected.authority_id == newest_spec_new_row.authority_id
+    assert selected.authority_id != foreign_row.authority_id
+    assert selected.authority_id != older_spec_late_row.authority_id
+
+
 def test_compiled_authority_for_acceptance_uses_exact_pending_id(
     session: Session,
 ) -> None:

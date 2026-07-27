@@ -6,7 +6,11 @@ from typing import Any, cast
 
 from sqlmodel import Session, select
 
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
+from models.specs import (
+    CompiledSpecAuthority,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 
 
 def compiled_authority_by_id(
@@ -36,6 +40,26 @@ def latest_compiled_authority(
         select(CompiledSpecAuthority)
         .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
         .order_by(cast("Any", CompiledSpecAuthority.authority_id).desc())
+    ).first()
+
+
+def latest_compiled_authority_for_product(
+    session: Session,
+    *,
+    product_id: int,
+) -> CompiledSpecAuthority | None:
+    """Load the newest row for the newest compiled spec owned by a product."""
+    return session.exec(
+        select(CompiledSpecAuthority)
+        .join(
+            SpecRegistry,
+            CompiledSpecAuthority.spec_version_id == SpecRegistry.spec_version_id,
+        )
+        .where(SpecRegistry.product_id == product_id)
+        .order_by(
+            cast("Any", SpecRegistry.spec_version_id).desc(),
+            cast("Any", CompiledSpecAuthority.authority_id).desc(),
+        )
     ).first()
 
 

@@ -589,7 +589,7 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
     sample_spec_content: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cache hit should not change artifact unless force_recompile=True."""
+    """Cache hits reuse one row; forced recompilation appends exact history."""
     reg_result = register_spec_version(
         {"product_id": sample_product.product_id, "content": sample_spec_content},
         tool_context=None,
@@ -646,13 +646,13 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
     assert call_count["count"] == 1
 
     session.expire_all()
-    authority = session.exec(
+    rows = session.exec(
         select(CompiledSpecAuthority).where(
             CompiledSpecAuthority.spec_version_id == spec_version_id
         )
-    ).first()
-    assert authority is not None
-    assert authority.compiled_artifact_json == artifact_first
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].compiled_artifact_json == artifact_first
 
     third = compile_spec_authority_for_version(
         {"spec_version_id": spec_version_id, "force_recompile": True},
@@ -662,13 +662,15 @@ def test_compile_cache_hit_does_not_change_compiled_artifact(
     assert call_count["count"] == 2  # noqa: PLR2004
 
     session.expire_all()
-    authority = session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == spec_version_id
-        )
-    ).first()
-    assert authority is not None
-    assert authority.compiled_artifact_json != artifact_first
+    rows = session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(CompiledSpecAuthority.authority_id)
+    ).all()
+    assert len(rows) == 2  # noqa: PLR2004
+    assert rows[0].compiled_artifact_json == artifact_first
+    assert rows[1].compiled_artifact_json != artifact_first
+    assert third["authority_id"] == rows[1].authority_id
 
 
 def test_compile_persists_invocation_failure_artifact(

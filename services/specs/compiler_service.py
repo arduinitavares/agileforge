@@ -43,6 +43,7 @@ from services.specs.authority_selection import (
     compiled_authority_for_acceptance,
     latest_accepted_authority_decision,
     latest_compiled_authority,
+    latest_compiled_authority_for_product,
 )
 from services.specs.profile_content import (
     STRUCTURED_SPEC_FORMAT,
@@ -4231,9 +4232,9 @@ def check_spec_authority_status(  # noqa: PLR0911
                 "success": False,
                 "error": "Latest approved spec is missing its primary key",
             }
-        latest_authority = latest_compiled_authority(
+        latest_authority = latest_compiled_authority_for_product(
             session,
-            spec_version_id=latest_approved_spec_version_id,
+            product_id=parsed.product_id,
         )
 
         if not latest_authority:
