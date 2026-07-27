@@ -40,6 +40,7 @@ EXPECTED_ERROR_METADATA = {
     ErrorCode.AUTHORITY_CURATION_MAX_ITERATIONS: (1, True),
     ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID: (1, False),
     ErrorCode.AUTHORITY_REPAIR_TARGET_NOT_FOUND: (1, False),
+    ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY: (4, False),
     ErrorCode.SCHEMA_VERSION_MISMATCH: (5, True),
     ErrorCode.STALE_STATE: (3, True),
     ErrorCode.STALE_SETUP_STATUS: (3, True),
@@ -154,6 +155,7 @@ def test_registry_covers_authority_curation_error_codes() -> None:
         "AUTHORITY_CURATION_MAX_ITERATIONS",
         "AUTHORITY_REPAIR_INTENT_INVALID",
         "AUTHORITY_REPAIR_TARGET_NOT_FOUND",
+        "AUTHORITY_CURATION_TARGET_READ_ONLY",
     ]:
         assert code in codes, code
 
@@ -174,6 +176,17 @@ def test_authority_repair_v2_error_codes_are_registered() -> None:
     assert missing.code == "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
     assert missing.default_exit_code == 1
     assert missing.retryable is False
+
+
+def test_authority_curation_read_only_target_error_is_registered() -> None:
+    """Structured authority claims are permanently read-only during curation."""
+    expected_exit_code = 4
+    metadata = error_metadata(ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY)
+
+    assert metadata.code == "AUTHORITY_CURATION_TARGET_READ_ONLY"
+    assert metadata.default_exit_code == expected_exit_code
+    assert metadata.retryable is False
+    assert metadata.description == "The authority curation target is read-only."
 
 
 def test_compiled_authority_schema_unsupported_error_is_registered() -> None:

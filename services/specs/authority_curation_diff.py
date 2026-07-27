@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from utils.spec_authority_assumptions import (
+    AUTHORITY_ASSUMPTION_ADAPTER,
+    canonical_assumption_key,
+)
+
 JsonDict = dict[str, Any]
 _DIFF_COLLECTIONS = ("invariants", "assumptions", "gaps")
 
@@ -266,6 +271,12 @@ def _collection_item_key_and_payload(
     """Return review-visible key and payload for one collection item."""
     prefix = _collection_review_prefix(collection)
     fallback_key = f"{prefix}-{index + 1}"
+    if collection == "assumptions":
+        try:
+            assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(item)
+        except ValueError:
+            return None
+        return fallback_key, {"assumption_key": canonical_assumption_key(assumption)}
     if isinstance(item, str):
         return fallback_key, {"text": item}
     if not isinstance(item, dict):

@@ -48,6 +48,7 @@ class ErrorCode(StrEnum):
     AUTHORITY_FEEDBACK_SCHEMA_INVALID = "AUTHORITY_FEEDBACK_SCHEMA_INVALID"
     AUTHORITY_CURATED_DIFF_UNBOUNDED = "AUTHORITY_CURATED_DIFF_UNBOUNDED"
     AUTHORITY_CURATION_MAX_ITERATIONS = "AUTHORITY_CURATION_MAX_ITERATIONS"
+    AUTHORITY_CURATION_TARGET_READ_ONLY = "AUTHORITY_CURATION_TARGET_READ_ONLY"
     AUTHORITY_REPAIR_INTENT_INVALID = "AUTHORITY_REPAIR_INTENT_INVALID"
     AUTHORITY_REPAIR_TARGET_NOT_FOUND = "AUTHORITY_REPAIR_TARGET_NOT_FOUND"
     STALE_STATE = "STALE_STATE"
@@ -291,6 +292,12 @@ _ERROR_REGISTRY: dict[ErrorCode, ErrorMetadata] = {
         default_exit_code=1,
         retryable=True,
         description="Authority curation reached its maximum iteration count.",
+    ),
+    ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY: ErrorMetadata(
+        code=ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY.value,
+        default_exit_code=4,
+        retryable=False,
+        description="The authority curation target is read-only.",
     ),
     ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID: ErrorMetadata(
         code=ErrorCode.AUTHORITY_REPAIR_INTENT_INVALID.value,

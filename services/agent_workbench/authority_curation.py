@@ -76,6 +76,13 @@ from utils.authority_curation_trace import (
     trace_artifact_id,
 )
 from utils.failure_artifacts import write_failure_artifact
+from utils.spec_authority_assumptions import (
+    AUTHORITY_ASSUMPTION_ADAPTER,
+    AuthorityAssumption,
+    FreeTextAssumption,
+    canonical_assumption_key,
+    is_structured_assumption,
+)
 from utils.spec_schemas import InvariantParameters, InvariantType
 
 if TYPE_CHECKING:
@@ -1106,7 +1113,7 @@ class AuthorityCurationRunner:
             },
         )
 
-    def _run_curation_after_status_update(  # noqa: PLR0911
+    def _run_curation_after_status_update(  # noqa: C901, PLR0911, PLR0915
         self,
         *,
         request: AuthorityCurationRequest,
@@ -1159,6 +1166,28 @@ class AuthorityCurationRunner:
             correlation_id=request.correlation_id,
             attributes=_curation_trace_attributes(request),
         )
+
+        read_only_target_id = _structured_assumption_feedback_target_id(
+            source_authority_json=loaded_inputs.source_authority_json,
+            feedback_json=loaded_inputs.feedback_json,
+        )
+        if read_only_target_id is not None:
+            response = _authority_curation_target_read_only_response(
+                context=_PatchApplicationContext(
+                    request=request,
+                    attempt=attempt,
+                    mutation_event_id=active_mutation.mutation_event_id,
+                ),
+                target_id=read_only_target_id,
+            )
+            self._finalize_failed_curation(
+                request=request,
+                active_mutation=active_mutation,
+                attempt=attempt,
+                response=response,
+                status=MutationStatus.DOMAIN_FAILED_NO_SIDE_EFFECTS,
+            )
+            return response
 
         repair_menu = _build_repair_menu(
             source_authority_json=loaded_inputs.source_authority_json,
@@ -1501,7 +1530,7 @@ class AuthorityCurationRunner:
         )
         return response
 
-    def _validate_successful_curation_candidate(
+    def _validate_successful_curation_candidate(  # noqa: PLR0911
         self,
         *,
         request: AuthorityCurationRequest,
@@ -1539,6 +1568,16 @@ class AuthorityCurationRunner:
                 attempt=attempt,
                 reason="missing_or_invalid_candidate_authority_json",
                 mutation_event_id=context.mutation_event_id,
+            )
+
+        read_only_target_id = _changed_structured_assumption_target_id(
+            source_authority_json=loaded.source_authority_json,
+            candidate_authority_json=candidate_authority_json,
+        )
+        if read_only_target_id is not None:
+            return _authority_curation_target_read_only_response(
+                context=context,
+                target_id=read_only_target_id,
             )
 
         targeted_source_item_ids = _targeted_source_item_ids(
@@ -3196,6 +3235,29 @@ def _authority_repair_intent_invalid_response(
     )
 
 
+def _authority_curation_target_read_only_response(
+    *,
+    context: _PatchApplicationContext,
+    target_id: str,
+) -> dict[str, Any]:
+    """Reject a curation attempt to alter a structured authority claim."""
+    return error_envelope(
+        command=AUTHORITY_CURATE_COMMAND,
+        error=workbench_error(
+            ErrorCode.AUTHORITY_CURATION_TARGET_READ_ONLY,
+            message="The authority curation target is read-only.",
+            details={
+                "project_id": context.request.project_id,
+                "curation_attempt_id": context.attempt.curation_attempt_id,
+                "target_kind": "assumption",
+                "target_id": target_id,
+                "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+            },
+        ),
+        correlation_id=context.request.correlation_id,
+    )
+
+
 def _authority_repair_target_not_found_response(
     *,
     context: _PatchApplicationContext,
@@ -3510,8 +3572,11 @@ def _apply_replace_text_selection(
     )
     if not isinstance(target, _RepairTextTarget):
         return target
-    if isinstance(target.item, str):
-        target.container[target.index] = replacement_text
+    if isinstance(target.item, FreeTextAssumption):
+        target.container[target.index] = FreeTextAssumption(
+            kind="free_text",
+            text=replacement_text,
+        ).model_dump(mode="json")
         return None
     item_payload = cast("dict[str, Any]", target.item)
     if target.target_field in _INVARIANT_PARAMETER_TEXT_FIELDS:
@@ -3591,7 +3656,11 @@ def _repair_text_target_or_error(
             ),
         )
     expected_hash = _string_or_none(menu_item.get("target_content_hash"))
-    if expected_hash is not None and _content_hash(current_text) != expected_hash:
+    if expected_hash is not None and _target_content_hash(
+        target_item=item,
+        target_kind=target_kind,
+        target_text=current_text,
+    ) != expected_hash:
         return _repair_target_error(
             context=context,
             reason="repair_target_content_changed",
@@ -3643,7 +3712,7 @@ def _repair_selection_error_details(
     }
 
 
-def _apply_candidate_patch(
+def _apply_candidate_patch(  # noqa: PLR0911
     *,
     context: _PatchApplicationContext,
     candidate: dict[str, Any],
@@ -3698,6 +3767,13 @@ def _apply_candidate_patch(
                 target_kind=target_kind,
                 target_id=authorized_target_id,
             ),
+        )
+    if target_kind == "assumption" and not isinstance(
+        target[2], FreeTextAssumption
+    ):
+        return _authority_curation_target_read_only_response(
+            context=context,
+            target_id=authorized_target_id,
         )
     applied = _apply_single_patch(
         target=target,
@@ -3889,7 +3965,11 @@ def _repair_menu_item_from_feedback(
             target_index=target.target_index,
         ),
         "allowed_repair_kinds": repair_kinds,
-        "target_content_hash": _content_hash(target.target_text),
+        "target_content_hash": _target_content_hash(
+            target_item=target.target_item,
+            target_kind=target.target_kind,
+            target_text=target.target_text,
+        ),
     }
     if "replace_text" not in repair_kinds:
         menu_item["not_repairable_reason"] = "structural_repair_deferred"
@@ -3946,6 +4026,8 @@ def _repair_menu_target_from_feedback(
 
 def _repairable_text_field(target_item: object) -> str | None:
     """Return the exact target text field bound by a repair menu handle."""
+    if isinstance(target_item, FreeTextAssumption):
+        return "text"
     if isinstance(target_item, str):
         return "text"
     if not isinstance(target_item, dict):
@@ -3964,6 +4046,8 @@ def _repairable_text_field(target_item: object) -> str | None:
 
 def _target_text_value(target_item: object, *, target_field: str) -> str | None:
     """Return target text for hashing and stale-content guards."""
+    if isinstance(target_item, FreeTextAssumption) and target_field == "text":
+        return target_item.text
     if isinstance(target_item, str) and target_field == "text":
         return target_item
     if not isinstance(target_item, dict):
@@ -4021,6 +4105,19 @@ def _content_hash(value: str) -> str:
     return canonical_hash({"text": value})
 
 
+def _target_content_hash(
+    *,
+    target_item: object,
+    target_kind: str,
+    target_text: str,
+) -> str:
+    """Return a curation menu hash bound to an item's canonical identity."""
+    if target_kind == "assumption":
+        assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(target_item)
+        return canonical_hash({"assumption_key": canonical_assumption_key(assumption)})
+    return _content_hash(target_text)
+
+
 def _find_patch_target(
     authority_json: dict[str, Any],
     *,
@@ -4035,11 +4132,9 @@ def _find_patch_target(
             id_keys=("id",),
         )
     if target_kind == "assumption":
-        return _find_text_or_dict_target(
+        return _find_assumption_target(
             authority_json.get("assumptions"),
             target_id=target_id,
-            review_prefix="ASM",
-            id_keys=("assumption_id", "id"),
         )
     if target_kind == "gap":
         return _find_text_or_dict_target(
@@ -4067,6 +4162,88 @@ def _find_dict_list_target(
         if any(item_payload.get(key) == target_id for key in id_keys):
             return value, index, item_payload
     return None
+
+
+def _find_assumption_target(
+    value: object,
+    *,
+    target_id: str,
+) -> tuple[list[Any], int, AuthorityAssumption] | None:
+    """Resolve one v3 assumption by its final review-visible position."""
+    if not isinstance(value, list) or not target_id.startswith("ASM-"):
+        return None
+    raw_index = target_id.removeprefix("ASM-")
+    if not raw_index.isdigit():
+        return None
+    index = int(raw_index) - 1
+    if index < 0 or index >= len(value):
+        return None
+    assumption = AUTHORITY_ASSUMPTION_ADAPTER.validate_python(value[index])
+    return value, index, assumption
+
+
+def _structured_assumption_feedback_target_id(
+    *,
+    source_authority_json: dict[str, Any],
+    feedback_json: str,
+) -> str | None:
+    """Return a blocking structured claim targeted for curation repair."""
+    for target_kind, target_id in _feedback_target_keys(feedback_json):
+        if target_kind != "assumption":
+            continue
+        target = _find_assumption_target(
+            source_authority_json.get("assumptions"),
+            target_id=target_id,
+        )
+        if target is not None and is_structured_assumption(target[2]):
+            return target_id
+    return None
+
+
+def _changed_structured_assumption_target_id(
+    *,
+    source_authority_json: dict[str, Any],
+    candidate_authority_json: dict[str, Any],
+) -> str | None:
+    """Return the first positional structured claim changed by a candidate."""
+    source = source_authority_json.get("assumptions")
+    candidate = candidate_authority_json.get("assumptions")
+    if not isinstance(source, list) or not isinstance(candidate, list):
+        return None
+    for index in range(max(len(source), len(candidate))):
+        source_item = _assumption_at(source, index)
+        candidate_item = _assumption_at(candidate, index)
+        if source_item is None and candidate_item is None:
+            continue
+        if source_item is None:
+            if candidate_item is not None and is_structured_assumption(candidate_item):
+                return f"ASM-{index + 1}"
+            continue
+        if candidate_item is None:
+            if is_structured_assumption(source_item):
+                return f"ASM-{index + 1}"
+            continue
+        if (
+            is_structured_assumption(source_item)
+            or is_structured_assumption(candidate_item)
+        ) and canonical_assumption_key(source_item) != canonical_assumption_key(
+            candidate_item
+        ):
+            return f"ASM-{index + 1}"
+    return None
+
+
+def _assumption_at(
+    assumptions: list[object],
+    index: int,
+) -> AuthorityAssumption | None:
+    """Parse one v3 assumption when it exists at a positional review id."""
+    if index >= len(assumptions):
+        return None
+    try:
+        return AUTHORITY_ASSUMPTION_ADAPTER.validate_python(assumptions[index])
+    except ValidationError:
+        return None
 
 
 def _find_text_or_dict_target(
@@ -4128,8 +4305,11 @@ def _apply_replace_text_patch(
     new_text = _string_or_none(patch.get("new_text"))
     if new_text is None:
         return "invalid_patch"
-    if isinstance(item, str):
-        container[index] = new_text
+    if isinstance(item, FreeTextAssumption):
+        container[index] = FreeTextAssumption(
+            kind="free_text",
+            text=new_text,
+        ).model_dump(mode="json")
         return None
     if not isinstance(item, dict):
         return "patch_target_not_textual"
@@ -4150,6 +4330,8 @@ def _apply_replace_value_patch(
     path = _string_or_none(patch.get("path"))
     if path is None or "value" not in patch:
         return "invalid_patch"
+    if target_kind == "assumption" and not isinstance(item, FreeTextAssumption):
+        return "patch_target_read_only"
     if not isinstance(item, dict):
         return "patch_target_not_structured"
     item_payload = cast("dict[str, Any]", item)

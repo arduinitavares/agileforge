@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,6 +39,10 @@ from services.specs.authority_curation_diff import (
 )
 from tests.typing_helpers import require_id
 from utils import failure_artifacts
+from utils.spec_authority_assumptions import (
+    FreeTextAssumption,
+    canonical_assumption_key,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -173,11 +177,11 @@ def _compiled_artifact_json() -> str:
             "gaps": [{"gap_id": "GAP-curation-1"}],
             "assumptions": [
                 {
-                    "assumption_id": "ASM-curation-1",
+                    "kind": "free_text",
                     "text": "Report contexts are exhaustive.",
                 },
                 {
-                    "assumption_id": "ASM-curation-untargeted",
+                    "kind": "free_text",
                     "text": "Unrelated assumption remains stable.",
                 },
             ],
@@ -342,6 +346,34 @@ def _latest_authority_artifact(engine: Engine) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(artifact_json))
 
 
+def _replace_assumptions_for_curation_test(
+    engine: Engine,
+    fixture: RejectedAuthorityFixture,
+    *,
+    assumptions: list[dict[str, object]],
+    feedback_item: dict[str, object],
+) -> RejectedAuthorityFixture:
+    """Replace a fixture's assumptions and bind feedback to its new fingerprint."""
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, fixture.authority_id)
+        assert authority is not None
+        artifact = json.loads(str(authority.compiled_artifact_json))
+        artifact["assumptions"] = assumptions
+        authority.compiled_artifact_json = json.dumps(artifact, sort_keys=True)
+        fingerprint = pending_authority_fingerprint(authority)
+        assert fingerprint is not None
+        feedback = session.exec(select(AuthorityFeedbackAttempt)).one()
+        feedback.source_authority_fingerprint = fingerprint
+        feedback.feedback_json = json.dumps(
+            {"feedback_items": [feedback_item]},
+            sort_keys=True,
+        )
+        session.add(authority)
+        session.add(feedback)
+        session.commit()
+    return replace(fixture, authority_fingerprint=fingerprint)
+
+
 def _successful_curation_result(
     fixture: RejectedAuthorityFixture,
 ) -> dict[str, object]:
@@ -393,7 +425,7 @@ def _patch_repair_curation_result(
         "patches": [
             {
                 "target_kind": "assumption",
-                "target_id": "ASM-curation-1",
+                "target_id": "ASM-1",
                 "op": "replace_text",
                 "new_text": "Report contexts are required examples, not exhaustive.",
             },
@@ -482,7 +514,7 @@ def _untargeted_patch_curation_result(
         "patches": [
             {
                 "target_kind": "assumption",
-                "target_id": "ASM-curation-untargeted",
+                "target_id": "ASM-2",
                 "op": "replace_text",
                 "new_text": "Unrelated assumption changed.",
             }
@@ -1388,7 +1420,7 @@ def test_authority_diff_detects_untargeted_assumption_change() -> None:
         targeted_source_item_ids=set(),
         targeted_collection_keys={
             "invariants": set(),
-            "assumptions": {"ASM-curation-1"},
+            "assumptions": {"ASM-1"},
             "gaps": set(),
         },
     )
@@ -1409,15 +1441,308 @@ def test_authority_diff_allows_targeted_assumption_change() -> None:
         targeted_source_item_ids=set(),
         targeted_collection_keys={
             "invariants": set(),
-            "assumptions": {"ASM-curation-1"},
+            "assumptions": {"ASM-1"},
             "gaps": set(),
         },
     )
 
     assert diff["summary"]["untargeted_change_count"] == 0
     assert diff["collections"]["assumptions"]["changed_ids"] == [
-        "ASM-curation-1"
+        "ASM-1"
     ]
+
+
+def test_authority_diff_uses_canonical_assumption_identity() -> None:
+    """Equivalent typed free text does not create a spurious curation diff."""
+    source = {
+        "invariants": [],
+        "assumptions": [
+            {"kind": "free_text", "text": "caf\u00e9 provider"},
+            {"kind": "free_text", "text": "Other assumption."},
+        ],
+    }
+    candidate = {
+        "invariants": [],
+        "assumptions": [
+            {"kind": "free_text", "text": "cafe\u0301 provider"},
+            {"kind": "free_text", "text": "Other assumption."},
+        ],
+    }
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids=set(),
+        targeted_collection_keys={
+            "invariants": set(),
+            "assumptions": set(),
+            "gaps": set(),
+        },
+    )
+
+    assert diff["collections"]["assumptions"] == {
+        "unchanged_ids": ["ASM-1", "ASM-2"],
+        "changed_ids": [],
+        "removed_ids": [],
+        "added_ids": [],
+    }
+
+
+def test_authority_curate_free_text_replacement_preserves_typed_object(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a typed free-text assumption can be edited through curation."""
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[{"kind": "free_text", "text": "Report contexts are exhaustive."}],
+        feedback_item={
+            "feedback_id": "AFB-free-text",
+            "target_kind": "assumption",
+            "target_id": "ASM-1",
+            "issue_type": "invalid_assumption",
+            "severity": "blocking",
+            "instruction": "Make the assumption non-exhaustive.",
+        },
+    )
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "contract_version": "authority_curation.v2",
+            "selection_payload": {
+                "repairs": [
+                    {
+                        "feedback_id": "AFB-free-text",
+                        "target_handle": "R1",
+                        "repair_kind": "replace_text",
+                        "replacement_text": (
+                            "Report contexts are examples, not exhaustive."
+                        ),
+                    }
+                ]
+            },
+        },
+    )
+
+    result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-free-text-only",
+        )
+    )
+
+    assert result["ok"] is True
+    candidate = _latest_authority_artifact(engine)
+    assert candidate["assumptions"] == [
+        {
+            "kind": "free_text",
+            "text": "Report contexts are examples, not exhaustive.",
+        }
+    ]
+
+
+def test_authority_curate_free_text_menu_hash_uses_canonical_assumption_key() -> None:
+    """Curation menu hashes a free-text claim's canonical identity."""
+    assumption = FreeTextAssumption(kind="free_text", text="caf\u00e9 provider")
+    menu = curation_mod._build_repair_menu(
+        source_authority_json={
+            "assumptions": [assumption.model_dump(mode="json")],
+        },
+        feedback_json={
+            "feedback_items": [
+                {
+                    "feedback_id": "AFB-free-text-hash",
+                    "target_kind": "assumption",
+                    "target_id": "ASM-1",
+                    "issue_type": "invalid_assumption",
+                    "severity": "blocking",
+                    "instruction": "Clarify the free text.",
+                }
+            ]
+        },
+    )
+
+    assert menu[0]["target_content_hash"] == curation_mod.canonical_hash(
+        {"assumption_key": canonical_assumption_key(assumption)}
+    )
+
+
+@pytest.mark.parametrize(
+    "structured_assumption",
+    [
+        {
+            "kind": "item_status",
+            "item_id": "REQ.alpha",
+            "status": "accepted",
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+        {
+            "kind": "accepted_normative_count",
+            "count": 1,
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+        {
+            "kind": "accepted_normative_set",
+            "item_ids": ["REQ.alpha"],
+            "provenance": {
+                "source": "structured_spec",
+                "artifact_id": "SPEC.curation",
+                "source_item_ids": ["REQ.alpha"],
+            },
+        },
+    ],
+)
+def test_authority_curate_rejects_structured_assumption_patch_before_publish(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    structured_assumption: dict[str, object],
+) -> None:
+    """A structured claim patch cannot create a candidate or success event."""
+    monkeypatch.setattr(trace_mod, "TRACE_DIR", tmp_path / "traces")
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[structured_assumption],
+        feedback_item={
+            "feedback_id": "AFB-structured",
+            "target_kind": "assumption",
+            "target_id": "ASM-1",
+            "issue_type": "invalid_assumption",
+            "severity": "blocking",
+            "instruction": "Change the structured claim.",
+        },
+    )
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "patches": [
+                {
+                    "target_kind": "assumption",
+                    "target_id": "ASM-1",
+                    "op": "replace_text",
+                    "new_text": "Only REQ.alpha was accepted.",
+                }
+            ],
+        },
+    )
+
+    result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-structured-read-only",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATION_TARGET_READ_ONLY"
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert len(authorities) == 1
+    assert attempt.status != "succeeded"
+    events = trace_mod.read_trace_events(
+        mutation_event_id=require_id(attempt.mutation_event_id, "mutation_event_id")
+    )
+    assert "candidate_publication_started" not in [event["step"] for event in events]
+
+
+@pytest.mark.parametrize("changed_field", ["status", "artifact_id", "source_item_ids"])
+def test_authority_curate_rejects_full_candidate_structured_claim_change(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_field: str,
+) -> None:
+    """Full candidates cannot alter structured claim value or provenance."""
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[
+            {
+                "kind": "item_status",
+                "item_id": "REQ.alpha",
+                "status": "accepted",
+                "provenance": {
+                    "source": "structured_spec",
+                    "artifact_id": "SPEC.curation",
+                    "source_item_ids": ["REQ.alpha"],
+                },
+            }
+        ],
+        feedback_item={
+            "feedback_id": "AFB-structured-full",
+            "target_kind": "invariant",
+            "target_id": "INV-curation-1",
+            "issue_type": "overstrong_invariant",
+            "severity": "blocking",
+            "instruction": "Change the targeted invariant.",
+        },
+    )
+    candidate = _latest_authority_artifact(engine)
+    structured = candidate["assumptions"][0]
+    if changed_field == "status":
+        structured["status"] = "rejected"
+    elif changed_field == "artifact_id":
+        structured["provenance"]["artifact_id"] = "SPEC.other"
+    else:
+        structured["provenance"]["source_item_ids"] = ["REQ.other"]
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {"fsm_state": "SETUP_REQUIRED", "setup_status": "authority_rejected"},
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {"ok": True, "candidate_authority_json": candidate},
+    )
+
+    result = AuthorityCurationRunner(engine=engine, workflow=fake_workflow).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key=f"curate-structured-full-{changed_field}",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "AUTHORITY_CURATION_TARGET_READ_ONLY"
+    with Session(engine) as session:
+        assert len(session.exec(select(CompiledSpecAuthority)).all()) == 1
 
 
 def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:
@@ -2041,7 +2366,7 @@ def test_authority_curate_applies_targeted_patches_deterministically(
                     {
                         "feedback_id": "AFB-assumption-1",
                         "target_kind": "assumption",
-                        "target_id": "ASM-curation-1",
+                        "target_id": "ASM-1",
                         "issue_type": "exhaustive_assumption",
                         "severity": "blocking",
                         "instruction": "Make context list non-exhaustive.",
@@ -2092,17 +2417,17 @@ def test_authority_curate_applies_targeted_patches_deterministically(
 
     candidate = _latest_authority_artifact(engine)
     invariants = {item["id"]: item for item in candidate["invariants"]}
-    assumptions = {item["assumption_id"]: item for item in candidate["assumptions"]}
+    assumptions = candidate["assumptions"]
     assert invariants["INV-curation-1"]["text"] == (
         "Review packets include qualified guard evidence."
     )
     assert invariants["INV-curation-untargeted"]["text"] == (
         "Unrelated review packets remain stable."
     )
-    assert assumptions["ASM-curation-1"]["text"] == (
+    assert assumptions[0]["text"] == (
         "Report contexts are required examples, not exhaustive."
     )
-    assert assumptions["ASM-curation-untargeted"]["text"] == (
+    assert assumptions[1]["text"] == (
         "Unrelated assumption remains stable."
     )
     assert json.loads(attempt.candidate_lineage_json) == {"source": "patches"}
@@ -2275,7 +2600,7 @@ def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedbac
                         "issue_type": "invalid_assumption",
                         "severity": "blocking",
                         "instruction": (
-                            "Repair authority assumption ASM-curation-1 only. "
+                            "Repair authority assumption ASM-1 only. "
                             "The report contexts are required examples, not "
                             "an exhaustive closed list."
                         ),
@@ -2303,7 +2628,7 @@ def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedbac
             "patches": [
                 {
                     "target_kind": "assumption",
-                    "target_id": "ASM-curation-1",
+                    "target_id": "ASM-1",
                     "op": "replace_text",
                     "new_text": (
                         "Report contexts are required examples, not exhaustive."
@@ -2328,8 +2653,8 @@ def test_authority_curate_allows_concrete_patch_from_authority_candidate_feedbac
 
     assert result["ok"] is True
     candidate = _latest_authority_artifact(engine)
-    assumptions = {item["assumption_id"]: item for item in candidate["assumptions"]}
-    assert assumptions["ASM-curation-1"]["text"] == (
+    assumptions = candidate["assumptions"]
+    assert assumptions[0]["text"] == (
         "Report contexts are required examples, not exhaustive."
     )
 
@@ -2346,8 +2671,8 @@ def test_authority_curate_allows_assumption_index_alias_when_feedback_targets_al
         assert authority is not None
         compiled = json.loads(str(authority.compiled_artifact_json))
         compiled["assumptions"] = [
-            "Report contexts are exhaustive.",
-            "Unrelated assumption remains stable.",
+            {"kind": "free_text", "text": "Report contexts are exhaustive."},
+            {"kind": "free_text", "text": "Unrelated assumption remains stable."},
         ]
         authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
         authority_fingerprint = pending_authority_fingerprint(authority)
@@ -2418,10 +2743,14 @@ def test_authority_curate_allows_assumption_index_alias_when_feedback_targets_al
 
     assert result["ok"] is True
     candidate = _latest_authority_artifact(engine)
-    assert candidate["assumptions"][0] == (
-        "Report contexts are required examples, not exhaustive."
-    )
-    assert candidate["assumptions"][1] == "Unrelated assumption remains stable."
+    assert candidate["assumptions"][0] == {
+        "kind": "free_text",
+        "text": "Report contexts are required examples, not exhaustive.",
+    }
+    assert candidate["assumptions"][1] == {
+        "kind": "free_text",
+        "text": "Unrelated assumption remains stable.",
+    }
 
 
 def test_authority_curate_rejects_assumption_index_alias_without_feedback_target(
@@ -2436,8 +2765,8 @@ def test_authority_curate_rejects_assumption_index_alias_without_feedback_target
         assert authority is not None
         compiled = json.loads(str(authority.compiled_artifact_json))
         compiled["assumptions"] = [
-            "First assumption remains stable.",
-            "Second assumption remains stable.",
+            {"kind": "free_text", "text": "First assumption remains stable."},
+            {"kind": "free_text", "text": "Second assumption remains stable."},
         ]
         authority.compiled_artifact_json = json.dumps(compiled, sort_keys=True)
         authority_fingerprint = pending_authority_fingerprint(authority)
@@ -4294,7 +4623,7 @@ def test_authority_curate_rejects_legacy_adk_patch_output(
                     "patches": [
                         {
                             "target_kind": "assumption",
-                            "target_id": "ASM-curation-1",
+                            "target_id": "ASM-1",
                             "op": "replace_text",
                             "new_text": "Report contexts are examples.",
                         }
@@ -4495,7 +4824,7 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
                         "target_id": f"authority:{fixture.authority_id}",
                         "issue_type": "invalid_assumption",
                         "severity": "blocking",
-                        "instruction": "Fix only ASM-curation-1.",
+                        "instruction": "Fix only ASM-1.",
                     },
                     {
                         "feedback_id": "AFB-authority-inv",
@@ -4571,7 +4900,7 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
         (item["handle"], item["feedback_id"], item["target_kind"], item["target_id"])
         for item in repair_menu
     ] == [
-        ("R1", "AFB-authority-asm", "assumption", "ASM-curation-1"),
+        ("R1", "AFB-authority-asm", "assumption", "ASM-1"),
         ("R2", "AFB-authority-inv", "invariant", "INV-curation-1"),
     ]
 
