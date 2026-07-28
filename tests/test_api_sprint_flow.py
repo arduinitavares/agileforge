@@ -14,6 +14,7 @@ import api as api_module
 from agile_sqlmodel import (
     CompiledSpecAuthority,
     Product,
+    SpecAuthorityAcceptance,
     SpecRegistry,
     Sprint,
     SprintStatus,
@@ -27,7 +28,10 @@ from agile_sqlmodel import (
 )
 from models.core import Team
 from services.agent_workbench.post_sprint_triage import build_triage_payload
-from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
+from tests.authority_assumption_fixtures import (
+    current_v3_compiled_authority_json,
+    historical_v2_compiled_authority,
+)
 from tools.spec_tools import _compute_story_input_hash
 from utils.spec_schemas import (
     AlignmentFinding,
@@ -398,6 +402,7 @@ def _seed_task_packet_context(
     *,
     pinned: bool,
     task_metadata: TaskMetadata | None = None,
+    retained_v2_before_accepted: bool = False,
 ) -> tuple[int, int, int, int]:
     product = repo.create("Task Packet Project")
     session.add(
@@ -463,6 +468,28 @@ def _seed_task_packet_context(
         )
         session.add(spec_version)
         session.flush()
+        spec_version_id = _require_id(
+            spec_version.spec_version_id,
+            "spec_version_id",
+        )
+
+        if retained_v2_before_accepted:
+            session.add(
+                CompiledSpecAuthority(
+                    spec_version_id=spec_version_id,
+                    compiler_version="2.0.0",
+                    prompt_hash="f" * 64,
+                    scope_themes="[]",
+                    invariants="[]",
+                    eligible_feature_ids="[]",
+                    rejected_features="[]",
+                    spec_gaps="[]",
+                    compiled_artifact_json=json.dumps(
+                        historical_v2_compiled_authority(prompt_hash="f" * 64)
+                    ),
+                )
+            )
+            session.flush()
 
         invariant = Invariant(
             id="INV-0123456789abcdef",
@@ -487,10 +514,7 @@ def _seed_task_packet_context(
             prompt_hash="0" * 64,
         )
         authority = CompiledSpecAuthority(
-            spec_version_id=_require_id(
-                spec_version.spec_version_id,
-                "spec_version_id",
-            ),
+            spec_version_id=spec_version_id,
             compiler_version="3.0.0",
             prompt_hash="0" * 64,
             scope_themes='["API"]',
@@ -504,11 +528,21 @@ def _seed_task_packet_context(
         )
         session.add(authority)
         session.flush()
-
-        story.accepted_spec_version_id = _require_id(
-            spec_version.spec_version_id,
-            "spec_version_id",
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product.product_id,
+                spec_version_id=spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="packet-test",
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec_version.spec_hash,
+                pending_authority_id=authority.authority_id,
+            )
         )
+
+        story.accepted_spec_version_id = spec_version_id
         story.validation_evidence = ValidationEvidence(
             spec_version_id=_require_id(
                 spec_version.spec_version_id,
@@ -2514,6 +2548,307 @@ def test_get_story_packet_returns_bootstrap_context_for_pinned_story(  # noqa: D
     assert any(
         finding["source"] == "alignment_warning" for finding in constraints["findings"]
     )
+
+
+def _packet_authority_rows(
+    session: Session,
+    *,
+    story_id: int,
+) -> tuple[UserStory, SpecRegistry, list[CompiledSpecAuthority]]:
+    story = session.get(UserStory, story_id)
+    assert story is not None
+    spec_version_id = _require_id(
+        story.accepted_spec_version_id,
+        "accepted_spec_version_id",
+    )
+    spec = session.get(SpecRegistry, spec_version_id)
+    assert spec is not None
+    rows = session.exec(
+        select(CompiledSpecAuthority)
+        .where(CompiledSpecAuthority.spec_version_id == spec_version_id)
+        .order_by(cast("Any", CompiledSpecAuthority.authority_id).asc())
+    ).all()
+    return story, spec, list(rows)
+
+
+def _add_packet_authority(
+    session: Session,
+    *,
+    spec_version_id: int,
+    prompt_hash: str,
+    artifact_json: str | None = None,
+) -> CompiledSpecAuthority:
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash=prompt_hash,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+        compiled_artifact_json=(
+            artifact_json
+            if artifact_json is not None
+            else current_v3_compiled_authority_json(prompt_hash=prompt_hash)
+        ),
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    return authority
+
+
+def test_story_packet_ignores_retained_v2_before_exact_accepted_v3(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retained v2 history cannot shadow the exact accepted v3 row."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, _ = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+        retained_v2_before_accepted=True,
+    )
+    _, _, rows = _packet_authority_rows(session, story_id=story_id)
+    assert [row.compiler_version for row in rows] == ["2.0.0", "3.0.0"]
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/stories/{story_id}/packet"
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()["data"]
+    assert payload["source_snapshot"]["compiled_authority_id"] == rows[1].authority_id
+    assert payload["constraints"]["spec_binding"]["authority_artifact_status"] == (
+        "available"
+    )
+
+
+def test_task_packet_keeps_exact_accepted_v3_when_newer_v3_is_pending(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer pending row cannot become execution authority."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    story, _, rows = _packet_authority_rows(session, story_id=story_id)
+    accepted = rows[0]
+    pending = _add_packet_authority(
+        session,
+        spec_version_id=_require_id(
+            story.accepted_spec_version_id,
+            "accepted_spec_version_id",
+        ),
+        prompt_hash="1" * 64,
+    )
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()["data"]
+    assert payload["source_snapshot"]["compiled_authority_id"] == accepted.authority_id
+    assert payload["source_snapshot"]["compiled_authority_id"] != pending.authority_id
+
+
+def test_task_packet_uses_latest_deterministic_accepted_decision(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later accepted decisions replace earlier execution authority."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    first_response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+    assert first_response.status_code == HTTP_OK
+    first_payload = first_response.json()["data"]
+
+    story, spec, existing_rows = _packet_authority_rows(session, story_id=story_id)
+    original = existing_rows[0]
+    replacement = _add_packet_authority(
+        session,
+        spec_version_id=_require_id(
+            story.accepted_spec_version_id,
+            "accepted_spec_version_id",
+        ),
+        prompt_hash="2" * 64,
+    )
+    replacement.compiled_at = original.compiled_at
+    session.add(replacement)
+    session.commit()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=project_id,
+            spec_version_id=_require_id(
+                story.accepted_spec_version_id,
+                "accepted_spec_version_id",
+            ),
+            status="accepted",
+            policy="test",
+            decided_by="packet-test-replacement",
+            decided_at=datetime.now(UTC),
+            compiler_version=replacement.compiler_version,
+            prompt_hash=replacement.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=replacement.authority_id,
+        )
+    )
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_OK
+    payload = response.json()["data"]
+    assert (
+        payload["source_snapshot"]["compiled_authority_id"]
+        == replacement.authority_id
+    )
+    assert (
+        payload["metadata"]["source_fingerprint"]
+        != first_payload["metadata"]["source_fingerprint"]
+    )
+
+
+def test_task_packet_does_not_fallback_when_pinned_spec_is_foreign_owned(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A product/spec ownership mismatch exposes no authority fallback."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    _, spec, _ = _packet_authority_rows(session, story_id=story_id)
+    foreign = Product(name="Foreign Packet Product")
+    session.add(foreign)
+    session.commit()
+    session.refresh(foreign)
+    spec.product_id = _require_id(foreign.product_id, "product_id")
+    session.add(spec)
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_OK
+    binding = response.json()["data"]["constraints"]["spec_binding"]
+    assert binding["binding_status"] == "pinned"
+    assert binding["authority_artifact_status"] == "missing"
+
+
+def test_task_packet_does_not_fallback_when_acceptance_targets_other_spec(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An acceptance/authority spec mismatch exposes no alternate row."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    story, _, _ = _packet_authority_rows(session, story_id=story_id)
+    other_spec = SpecRegistry(
+        product_id=project_id,
+        spec_hash="b" * 64,
+        content="# Other spec",
+        status="approved",
+    )
+    session.add(other_spec)
+    session.commit()
+    session.refresh(other_spec)
+    other_authority = _add_packet_authority(
+        session,
+        spec_version_id=_require_id(other_spec.spec_version_id, "spec_version_id"),
+        prompt_hash="3" * 64,
+    )
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.spec_version_id
+            == story.accepted_spec_version_id,
+        )
+    ).first()
+    assert acceptance is not None
+    acceptance.pending_authority_id = other_authority.authority_id
+    session.add(acceptance)
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_OK
+    assert (
+        response.json()["data"]["constraints"]["spec_binding"][
+            "authority_artifact_status"
+        ]
+        == "missing"
+    )
+
+
+@pytest.mark.parametrize(
+    ("accepted_artifact_json", "expected_code"),
+    [
+        (
+            json.dumps(historical_v2_compiled_authority(prompt_hash="4" * 64)),
+            "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+        ),
+        ("not-json", "COMPILED_AUTHORITY_INVALID"),
+    ],
+)
+def test_task_packet_blocks_unusable_accepted_row_despite_valid_pending_v3(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted_artifact_json: str,
+    expected_code: str,
+) -> None:
+    """A valid pending v3 row cannot bypass an unusable accepted row."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    story, _, rows = _packet_authority_rows(session, story_id=story_id)
+    accepted = rows[0]
+    accepted.compiled_artifact_json = accepted_artifact_json
+    session.add(accepted)
+    session.commit()
+    _add_packet_authority(
+        session,
+        spec_version_id=_require_id(
+            story.accepted_spec_version_id,
+            "accepted_spec_version_id",
+        ),
+        prompt_hash="5" * 64,
+    )
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == expected_code
+    assert error["details"]["authority_id"] == accepted.authority_id
 
 
 def test_get_task_packet_returns_task_local_execution_context(session, monkeypatch):  # noqa: ANN001, ANN201, D103

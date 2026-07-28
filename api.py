@@ -214,7 +214,10 @@ from services.roadmap_runtime import run_roadmap_agent_from_state
 from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
-from services.specs.authority_selection import latest_compiled_authority
+from services.specs.authority_selection import (
+    accepted_compiled_authority,
+    latest_compiled_authority,
+)
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
     compiled_authority_read_failure,
@@ -1878,15 +1881,16 @@ def _load_validation_evidence(
 
 def _load_pinned_authority(
     session: Session,
+    project_id: int,
     accepted_spec_version_id: int | None,
 ) -> CompiledSpecAuthority | None:
     if accepted_spec_version_id is None:
         return None
-    return session.exec(
-        select(CompiledSpecAuthority).where(
-            CompiledSpecAuthority.spec_version_id == accepted_spec_version_id
-        )
-    ).first()
+    return accepted_compiled_authority(
+        session,
+        product_id=project_id,
+        spec_version_id=accepted_spec_version_id,
+    )
 
 
 def _build_packet_findings(
@@ -2124,7 +2128,11 @@ def _load_packet_story_context(  # noqa: C901
         "missing" if evidence is None else "current" if input_hash_matches else "stale"
     )
 
-    authority = _load_pinned_authority(session, story.accepted_spec_version_id)
+    authority = _load_pinned_authority(
+        session,
+        project_id,
+        story.accepted_spec_version_id,
+    )
     load_result = load_compiled_artifact(authority) if authority else None
     if load_result is not None:
         failure = compiled_authority_read_failure(
@@ -2208,6 +2216,9 @@ def _build_story_packet(
         "validation_input_hash": context.validation_input_hash,
         "compiled_authority_compiled_at": _serialize_temporal(
             context.authority.compiled_at if context.authority else None
+        ),
+        "compiled_authority_id": (
+            context.authority.authority_id if context.authority else None
         ),
         "task_plan_hash": _hash_payload(task_plan_tasks),
     }
@@ -2330,6 +2341,9 @@ def _build_task_packet(
         "validation_input_hash": context.validation_input_hash,
         "compiled_authority_compiled_at": _serialize_temporal(
             context.authority.compiled_at if context.authority else None
+        ),
+        "compiled_authority_id": (
+            context.authority.authority_id if context.authority else None
         ),
     }
 

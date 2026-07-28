@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from utils.cli_output import emit
 
@@ -22,9 +22,8 @@ from agile_sqlmodel import (  # pylint: disable=wrong-import-position  # noqa: E
     UserStory,
     get_engine,
 )
-from tools.spec_tools import (  # noqa: E402
-    _load_compiled_artifact,  # pylint: disable=wrong-import-position
-)
+from services.specs.authority_selection import accepted_compiled_authority  # noqa: E402
+from services.specs.compiler_service import load_compiled_artifact  # noqa: E402
 
 REVIEW_OUTCOME_FIELD = "rater_pass"
 
@@ -55,7 +54,7 @@ def _summarize_authority(compiled: CompiledSpecAuthority | None) -> str:
     """Render compact summary of compiled authority for reviewer context."""
     if not compiled:
         return "NO_COMPILED_AUTHORITY"
-    load_result = _load_compiled_artifact(compiled)
+    load_result = load_compiled_artifact(compiled)
     artifact = load_result.artifact if load_result else None
     if not artifact:
         return "INVALID_COMPILED_AUTHORITY_ARTIFACT"
@@ -76,11 +75,15 @@ def build_labeling_rows(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with Session(get_engine()) as session:
         for case in cases:
             story = session.get(UserStory, case["story_id"])
-            compiled = session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == case["spec_version_id"]
+            compiled = (
+                accepted_compiled_authority(
+                    session,
+                    product_id=story.product_id,
+                    spec_version_id=case["spec_version_id"],
                 )
-            ).first()
+                if story is not None
+                else None
+            )
 
             title = (story.title if story else "") or ""
             description = (story.story_description if story else "") or ""

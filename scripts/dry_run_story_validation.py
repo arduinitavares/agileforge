@@ -2,11 +2,12 @@
 """Dry-run script to validate stories against spec authority without persisting changes."""  # noqa: E501
 
 import argparse
-import json
 from typing import Any
 
 from sqlmodel import Session, col, create_engine, select
 
+from services.specs.authority_selection import accepted_compiled_authority
+from services.specs.compiler_service import load_compiled_artifact
 from utils.cli_output import emit
 from utils.runtime_config import DatabaseTarget, resolve_database_target
 
@@ -16,20 +17,31 @@ def resolve_db_target(explicit_db: str | None = None) -> DatabaseTarget:
     return resolve_database_target(explicit_db, env_name="AGILEFORGE_DB_URL")
 
 
-def _load_invariants(compiled_artifact_json: str | None) -> list[dict[str, Any]] | None:
-    if not compiled_artifact_json:
-        emit("ERROR: Compiled authority artifact is empty.")
+def _load_accepted_invariants(
+    session: Session,
+    *,
+    product_id: int,
+    spec_version_id: int,
+) -> list[dict[str, Any]] | None:
+    """Load invariants only from the exact accepted valid authority."""
+    authority = accepted_compiled_authority(
+        session,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+    if authority is None:
         return None
-
-    authority = json.loads(compiled_artifact_json)
-    invariants = authority.get("invariants", [])
-    return [inv for inv in invariants if isinstance(inv, dict)]
+    loaded = load_compiled_artifact(authority)
+    if not loaded.ok or loaded.artifact is None:
+        return None
+    return [
+        invariant.model_dump(mode="json") for invariant in loaded.artifact.invariants
+    ]
 
 
 def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa: C901, PLR0912
     """Return dry run validation."""
     from agile_sqlmodel import (  # noqa: PLC0415
-        CompiledSpecAuthority,
         SpecRegistry,
         UserStory,
     )
@@ -62,6 +74,9 @@ def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa:
         if not spec:
             emit(f"ERROR: No approved spec found for product {product_id}")
             return
+        if spec.spec_version_id is None:
+            emit(f"ERROR: Approved spec for product {product_id} has no ID.")
+            return
 
         emit(f"Using Spec Version {spec.spec_version_id} (ID: {spec.spec_version_id})")
 
@@ -86,18 +101,15 @@ def dry_run_validation(product_id: int, db: str | None = None) -> None:  # noqa:
 
         # PLAN B: Re-implement the check logic here to avoid side effects
         # Fetch compiled authority content
-        compiled = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == spec.spec_version_id
-            )
-        ).first()
-
-        if not compiled:
-            emit("ERROR: No compiled authority found for this spec version.")
-            return
-
-        invariants = _load_invariants(compiled.compiled_artifact_json)
+        invariants = _load_accepted_invariants(
+            session,
+            product_id=product_id,
+            spec_version_id=spec.spec_version_id,
+        )
         if invariants is None:
+            emit(
+                "ERROR: No exact accepted valid authority found for this spec version."
+            )
             return
 
         emit(f"Loaded {len(invariants)} invariants from authority.")

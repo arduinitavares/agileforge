@@ -19,11 +19,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from agile_sqlmodel import (  # pylint: disable=wrong-import-position  # noqa: E402
-    CompiledSpecAuthority,
     SpecRegistry,
     UserStory,
     get_engine,
 )
+from services.specs.authority_selection import accepted_compiled_authority  # noqa: E402
+from services.specs.compiler_service import load_compiled_artifact  # noqa: E402
 
 
 def _compute_content_hash(story: UserStory) -> str:
@@ -114,13 +115,16 @@ def _resolve_spec_version_id(
     if story.accepted_spec_version_id:
         spec_id = int(story.accepted_spec_version_id)
         if require_compiled:
-            compiled = session.exec(
-                select(CompiledSpecAuthority).where(
-                    CompiledSpecAuthority.spec_version_id == spec_id
-                )
-            ).first()
-            if not compiled:
-                return None, "accepted_spec_uncompiled"
+            authority = accepted_compiled_authority(
+                session,
+                product_id=story.product_id,
+                spec_version_id=spec_id,
+            )
+            loaded = (
+                load_compiled_artifact(authority) if authority is not None else None
+            )
+            if loaded is None or not loaded.ok or loaded.artifact is None:
+                return None, "accepted_spec_invalid"
         return spec_id, "accepted_spec_version_id"
 
     spec = session.exec(
@@ -138,13 +142,14 @@ def _resolve_spec_version_id(
     if spec_id is None:
         return None, "latest_approved_spec_missing_id"
     if require_compiled:
-        compiled = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == spec_id
-            )
-        ).first()
-        if not compiled:
-            return None, "approved_spec_uncompiled"
+        authority = accepted_compiled_authority(
+            session,
+            product_id=story.product_id,
+            spec_version_id=spec_id,
+        )
+        loaded = load_compiled_artifact(authority) if authority is not None else None
+        if loaded is None or not loaded.ok or loaded.artifact is None:
+            return None, "approved_spec_invalid"
 
     return spec_id, "latest_approved_spec"
 
@@ -253,7 +258,10 @@ def main() -> None:
     parser.add_argument(
         "--allow-uncompiled",
         action="store_true",
-        help="Allow cases where selected spec_version has no CompiledSpecAuthority row",
+        help=(
+            "Permissive mode: allow cases without an exact accepted valid "
+            "compiled authority"
+        ),
     )
     parser.add_argument(
         "--no-evidence-labels",

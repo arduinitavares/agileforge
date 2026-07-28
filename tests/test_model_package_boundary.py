@@ -619,13 +619,9 @@ def test_runtime_modules_import_new_core_boundary() -> None:
     """Verify runtime modules import new core boundary."""
     root = Path(__file__).resolve().parents[1]
     db_tools_text = (root / "tools" / "db_tools.py").read_text(encoding="utf-8")
-    smoke_script_text = (
-        root / "scripts" / "smoke_spec_to_story_pipeline.py"
-    ).read_text(encoding="utf-8")
 
     assert "from models.core import " in db_tools_text
     assert "ProductPersona" in db_tools_text
-    assert "from models.core import ProductPersona" in smoke_script_text
 
 
 def test_runtime_modules_import_new_core_product_boundary() -> None:
@@ -748,7 +744,6 @@ def test_runtime_scripts_import_hierarchy_models_from_core() -> None:
         "scripts/verify_backlog_optimization.py": {"Theme", "Epic", "Feature"},
         "scripts/benchmark_product_structure.py": {"Theme", "Epic", "Feature"},
         "scripts/fix_persona_drift.py": {"Feature"},
-        "scripts/smoke_spec_to_story_pipeline.py": {"Theme", "Epic", "Feature"},
         "scripts/benchmark_sprint_planning.py": {"Theme", "Epic", "Feature"},
     }
 

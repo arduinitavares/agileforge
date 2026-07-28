@@ -211,3 +211,167 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
 
     assert selected is not None
     assert selected.id == decisions[2].id
+
+
+def test_accepted_compiled_authority_selects_exact_accepted_row(
+    session: Session,
+) -> None:
+    """Execution selection ignores retained history and newer pending rows."""
+    product_id, spec_version_id, retained, accepted = _history(session)
+    acceptance = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        compiler_version=accepted.compiler_version,
+        prompt_hash=accepted.prompt_hash,
+        spec_hash="sha256:selection",
+        pending_authority_id=accepted.authority_id,
+    )
+    session.add(acceptance)
+    session.commit()
+    pending = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="c" * 64,
+        compiled_artifact_json="{}",
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(pending)
+    session.commit()
+
+    selected = authority_selection.accepted_compiled_authority(
+        session,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+
+    assert selected is accepted
+    assert selected is not retained
+    assert selected is not pending
+
+
+def test_accepted_compiled_authority_uses_latest_deterministic_decision(
+    session: Session,
+) -> None:
+    """Multiple accepted decisions use decided-at then id ordering."""
+    product_id, spec_version_id, first, second = _history(session)
+    decided_at = datetime.now(UTC)
+    decisions = [
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            decided_at=decided_at,
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash="sha256:selection",
+            pending_authority_id=authority.authority_id,
+        )
+        for authority in (first, second)
+    ]
+    session.add_all(decisions)
+    session.commit()
+
+    selected = authority_selection.accepted_compiled_authority(
+        session,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+
+    assert selected is second
+
+
+def test_accepted_compiled_authority_rejects_foreign_product_spec(
+    session: Session,
+) -> None:
+    """The selected spec must belong to the requested product."""
+    _, spec_version_id, _, accepted = _history(session)
+    foreign_product = Product(name="Foreign Authority Selection")
+    session.add(foreign_product)
+    session.commit()
+    session.refresh(foreign_product)
+    foreign_product_id = require_id(foreign_product.product_id, "product_id")
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=foreign_product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+            spec_hash="sha256:selection",
+            pending_authority_id=accepted.authority_id,
+        )
+    )
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=foreign_product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )
+
+
+def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
+    session: Session,
+) -> None:
+    """A mismatched acceptance target never falls back to another row."""
+    product_id, spec_version_id, _, accepted = _history(session)
+    other_spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="sha256:other-spec",
+        content="other",
+        status="approved",
+    )
+    session.add(other_spec)
+    session.commit()
+    session.refresh(other_spec)
+    other_authority = CompiledSpecAuthority(
+        spec_version_id=require_id(other_spec.spec_version_id, "spec_version_id"),
+        compiler_version="3.0.0",
+        prompt_hash="d" * 64,
+        compiled_artifact_json="{}",
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(other_authority)
+    session.commit()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=other_authority.compiler_version,
+            prompt_hash=other_authority.prompt_hash,
+            spec_hash="sha256:selection",
+            pending_authority_id=other_authority.authority_id,
+        )
+    )
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )
+    assert accepted.authority_id is not None

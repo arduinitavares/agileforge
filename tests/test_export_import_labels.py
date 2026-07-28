@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agile_sqlmodel import CompiledSpecAuthority, Product, SpecRegistry, UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 from models.core import Epic, Feature, Theme
 from scripts import export_benchmark_for_labeling as exporter
 from scripts import import_human_labels as importer
@@ -83,6 +89,22 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
     session.refresh(spec)
     spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
 
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="2.0.0",
+            prompt_hash="f" * 64,
+            compiled_at=datetime.now(UTC),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+            compiled_artifact_json='{"schema_version":"agileforge.compiled_authority.v2"}',
+        )
+    )
+    session.flush()
+
     invariant = Invariant(
         id="INV-0000000000000001",
         type=InvariantType.REQUIRED_FIELD,
@@ -120,6 +142,20 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
         ).model_dump_json(),
     )
     session.add(compiled)
+    session.flush()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="label-test",
+            compiler_version=compiled.compiler_version,
+            prompt_hash=compiled.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=compiled.authority_id,
+        )
+    )
     session.commit()
 
     return story_id, spec_version_id

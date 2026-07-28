@@ -99,3 +99,23 @@ def latest_accepted_authority_decision(
             cast("Any", SpecAuthorityAcceptance.id).desc(),
         )
     ).first()
+
+
+def accepted_compiled_authority(
+    session: Session,
+    *,
+    product_id: int,
+    spec_version_id: int,
+) -> CompiledSpecAuthority | None:
+    """Load the exact accepted authority for one product-owned spec."""
+    spec = session.get(SpecRegistry, spec_version_id)
+    if spec is None or spec.product_id != product_id:
+        return None
+    acceptance = latest_accepted_authority_decision(
+        session,
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+    )
+    if acceptance is None:
+        return None
+    return compiled_authority_for_acceptance(session, acceptance=acceptance)

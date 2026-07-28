@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 from contextlib import redirect_stderr
@@ -10,11 +11,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agile_sqlmodel import Product, SpecRegistry, UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 
 os.environ.setdefault("ALLOW_PROD_DB_IN_TEST", "1")
 
 from scripts import apply_story_validation as validation_script
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
+from tests.typing_helpers import require_id
 from utils.runtime_config import clear_runtime_config_cache
 
 if TYPE_CHECKING:
@@ -101,6 +110,84 @@ def _seed_product_with_stories(
 
     session.commit()
     return product.product_id, story_ids
+
+
+def test_invariant_summary_uses_exact_accepted_valid_authority(
+    session: Session,
+) -> None:
+    """Invariant details never come from retained or pending rows."""
+    product = Product(name="Invariant Summary Product")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="summary-spec",
+        content="# Summary",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="2.0.0",
+            prompt_hash="a" * 64,
+            compiled_artifact_json="not-json",
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+    )
+    payload = json.loads(current_v3_compiled_authority_json(prompt_hash="b" * 64))
+    payload["invariants"] = [
+        {
+            "id": "INV-0123456789abcdef",
+            "type": "REQUIRED_FIELD",
+            "parameters": {"field_name": "user_id"},
+        }
+    ]
+    accepted = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="b" * 64,
+        compiled_artifact_json=json.dumps(payload),
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(accepted)
+    session.flush()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="summary-test",
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=accepted.authority_id,
+        )
+    )
+    session.commit()
+
+    invariant_map = validation_script._load_invariant_map(
+        product_id,
+        spec_version_id,
+    )
+
+    assert invariant_map["INV-0123456789abcdef"]["parameters"] == {
+        "field_name": "user_id"
+    }
 
 
 def test_default_cli_output_is_concise(

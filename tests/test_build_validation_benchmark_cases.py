@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest  # noqa: TC002
 
-from agile_sqlmodel import UserStory
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+    UserStory,
+)
 from scripts import build_validation_benchmark_cases as builder
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
+from tests.typing_helpers import require_id
+
+if TYPE_CHECKING:
+    from sqlmodel import Session
 
 
 def _story(title: str, description: str, acceptance_criteria: str) -> UserStory:
@@ -61,3 +74,95 @@ def test_warn_when_all_cases_are_validation_evidence(
     builder._maybe_warn_evidence_only(rows)  # pylint: disable=protected-access
     captured = capsys.readouterr()
     assert "WARNING: All labels derive from validation_evidence" in captured.err
+
+
+def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
+    session: Session,
+) -> None:
+    """Strict cases reject missing or malformed acceptance; permissive is explicit."""
+    product = Product(name="Benchmark Builder Product")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="builder-spec",
+        content="# Builder",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    story = UserStory(
+        product_id=product_id,
+        accepted_spec_version_id=spec_version_id,
+        title="Builder story",
+    )
+    session.add(story)
+    malformed = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="a" * 64,
+        compiled_artifact_json="not-json",
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(malformed)
+    session.flush()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="builder-test",
+            compiler_version=malformed.compiler_version,
+            prompt_hash=malformed.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=malformed.authority_id,
+        )
+    )
+    session.add(
+        CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="b" * 64,
+            compiled_artifact_json=current_v3_compiled_authority_json(
+                prompt_hash="b" * 64
+            ),
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+    )
+    session.commit()
+
+    assert builder._resolve_spec_version_id(
+        session,
+        story,
+        require_compiled=False,
+    ) == (spec_version_id, "accepted_spec_version_id")
+    assert builder._resolve_spec_version_id(
+        session,
+        story,
+        require_compiled=True,
+    ) == (None, "accepted_spec_invalid")
+
+    malformed.compiled_artifact_json = current_v3_compiled_authority_json(
+        prompt_hash=malformed.prompt_hash
+    )
+    session.add(malformed)
+    session.commit()
+
+    assert builder._resolve_spec_version_id(
+        session,
+        story,
+        require_compiled=True,
+    ) == (spec_version_id, "accepted_spec_version_id")

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import re
@@ -20,12 +19,13 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 from agile_sqlmodel import (  # noqa: E402
-    CompiledSpecAuthority,
     Product,
     SpecRegistry,
     UserStory,
     get_engine,
 )
+from services.specs.authority_selection import accepted_compiled_authority  # noqa: E402
+from services.specs.compiler_service import load_compiled_artifact  # noqa: E402
 from tools.spec_tools import validate_story_with_spec_authority  # noqa: E402
 from utils.logging_config import configure_logging  # noqa: E402
 
@@ -90,27 +90,20 @@ def _effective_mode(explicit_mode: str | None) -> str:
     )
 
 
-def _load_invariant_map(spec_version_id: int) -> dict[str, dict]:
+def _load_invariant_map(product_id: int, spec_version_id: int) -> dict[str, dict]:
     with Session(engine) as session:
-        auth = session.exec(
-            select(CompiledSpecAuthority).where(
-                CompiledSpecAuthority.spec_version_id == spec_version_id
-            )
-        ).first()
-    if not auth or not auth.compiled_artifact_json:
-        return {}
-    try:
-        artifact = json.loads(auth.compiled_artifact_json)
-        invariants = (
-            artifact.get("invariants", []) if isinstance(artifact, dict) else []
+        authority = accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
         )
-        return {
-            inv.get("id"): inv
-            for inv in invariants
-            if isinstance(inv, dict) and isinstance(inv.get("id"), str)
-        }
-    except Exception:  # pragma: no cover - defensive parsing fallback  # noqa: BLE001
+        loaded = load_compiled_artifact(authority) if authority is not None else None
+    if loaded is None or not loaded.ok or loaded.artifact is None:
         return {}
+    return {
+        invariant.id: invariant.model_dump(mode="json")
+        for invariant in loaded.artifact.invariants
+    }
 
 
 def _extract_invariant_ids(*texts: str) -> list[str]:
@@ -227,7 +220,7 @@ def apply_validation(product_id: int, mode: str | None = None) -> ValidationRunR
             return result
 
         result.spec_version_id = spec_version_id
-        invariant_map = _load_invariant_map(spec_version_id)
+        invariant_map = _load_invariant_map(product_id, spec_version_id)
         stories = session.exec(
             select(UserStory)
             .where(UserStory.product_id == product_id)
