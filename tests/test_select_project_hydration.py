@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING, Any, TypedDict, Unpack, cast
 from sqlmodel import Session
 
 from agile_sqlmodel import Product, SpecRegistry
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 from tools.orchestrator_tools import get_project_details, select_project
 
 JsonDict = dict[str, Any]
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
+COMPILED_AUTHORITY_JSON = current_v3_compiled_authority_json()
 
 if TYPE_CHECKING:
     from google.adk.tools import ToolContext

@@ -1867,6 +1867,39 @@ def test_invariants_reports_regenerate_for_unsupported_schema(
     )
 
 
+def test_status_and_invariants_reject_malformed_v3_authority(
+    session: Session,
+    tmp_path: Path,
+) -> None:
+    """Current-schema malformed rows must never project denormalized success."""
+    product = _seed_product(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
+    authority = _seed_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiled_artifact_json=json.dumps(
+            {"schema_version": "agileforge.compiled_authority.v3"}
+        ),
+    )
+    _accept_spec(session, product_id=product_id, spec=spec)
+    service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+
+    status_result = service.status(project_id=product_id)
+    invariants_result = service.invariants(project_id=product_id)
+
+    for result in (status_result, invariants_result):
+        assert result["ok"] is False
+        error = result["errors"][0]
+        assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+        assert error["details"]["load_status"] == "schema_invalid"
+        assert error["details"]["authority_id"] == authority.authority_id
+        assert "agileforge authority regenerate" in " ".join(error["remediation"])
+        assert result["data"]["authority_status"] == "invalid"
+        assert result["data"]["current"] is False
+        assert result["data"]["accepted_current"] is False
+
+
 def test_invariants_returns_explicit_compiled_authority_without_acceptance(
     session: Session,
     tmp_path: Path,
@@ -1891,7 +1924,10 @@ def test_invariants_returns_explicit_compiled_authority_without_acceptance(
     assert result["data"]["spec_version_id"] == spec.spec_version_id
     assert result["data"]["count"] == 1
     assert result["data"]["invariants"] == [
-        {"id": "INV-1", "text": "Must stay in scope"}
+        {
+            "id": "INV-0123456789abcdef",
+            "text": "REQUIRED_FIELD:guard_tokens",
+        }
     ]
     assert result["data"]["authority_fingerprint"].startswith("sha256:")
 
@@ -1946,27 +1982,40 @@ def test_invariants_reports_missing_spec_version_with_registry_metadata(
     }
 
 
-def test_malformed_invariants_do_not_crash_status_and_error_invariants(
+def test_denormalized_invariants_do_not_override_typed_artifact(
     session: Session,
     tmp_path: Path,
 ) -> None:
-    """Warn in status and return a structured invariants error for bad JSON."""
+    """Legacy denormalized JSON cannot override the typed v3 artifact."""
     product = _seed_product(session)
     product_id = require_id(product.product_id, "product_id")
     spec = _seed_spec(session, product_id=product_id, content="# Spec\n")
-    _seed_authority(
+    authority = _seed_authority(
         session,
         spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
-        invariants="{bad json",
     )
     _accept_spec(session, product_id=product_id, spec=spec)
     service = AuthorityProjectionService(engine=_engine(session), repo_root=tmp_path)
+    baseline_status = service.status(project_id=product_id)
+    baseline_invariants = service.invariants(project_id=product_id)
+    authority.invariants = "{bad json"
+    session.add(authority)
+    session.commit()
 
     status_result = service.status(project_id=product_id)
     invariants_result = service.invariants(project_id=product_id)
 
     assert status_result["ok"] is True
-    assert status_result["data"]["invariant_count"] == 0
-    assert status_result["warnings"][0]["code"] == "AUTHORITY_INVARIANTS_INVALID"
-    assert invariants_result["ok"] is False
-    assert invariants_result["errors"][0]["code"] == "AUTHORITY_INVARIANTS_INVALID"
+    assert status_result["data"]["invariant_count"] == 1
+    assert status_result["warnings"] == []
+    assert invariants_result["ok"] is True
+    assert invariants_result["data"]["count"] == 1
+    assert invariants_result["data"]["invariants"][0]["id"] == (
+        "INV-0123456789abcdef"
+    )
+    assert status_result["data"]["authority_fingerprint"] == (
+        baseline_status["data"]["authority_fingerprint"]
+    )
+    assert invariants_result["data"]["authority_fingerprint"] == (
+        baseline_invariants["data"]["authority_fingerprint"]
+    )

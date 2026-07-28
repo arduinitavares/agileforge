@@ -803,6 +803,9 @@ def test_review_malformed_compiled_artifact_blocks_acceptance(
     )
     assert invalid["severity"] == "blocking"
     assert invalid["override_allowed"] is False
+    assert invalid["details"]["load_status"] == "schema_invalid"
+    assert invalid["details"]["authority_id"] == authority_id
+    assert "agileforge authority regenerate" in " ".join(invalid["remediation"])
     assert "1 accepted normative items" in result["data"]["text"]
     artifact = result["data"]["pending_authority"]["artifact"]
     assert artifact["eligible_feature_rules"] == [

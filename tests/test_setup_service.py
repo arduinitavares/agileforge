@@ -5,7 +5,28 @@ from typing import Any, Never
 
 import pytest
 
+from utils.spec_schemas import (
+    SpecAuthorityCompilationSuccess,
+    SpecAuthorityCompilerOutput,
+)
+
 JsonDict = dict[str, Any]
+
+
+def _compiled_v3_json() -> str:
+    """Return a minimal valid typed authority fixture."""
+    return SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationSuccess(
+            scope_themes=[],
+            invariants=[],
+            eligible_feature_rules=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+        )
+    ).model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -100,13 +121,12 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
     """Verify run project setup runs auto vision after successful setup."""
     from services.setup_service import run_project_setup  # noqa: PLC0415
 
+    authority_json = _compiled_v3_json()
     context = SimpleNamespace(
         state={
             "fsm_state": "SETUP_REQUIRED",
             "pending_spec_content": "SPEC",
-            "compiled_authority_cached": (
-                '{"schema_version":"agileforge.compiled_authority.v3"}'
-            ),
+            "compiled_authority_cached": authority_json,
         },
         session_id="7",
     )
@@ -142,9 +162,7 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
         return SimpleNamespace(
             product_id=project_id,
             spec_file_path=__file__,
-            compiled_authority_json=(
-                '{"schema_version":"agileforge.compiled_authority.v3"}'
-            ),
+            compiled_authority_json=authority_json,
         )
 
     def setup_blocker(_product: object) -> str | None:
@@ -212,15 +230,38 @@ async def test_run_project_setup_runs_auto_vision_after_successful_setup() -> No
 
 
 @pytest.mark.asyncio
-async def test_run_project_setup_blocks_legacy_authority() -> None:
-    """Unsupported authority artifacts should block setup before Vision starts."""
+@pytest.mark.parametrize(
+    ("authority_json", "expected_code", "expected_status", "expected_message"),
+    [
+        (
+            '{"invariants":[]}',
+            "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+            "schema_unsupported",
+            "Compiled authority artifact schema is unsupported.",
+        ),
+        (
+            '{"schema_version":"agileforge.compiled_authority.v3"}',
+            "COMPILED_AUTHORITY_INVALID",
+            "schema_invalid",
+            "Compiled authority artifact is invalid.",
+        ),
+    ],
+)
+async def test_run_project_setup_blocks_unusable_authority(
+    authority_json: str,
+    expected_code: str,
+    expected_status: str,
+    expected_message: str,
+) -> None:
+    """Every non-success authority blocks setup before Vision starts."""
     from services.setup_service import run_project_setup  # noqa: PLC0415
 
+    authority_id = 17
     context = SimpleNamespace(
         state={
             "fsm_state": "SETUP_REQUIRED",
             "latest_spec_version_id": 42,
-            "compiled_authority_cached": '{"invariants":[]}',
+            "compiled_authority_cached": authority_json,
         },
         session_id="7",
     )
@@ -249,8 +290,9 @@ async def test_run_project_setup_blocks_legacy_authority() -> None:
             product_id=project_id,
             latest_spec_version_id=42,
             spec_file_path=__file__,
-            compiled_artifact_json='{"invariants":[]}',
-            compiled_authority_json='{"invariants":[]}',
+            authority_id=authority_id,
+            compiled_artifact_json=authority_json,
+            compiled_authority_json=authority_json,
         )
 
     def setup_blocker(_product: object) -> str | None:
@@ -260,7 +302,7 @@ async def test_run_project_setup_blocks_legacy_authority() -> None:
         _state: object, *, project_id: int, user_input: str
     ) -> Never:
         del project_id, user_input
-        msg = "vision agent should not start with unsupported authority"
+        msg = "vision agent should not start with unusable authority"
         raise AssertionError(msg)
 
     def save_session_state(session_id: str, state: JsonDict) -> None:
@@ -292,7 +334,10 @@ async def test_run_project_setup_blocks_legacy_authority() -> None:
         "reason": "regenerate unsupported compiled authority before continuing.",
     }
     assert result["passed"] is False
-    assert result["error"] == "Compiled authority artifact schema is unsupported."
+    assert result["error"] == expected_message
+    assert result["detail"]["error_code"] == expected_code
+    assert result["detail"]["details"]["load_status"] == expected_status
+    assert result["detail"]["details"]["authority_id"] == authority_id
     assert result["next_actions"] == [next_action]
     assert saved["state"]["setup_status"] == "failed"
     assert saved["state"]["setup_next_actions"] == [next_action]

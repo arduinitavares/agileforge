@@ -54,8 +54,8 @@ from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.specs.authority_selection import compiled_authority_for_acceptance
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from utils.adk_runner import (
@@ -674,7 +674,7 @@ class AsBuiltAssessmentRunner:
             return _project_not_found(project_id)
         return None
 
-    def _load_authority(  # noqa: PLR0911
+    def _load_authority(
         self,
         project_id: int,
     ) -> tuple[str, dict[str, Any]] | dict[str, Any]:
@@ -698,7 +698,7 @@ class AsBuiltAssessmentRunner:
                 session,
                 acceptance=accepted,
             )
-            if authority is None or not authority.compiled_artifact_json:
+            if authority is None:
                 return error_envelope(
                     command=AS_BUILT_ASSESS_COMMAND,
                     error=_authority_not_compiled(project_id),
@@ -713,28 +713,14 @@ class AsBuiltAssessmentRunner:
                     ),
                 )
             load_result = load_compiled_artifact(authority)
-            if load_result.unsupported:
-                return _unsupported_authority_schema_envelope(
-                    project_id=project_id,
-                    spec_version_id=accepted.spec_version_id,
-                    observed_schema_version=load_result.observed_schema_version,
-                )
-            if load_result.status == "invalid_json":
-                return error_envelope(
-                    command=AS_BUILT_ASSESS_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority artifact JSON is invalid.",
-                    ),
-                )
-            if load_result.status == "schema_invalid":
-                return error_envelope(
-                    command=AS_BUILT_ASSESS_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority artifact failed schema validation.",
-                    ),
-                )
+            read_failure = compiled_authority_read_failure(
+                load_result,
+                project_id=project_id,
+                spec_version_id=accepted.spec_version_id,
+                authority_id=authority.authority_id,
+            )
+            if read_failure is not None:
+                return _authority_read_failure_envelope(read_failure)
             compiled = (
                 load_result.artifact.model_dump(mode="json")
                 if load_result.artifact is not None
@@ -1444,46 +1430,37 @@ def _authority_regenerate_next_action(
     }
 
 
-def _unsupported_authority_schema_error(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _authority_read_error(
+    failure: CompiledAuthorityReadFailure,
 ) -> WorkbenchError:
-    """Return the standard unsupported compiled-authority schema error."""
+    """Return the central compiled-authority read error."""
     return workbench_error(
-        ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
-        message="Compiled authority artifact schema is unsupported.",
-        details=compiled_authority_schema_unsupported_details(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=observed_schema_version,
-        ),
-        remediation=compiled_authority_schema_unsupported_remediation(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-        ),
+        ErrorCode(failure.error_code),
+        message=failure.message,
+        details=dict(failure.details),
+        remediation=list(failure.remediation),
     )
 
 
-def _unsupported_authority_schema_envelope(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _authority_read_failure_envelope(
+    failure: CompiledAuthorityReadFailure,
 ) -> dict[str, Any]:
     """Return a failed envelope with regenerate next action."""
+    project_id = cast("int", failure.details["project_id"])
+    spec_version_id = cast("int | None", failure.details["spec_version_id"])
+    authority_status = (
+        "unsupported_schema"
+        if failure.error_code
+        == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+        else "invalid"
+    )
     result = error_envelope(
         command=AS_BUILT_ASSESS_COMMAND,
-        error=_unsupported_authority_schema_error(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=observed_schema_version,
-        ),
+        error=_authority_read_error(failure),
     )
     result["data"] = {
         "project_id": project_id,
-        "authority_status": "unsupported_schema",
+        "authority_status": authority_status,
         "next_actions": [
             _authority_regenerate_next_action(
                 project_id=project_id,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from markdown import markdown as _md
 from sqlmodel import Session, select
@@ -19,7 +19,11 @@ from services.specs.authority_selection import (
     latest_accepted_authority_decision,
     latest_compiled_authority,
 )
-from services.specs.compiler_service import load_compiled_artifact
+from services.specs.compiler_service import (
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
+    load_compiled_artifact,
+)
 from utils.spec_schemas import (
     Invariant,
     InvariantType,
@@ -38,6 +42,18 @@ class _ExportSnapshotError(ValueError):
     def product_not_found(cls, product_id: int) -> _ExportSnapshotError:
         message = f"Product {product_id} not found"
         return cls(message)
+
+    @classmethod
+    def compiled_authority_invalid(
+        cls,
+        failure: CompiledAuthorityReadFailure,
+    ) -> _ExportSnapshotError:
+        """Build a stable pre-write failure for an unusable selected row."""
+        remediation = " ".join(failure.remediation)
+        return cls(
+            f"{failure.error_code}: {failure.message} "
+            f"details={failure.details}. {remediation}"
+        )
 
 
 @dataclass(frozen=True)
@@ -205,13 +221,19 @@ def _load_compiled_authority(
             spec_version_id=approved_spec.spec_version_id,
         )
     )
-    if not authority or not authority.compiled_artifact_json:
+    if not authority:
         return None
 
     loaded = load_compiled_artifact(authority)
-    if not loaded.ok or loaded.artifact is None:
-        return None
-    return loaded.artifact
+    failure = compiled_authority_read_failure(
+        loaded,
+        project_id=approved_spec.product_id,
+        spec_version_id=approved_spec.spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if failure is not None:
+        raise _ExportSnapshotError.compiled_authority_invalid(failure)
+    return cast("SpecAuthorityCompilationSuccess", loaded.artifact)
 
 
 def _render_snapshot_html(context: _SnapshotRenderContext) -> str:

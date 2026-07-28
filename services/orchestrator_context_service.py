@@ -16,9 +16,9 @@ from models.specs import SpecRegistry
 from services.specs.authority_selection import latest_compiled_authority
 from services.specs.compiler_service import (
     CompileSpecAuthorityForVersionInput,
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
     compile_spec_authority_for_version,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from services.specs.lifecycle_service import hydrate_spec_state
@@ -30,42 +30,25 @@ class _SupportsState(Protocol):
     state: dict[str, Any]
 
 
-def _unsupported_authority_error(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _authority_read_error(
+    failure: CompiledAuthorityReadFailure,
 ) -> dict[str, Any]:
-    """Return the standard unsupported compiled-authority error payload."""
+    """Return the central compiled-authority read failure payload."""
     return {
-        "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
-        "message": "Compiled authority artifact schema is unsupported.",
-        "details": compiled_authority_schema_unsupported_details(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=observed_schema_version,
-        ),
-        "remediation": compiled_authority_schema_unsupported_remediation(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-        ),
+        "code": failure.error_code,
+        "message": failure.message,
+        "details": dict(failure.details),
+        "remediation": list(failure.remediation),
     }
 
 
-def _unsupported_authority_result(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _authority_read_failure_result(
+    failure: CompiledAuthorityReadFailure,
 ) -> dict[str, Any]:
-    """Return a fail-closed select-project response for unsupported authority."""
+    """Return a fail-closed select-project response for an unusable authority."""
     return {
         "success": False,
-        "error": _unsupported_authority_error(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=observed_schema_version,
-        ),
+        "error": _authority_read_error(failure),
     }
 
 
@@ -189,21 +172,27 @@ def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, A
 
     authority_json = product_details.get("compiled_authority_json")
     spec_version_id = product_details.get("latest_spec_version_id")
+    cached_failure: CompiledAuthorityReadFailure | None = None
     if authority_json is not None:
         load_result = load_compiled_artifact(
             SimpleNamespace(compiled_artifact_json=authority_json)
         )
-        if load_result.unsupported:
+        cached_failure = compiled_authority_read_failure(
+            load_result,
+            project_id=product_id,
+            spec_version_id=spec_version_id,
+            authority_id=None,
+        )
+        if cached_failure is not None:
             _set_or_clear(state, "compiled_authority_cached", None)
             state["active_project"]["compiled_authority_json"] = None
-            return _unsupported_authority_result(
-                project_id=product_id,
-                spec_version_id=spec_version_id,
-                observed_schema_version=load_result.observed_schema_version,
-            )
-    if authority_json is None and product_details.get("latest_spec_version_id"):
+            _clear_product_authority_cache(product_id)
+            authority_json = None
+    if authority_json is None and spec_version_id:
         fallback = _load_authority_fallback(
-            product_id, product_details["latest_spec_version_id"]
+            product_id,
+            spec_version_id,
+            allow_compile=cached_failure is None,
         )
         if isinstance(fallback, dict):
             _set_or_clear(state, "compiled_authority_cached", None)
@@ -211,6 +200,8 @@ def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, A
         authority_json = fallback
         if authority_json:
             state["active_project"]["compiled_authority_json"] = authority_json
+        elif cached_failure is not None:
+            return _authority_read_failure_result(cached_failure)
     _set_or_clear(state, "compiled_authority_cached", authority_json)
     _set_or_clear(
         state,
@@ -239,24 +230,43 @@ def _set_or_clear(state: dict[str, Any], key: str, value: object) -> None:
         del state[key]
 
 
-def _load_authority_fallback(
+def _clear_product_authority_cache(product_id: int) -> None:
+    """Clear a derived product cache that failed canonical loading."""
+    with Session(get_engine()) as session:
+        product = session.get(Product, product_id)
+        if product is None or product.compiled_authority_json is None:
+            return
+        product.compiled_authority_json = None
+        session.add(product)
+        session.commit()
+
+
+def _load_authority_fallback(  # noqa: PLR0911
     product_id: int,
     spec_version_id: int,
+    *,
+    allow_compile: bool = True,
 ) -> str | dict[str, Any] | None:
-    """Load compiled authority for the given version, compiling on demand if needed."""
+    """Load a typed compiled authority, optionally compiling only when none exists."""
     with Session(get_engine()) as session:
         authority = latest_compiled_authority(
             session,
             spec_version_id=spec_version_id,
         )
-        if authority and authority.compiled_artifact_json:
+        if authority is not None:
             load_result = load_compiled_artifact(authority)
-            if load_result.unsupported:
-                return _unsupported_authority_result(
-                    project_id=product_id,
-                    spec_version_id=spec_version_id,
-                    observed_schema_version=load_result.observed_schema_version,
-                )
+            failure = compiled_authority_read_failure(
+                load_result,
+                project_id=product_id,
+                spec_version_id=spec_version_id,
+                authority_id=authority.authority_id,
+            )
+            if failure is not None:
+                return _authority_read_failure_result(failure)
+            if authority.compiled_artifact_json is None:
+                return None
+            if load_result.artifact is None:
+                return None
             product = session.get(Product, product_id)
             if product:
                 product.compiled_authority_json = authority.compiled_artifact_json
@@ -268,6 +278,9 @@ def _load_authority_fallback(
                     product_id,
                 )
             return authority.compiled_artifact_json
+
+    if not allow_compile:
+        return None
 
     try:
         logger.debug(

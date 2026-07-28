@@ -9,9 +9,10 @@ from fastapi.testclient import TestClient
 
 import api as api_module
 from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from utils import failure_artifacts
 
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
+COMPILED_AUTHORITY_JSON = current_v3_compiled_authority_json()
 
 
 @dataclass

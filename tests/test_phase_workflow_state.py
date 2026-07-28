@@ -101,6 +101,8 @@ def test_workflow_state_blocks_legacy_authority_phase_start(
     assert error["details"] == {
         "project_id": product_id,
         "spec_version_id": spec_version_id,
+        "authority_id": 1,
+        "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -115,6 +117,62 @@ def test_workflow_state_blocks_legacy_authority_phase_start(
             "reason": "regenerate unsupported compiled authority before continuing.",
         }
     ]
+
+
+def test_workflow_state_exposes_invalid_current_authority(
+    session: "Session",
+) -> None:
+    """Workflow projection must expose malformed v3 as explicit invalid state."""
+    product = Product(name="Invalid Phase Product")
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    product_id = cast("int", product.product_id)
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="invalid",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    spec_version_id = cast("int", spec.spec_version_id)
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="m" * 64,
+        compiled_artifact_json=(
+            '{"schema_version":"agileforge.compiled_authority.v3"}'
+        ),
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+
+    class FakeSessionReader:
+        def get_project_state(self, _project_id: int) -> JsonDict:
+            return {
+                "fsm_state": "BACKLOG_READY",
+                "latest_spec_version_id": spec_version_id,
+            }
+
+    result = ReadProjectionService(
+        engine=cast("Engine", session.get_bind()),
+        session_reader=cast("Any", FakeSessionReader()),
+    ).workflow_state(project_id=product_id)
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == authority.authority_id
+    assert result["data"]["authority_status"] == "invalid"
 
 
 def test_sprint_state_helpers_delegate_to_shared_workflow_state(

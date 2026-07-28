@@ -1262,6 +1262,8 @@ def test_runner_rejects_unsupported_compiled_authority_schema(
     assert error["details"] == {
         "project_id": 1,
         "spec_version_id": 1,
+        "authority_id": 1,
+        "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -1276,6 +1278,56 @@ def test_runner_rejects_unsupported_compiled_authority_schema(
             "reason": "regenerate unsupported compiled authority before continuing.",
         }
     ]
+    assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
+    with Session(engine) as session:
+        assert session.exec(select(WorkflowEvent)).all() == []
+
+
+def test_runner_rejects_malformed_v3_with_central_failure(
+    tmp_path: Path,
+) -> None:
+    """Malformed current authority must not invoke or persist an assessment."""
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    _seed_authority(engine)
+    with Session(engine) as session:
+        authority = session.get(CompiledSpecAuthority, 1)
+        assert authority is not None
+        authority.compiled_artifact_json = json.dumps(
+            {"schema_version": "agileforge.compiled_authority.v3"}
+        )
+        session.add(authority)
+        session.flush()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workflow = _WorkflowStub()
+    invoker = _RecordingBatchInvoker()
+    result = AsBuiltAssessmentRunner(
+        engine=engine,
+        product_repo=_ProductRepoStub(),
+        workflow_service=workflow,
+        invoke_agent=invoker,
+    ).assess(
+        project_id=1,
+        repo_path=str(repo),
+        spec_file=None,
+        spec_mode="unknown",
+        user_input=None,
+        idempotency_key="malformed-v3",
+    )
+
+    assert result["ok"] is False
+    assert invoker.payloads == []
+    error = result["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == 1
+    assert "agileforge authority regenerate" in " ".join(error["remediation"])
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     with Session(engine) as session:
         assert session.exec(select(WorkflowEvent)).all() == []

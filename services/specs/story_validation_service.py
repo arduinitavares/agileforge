@@ -30,7 +30,8 @@ from services.specs.authority_selection import (
     latest_accepted_authority_decision,
 )
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_remediation,
+    CompiledArtifactLoadResult,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from utils.adk_runner import invoke_agent_to_text
@@ -1147,26 +1148,22 @@ def validate_story_with_spec_authority(
             )
 
         loaded_artifact = dependencies["load_artifact"](authority)
-        if getattr(loaded_artifact, "unsupported", False):
-            remediation = compiled_authority_schema_unsupported_remediation(
-                project_id=story.product_id,
-                spec_version_id=parsed.spec_version_id,
-            )
-            error_message = (
-                "Compiled authority artifact schema is unsupported. "
-                + " ".join(remediation)
-            )
-            return _build_failed_validation_result(
-                failure_context,
-                _FailedValidationDetails(
-                    rule="SPEC_VERSION_COMPILED",
-                    expected="Supported compiled authority exists",
-                    actual="Unsupported compiled authority schema",
-                    message=error_message,
-                    error=error_message,
-                    remediation=remediation,
-                ),
-            )
+        read_failure = compiled_authority_read_failure(
+            cast("CompiledArtifactLoadResult", loaded_artifact),
+            project_id=story.product_id,
+            spec_version_id=parsed.spec_version_id,
+            authority_id=authority.authority_id,
+        )
+        if read_failure is not None:
+            return {
+                "success": False,
+                "error": read_failure.message,
+                "error_code": read_failure.error_code,
+                "passed": False,
+                "input_hash": input_hash,
+                "details": dict(read_failure.details),
+                "remediation": list(read_failure.remediation),
+            }
 
         artifact = _resolve_loaded_artifact(loaded_artifact)
         invariants_checked = _build_invariants_checked(

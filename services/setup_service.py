@@ -11,7 +11,11 @@ from services.phases.vision_service import (
     record_vision_attempt,
     set_vision_fsm_state,
 )
-from services.specs.compiler_service import load_compiled_artifact
+from services.specs.compiler_service import (
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
+    load_compiled_artifact,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -52,26 +56,25 @@ def _authority_regenerate_next_action(
     }
 
 
-def _unsupported_authority_next_actions(
+def _authority_read_failure(
     *,
     project_id: int,
     spec_version_id: int | None,
+    authority_id: int | None,
     authority_json: object,
-) -> list[dict[str, Any]]:
-    """Return regenerate next actions when the compiled artifact is unsupported."""
+) -> CompiledAuthorityReadFailure | None:
+    """Return the central failure for a stored authority JSON value."""
     if not isinstance(authority_json, str) or not authority_json:
-        return []
+        return None
     load_result = load_compiled_artifact(
         SimpleNamespace(compiled_artifact_json=authority_json)
     )
-    if not load_result.unsupported:
-        return []
-    return [
-        _authority_regenerate_next_action(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-        )
-    ]
+    return compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_id=authority_id,
+    )
 
 
 def _set_setup_failure_meta(
@@ -155,14 +158,31 @@ async def run_project_setup(
         normalized_spec_version_id = (
             spec_version_id if isinstance(spec_version_id, int) else None
         )
-        setup_next_actions = _unsupported_authority_next_actions(
+        read_failure = _authority_read_failure(
             project_id=options["project_id"],
             spec_version_id=normalized_spec_version_id,
+            authority_id=getattr(latest_product, "authority_id", None),
             authority_json=authority_json,
         )
+        if read_failure is not None:
+            setup_next_actions = [
+                _authority_regenerate_next_action(
+                    project_id=options["project_id"],
+                    spec_version_id=normalized_spec_version_id,
+                )
+            ]
+            result = {
+                **result,
+                "success": False,
+                "compile_success": False,
+                "error": read_failure.message,
+                "error_code": read_failure.error_code,
+                "details": dict(read_failure.details),
+                "remediation": list(read_failure.remediation),
+            }
         blocker = (
-            "Compiled authority artifact schema is unsupported."
-            if setup_next_actions
+            read_failure.message
+            if read_failure is not None
             else options["setup_blocker"](latest_product)
         )
         if blocker:

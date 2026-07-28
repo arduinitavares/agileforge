@@ -64,11 +64,11 @@ def test_validate_story_with_spec_authority_returns_missing_story_error(
     }
 
 
-def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifact(
+def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported stored artifacts should block validation with regenerate guidance."""
+    """Malformed selected authority blocks before checks, LLM, or persistence."""
     from services.specs import story_validation_service  # noqa: PLC0415
 
     monkeypatch.setattr(
@@ -116,7 +116,9 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
         eligible_feature_ids="[]",
         rejected_features="[]",
         spec_gaps="[]",
-        compiled_artifact_json='{"invariants":[]}',
+        compiled_artifact_json=(
+            '{"schema_version":"agileforge.compiled_authority.v3"}'
+        ),
     )
     session.add(authority)
     session.commit()
@@ -162,17 +164,37 @@ def test_validate_story_with_spec_authority_fails_closed_for_unsupported_artifac
     )
     session.commit()
 
+    calls: list[str] = []
     result = story_validation_service.validate_story_with_spec_authority(
         {
             "story_id": require_id(story.story_id, "story_id"),
             "spec_version_id": spec_version_id,
-        }
+        },
+        run_structural_story_checks=lambda _story: (
+            calls.append("structural") or [],
+            [],
+            [],
+        ),
+        run_deterministic_alignment_checks=lambda _story, _authority: (
+            calls.append("deterministic") or [],
+            [],
+            [],
+        ),
+        run_llm_spec_validation=lambda *_args: (
+            calls.append("llm") or {"passed": True}
+        ),
+        persist_validation_evidence=lambda *_args: calls.append("persist"),
     )
 
     assert result["success"] is False
     assert result["passed"] is False
-    assert "Compiled authority artifact schema is unsupported." in result["error"]
-    assert "agileforge authority regenerate" in result["error"]
+    assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["details"]["load_status"] == "schema_invalid"
+    assert result["details"]["authority_id"] == authority.authority_id
+    assert "agileforge authority regenerate" in " ".join(result["remediation"])
+    assert calls == []
+    session.refresh(story)
+    assert story.validation_evidence is None
 
 
 def test_story_validation_stays_on_exact_accepted_row_with_newer_pending_candidate(

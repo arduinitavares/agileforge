@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import api as api_module
 from models.core import Product, UserStory
 from services.phases.story_service import _story_artifact_fingerprint
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 if TYPE_CHECKING:
     import pytest
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
         SaveStoryPatchInput,
     )
 
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
+COMPILED_AUTHORITY_JSON = current_v3_compiled_authority_json()
 EXPECTED_REFINEMENT_ATTEMPT_COUNT = 2
 
 

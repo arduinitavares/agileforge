@@ -31,8 +31,8 @@ from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
 from services.specs.authority_selection import compiled_authority_for_acceptance
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 
@@ -660,7 +660,7 @@ class EvidenceCollectionRunner:
             return _project_not_found(project_id)
         return None
 
-    def _load_authority(  # noqa: PLR0911
+    def _load_authority(
         self,
         project_id: int,
     ) -> tuple[str, int, dict[str, Any]] | dict[str, Any]:
@@ -684,7 +684,7 @@ class EvidenceCollectionRunner:
                 session,
                 acceptance=accepted,
             )
-            if authority is None or not authority.compiled_artifact_json:
+            if authority is None:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_not_compiled(project_id),
@@ -698,30 +698,16 @@ class EvidenceCollectionRunner:
                     error=_authority_acceptance_mismatch(project_id),
                 )
             load_result = load_compiled_artifact(authority)
-            if load_result.unsupported:
+            read_failure = compiled_authority_read_failure(
+                load_result,
+                project_id=project_id,
+                spec_version_id=accepted.spec_version_id,
+                authority_id=authority.authority_id,
+            )
+            if read_failure is not None:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
-                    error=_unsupported_authority_schema(
-                        project_id=project_id,
-                        spec_version_id=accepted.spec_version_id,
-                        observed_schema_version=load_result.observed_schema_version,
-                    ),
-                )
-            if load_result.status == "invalid_json":
-                return error_envelope(
-                    command=EVIDENCE_COLLECT_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority artifact JSON is invalid.",
-                    ),
-                )
-            if load_result.status == "schema_invalid":
-                return error_envelope(
-                    command=EVIDENCE_COLLECT_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority artifact failed schema validation.",
-                    ),
+                    error=_authority_read_error(read_failure),
                 )
             compiled_artifact = (
                 load_result.artifact.model_dump(mode="json")
@@ -1021,25 +1007,15 @@ def _authority_not_compiled(
     )
 
 
-def _unsupported_authority_schema(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _authority_read_error(
+    failure: CompiledAuthorityReadFailure,
 ) -> WorkbenchError:
-    """Return the standard unsupported compiled-authority schema error."""
+    """Return the central compiled-authority read error."""
     return workbench_error(
-        ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
-        message="Compiled authority artifact schema is unsupported.",
-        details=compiled_authority_schema_unsupported_details(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=observed_schema_version,
-        ),
-        remediation=compiled_authority_schema_unsupported_remediation(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-        ),
+        ErrorCode(failure.error_code),
+        message=failure.message,
+        details=dict(failure.details),
+        remediation=list(failure.remediation),
     )
 
 

@@ -27,6 +27,7 @@ from agile_sqlmodel import (
 )
 from models.core import Team
 from services.agent_workbench.post_sprint_triage import build_triage_payload
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tools.spec_tools import _compute_story_input_hash
 from utils.spec_schemas import (
     AlignmentFinding,
@@ -89,7 +90,7 @@ TASK_PACKET_PARENT_PROMPT_NOTE = (
     "This prompt assumes the session was already initialized with the parent "
     "story prompt. If not, restart with Copy Story Prompt."
 )
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
+COMPILED_AUTHORITY_JSON = current_v3_compiled_authority_json()
 
 
 def _require_id(value: int | None, label: str) -> int:

@@ -31,8 +31,8 @@ from services.agent_workbench.session_reader import ReadOnlySessionReader
 from services.orchestrator_query_service import fetch_sprint_candidates_from_session
 from services.specs.authority_selection import latest_compiled_authority
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from services.sprint_input import (
@@ -224,33 +224,32 @@ def _authority_regenerate_next_action(
     }
 
 
-def _unsupported_authority_error(
+def _authority_read_error(
     *,
     command: str,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+    failure: CompiledAuthorityReadFailure,
 ) -> JsonDict:
-    """Return an error envelope for unsupported compiled-authority artifacts."""
+    """Return an error envelope for an unusable compiled-authority artifact."""
+    project_id = cast("int", failure.details["project_id"])
+    spec_version_id = cast("int | None", failure.details["spec_version_id"])
+    authority_status = (
+        "unsupported_schema"
+        if failure.error_code
+        == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+        else "invalid"
+    )
     result = error_envelope(
         command=command,
         error=workbench_error(
-            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
-            message="Compiled authority artifact schema is unsupported.",
-            details=compiled_authority_schema_unsupported_details(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-                observed_schema_version=observed_schema_version,
-            ),
-            remediation=compiled_authority_schema_unsupported_remediation(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-            ),
+            ErrorCode(failure.error_code),
+            message=failure.message,
+            details=dict(failure.details),
+            remediation=list(failure.remediation),
         ),
     )
     result["data"] = {
         "project_id": project_id,
-        "authority_status": "unsupported_schema",
+        "authority_status": authority_status,
         "next_actions": [
             _authority_regenerate_next_action(
                 project_id=project_id,
@@ -685,14 +684,16 @@ class ReadProjectionService:
                 )
                 if authority is not None:
                     load_result = load_compiled_artifact(authority)
-                    if load_result.unsupported:
-                        return _unsupported_authority_error(
+                    failure = compiled_authority_read_failure(
+                        load_result,
+                        project_id=project_id,
+                        spec_version_id=spec_version_id,
+                        authority_id=authority.authority_id,
+                    )
+                    if failure is not None:
+                        return _authority_read_error(
                             command=WORKFLOW_STATE_COMMAND,
-                            project_id=project_id,
-                            spec_version_id=spec_version_id,
-                            observed_schema_version=(
-                                load_result.observed_schema_version
-                            ),
+                            failure=failure,
                         )
 
         data = {

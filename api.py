@@ -215,8 +215,8 @@ from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from services.specs.lifecycle_service import link_spec_to_product
@@ -833,32 +833,20 @@ def _dashboard_authority_response(result: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _raise_compiled_authority_schema_unsupported(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    observed_schema_version: str | None,
+def _raise_compiled_authority_read_failure(
+    failure: CompiledAuthorityReadFailure,
 ) -> None:
-    """Raise the dashboard conflict for unsupported compiled-authority artifacts."""
+    """Raise a stable dashboard conflict for an unusable authority row."""
     raise HTTPException(
         status_code=409,
         detail={
             "status": "error",
             "errors": [
                 {
-                    "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
-                    "message": ("Compiled authority artifact schema is unsupported."),
-                    "details": compiled_authority_schema_unsupported_details(
-                        project_id=project_id,
-                        spec_version_id=spec_version_id,
-                        observed_schema_version=observed_schema_version,
-                    ),
-                    "remediation": (
-                        compiled_authority_schema_unsupported_remediation(
-                            project_id=project_id,
-                            spec_version_id=spec_version_id,
-                        )
-                    ),
+                    "code": failure.error_code,
+                    "message": failure.message,
+                    "details": dict(failure.details),
+                    "remediation": list(failure.remediation),
                 }
             ],
         },
@@ -877,24 +865,26 @@ def _phase_authority_spec_version_id(state: dict[str, Any]) -> int | None:
     return None
 
 
-def _raise_if_authority_json_unsupported(
+def _raise_if_authority_json_unusable(
     *,
     project_id: int,
     spec_version_id: int | None,
     authority_json: object,
 ) -> None:
-    """Fail closed when a phase start source has unsupported authority JSON."""
+    """Fail closed when a phase-start authority source cannot load."""
     if not isinstance(authority_json, str) or not authority_json:
         return
     load_result = load_compiled_artifact(
         SimpleNamespace(compiled_artifact_json=authority_json)
     )
-    if load_result.unsupported:
-        _raise_compiled_authority_schema_unsupported(
-            project_id=project_id,
-            spec_version_id=spec_version_id,
-            observed_schema_version=load_result.observed_schema_version,
-        )
+    failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=spec_version_id,
+        authority_id=None,
+    )
+    if failure is not None:
+        _raise_compiled_authority_read_failure(failure)
 
 
 async def _guard_phase_generation_authority(
@@ -906,12 +896,12 @@ async def _guard_phase_generation_authority(
     """Block phase generation when active authority is an unsupported artifact."""
     state = await _ensure_session(session_id)
     spec_version_id = _phase_authority_spec_version_id(state)
-    _raise_if_authority_json_unsupported(
+    _raise_if_authority_json_unusable(
         project_id=project_id,
         spec_version_id=spec_version_id,
         authority_json=state.get("compiled_authority_cached"),
     )
-    _raise_if_authority_json_unsupported(
+    _raise_if_authority_json_unusable(
         project_id=project_id,
         spec_version_id=spec_version_id,
         authority_json=getattr(product, "compiled_authority_json", None),
@@ -1885,18 +1875,20 @@ def _build_story_compliance_boundaries(
     *,
     project_id: int = 0,
 ) -> list[dict[str, Any]]:
-    if not authority or not evidence:
+    if not authority:
         return []
 
     load_result = load_compiled_artifact(authority)
-    if load_result.unsupported:
-        _raise_compiled_authority_schema_unsupported(
-            project_id=project_id,
-            spec_version_id=authority.spec_version_id,
-            observed_schema_version=load_result.observed_schema_version,
-        )
-    artifact = load_result.artifact if load_result.ok else None
-    if artifact is None:
+    failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=authority.spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if failure is not None:
+        _raise_compiled_authority_read_failure(failure)
+    artifact = cast("Any", load_result.artifact)
+    if not evidence:
         return []
 
     referenced_ids = set()
@@ -1935,18 +1927,20 @@ def _build_task_hard_constraints(
     project_id: int = 0,
     task_metadata: TaskMetadata,
 ) -> list[dict[str, Any]]:
-    if not authority or not task_metadata.relevant_invariant_ids:
+    if not authority:
         return []
 
     load_result = load_compiled_artifact(authority)
-    if load_result.unsupported:
-        _raise_compiled_authority_schema_unsupported(
-            project_id=project_id,
-            spec_version_id=authority.spec_version_id,
-            observed_schema_version=load_result.observed_schema_version,
-        )
-    artifact = load_result.artifact if load_result.ok else None
-    if artifact is None:
+    failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=authority.spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if failure is not None:
+        _raise_compiled_authority_read_failure(failure)
+    artifact = cast("Any", load_result.artifact)
+    if not task_metadata.relevant_invariant_ids:
         return []
 
     source_map: dict[str, Any] = {}
@@ -1977,7 +1971,7 @@ def _build_task_hard_constraints(
     return constraints
 
 
-def _load_packet_story_context(
+def _load_packet_story_context(  # noqa: C901
     session: Session,
     *,
     project_id: int,
@@ -2055,12 +2049,15 @@ def _load_packet_story_context(
 
     authority = _load_pinned_authority(session, story.accepted_spec_version_id)
     load_result = load_compiled_artifact(authority) if authority else None
-    if load_result is not None and load_result.unsupported:
-        _raise_compiled_authority_schema_unsupported(
+    if load_result is not None:
+        failure = compiled_authority_read_failure(
+            load_result,
             project_id=project_id,
             spec_version_id=story.accepted_spec_version_id,
-            observed_schema_version=load_result.observed_schema_version,
+            authority_id=getattr(authority, "authority_id", None),
         )
+        if failure is not None:
+            _raise_compiled_authority_read_failure(failure)
     compiled_artifact = (
         load_result.artifact if load_result is not None and load_result.ok else None
     )
@@ -2810,18 +2807,18 @@ async def get_project_authority_review(
 
                 if accepted_spec is not None and authority is not None:
                     load_result = load_compiled_artifact(authority)
-                    if load_result.unsupported:
-                        _raise_compiled_authority_schema_unsupported(
-                            project_id=project_id,
-                            spec_version_id=getattr(
-                                accepted_spec,
-                                "spec_version_id",
-                                None,
-                            ),
-                            observed_schema_version=(
-                                load_result.observed_schema_version
-                            ),
-                        )
+                    failure = compiled_authority_read_failure(
+                        load_result,
+                        project_id=project_id,
+                        spec_version_id=getattr(
+                            accepted_spec,
+                            "spec_version_id",
+                            None,
+                        ),
+                        authority_id=authority.authority_id,
+                    )
+                    if failure is not None:
+                        _raise_compiled_authority_read_failure(failure)
                     snapshot = build_authority_review_snapshot(
                         project_id=project_id,
                         product=product,

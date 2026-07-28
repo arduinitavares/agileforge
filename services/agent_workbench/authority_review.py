@@ -33,7 +33,7 @@ from services.agent_workbench.envelope import error_envelope
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.schema_readiness import check_schema_readiness
 from services.specs.compiler_service import (
-    COMPILED_AUTHORITY_SCHEMA_VERSION,
+    compiled_authority_read_failure,
     compiled_authority_schema_unsupported_details,
     compiled_authority_schema_unsupported_remediation,
 )
@@ -591,7 +591,10 @@ def build_authority_review_snapshot(  # noqa: PLR0913
     artifact, authority_evidence, classification_evidence = (
         _authority_artifact_payload(authority)
     )
-    artifact_shape_findings = _compiled_artifact_shape_findings(authority)
+    artifact_shape_findings = _compiled_artifact_shape_findings(
+        authority,
+        project_id=project_id,
+    )
     structured_artifact = _structured_artifact_from_text(source.text)
     if structured_artifact is not None:
         outline: list[JsonDict] = []
@@ -1720,53 +1723,32 @@ def _load_compiled_artifact(
 
 def _compiled_artifact_shape_findings(
     authority: CompiledSpecAuthority,
+    *,
+    project_id: int,
 ) -> list[JsonDict]:
     """Return non-overrideable findings for malformed compiler artifacts."""
-    artifact_json = getattr(authority, "compiled_artifact_json", None)
-    reason = ""
-    if not artifact_json:
-        reason = "compiled_artifact_json is missing."
-    else:
-        load_result = load_stored_compiled_artifact(authority)
-        if load_result.ok:
-            return []
-        if load_result.unsupported:
-            return [
-                {
-                    "finding_id": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
-                    "severity": "blocking",
-                    "code": "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
-                    "message": "Compiled authority artifact schema is unsupported.",
-                    "candidate_ids": [],
-                    "source_unit_ids": [],
-                    "override_allowed": False,
-                    "details": {
-                        "observed_schema_version": load_result.observed_schema_version,
-                        "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
-                    },
-                }
-            ]
-        if load_result.status == "compiler_failure":
-            reason = "compiled_artifact_json contains a compiler failure object."
-        else:
-            reason = (
-                load_result.message
-                or "compiled_artifact_json failed schema validation."
-            )
-
-    if not reason:
+    load_result = load_stored_compiled_artifact(authority)
+    if load_result.ok:
         return []
-
+    failure = compiled_authority_read_failure(
+        load_result,
+        project_id=project_id,
+        spec_version_id=authority.spec_version_id,
+        authority_id=authority.authority_id,
+    )
+    if failure is None:
+        return []
     return [
         {
-            "finding_id": "COMPILED_AUTHORITY_INVALID",
+            "finding_id": failure.error_code,
             "severity": "blocking",
-            "code": "COMPILED_AUTHORITY_INVALID",
-            "message": "Compiled authority artifact is not a valid success object.",
+            "code": failure.error_code,
+            "message": failure.message,
             "candidate_ids": [],
             "source_unit_ids": [],
             "override_allowed": False,
-            "details": {"reason": reason},
+            "details": dict(failure.details),
+            "remediation": list(failure.remediation),
         }
     ]
 

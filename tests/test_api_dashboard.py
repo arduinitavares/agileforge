@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import api as api_module
@@ -32,6 +33,7 @@ HTTP_CONFLICT = 409
 HTTP_TEMP_REDIRECT = 307
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
+MALFORMED_AUTHORITY_ID = 17
 REVIEW_FIELD = "review_token"
 AUTHORITY_REVIEW_FIXTURE = "agileforge.authority_review.v1:sha256:test"
 LEGACY_COMPILED_AUTHORITY_JSON = '{"invariants":[]}'
@@ -2029,13 +2031,21 @@ def test_get_project_authority_review_post_accept_fallback(
         latest_spec=None,
         accepted=None,
         rejected=None,
-        accepted_spec=cast("Any", object()),
-        authority=cast("Any", object()),
+        accepted_spec=cast("Any", SimpleNamespace(spec_version_id=1)),
+        authority=cast("Any", SimpleNamespace(authority_id=1)),
         pending_authority=None,
     )
 
     monkeypatch.setattr(
         api_module, "_load_authority_selection", lambda *_args, **_kwargs: selection
+    )
+    monkeypatch.setattr(
+        api_module,
+        "load_compiled_artifact",
+        lambda _authority: CompiledArtifactLoadResult(
+            status="success",
+            artifact=cast("Any", object()),
+        ),
     )
 
     snapshot = AuthorityReviewSnapshot(
@@ -2143,7 +2153,7 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
         accepted_spec=cast("SpecRegistry", SimpleNamespace(spec_version_id=9)),
         authority=cast(
             "CompiledSpecAuthority",
-            SimpleNamespace(compiled_artifact_json="{}"),
+            SimpleNamespace(compiled_artifact_json="{}", authority_id=1),
         ),
         pending_authority=None,
     )
@@ -2176,6 +2186,8 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
     assert error["details"] == {
         "project_id": product.product_id,
         "spec_version_id": 9,
+        "authority_id": 1,
+        "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -2258,6 +2270,8 @@ def test_phase_generate_blocks_legacy_cached_authority(
     assert error["details"] == {
         "project_id": product.product_id,
         "spec_version_id": 9,
+        "authority_id": None,
+        "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -2269,6 +2283,46 @@ def test_phase_generate_blocks_legacy_cached_authority(
             "--idempotency-key <new-key>."
         )
     ]
+
+
+def test_phase_generate_blocks_malformed_current_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase execution must return a stable conflict for malformed v3."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Malformed Phase Project")
+    malformed = '{"schema_version":"agileforge.compiled_authority.v3"}'
+    product.spec_file_path = __file__
+    product.compiled_authority_json = malformed
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": 9,
+        "compiled_authority_cached": malformed,
+    }
+    service_calls: list[str] = []
+
+    async def unexpected_service_call(*_args: object, **_kwargs: object) -> object:
+        service_calls.append("vision")
+        msg = "vision generation should not run with malformed authority"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        unexpected_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert "agileforge authority regenerate" in " ".join(error["remediation"])
 
 
 def test_retry_setup_nonexistent_or_invalid_spec_file(
@@ -2365,10 +2419,10 @@ def test_ui_create_calls_facade_telemetry(
     assert call_params["idempotency_key"].startswith("ui-create-")
 
 
-def test_build_story_compliance_boundaries_ignores_non_success_loader_result(
+def test_build_story_compliance_boundaries_rejects_non_success_loader_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Story compliance boundaries should treat unreadable artifacts as absent."""
+    """Story compliance boundaries must fail closed on unreadable authority."""
     monkeypatch.setattr(
         api_module,
         "load_compiled_artifact",
@@ -2378,21 +2432,35 @@ def test_build_story_compliance_boundaries_ignores_non_success_loader_result(
         ),
     )
 
-    result = api_module._build_story_compliance_boundaries(
-        authority=cast("CompiledSpecAuthority", object()),
-        evidence=cast(
-            "ValidationEvidence",
-            SimpleNamespace(finding_invariant_ids=["INV-1"]),
+    authority = cast(
+        "CompiledSpecAuthority",
+        SimpleNamespace(
+            spec_version_id=11,
+            authority_id=MALFORMED_AUTHORITY_ID,
         ),
     )
+    with pytest.raises(HTTPException) as exc_info:
+        api_module._build_story_compliance_boundaries(
+            authority=authority,
+            evidence=cast(
+                "ValidationEvidence",
+                SimpleNamespace(finding_invariant_ids=["INV-1"]),
+            ),
+            project_id=3,
+        )
 
-    assert result == []
+    assert exc_info.value.status_code == HTTP_CONFLICT
+    error = exc_info.value.detail["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID
+    assert "agileforge authority regenerate" in " ".join(error["remediation"])
 
 
-def test_build_task_hard_constraints_ignores_non_success_loader_result(
+def test_build_task_hard_constraints_rejects_non_success_loader_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Task hard constraints should treat unreadable artifacts as absent."""
+    """Task hard constraints must fail closed on unreadable authority."""
     monkeypatch.setattr(
         api_module,
         "load_compiled_artifact",
@@ -2402,21 +2470,34 @@ def test_build_task_hard_constraints_ignores_non_success_loader_result(
         ),
     )
 
-    result = api_module._build_task_hard_constraints(
-        authority=cast("CompiledSpecAuthority", object()),
-        task_metadata=cast(
-            "TaskMetadata",
-            SimpleNamespace(relevant_invariant_ids=["INV-1"]),
+    authority = cast(
+        "CompiledSpecAuthority",
+        SimpleNamespace(
+            spec_version_id=11,
+            authority_id=MALFORMED_AUTHORITY_ID,
         ),
     )
+    with pytest.raises(HTTPException) as exc_info:
+        api_module._build_task_hard_constraints(
+            authority=authority,
+            project_id=3,
+            task_metadata=cast(
+                "TaskMetadata",
+                SimpleNamespace(relevant_invariant_ids=["INV-1"]),
+            ),
+        )
 
-    assert result == []
+    assert exc_info.value.status_code == HTTP_CONFLICT
+    error = exc_info.value.detail["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID
 
 
-def test_load_packet_story_context_marks_unreadable_authority_missing(
+def test_load_packet_story_context_rejects_unreadable_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Packet context should only report authority available when loader succeeds."""
+    """Packet context must not relabel an invalid selected row as missing."""
 
     class _ExecResult:
         def __init__(self, value: object) -> None:
@@ -2472,7 +2553,14 @@ def test_load_packet_story_context_marks_unreadable_authority_missing(
 
     monkeypatch.setattr(api_module, "_load_validation_evidence", lambda _raw: None)
     monkeypatch.setattr(api_module, "compute_story_input_hash", lambda _story: "hash")
-    monkeypatch.setattr(api_module, "_load_pinned_authority", lambda *_args: object())
+    monkeypatch.setattr(
+        api_module,
+        "_load_pinned_authority",
+        lambda *_args: SimpleNamespace(
+            spec_version_id=11,
+            authority_id=MALFORMED_AUTHORITY_ID,
+        ),
+    )
     monkeypatch.setattr(
         api_module,
         "load_compiled_artifact",
@@ -2482,13 +2570,16 @@ def test_load_packet_story_context_marks_unreadable_authority_missing(
         ),
     )
 
-    context = api_module._load_packet_story_context(
-        cast("Session", _Session([story, sprint, sprint_story])),
-        project_id=1,
-        sprint_id=2,
-        story_id=7,
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        api_module._load_packet_story_context(
+            cast("Session", _Session([story, sprint, sprint_story])),
+            project_id=1,
+            sprint_id=2,
+            story_id=7,
+        )
 
-    assert context is not None
-    assert context.spec_binding_status == "pinned"
-    assert context.authority_status == "missing"
+    assert exc_info.value.status_code == HTTP_CONFLICT
+    error = exc_info.value.detail["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "missing"
+    assert error["details"]["authority_id"] == MALFORMED_AUTHORITY_ID

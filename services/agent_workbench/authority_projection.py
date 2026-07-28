@@ -37,17 +37,20 @@ from services.specs.authority_selection import (
     latest_compiled_authority,
 )
 from services.specs.compiler_service import (
-    compiled_authority_schema_unsupported_details,
-    compiled_authority_schema_unsupported_remediation,
+    CompiledAuthorityReadFailure,
+    compiled_authority_read_failure,
     load_compiled_artifact,
 )
 from services.specs.profile_content import (
     SpecContentNormalizationError,
     normalize_spec_content_for_registry,
 )
+from services.specs.story_validation_service import render_invariant_summary
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
+
+    from utils.spec_schemas import SpecAuthorityCompilationSuccess
 
 JsonDict = dict[str, Any]
 
@@ -250,31 +253,21 @@ def _authority_acceptance_mismatch_error(
     )
 
 
-def _unsupported_compiled_authority_error(  # noqa: PLR0913
+def _compiled_authority_read_error(
     *,
     command: str,
-    project_id: int,
-    spec_version_id: int | None,
-    authority_id: int | None,
-    observed_schema_version: str | None,
+    failure: CompiledAuthorityReadFailure,
     data: JsonDict,
     warnings: list[WorkbenchWarning] | None = None,
 ) -> JsonDict:
-    """Return a structured unsupported-artifact error with stable data."""
+    """Return a structured central read failure with stable projection data."""
     envelope = error_envelope(
         command=command,
         error=workbench_error(
-            ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
-            details=compiled_authority_schema_unsupported_details(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-                observed_schema_version=observed_schema_version,
-            )
-            | {"authority_id": authority_id},
-            remediation=compiled_authority_schema_unsupported_remediation(
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-            ),
+            ErrorCode(failure.error_code),
+            message=failure.message,
+            details=dict(failure.details),
+            remediation=list(failure.remediation),
         ),
         warnings=warnings,
     )
@@ -295,45 +288,6 @@ def _spec_version_not_found_error(project_id: int, spec_version_id: int) -> Json
             details={"project_id": project_id, "spec_version_id": spec_version_id},
             remediation=["Choose a spec version that belongs to this project."],
         ),
-    )
-
-
-def _invalid_invariants_error(
-    *,
-    authority: CompiledSpecAuthority,
-    reason: str,
-) -> JsonDict:
-    """Return a structured invalid-invariants JSON error."""
-    return error_envelope(
-        command=AUTHORITY_INVARIANTS_COMMAND,
-        error=workbench_error(
-            ErrorCode.AUTHORITY_INVARIANTS_INVALID,
-            message="Compiled authority invariants JSON is invalid.",
-            details={
-                "authority_id": authority.authority_id,
-                "spec_version_id": authority.spec_version_id,
-                "reason": reason,
-            },
-            remediation=["Inspect the compiled authority row and regenerate it."],
-        ),
-    )
-
-
-def _invalid_invariants_warning(
-    *,
-    authority: CompiledSpecAuthority,
-    reason: str,
-) -> WorkbenchWarning:
-    """Return a status warning for malformed invariants JSON."""
-    return WorkbenchWarning(
-        code="AUTHORITY_INVARIANTS_INVALID",
-        message="Compiled authority invariants JSON could not be parsed.",
-        details={
-            "authority_id": authority.authority_id,
-            "spec_version_id": authority.spec_version_id,
-            "reason": reason,
-        },
-        remediation=["Inspect the compiled authority row and regenerate it."],
     )
 
 
@@ -384,29 +338,16 @@ def _json_field_for_fingerprint(raw: str | None) -> object:
         return {"malformed_json": raw}
 
 
-def _parse_invariants(raw: str | None) -> tuple[list[Any] | None, str | None]:
-    """Parse invariants JSON as a list, returning a structured failure reason."""
-    if not raw:
-        return [], None
-    try:
-        parsed = json.loads(raw)
-    except JSONDecodeError as exc:
-        return None, str(exc)
-    if not isinstance(parsed, list):
-        return None, f"expected list, got {type(parsed).__name__}"
-    return parsed, None
-
-
 def _invariant_count(
     authority: CompiledSpecAuthority | None,
 ) -> tuple[int, list[WorkbenchWarning]]:
-    """Return invariant count plus warnings without raising on malformed JSON."""
+    """Return invariant count only from a canonical typed artifact."""
     if authority is None:
         return 0, []
-    invariants, reason = _parse_invariants(authority.invariants)
-    if reason is not None:
-        return 0, [_invalid_invariants_warning(authority=authority, reason=reason)]
-    return len(invariants or []), []
+    loaded = load_compiled_artifact(authority)
+    if not loaded.ok or loaded.artifact is None:
+        return 0, []
+    return len(loaded.artifact.invariants), []
 
 
 def _authority_fingerprint_payload(
@@ -422,13 +363,6 @@ def _authority_fingerprint_payload(
         "compiled_artifact_json": _json_field_for_fingerprint(
             authority.compiled_artifact_json
         ),
-        "scope_themes": _json_field_for_fingerprint(authority.scope_themes),
-        "invariants": _json_field_for_fingerprint(authority.invariants),
-        "eligible_feature_ids": _json_field_for_fingerprint(
-            authority.eligible_feature_ids
-        ),
-        "rejected_features": _json_field_for_fingerprint(authority.rejected_features),
-        "spec_gaps": _json_field_for_fingerprint(authority.spec_gaps),
     }
 
 
@@ -921,16 +855,24 @@ def _status_data(context: _StatusContext) -> JsonDict:
     return data
 
 
-def _first_unsupported_status_authority(
+def _first_unusable_status_authority(
     selection: _AuthoritySelection,
-) -> tuple[CompiledSpecAuthority, object] | None:
-    """Return the first unsupported authority row relevant to status projection."""
+    *,
+    project_id: int,
+) -> tuple[CompiledSpecAuthority, CompiledAuthorityReadFailure] | None:
+    """Return the first unusable authority row relevant to status projection."""
     for authority in (selection.pending_authority, selection.authority):
         if authority is None:
             continue
         load_result = load_compiled_artifact(authority)
-        if load_result.unsupported:
-            return authority, load_result
+        failure = compiled_authority_read_failure(
+            load_result,
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            authority_id=authority.authority_id,
+        )
+        if failure is not None:
+            return authority, failure
     return None
 
 
@@ -1104,25 +1046,30 @@ class AuthorityProjectionService:
                 selection=selection,
                 disk_spec=disk_spec,
             )
-            unsupported = _first_unsupported_status_authority(selection)
-            if unsupported is not None:
-                authority, load_result = unsupported
+            unusable = _first_unusable_status_authority(
+                selection,
+                project_id=project_id,
+            )
+            if unusable is not None:
+                _authority, failure = unusable
+                authority_status = (
+                    "unsupported_schema"
+                    if failure.error_code
+                    == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+                    else "invalid"
+                )
                 data.update(
                     {
-                        "status": "unsupported_schema",
-                        "authority_status": "unsupported_schema",
+                        "status": authority_status,
+                        "authority_status": authority_status,
                         "current": False,
                         "accepted_current": False,
+                        "invariant_count": 0,
                     }
                 )
-                return _unsupported_compiled_authority_error(
+                return _compiled_authority_read_error(
                     command=AUTHORITY_STATUS_COMMAND,
-                    project_id=project_id,
-                    spec_version_id=authority.spec_version_id,
-                    authority_id=authority.authority_id,
-                    observed_schema_version=getattr(
-                        load_result, "observed_schema_version", None
-                    ),
+                    failure=failure,
                     data=data,
                     warnings=warnings,
                 )
@@ -1292,18 +1239,27 @@ class AuthorityProjectionService:
         if authority is None:
             return _authority_not_compiled_error(project_id, selected_id)
         load_result = load_compiled_artifact(authority)
-        if load_result.unsupported:
-            return _unsupported_compiled_authority_error(
+        failure = compiled_authority_read_failure(
+            load_result,
+            project_id=project_id,
+            spec_version_id=authority.spec_version_id,
+            authority_id=authority.authority_id,
+        )
+        if failure is not None:
+            authority_status = (
+                "unsupported_schema"
+                if failure.error_code
+                == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+                else "invalid"
+            )
+            return _compiled_authority_read_error(
                 command=AUTHORITY_INVARIANTS_COMMAND,
-                project_id=project_id,
-                spec_version_id=authority.spec_version_id,
-                authority_id=authority.authority_id,
-                observed_schema_version=load_result.observed_schema_version,
+                failure=failure,
                 data={
                     "project_id": project_id,
                     "spec_version_id": authority.spec_version_id,
                     "authority_id": authority.authority_id,
-                    "authority_status": "unsupported_schema",
+                    "authority_status": authority_status,
                     "current": False,
                     "accepted_current": False,
                     "invariants": [],
@@ -1321,7 +1277,11 @@ class AuthorityProjectionService:
                 authority=authority,
             )
 
-        return _invariants_success(project_id=project_id, authority=authority)
+        return _invariants_success(
+            project_id=project_id,
+            authority=authority,
+            artifact=cast("SpecAuthorityCompilationSuccess", load_result.artifact),
+        )
 
 
 def _status_spec_path(
@@ -1390,15 +1350,13 @@ def _invariants_success(
     *,
     project_id: int,
     authority: CompiledSpecAuthority,
+    artifact: SpecAuthorityCompilationSuccess,
 ) -> JsonDict:
-    """Return parsed invariants for a compiled authority."""
-    invariants, reason = _parse_invariants(authority.invariants)
-    if reason is not None or invariants is None:
-        return _invalid_invariants_error(
-            authority=authority,
-            reason=reason or "unknown parse error",
-        )
-
+    """Return invariants rendered from the canonical typed artifact."""
+    invariants = [
+        {"id": invariant.id, "text": render_invariant_summary(invariant)}
+        for invariant in artifact.invariants
+    ]
     return _success(
         {
             "project_id": project_id,

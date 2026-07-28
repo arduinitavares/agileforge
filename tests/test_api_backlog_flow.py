@@ -8,12 +8,13 @@ from fastapi.testclient import TestClient
 
 import api as api_module
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 HTTP_OK = 200
 HTTP_CONFLICT = 409
 HTTP_TEAPOT = 418
 EXPECTED_HISTORY_COUNT = 2
-COMPILED_AUTHORITY_JSON = '{"schema_version":"agileforge.compiled_authority.v3"}'
+COMPILED_AUTHORITY_JSON = current_v3_compiled_authority_json()
 
 
 class _StateContext(Protocol):

@@ -17,6 +17,7 @@ from utils.spec_schemas import (
 JsonDict = dict[str, Any]
 
 if TYPE_CHECKING:
+    import pytest
     from sqlmodel import Session
 
 
@@ -235,6 +236,8 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
     assert result["error"]["details"] == {
         "project_id": product_id,
         "spec_version_id": spec_version_id,
+        "authority_id": 1,
+        "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
@@ -247,6 +250,60 @@ def test_context_service_select_project_rejects_legacy_authority_without_backfil
         )
     ]
     assert "compiled_authority_cached" not in context.state
+    refreshed = session.get(Product, product_id)
+    assert refreshed is not None
+    assert refreshed.compiled_authority_json is None
+
+
+def test_context_service_rejects_malformed_v3_without_backfill_or_compile(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed selected rows clear caches and never trigger automatic compile."""
+    from services import orchestrator_context_service  # noqa: PLC0415
+
+    product = _create_product(
+        session,
+        technical_spec="Spec body",
+        spec_file_path="specs/spec.md",
+    )
+    product_id = require_id(product.product_id, "product_id")
+    spec = _create_approved_spec(session, product_id)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="malformed",
+        compiled_artifact_json=json.dumps(
+            {"schema_version": "agileforge.compiled_authority.v3"}
+        ),
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    compile_calls: list[object] = []
+    monkeypatch.setattr(
+        orchestrator_context_service,
+        "compile_spec_authority_for_version",
+        lambda params, tool_context: compile_calls.append((params, tool_context)),
+    )
+    context = MockToolContext({"compiled_authority_cached": "OLD"})
+
+    result = orchestrator_context_service.select_project(product_id, context)
+
+    assert result["success"] is False
+    error = result["error"]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == authority.authority_id
+    assert "compiled_authority_cached" not in context.state
+    assert context.state["active_project"]["compiled_authority_json"] is None
+    assert compile_calls == []
     refreshed = session.get(Product, product_id)
     assert refreshed is not None
     assert refreshed.compiled_authority_json is None

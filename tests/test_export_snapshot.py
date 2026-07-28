@@ -6,6 +6,7 @@ import json
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
 from sqlmodel import Session
 
 from agile_sqlmodel import (
@@ -476,3 +477,50 @@ def test_export_snapshot_command_writes_file(engine: Engine, tmp_path: Path) -> 
     )
 
     assert output_path.exists()
+
+
+def test_export_snapshot_rejects_malformed_v3_before_writing(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A selected invalid authority must abort before creating any export file."""
+    with Session(engine) as session:
+        product = _insert_basic_project(session)
+        product_id = require_id(product.product_id, "product_id")
+        spec = SpecRegistry(
+            product_id=product_id,
+            spec_hash="snapshot-invalid",
+            content="# Approved spec",
+            status="approved",
+        )
+        session.add(spec)
+        session.commit()
+        session.refresh(spec)
+        session.add(
+            CompiledSpecAuthority(
+                spec_version_id=require_id(
+                    spec.spec_version_id,
+                    "spec_version_id",
+                ),
+                compiler_version="3.0.0",
+                prompt_hash="m" * 64,
+                compiled_artifact_json=json.dumps(
+                    {"schema_version": "agileforge.compiled_authority.v3"}
+                ),
+                scope_themes="[]",
+                invariants="[]",
+                eligible_feature_ids="[]",
+                rejected_features="[]",
+                spec_gaps="[]",
+            )
+        )
+        session.commit()
+
+    with pytest.raises(ValueError, match="COMPILED_AUTHORITY_INVALID"):
+        export_project_snapshot_html(
+            product_id=product_id,
+            output_dir=tmp_path,
+            engine_override=engine,
+        )
+
+    assert list(tmp_path.iterdir()) == []

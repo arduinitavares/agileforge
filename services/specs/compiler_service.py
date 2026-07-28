@@ -544,7 +544,7 @@ def compiled_authority_read_failure(
     load_result: CompiledArtifactLoadResult,
     *,
     project_id: int,
-    spec_version_id: int,
+    spec_version_id: int | None,
     authority_id: int | None,
 ) -> CompiledAuthorityReadFailure | None:
     """Describe a selected stored row unless it is a parsed v3 success."""
