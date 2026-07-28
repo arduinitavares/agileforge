@@ -13,6 +13,9 @@ from agile_sqlmodel import (
     SpecRegistry,
     UserStory,
 )
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
     ForbiddenCapabilityParams,
@@ -134,6 +137,7 @@ def test_story_validation_blocks_malformed_v3_before_checks_or_evidence(
             prompt_hash=authority.prompt_hash,
             spec_hash=spec_version.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
         )
     )
     session.commit()
@@ -706,6 +710,7 @@ def test_validate_story_with_spec_authority_uses_service_owned_defaults(
             prompt_hash=authority.prompt_hash,
             spec_hash=spec_version.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
         )
     )
     session.commit()

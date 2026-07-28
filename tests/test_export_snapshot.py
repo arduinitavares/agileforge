@@ -22,6 +22,9 @@ from agile_sqlmodel import (
 )
 from models.core import Epic, Feature, Team, Theme
 from scripts.export_snapshot import export_snapshot_command
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from tests.typing_helpers import require_id
 from tools.export_snapshot import export_project_snapshot_html
 from utils.spec_schemas import (
@@ -271,6 +274,7 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
             prompt_hash=accepted.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=accepted.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(accepted),
         )
     )
     session.commit()
@@ -279,6 +283,64 @@ def test_snapshot_loader_uses_exact_acceptance_bound_row(
 
     assert loaded is not None
     assert loaded.scope_themes == ["Accepted"]
+
+
+def test_snapshot_loader_rejects_post_acceptance_valid_artifact_mutation(
+    session: Session,
+) -> None:
+    """Snapshot export fails closed when accepted v3 content changes in place."""
+    from tools.export_snapshot import _load_compiled_authority  # noqa: PLC0415
+
+    product = _insert_basic_project(session)
+    product_id = require_id(product.product_id, "product_id")
+    spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="snapshot-mutated",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    accepted = _snapshot_authority(
+        session,
+        spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+        compiler_version="3.0.0",
+        theme="Accepted",
+    )
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=accepted.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(accepted),
+        )
+    )
+    session.commit()
+
+    accepted.compiled_artifact_json = SpecAuthorityCompilerOutput(
+        root=SpecAuthorityCompilationSuccess(
+            scope_themes=["Mutated"],
+            invariants=[],
+            eligible_feature_rules=[],
+            gaps=[],
+            assumptions=[],
+            source_map=[],
+            compiler_version=accepted.compiler_version,
+            prompt_hash=accepted.prompt_hash,
+        )
+    ).model_dump_json()
+    session.add(accepted)
+    session.commit()
+
+    with pytest.raises(ValueError, match="AUTHORITY_NOT_COMPILED"):
+        _load_compiled_authority(session, spec)
 
 
 def test_snapshot_loader_without_acceptance_uses_newest_row(

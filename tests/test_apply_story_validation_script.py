@@ -22,6 +22,7 @@ from agile_sqlmodel import (
 os.environ.setdefault("ALLOW_PROD_DB_IN_TEST", "1")
 
 from scripts import apply_story_validation as validation_script
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 from utils.runtime_config import clear_runtime_config_cache
@@ -176,6 +177,7 @@ def test_invariant_summary_uses_exact_accepted_valid_authority(
             prompt_hash=accepted.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=accepted.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(accepted),
         )
     )
     session.commit()

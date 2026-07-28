@@ -456,10 +456,13 @@ def test_classify_finding_reports_evidence_status_and_confidence(
     expected: tuple[str, str],
 ) -> None:
     """Verify finding classification follows verification evidence rules."""
-    assert classify_finding(
-        evidence_paths,
-        verification_method=verification_method,
-    ) == expected
+    assert (
+        classify_finding(
+            evidence_paths,
+            verification_method=verification_method,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -772,9 +775,7 @@ def test_import_report_json_preserves_null_repo_and_external_collector() -> None
     assert imported.repo is None
     assert imported.collector.strategy == "manual"
     assert imported.collector.version == "external.v1"
-    assert [warning.code for warning in warnings] == [
-        "EVIDENCE_REPO_METADATA_MISSING"
-    ]
+    assert [warning.code for warning in warnings] == ["EVIDENCE_REPO_METADATA_MISSING"]
 
 
 class _WorkflowStub:
@@ -1075,18 +1076,24 @@ def test_runner_replays_original_report_after_later_collection(
         workflow_service=workflow,
     )
 
-    assert runner.collect(
-        project_id=1,
-        repo_path=None,
-        from_file=str(first_file),
-        idempotency_key="first-key",
-    )["ok"] is True
-    assert runner.collect(
-        project_id=1,
-        repo_path=None,
-        from_file=str(second_file),
-        idempotency_key="second-key",
-    )["ok"] is True
+    assert (
+        runner.collect(
+            project_id=1,
+            repo_path=None,
+            from_file=str(first_file),
+            idempotency_key="first-key",
+        )["ok"]
+        is True
+    )
+    assert (
+        runner.collect(
+            project_id=1,
+            repo_path=None,
+            from_file=str(second_file),
+            idempotency_key="second-key",
+        )["ok"]
+        is True
+    )
     replay = runner.collect(
         project_id=1,
         repo_path=None,
@@ -1228,6 +1235,11 @@ def test_runner_returns_error_envelope_for_invalid_compiled_authority_json(
         authority.compiled_artifact_json = "{"
         session.add(authority)
         session.commit()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
     runner = EvidenceCollectionRunner(
         engine=engine,
         product_repo=_ProductRepoStub(),
@@ -1356,12 +1368,15 @@ def test_runner_rejects_idempotency_key_reuse_with_changed_file(
         workflow_service=workflow,
     )
 
-    assert runner.collect(
-        project_id=1,
-        repo_path=None,
-        from_file=str(report_file),
-        idempotency_key="same-key",
-    )["ok"] is True
+    assert (
+        runner.collect(
+            project_id=1,
+            repo_path=None,
+            from_file=str(report_file),
+            idempotency_key="same-key",
+        )["ok"]
+        is True
+    )
     changed = dict(base)
     changed["generated_at"] = "2026-05-27T12:01:00Z"
     report_file.write_text(json.dumps(changed), encoding="utf-8")
@@ -1393,12 +1408,15 @@ def test_runner_rejects_idempotency_key_reuse_with_changed_repo_file(
         workflow_service=_WorkflowStub(),
     )
 
-    assert runner.collect(
-        project_id=1,
-        repo_path=str(repo),
-        from_file=None,
-        idempotency_key="same-repo-key",
-    )["ok"] is True
+    assert (
+        runner.collect(
+            project_id=1,
+            repo_path=str(repo),
+            from_file=None,
+            idempotency_key="same-repo-key",
+        )["ok"]
+        is True
+    )
     source_file.write_text("# REQ.budget-validation\n# changed\n", encoding="utf-8")
     result = runner.collect(
         project_id=1,

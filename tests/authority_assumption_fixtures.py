@@ -6,12 +6,13 @@ import json
 def current_v3_compiled_authority_json(
     *,
     prompt_hash: str = "a" * 64,
+    scope_themes: list[str] | None = None,
 ) -> str:
     """Return a minimal valid current authority payload as stored JSON."""
     return json.dumps(
         {
             "schema_version": "agileforge.compiled_authority.v3",
-            "scope_themes": [],
+            "scope_themes": scope_themes or [],
             "domain": None,
             "invariants": [],
             "eligible_feature_rules": [],

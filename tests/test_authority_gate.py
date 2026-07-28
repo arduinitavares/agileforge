@@ -35,6 +35,7 @@ from orchestrator_agent.agent_tools.spec_authority_compiler_agent.instructions_s
     SPEC_AUTHORITY_COMPILER_INSTRUCTIONS,
     SPEC_AUTHORITY_COMPILER_VERSION,
 )
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
 from tools import spec_tools
 from utils.spec_schemas import (
@@ -148,6 +149,8 @@ def _create_spec_and_compiled_authority(
             compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
             prompt_hash=prompt_hash,
             spec_hash=spec_hash,
+            pending_authority_id=compiled.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(compiled),
         )
         session.add(acceptance)
         session.commit()
@@ -217,6 +220,8 @@ def _create_spec_with_failure_authority(
         compiler_version=SPEC_AUTHORITY_COMPILER_VERSION,
         prompt_hash=prompt_hash,
         spec_hash=spec_hash,
+        pending_authority_id=compiled.authority_id,
+        authority_fingerprint=pending_authority_fingerprint(compiled),
     )
     session.add(acceptance)
     session.commit()
@@ -257,7 +262,9 @@ class TestAuthorityGateExistingAccepted:
         )
 
         assert result == 321  # noqa: PLR2004
-        assert captured["product_id"] == require_id(sample_product.product_id, "product_id")
+        assert captured["product_id"] == require_id(
+            sample_product.product_id, "product_id"
+        )
         assert captured["spec_content"] == "# Spec"
         assert captured["recompile"] is True
         assert captured["_update_spec_and_compile_authority"] is (
@@ -278,7 +285,9 @@ class TestAuthorityGateExistingAccepted:
         spec_version, _compiled = _create_spec_and_compiled_authority(
             session, require_id(sample_product.product_id, "product_id"), accepted=True
         )
-        expected_spec_version_id = require_id(spec_version.spec_version_id, "spec_version_id")
+        expected_spec_version_id = require_id(
+            spec_version.spec_version_id, "spec_version_id"
+        )
 
         # Act
         with patch.object(
@@ -312,7 +321,9 @@ class TestAuthorityGateExistingAccepted:
         )
 
         # Assert
-        assert spec_version_id == require_id(spec_version.spec_version_id, "spec_version_id")
+        assert spec_version_id == require_id(
+            spec_version.spec_version_id, "spec_version_id"
+        )
 
 
 # =============================================================================
@@ -352,7 +363,9 @@ class TestAuthorityGateNoAcceptedAuthority:
         # Assert
         mock_update.assert_called_once()
         call_args = mock_update.call_args
-        assert call_args[0][0]["product_id"] == require_id(sample_product.product_id, "product_id")
+        assert call_args[0][0]["product_id"] == require_id(
+            sample_product.product_id, "product_id"
+        )
         assert call_args[0][0]["spec_content"] == "# New Spec\nContent here"
         assert result == 999  # noqa: PLR2004
 
@@ -412,7 +425,9 @@ class TestAuthorityGateNoAcceptedAuthority:
 
             # Mock the accepted authority now exists (simulating DB side effect)
             _create_spec_and_compiled_authority(
-                session, require_id(sample_product.product_id, "product_id"), accepted=True
+                session,
+                require_id(sample_product.product_id, "product_id"),
+                accepted=True,
             )
 
             # Second call - should find existing and not call update
@@ -468,7 +483,9 @@ class TestAuthorityGateMissingSpecContent:
         spec_tools.engine = engine
 
         with pytest.raises(RuntimeError) as exc:
-            ensure_accepted_spec_authority(product_id=require_id(sample_product.product_id, "product_id"))
+            ensure_accepted_spec_authority(
+                product_id=require_id(sample_product.product_id, "product_id")
+            )
 
         message = str(exc.value)
         # Should mention what the user needs to do
@@ -589,7 +606,9 @@ class TestSpecVersionIdInjection:
         )
 
         # Act
-        result = ensure_accepted_spec_authority(product_id=require_id(sample_product.product_id, "product_id"))
+        result = ensure_accepted_spec_authority(
+            product_id=require_id(sample_product.product_id, "product_id")
+        )
 
         # Assert
         assert isinstance(result, int)
@@ -686,7 +705,9 @@ class TestAuthorityGateFailureArtifact:
         spec_tools.engine = engine
 
         # Arrange: Create an accepted authority with a FAILURE artifact
-        _create_spec_with_failure_authority(session, require_id(sample_product.product_id, "product_id"))
+        _create_spec_with_failure_authority(
+            session, require_id(sample_product.product_id, "product_id")
+        )
 
         # Act & Assert: without spec_content, we can't proceed
         with pytest.raises(RuntimeError):
@@ -721,7 +742,9 @@ class TestAuthorityGateLogging:
             session, require_id(sample_product.product_id, "product_id"), accepted=True
         )
 
-        ensure_accepted_spec_authority(product_id=require_id(sample_product.product_id, "product_id"))
+        ensure_accepted_spec_authority(
+            product_id=require_id(sample_product.product_id, "product_id")
+        )
 
         reuse_records = [
             record
@@ -729,7 +752,9 @@ class TestAuthorityGateLogging:
             if record.message == "authority_gate.pass"
         ]
         assert reuse_records
-        assert reuse_records[0].__dict__.get("product_id") == require_id(sample_product.product_id, "product_id")
+        assert reuse_records[0].__dict__.get("product_id") == require_id(
+            sample_product.product_id, "product_id"
+        )
 
     def test_authority_gate_logs_compile(
         self,
@@ -766,8 +791,8 @@ class TestAuthorityGateLogging:
             if record.message == "authority_gate.updated"
         ]
         assert compile_records
-        assert (
-            compile_records[0].__dict__.get("product_id") == require_id(sample_product.product_id, "product_id")
+        assert compile_records[0].__dict__.get("product_id") == require_id(
+            sample_product.product_id, "product_id"
         )
 
     def test_authority_gate_logs_fail(
@@ -785,7 +810,9 @@ class TestAuthorityGateLogging:
         caplog.set_level(logging.INFO, logger="tools.spec_tools")
 
         with pytest.raises(RuntimeError):
-            ensure_accepted_spec_authority(product_id=require_id(sample_product.product_id, "product_id"))
+            ensure_accepted_spec_authority(
+                product_id=require_id(sample_product.product_id, "product_id")
+            )
 
         fail_records = [
             record

@@ -18,6 +18,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Theme
+from services.specs.authority_selection import pending_authority_fingerprint
 from tools import spec_tools
 from tools.spec_tools import (
     approve_spec_version,
@@ -92,7 +93,7 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
     authority = CompiledSpecAuthority(
         spec_version_id=spec_version_id,
         compiler_version="3.0.0",
-        prompt_hash="test",
+        prompt_hash="0" * 64,
         scope_themes='["core"]',
         invariants='["FORBIDDEN_CAPABILITY:web"]',
         eligible_feature_ids="[]",
@@ -117,6 +118,7 @@ def product_with_spec(session: Session, engine: Engine) -> tuple[Product, int]:
             prompt_hash=authority.prompt_hash,
             spec_hash=spec_version.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
         )
     )
     session.commit()
@@ -266,6 +268,7 @@ def test_alignment_warning_persisted(engine: Engine, session: Session) -> None:
             prompt_hash=authority.prompt_hash,
             spec_hash=accepted_spec.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
         )
     )
     session.commit()

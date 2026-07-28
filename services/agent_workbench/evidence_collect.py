@@ -19,8 +19,7 @@ from sqlmodel import Session, select
 
 from models.enums import WorkflowEventType
 from models.events import WorkflowEvent
-from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance
-from services.agent_workbench.authority_projection import pending_authority_fingerprint
+from models.specs import SpecAuthorityAcceptance
 from services.agent_workbench.envelope import (
     WorkbenchError,
     WorkbenchWarning,
@@ -29,7 +28,10 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
-from services.specs.authority_selection import compiled_authority_for_acceptance
+from services.specs.authority_selection import (
+    accepted_compiled_authority,
+    compiled_authority_for_acceptance,
+)
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
     compiled_authority_read_failure,
@@ -155,9 +157,7 @@ CONFIG_FILE_NAMES: frozenset[str] = frozenset(
 DOC_DIR_NAMES: frozenset[str] = frozenset({"doc", "docs", "documentation"})
 DOC_SUFFIXES: frozenset[str] = frozenset({".md", ".mdx", ".rst", ".txt"})
 CONFIG_SUFFIXES: frozenset[str] = frozenset({".toml", ".yaml", ".yml"})
-TEST_SOURCE_SUFFIXES: frozenset[str] = frozenset(
-    {".py", ".js", ".jsx", ".ts", ".tsx"}
-)
+TEST_SOURCE_SUFFIXES: frozenset[str] = frozenset({".py", ".js", ".jsx", ".ts", ".tsx"})
 PYTHON_TEST_HELPER_NAMES: frozenset[str] = frozenset(
     {"test_helper.py", "test_helpers.py"}
 )
@@ -680,14 +680,23 @@ class EvidenceCollectionRunner:
                     error=_authority_not_accepted(project_id),
                 )
 
-            authority = compiled_authority_for_acceptance(
+            authority = accepted_compiled_authority(
                 session,
-                acceptance=accepted,
+                product_id=project_id,
+                spec_version_id=accepted.spec_version_id,
             )
             if authority is None:
+                exact_row = compiled_authority_for_acceptance(
+                    session,
+                    acceptance=accepted,
+                )
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
-                    error=_authority_not_compiled(project_id),
+                    error=(
+                        _authority_acceptance_mismatch(project_id)
+                        if exact_row is not None
+                        else _authority_not_compiled(project_id)
+                    ),
                 )
             load_result = load_compiled_artifact(authority)
             read_failure = compiled_authority_read_failure(
@@ -700,14 +709,6 @@ class EvidenceCollectionRunner:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_read_error(read_failure),
-                )
-            if _authority_mismatches_acceptance(
-                authority=authority,
-                accepted=accepted,
-            ):
-                return error_envelope(
-                    command=EVIDENCE_COLLECT_COMMAND,
-                    error=_authority_acceptance_mismatch(project_id),
                 )
             compiled_artifact = (
                 load_result.artifact.model_dump(mode="json")
@@ -972,21 +973,6 @@ def _authority_not_accepted(project_id: int) -> WorkbenchError:
     )
 
 
-def _authority_mismatches_acceptance(
-    *,
-    authority: CompiledSpecAuthority,
-    accepted: SpecAuthorityAcceptance,
-) -> bool:
-    """Return whether a compiled authority no longer matches its acceptance."""
-    current_fingerprint = pending_authority_fingerprint(authority)
-    return (
-        authority.authority_id != accepted.pending_authority_id
-        or authority.compiler_version != accepted.compiler_version
-        or authority.prompt_hash != accepted.prompt_hash
-        or current_fingerprint != accepted.authority_fingerprint
-    )
-
-
 def _authority_acceptance_mismatch(project_id: int) -> WorkbenchError:
     return workbench_error(
         ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH,
@@ -1058,9 +1044,7 @@ def classify_finding(
         evidence_path.kind in BEHAVIOR_EVIDENCE_KINDS
         for evidence_path in evidence_paths
     )
-    has_test_ref = any(
-        evidence_path.kind == "test" for evidence_path in evidence_paths
-    )
+    has_test_ref = any(evidence_path.kind == "test" for evidence_path in evidence_paths)
 
     if not has_behavior_ref and not has_test_ref:
         return ("missing", "low")
@@ -1087,9 +1071,7 @@ def file_kind_for_path(path: Path) -> EvidenceKind:
     lower_name = name.lower()
     lower_suffix = path.suffix.lower()
 
-    if lower_suffix in DOC_SUFFIXES or (
-        path_parts and path_parts[0] in DOC_DIR_NAMES
-    ):
+    if lower_suffix in DOC_SUFFIXES or (path_parts and path_parts[0] in DOC_DIR_NAMES):
         return "doc"
     if lower_name in CONFIG_FILE_NAMES or lower_suffix in CONFIG_SUFFIXES:
         return "config"
@@ -1118,10 +1100,7 @@ def collect_repo_evidence(
     )
     warnings.extend(traversal_warnings)
     for file_path, relative_path in files:
-        if (
-            not include_generated_artifacts
-            and _is_default_ignored_path(relative_path)
-        ):
+        if not include_generated_artifacts and _is_default_ignored_path(relative_path):
             continue
         skip_reason = _skip_file_reason(file_path, relative_path)
         if skip_reason is not None:
@@ -1213,9 +1192,7 @@ def _iter_scannable_files(
 
     for root, dirnames, filenames in os.walk(repo_root, onerror=onerror):
         ignored_dir_names = (
-            frozenset()
-            if include_generated_artifacts
-            else DEFAULT_IGNORE_DIR_NAMES
+            frozenset() if include_generated_artifacts else DEFAULT_IGNORE_DIR_NAMES
         )
         dirnames[:] = sorted(
             dirname
@@ -1323,9 +1300,7 @@ def _finding_notes(
     verification_method: str,
 ) -> list[str]:
     """Return stable explanatory notes for one finding classification."""
-    has_test_ref = any(
-        evidence_path.kind == "test" for evidence_path in evidence_paths
-    )
+    has_test_ref = any(evidence_path.kind == "test" for evidence_path in evidence_paths)
     if status == "evidenced":
         return ["Exact reference evidence found. Tests were not executed."]
     if status == "evidence_missing" and has_test_ref:

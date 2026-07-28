@@ -70,7 +70,11 @@ from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
     save_story_patch_tool,
 )
 from orchestrator_agent.fsm.states import OrchestratorState
-from repositories.product import ProductRepository
+from repositories.product import (
+    PROJECT_DELETION_CONFLICT_MESSAGE,
+    ProductRepository,
+    ProjectDeletionConflictError,
+)
 from repositories.story import StoryRepository
 from routers.sprint import register_sprint_routes
 from services.agent_workbench.application import AgentWorkbenchApplication
@@ -216,7 +220,7 @@ from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
 from services.specs.authority_selection import (
-    compiled_authority_for_acceptance,
+    accepted_compiled_authority,
     latest_accepted_authority_decision,
 )
 from services.specs.compiler_service import (
@@ -981,9 +985,10 @@ def _load_exact_accepted_authority(
             ),
         )
 
-    authority = compiled_authority_for_acceptance(
+    authority = accepted_compiled_authority(
         session,
-        acceptance=acceptance,
+        product_id=project_id,
+        spec_version_id=spec_version_id,
     )
     if authority is None:
         _raise_execution_authority_conflict(
@@ -1018,40 +1023,35 @@ async def _guard_phase_generation_authority(
     if spec_version_id is not None:
         canonical_json: str | None = None
         canonical_failure: CompiledAuthorityReadFailure | None = None
-        canonical_found = False
         with Session(get_engine()) as session:
-            spec = session.get(SpecRegistry, spec_version_id)
-            if spec is not None:
-                authority = _load_exact_accepted_authority(
-                    session,
-                    project_id=project_id,
-                    spec_version_id=spec_version_id,
-                )
-                canonical_found = True
-                load_result = load_compiled_artifact(authority)
-                canonical_failure = compiled_authority_read_failure(
-                    load_result,
-                    project_id=project_id,
-                    spec_version_id=spec_version_id,
-                    authority_id=authority.authority_id,
-                )
-                if canonical_failure is None:
-                    canonical_json = authority.compiled_artifact_json
-                persisted_product = session.get(Product, project_id)
-                if persisted_product is not None:
-                    persisted_product.compiled_authority_json = canonical_json
-                    session.add(persisted_product)
-                    session.commit()
-
-        if canonical_found:
-            cast("Any", product).compiled_authority_json = canonical_json
-            workflow_service.update_session_status(
-                session_id,
-                {"compiled_authority_cached": canonical_json},
+            authority = _load_exact_accepted_authority(
+                session,
+                project_id=project_id,
+                spec_version_id=spec_version_id,
             )
-            if canonical_failure is not None:
-                _raise_compiled_authority_read_failure(canonical_failure)
-            return
+            load_result = load_compiled_artifact(authority)
+            canonical_failure = compiled_authority_read_failure(
+                load_result,
+                project_id=project_id,
+                spec_version_id=spec_version_id,
+                authority_id=authority.authority_id,
+            )
+            if canonical_failure is None:
+                canonical_json = authority.compiled_artifact_json
+            persisted_product = session.get(Product, project_id)
+            if persisted_product is not None:
+                persisted_product.compiled_authority_json = canonical_json
+                session.add(persisted_product)
+                session.commit()
+
+        cast("Any", product).compiled_authority_json = canonical_json
+        workflow_service.update_session_status(
+            session_id,
+            {"compiled_authority_cached": canonical_json},
+        )
+        if canonical_failure is not None:
+            _raise_compiled_authority_read_failure(canonical_failure)
+        return
 
     _raise_if_authority_json_unusable(
         project_id=project_id,
@@ -1393,17 +1393,13 @@ def _scope_extension_runtime_label(status: str) -> str:
     """Return the dashboard label for scope-discovery/extension actions."""
     labels = {
         "scope_discovery_challenge_artifact_missing": "Record Challenge Artifact",
-        "scope_discovery_challenge_artifact_not_ready": (
-            "Record Challenge Artifact"
-        ),
+        "scope_discovery_challenge_artifact_not_ready": ("Record Challenge Artifact"),
         "scope_discovery_prd_missing": "Record PRD Draft",
         "scope_discovery_prd_pending_acceptance": "Accept PRD",
         "scope_discovery_prd_rejected": "Record PRD Draft",
         "scope_discovery_spec_amendment_missing": "Record Spec Amendment Draft",
         "scope_discovery_spec_amendment_invalid": "Record Spec Amendment Draft",
-        "scope_discovery_spec_amendment_pending_acceptance": (
-            "Accept Spec Amendment"
-        ),
+        "scope_discovery_spec_amendment_pending_acceptance": ("Accept Spec Amendment"),
         "scope_discovery_ready_for_scope_extension_start": "Start Scope Extension",
         "project_scope_extension_blocked": "Scope Extension Blocked",
     }
@@ -1467,8 +1463,7 @@ def _scope_extension_runtime_projection(project_id: int) -> dict[str, Any] | Non
             **default_primary_action,
             **action_data,
             "label": action_data.get("label") or default_primary_action["label"],
-            "command": action_data.get("command")
-            or default_primary_action["command"],
+            "command": action_data.get("command") or default_primary_action["command"],
         }
 
     raw_actions = data.get("next_actions", [])
@@ -1519,9 +1514,7 @@ def _apply_sprint_generation_runtime_blocker(
     command_project_id = (
         project_id if project_id is not None else completed[0].product_id
     )
-    scope_extension_projection = _scope_extension_runtime_projection(
-        command_project_id
-    )
+    scope_extension_projection = _scope_extension_runtime_projection(command_project_id)
     summary.update(
         {
             "workflow_next_status": "post_sprint_sprint_candidates_unavailable",
@@ -2771,20 +2764,35 @@ async def delete_project(project_id: int) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Project not found")
 
     try:
-        # Delete volatile session state
-        workflow_service.delete_session(str(project_id))
-        # Cascade delete products and all artifacts
         success = product_repo.delete_project(project_id)
-        if not success:
-            _raise_delete_project_failed()
+    except ProjectDeletionConflictError as exc:
+        logger.warning(
+            "Project %d deletion blocked by cross-project references: %s",
+            project_id,
+            ", ".join(exc.references),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=PROJECT_DELETION_CONFLICT_MESSAGE,
+        ) from exc
     except Exception as exc:
         logger.exception("Error deleting project %d", project_id)
         raise HTTPException(status_code=500, detail="Failed to delete project") from exc
-    else:
-        return {
-            "status": "success",
-            "data": {"message": f"Project {project_id} deleted."},
-        }
+    if not success:
+        _raise_delete_project_failed()
+
+    try:
+        workflow_service.delete_session(str(project_id))
+    except Exception:
+        logger.exception(
+            "Project %d was deleted, but volatile session cleanup failed",
+            project_id,
+        )
+
+    return {
+        "status": "success",
+        "data": {"message": f"Project {project_id} deleted."},
+    }
 
 
 @app.post("/api/projects/{project_id}/setup/retry")

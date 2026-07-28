@@ -63,6 +63,7 @@ from services.specs.authority_curation_diff import (
     AuthorityDiffValidationError,
     build_authority_diff,
 )
+from services.specs.compiler_service import COMPILED_AUTHORITY_SCHEMA_VERSION
 from utils.adk_runner import (
     AgentInvocationError,
     extract_final_response_text,
@@ -83,7 +84,11 @@ from utils.spec_authority_assumptions import (
     canonical_assumption_key,
     is_structured_assumption,
 )
-from utils.spec_schemas import InvariantParameters, InvariantType
+from utils.spec_schemas import (
+    InvariantParameters,
+    InvariantType,
+    SpecAuthorityCompilationSuccess,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Iterator, Mapping
@@ -1535,18 +1540,16 @@ class AuthorityCurationRunner:
             loaded=loaded,
             workflow_result=workflow_result,
         )
-        if not _is_authority_json(candidate_authority_json):
-            if (
-                isinstance(candidate_authority_json, dict)
-                and candidate_authority_json.get("ok") is False
-            ):
-                return candidate_authority_json
-            return _invalid_curation_candidate_response(
-                request=context.request,
-                attempt=attempt,
-                reason="missing_or_invalid_candidate_authority_json",
-                mutation_event_id=context.mutation_event_id,
-            )
+        if candidate_authority_json.get("ok") is False:
+            return candidate_authority_json
+
+        validated_artifact = _validate_curation_candidate_contract(
+            candidate_authority_json,
+            context=context,
+        )
+        if not isinstance(validated_artifact, SpecAuthorityCompilationSuccess):
+            return validated_artifact
+        candidate_authority_json = validated_artifact.model_dump(mode="json")
 
         read_only_target_id = _changed_structured_assumption_target_id(
             source_authority_json=loaded.source_authority_json,
@@ -2997,6 +3000,57 @@ def _invalid_curation_candidate_response(
     )
 
 
+def _validate_curation_candidate_contract(
+    candidate_authority_json: dict[str, Any],
+    *,
+    context: _PatchApplicationContext,
+) -> SpecAuthorityCompilationSuccess | dict[str, Any]:
+    """Return one canonical v3 candidate or a sanitized contract error."""
+    observed_schema_version = candidate_authority_json.get("schema_version")
+    if observed_schema_version != COMPILED_AUTHORITY_SCHEMA_VERSION:
+        return error_envelope(
+            command=AUTHORITY_CURATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED,
+                message="Authority curation candidate schema is unsupported.",
+                details={
+                    "project_id": context.request.project_id,
+                    "spec_version_id": context.request.spec_version_id,
+                    "curation_attempt_id": context.attempt.curation_attempt_id,
+                    "observed_schema_version": (
+                        observed_schema_version
+                        if isinstance(observed_schema_version, str)
+                        else None
+                    ),
+                    "required_schema_version": COMPILED_AUTHORITY_SCHEMA_VERSION,
+                    "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+                },
+            ),
+            correlation_id=context.request.correlation_id,
+        )
+
+    try:
+        return SpecAuthorityCompilationSuccess.model_validate(candidate_authority_json)
+    except ValidationError as exc:
+        validation_errors = _validation_error_details(exc)
+        return error_envelope(
+            command=AUTHORITY_CURATE_COMMAND,
+            error=workbench_error(
+                ErrorCode.COMPILED_AUTHORITY_INVALID,
+                message="Authority curation candidate is invalid.",
+                details={
+                    "project_id": context.request.project_id,
+                    "spec_version_id": context.request.spec_version_id,
+                    "curation_attempt_id": context.attempt.curation_attempt_id,
+                    "validation_error_count": len(validation_errors),
+                    "validation_errors": validation_errors,
+                    "trace_artifact_id": trace_artifact_id(context.mutation_event_id),
+                },
+            ),
+            correlation_id=context.request.correlation_id,
+        )
+
+
 def _candidate_authority_from_workflow_result(
     *,
     context: _PatchApplicationContext,
@@ -3961,7 +4015,7 @@ def _repair_menu_item_from_feedback(
             target_text=target.target_text,
         ),
     }
-    if "replace_text" not in repair_kinds:
+    if not {"replace_text", "replace_parameter_text"}.intersection(repair_kinds):
         menu_item["not_repairable_reason"] = "structural_repair_deferred"
     return menu_item
 

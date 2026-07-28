@@ -43,7 +43,6 @@ from orchestrator_agent.agent_tools.as_built_assessor.schemes import (
     SearchObservation,
     SpecMode,
 )
-from services.agent_workbench.authority_projection import pending_authority_fingerprint
 from services.agent_workbench.envelope import (
     WorkbenchError,
     WorkbenchWarning,
@@ -52,7 +51,10 @@ from services.agent_workbench.envelope import (
 )
 from services.agent_workbench.error_codes import ErrorCode, workbench_error
 from services.agent_workbench.fingerprints import canonical_hash, canonical_json
-from services.specs.authority_selection import compiled_authority_for_acceptance
+from services.specs.authority_selection import (
+    accepted_compiled_authority,
+    compiled_authority_for_acceptance,
+)
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
     compiled_authority_read_failure,
@@ -87,9 +89,9 @@ MAX_FILE_MANIFEST_ENTRIES: int = 300
 MAX_TRANSIENT_MODEL_ATTEMPTS: int = 3
 MAX_MODEL_RETRY_FEEDBACK_CHARS: int = 2_000
 GIT_BINARY: str = shutil.which("git") or "git"
-_PROGRESS_CONTEXT: contextvars.ContextVar[
-    dict[str, object] | None
-] = contextvars.ContextVar("as_built_progress_context", default=None)
+_PROGRESS_CONTEXT: contextvars.ContextVar[dict[str, object] | None] = (
+    contextvars.ContextVar("as_built_progress_context", default=None)
+)
 
 _SKIP_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -309,10 +311,7 @@ _ID_TERM_PREFIXES: tuple[str, ...] = (
     "DATA.",
 )
 _ID_BOUNDARY_CHARS: frozenset[str] = frozenset(
-    "abcdefghijklmnopqrstuvwxyz"
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "0123456789"
-    "_.-"
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
 )
 
 
@@ -694,14 +693,23 @@ class AsBuiltAssessmentRunner:
                     error=_authority_not_accepted(project_id),
                 )
 
-            authority = compiled_authority_for_acceptance(
+            authority = accepted_compiled_authority(
                 session,
-                acceptance=accepted,
+                product_id=project_id,
+                spec_version_id=accepted.spec_version_id,
             )
             if authority is None:
+                exact_row = compiled_authority_for_acceptance(
+                    session,
+                    acceptance=accepted,
+                )
                 return error_envelope(
                     command=AS_BUILT_ASSESS_COMMAND,
-                    error=_authority_not_compiled(project_id),
+                    error=(
+                        _authority_acceptance_mismatch(project_id)
+                        if exact_row is not None
+                        else _authority_not_compiled(project_id)
+                    ),
                 )
             load_result = load_compiled_artifact(authority)
             read_failure = compiled_authority_read_failure(
@@ -712,15 +720,6 @@ class AsBuiltAssessmentRunner:
             )
             if read_failure is not None:
                 return _authority_read_failure_envelope(read_failure)
-            current_fingerprint = pending_authority_fingerprint(authority)
-            if current_fingerprint != accepted.authority_fingerprint:
-                return error_envelope(
-                    command=AS_BUILT_ASSESS_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority does not match compiled authority.",
-                    ),
-                )
             compiled = (
                 load_result.artifact.model_dump(mode="json")
                 if load_result.artifact is not None
@@ -1018,9 +1017,8 @@ async def _invoke_agent_payload_async(
             raise RuntimeError(error) from exc
         except AgentInvocationError as exc:
             is_schema_validation = _is_schema_validation_invocation_error(exc)
-            if (
-                attempt_index >= MAX_TRANSIENT_MODEL_ATTEMPTS
-                or not (_is_transient_model_error(exc) or is_schema_validation)
+            if attempt_index >= MAX_TRANSIENT_MODEL_ATTEMPTS or not (
+                _is_transient_model_error(exc) or is_schema_validation
             ):
                 _emit_model_call_failed(
                     payload,
@@ -1400,6 +1398,14 @@ def _authority_not_accepted(project_id: int) -> WorkbenchError:
     )
 
 
+def _authority_acceptance_mismatch(project_id: int) -> WorkbenchError:
+    return workbench_error(
+        ErrorCode.AUTHORITY_ACCEPTANCE_MISMATCH,
+        message="Accepted authority decision does not match compiled authority.",
+        details={"project_id": project_id},
+    )
+
+
 def _authority_not_compiled(
     project_id: int,
     *,
@@ -1450,8 +1456,7 @@ def _authority_read_failure_envelope(
     spec_version_id = cast("int | None", failure.details["spec_version_id"])
     authority_status = (
         "unsupported_schema"
-        if failure.error_code
-        == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
+        if failure.error_code == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
         else "invalid"
     )
     result = error_envelope(
@@ -1544,9 +1549,7 @@ def build_evidence_pack(  # noqa: PLR0913
         msg = "repo path is not a readable directory"
         raise ValueError(msg)
 
-    targets, target_warnings, limitations = build_authority_targets(
-        compiled_authority
-    )
+    targets, target_warnings, limitations = build_authority_targets(compiled_authority)
     snapshot = _repo_snapshot(repo)
     files, skipped_counts = _scannable_files(repo)
     source_snippets, test_snippets, doc_snippets, search_observations = (
@@ -1778,8 +1781,7 @@ def _batch_assessment_coverage_mismatch(
 ) -> _CoverageMismatch | None:
     expected_keys = [_target_key(target) for target in batch_pack.authority_targets]
     actual_keys = [
-        _capability_key(capability)
-        for capability in assessment.capability_assessments
+        _capability_key(capability) for capability in assessment.capability_assessments
     ]
     return _coverage_mismatch(
         expected_keys=expected_keys,
@@ -1837,9 +1839,7 @@ def _slice_evidence_pack(
 ) -> EvidencePack:
     selected_observations = pack.search_observations[start:end]
     referenced_paths = {
-        path
-        for observation in selected_observations
-        for path in observation.paths
+        path for observation in selected_observations for path in observation.paths
     }
     sliced = pack.model_copy(
         update={
@@ -2255,8 +2255,7 @@ def _id_term_matches(text: str, term: str) -> bool:
         after_index = index + term_length
         before_ok = before_index < 0 or text[before_index] not in _ID_BOUNDARY_CHARS
         after_ok = (
-            after_index >= len(text)
-            or text[after_index] not in _ID_BOUNDARY_CHARS
+            after_index >= len(text) or text[after_index] not in _ID_BOUNDARY_CHARS
         )
         if before_ok and after_ok:
             return True

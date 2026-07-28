@@ -22,7 +22,10 @@ from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
 )
-from services.agent_workbench.authority_projection import _AuthoritySelection
+from services.agent_workbench.authority_projection import (
+    _AuthoritySelection,
+    pending_authority_fingerprint,
+)
 from services.agent_workbench.authority_review import AuthorityReviewSnapshot
 from services.specs.compiler_service import CompiledArtifactLoadResult
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
@@ -2263,7 +2266,6 @@ def test_phase_generate_blocks_legacy_cached_authority(
     product.compiled_authority_json = LEGACY_COMPILED_AUTHORITY_JSON
     workflow.states[str(product.product_id)] = {
         "fsm_state": "BACKLOG_READY",
-        "latest_spec_version_id": 9,
         "compiled_authority_cached": LEGACY_COMPILED_AUTHORITY_JSON,
     }
     service_calls: list[str] = []
@@ -2287,19 +2289,14 @@ def test_phase_generate_blocks_legacy_cached_authority(
     assert error["message"] == "Compiled authority artifact schema is unsupported."
     assert error["details"] == {
         "project_id": product.product_id,
-        "spec_version_id": 9,
+        "spec_version_id": None,
         "authority_id": None,
         "load_status": "schema_unsupported",
         "observed_schema_version": None,
         "required_schema_version": "agileforge.compiled_authority.v3",
     }
     assert error["remediation"] == [
-        (
-            "Run agileforge authority regenerate "
-            f"--project-id {product.product_id} "
-            "--spec-version-id 9 "
-            "--idempotency-key <new-key>."
-        )
+        "Find the approved spec version, then run agileforge authority regenerate."
     ]
 
 
@@ -2314,7 +2311,6 @@ def test_phase_generate_blocks_malformed_current_authority(
     product.compiled_authority_json = malformed
     workflow.states[str(product.product_id)] = {
         "fsm_state": "BACKLOG_READY",
-        "latest_spec_version_id": 9,
         "compiled_authority_cached": malformed,
     }
     service_calls: list[str] = []
@@ -2391,6 +2387,7 @@ def test_phase_generate_canonical_row_outranks_valid_derived_caches(
             prompt_hash=authority.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
             terminal_decision_key=(
                 f"{product.product_id}:{spec.spec_version_id}:{authority.authority_id}"
             ),
@@ -2483,6 +2480,7 @@ def test_phase_generate_uses_exact_accepted_authority_when_newer_row_is_pending(
             prompt_hash=accepted.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=accepted.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(accepted),
             terminal_decision_key=(
                 f"{product.product_id}:{spec.spec_version_id}:{accepted.authority_id}"
             ),
@@ -2620,13 +2618,77 @@ def test_phase_generate_rejects_cross_project_spec_without_mutating_caches(
         "spec_version_id": spec_b.spec_version_id,
     }
     assert product_a.compiled_authority_json == cache_a
-    assert workflow.states[str(product_a.product_id)][
-        "compiled_authority_cached"
-    ] == cache_a
+    assert (
+        workflow.states[str(product_a.product_id)]["compiled_authority_cached"]
+        == cache_a
+    )
     session.expire_all()
     persisted_a = session.get(Product, product_a.product_id)
     assert persisted_a is not None
     assert persisted_a.compiled_authority_json == cache_a
+
+
+def test_phase_generate_rejects_nonexistent_explicit_spec_without_mutating_caches(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """An explicit missing spec id cannot fall through to valid derived caches."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Missing Explicit Spec Project")
+    cached_json = current_v3_compiled_authority_json()
+    product.spec_file_path = __file__
+    product.compiled_authority_json = cached_json
+    session.add(
+        Product(
+            product_id=product.product_id,
+            name=product.name,
+            compiled_authority_json=cached_json,
+        )
+    )
+    session.commit()
+    missing_spec_version_id = 999_999
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": missing_spec_version_id,
+        "compiled_authority_cached": cached_json,
+    }
+    service_calls: list[str] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        service_calls.append("vision")
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "SPEC_VERSION_NOT_FOUND"
+    assert error["details"] == {
+        "project_id": product.product_id,
+        "spec_version_id": missing_spec_version_id,
+    }
+    assert product.compiled_authority_json == cached_json
+    assert (
+        workflow.states[str(product.product_id)]["compiled_authority_cached"]
+        == cached_json
+    )
+    session.expire_all()
+    persisted = session.get(Product, product.product_id)
+    assert persisted is not None
+    assert persisted.compiled_authority_json == cached_json
 
 
 def test_retry_setup_nonexistent_or_invalid_spec_file(

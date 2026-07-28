@@ -30,6 +30,9 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Theme
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from tools import spec_tools
 from tools.spec_tools import (
     VALIDATOR_VERSION,
@@ -200,6 +203,7 @@ def compiled_spec(session: Session, sample_product: Product) -> SpecRegistry:
             prompt_hash=authority.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
         )
     )
     session.commit()

@@ -38,8 +38,8 @@ from services.agent_workbench.error_codes import ErrorCode
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_quality import apply_authority_quality_gate
 from services.specs.authority_selection import (
+    accepted_compiled_authority,
     compiled_authority_by_id,
-    compiled_authority_for_acceptance,
     latest_accepted_authority_decision,
     latest_compiled_authority,
     latest_compiled_authority_for_product,
@@ -596,16 +596,9 @@ def _compiled_authority_read_failure_envelope(
     }
     if cached is not None:
         envelope["cached"] = cached
-    if (
-        failure.error_code
-        == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value
-    ):
-        envelope["observed_schema_version"] = failure.details[
-            "observed_schema_version"
-        ]
-        envelope["required_schema_version"] = failure.details[
-            "required_schema_version"
-        ]
+    if failure.error_code == ErrorCode.COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED.value:
+        envelope["observed_schema_version"] = failure.details["observed_schema_version"]
+        envelope["required_schema_version"] = failure.details["required_schema_version"]
     return envelope
 
 
@@ -745,9 +738,10 @@ def _lookup_reusable_accepted_authority(
             compiled_artifact_success=False,
         )
 
-    compiled = compiled_authority_for_acceptance(
+    compiled = accepted_compiled_authority(
         session,
-        acceptance=existing_acceptance,
+        product_id=product_id,
+        spec_version_id=existing_acceptance.spec_version_id,
     )
     if compiled is None:
         return _AcceptedAuthorityLookup(
@@ -1925,8 +1919,7 @@ def _merge_compilation_successes(
                 [gap for success in successes for gap in success.gaps]
             ),
             "assumptions": [
-                assumption.model_dump(mode="json")
-                for assumption in merged_assumptions
+                assumption.model_dump(mode="json") for assumption in merged_assumptions
             ],
             "source_map": [
                 entry.model_dump(mode="json") for entry in merged_source_map
@@ -2000,10 +1993,7 @@ def _is_invalidated_accepted_base_aggregate(
     has_extension_only: bool,
 ) -> bool:
     """Return whether this input's aggregate assumptions are stale by construction."""
-    return (
-        has_extension_only
-        and compilation.scope == CompilationScope.ACCEPTED_BASE
-    )
+    return has_extension_only and compilation.scope == CompilationScope.ACCEPTED_BASE
 
 
 def _ground_merged_assumptions(
@@ -2109,9 +2099,7 @@ def _merge_authority_quality_reports(
             for index, item in enumerate(merged_items, start=1)
         ],
         invalidated_items=[
-            item.model_copy(
-                update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"}
-            )
+            item.model_copy(update={"invalidation_id": f"AQ-INVALIDATE-{index:03d}"})
             for index, item in enumerate(all_invalidated_items, start=1)
         ],
         review_groups=[
@@ -3492,32 +3480,6 @@ def _scope_extension_compile_failure(
     )
 
 
-def _accepted_authority_identity_matches(
-    authority: CompiledSpecAuthority,
-    acceptance: SpecAuthorityAcceptance,
-) -> bool:
-    """Return whether a compiled authority still matches its acceptance row."""
-    from services.agent_workbench.authority_projection import (  # noqa: PLC0415
-        pending_authority_fingerprint,
-    )
-
-    if authority.compiler_version != acceptance.compiler_version:
-        return False
-    if authority.prompt_hash != acceptance.prompt_hash:
-        return False
-    if acceptance.pending_authority_id is not None:
-        if authority.authority_id != acceptance.pending_authority_id:
-            return False
-    elif acceptance.authority_fingerprint is None:
-        return False
-    if acceptance.authority_fingerprint is not None:
-        return (
-            pending_authority_fingerprint(authority)
-            == acceptance.authority_fingerprint
-        )
-    return True
-
-
 def _latest_matching_base_authority(
     session: Session,
     *,
@@ -3525,14 +3487,14 @@ def _latest_matching_base_authority(
     acceptance: SpecAuthorityAcceptance,
 ) -> CompiledSpecAuthority | None:
     """Return a base authority only when it still matches the accepted decision."""
-    authority = compiled_authority_for_acceptance(
+    authority = accepted_compiled_authority(
         session,
-        acceptance=acceptance,
+        product_id=acceptance.product_id,
+        spec_version_id=acceptance.spec_version_id,
     )
     if (
         authority is not None
         and authority.spec_version_id == marker.base_spec_version_id
-        and _accepted_authority_identity_matches(authority, acceptance)
     ):
         return authority
     return None

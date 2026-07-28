@@ -12,6 +12,7 @@ from agile_sqlmodel import (
     SpecRegistry,
 )
 from scripts import dry_run_story_validation as dry_run
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 
@@ -83,6 +84,7 @@ def test_load_accepted_invariants_uses_exact_valid_authority(
             prompt_hash=accepted.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=accepted.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(accepted),
         )
     )
     session.commit()

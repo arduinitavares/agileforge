@@ -33,8 +33,12 @@ from services.agent_workbench.schema_readiness import (
     check_schema_readiness,
 )
 from services.specs.authority_selection import (
+    accepted_compiled_authority,
     compiled_authority_for_acceptance,
     latest_compiled_authority,
+)
+from services.specs.authority_selection import (
+    pending_authority_fingerprint as canonical_pending_authority_fingerprint,
 )
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
@@ -120,6 +124,7 @@ class _AuthoritySelection:
     accepted_spec: SpecRegistry | None
     authority: CompiledSpecAuthority | None
     pending_authority: CompiledSpecAuthority | None
+    authority_trusted: bool = True
 
 
 @dataclass(frozen=True)
@@ -415,21 +420,14 @@ def _pending_authority_fingerprint(
     authority: CompiledSpecAuthority | None,
 ) -> str | None:
     """Return a stable fingerprint for a pending compiled authority."""
-    if authority is None:
-        return None
-    return canonical_hash(
-        {
-            "command": AUTHORITY_STATUS_COMMAND,
-            "pending_compiled": _authority_fingerprint_payload(authority),
-        }
-    )
+    return canonical_pending_authority_fingerprint(authority)
 
 
 def pending_authority_fingerprint(
     authority: CompiledSpecAuthority | None,
 ) -> str | None:
     """Return the stable public fingerprint for a pending compiled authority."""
-    return _pending_authority_fingerprint(authority)
+    return canonical_pending_authority_fingerprint(authority)
 
 
 def _spec_fingerprint_payload(spec: SpecRegistry | None) -> JsonDict | None:
@@ -546,9 +544,7 @@ def _feedback_curation_for_selection(
     if not curation_ready:
         return _feedback_curation_defaults()
     pending_authority_id = _pending_authority_id(selection.pending_authority)
-    rejected_source_authority_id = _rejected_curation_source_authority_id(
-        selection
-    )
+    rejected_source_authority_id = _rejected_curation_source_authority_id(selection)
     if rejected_source_authority_id is not None:
         rejected_curation = _latest_feedback_and_curation(
             session,
@@ -731,6 +727,10 @@ def _classify_status(
         stale_reason = reason
     elif (disk_classification := _disk_stale_classification(disk_spec)) is not None:
         return disk_classification
+    elif not selection.authority_trusted:
+        status = "stale"
+        reason = "accepted_authority_identity_mismatch"
+        stale_reason = reason
     else:
         status = "current"
         reason = "accepted_authority_current"
@@ -820,14 +820,10 @@ def _status_data(context: _StatusContext) -> JsonDict:
         "prompt_hash": authority.prompt_hash if authority is not None else None,
         "invariant_count": context.invariant_count,
         "pending_authority_id": (
-            pending_authority.authority_id
-            if pending_authority is not None
-            else None
+            pending_authority.authority_id if pending_authority is not None else None
         ),
         "pending_compiled_spec_version_id": (
-            pending_authority.spec_version_id
-            if pending_authority is not None
-            else None
+            pending_authority.spec_version_id if pending_authority is not None else None
         ),
         "pending_compiled_at": (
             _iso_z(pending_authority.compiled_at)
@@ -840,9 +836,7 @@ def _status_data(context: _StatusContext) -> JsonDict:
             else None
         ),
         "pending_prompt_hash": (
-            pending_authority.prompt_hash
-            if pending_authority is not None
-            else None
+            pending_authority.prompt_hash if pending_authority is not None else None
         ),
         "pending_invariant_count": pending_invariant_count,
         "pending_authority_fingerprint": _pending_authority_fingerprint(
@@ -923,18 +917,6 @@ def _latest_rejected(
     ).first()
 
 
-def _authority_matches_acceptance(
-    *,
-    authority: CompiledSpecAuthority,
-    accepted: SpecAuthorityAcceptance,
-) -> bool:
-    """Return whether compiled authority provenance matches the acceptance."""
-    return (
-        authority.compiler_version == accepted.compiler_version
-        and authority.prompt_hash == accepted.prompt_hash
-    )
-
-
 def _load_authority_selection(
     session: Session,
     *,
@@ -957,6 +939,15 @@ def _load_authority_selection(
         if accepted is not None
         else None
     )
+    trusted_authority = (
+        accepted_compiled_authority(
+            session,
+            product_id=project_id,
+            spec_version_id=accepted.spec_version_id,
+        )
+        if accepted is not None
+        else None
+    )
     latest_spec = specs[0] if specs else None
     pending_authority = _pending_authority(
         session=session,
@@ -972,6 +963,11 @@ def _load_authority_selection(
         accepted_spec=accepted_spec,
         authority=authority,
         pending_authority=pending_authority,
+        authority_trusted=(
+            authority is not None
+            and trusted_authority is not None
+            and authority.authority_id == trusted_authority.authority_id
+        ),
     )
 
 
@@ -1238,6 +1234,20 @@ class AuthorityProjectionService:
         )
         if authority is None:
             return _authority_not_compiled_error(project_id, selected_id)
+        if (
+            selection.accepted is not None
+            and accepted_compiled_authority(
+                session,
+                product_id=project_id,
+                spec_version_id=selected_id,
+            )
+            is None
+        ):
+            return _authority_acceptance_mismatch_error(
+                project_id=project_id,
+                accepted=selection.accepted,
+                authority=authority,
+            )
         load_result = load_compiled_artifact(authority)
         failure = compiled_authority_read_failure(
             load_result,
@@ -1267,16 +1277,6 @@ class AuthorityProjectionService:
                     "authority_fingerprint": None,
                 },
             )
-        if selection.accepted is not None and not _authority_matches_acceptance(
-            authority=authority,
-            accepted=selection.accepted,
-        ):
-            return _authority_acceptance_mismatch_error(
-                project_id=project_id,
-                accepted=selection.accepted,
-                authority=authority,
-            )
-
         return _invariants_success(
             project_id=project_id,
             authority=authority,

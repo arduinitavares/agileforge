@@ -261,6 +261,7 @@ def _accept_spec(
         prompt_hash="a" * 64,
         spec_hash=spec.spec_hash,
         pending_authority_id=pending_authority_id,
+        authority_fingerprint=pending_authority_fingerprint(compiled_authority),
         actor_mode="human_review_token",
         review_completeness="complete",
         terminal_decision_key=(
@@ -522,10 +523,7 @@ def test_authority_status_keeps_compiled_but_unaccepted_authority_pending(
     assert result["data"]["accepted_spec_version_id"] is None
     assert result["data"]["authority_id"] is None
     assert result["data"]["pending_authority_id"] == authority.authority_id
-    assert (
-        result["data"]["pending_compiled_spec_version_id"]
-        == spec.spec_version_id
-    )
+    assert result["data"]["pending_compiled_spec_version_id"] == spec.spec_version_id
     assert result["data"]["pending_compiled_at"] == "2026-05-14T12:00:00Z"
     assert result["data"]["pending_compiler_version"] == "3.0.0"
     assert result["data"]["pending_prompt_hash"] == "a" * 64
@@ -734,9 +732,7 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
         candidate_authority.authority_id,
         "authority_id",
     )
-    candidate_authority_fingerprint = pending_authority_fingerprint(
-        candidate_authority
-    )
+    candidate_authority_fingerprint = pending_authority_fingerprint(candidate_authority)
     assert candidate_authority_fingerprint is not None
     _seed_curation_attempt(
         session,
@@ -762,9 +758,7 @@ def test_authority_status_keeps_curation_metadata_with_published_candidate(
     assert data["latest_feedback_attempt_id"] == feedback.feedback_attempt_id
     assert data["latest_curation_attempt_id"] == "curation-published-candidate"
     assert data["latest_curation_status"] == "recovery_required"
-    assert data["latest_curation_candidate_authority_id"] == (
-        candidate_authority_id
-    )
+    assert data["latest_curation_candidate_authority_id"] == (candidate_authority_id)
     assert data["latest_curation_candidate_authority_fingerprint"] == (
         candidate_authority_fingerprint
     )
@@ -1144,6 +1138,7 @@ def test_authority_status_treats_newer_acceptance_after_rejection_as_current(
         prompt_hash=accepted_authority.prompt_hash,
         spec_hash=spec.spec_hash,
         pending_authority_id=accepted_authority_id,
+        authority_fingerprint=pending_authority_fingerprint(accepted_authority),
         terminal_decision_key=(
             f"{product_id}:{spec_version_id}:{accepted_authority_id}"
         ),
@@ -1183,7 +1178,7 @@ def test_authority_status_reports_current_accepted_authority_from_repo_root(
         session,
         product_id=product_id,
         content=spec_content,
-            content_ref="specs/app.json",
+        content_ref="specs/app.json",
     )
     authority = _seed_authority(
         session,
@@ -1825,6 +1820,7 @@ def test_invariants_default_uses_exact_newest_accepted_authority(
             prompt_hash=authority_b.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=authority_b_id,
+            authority_fingerprint=pending_authority_fingerprint(authority_b),
             terminal_decision_key=f"{product_id}:{spec_version_id}:{authority_b_id}",
         )
     )
@@ -2010,12 +2006,12 @@ def test_denormalized_invariants_do_not_override_typed_artifact(
     assert status_result["warnings"] == []
     assert invariants_result["ok"] is True
     assert invariants_result["data"]["count"] == 1
-    assert invariants_result["data"]["invariants"][0]["id"] == (
-        "INV-0123456789abcdef"
+    assert invariants_result["data"]["invariants"][0]["id"] == ("INV-0123456789abcdef")
+    assert (
+        status_result["data"]["authority_fingerprint"]
+        == (baseline_status["data"]["authority_fingerprint"])
     )
-    assert status_result["data"]["authority_fingerprint"] == (
-        baseline_status["data"]["authority_fingerprint"]
-    )
-    assert invariants_result["data"]["authority_fingerprint"] == (
-        baseline_invariants["data"]["authority_fingerprint"]
+    assert (
+        invariants_result["data"]["authority_fingerprint"]
+        == (baseline_invariants["data"]["authority_fingerprint"])
     )

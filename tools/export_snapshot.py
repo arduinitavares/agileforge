@@ -15,7 +15,7 @@ from models.db import engine as default_engine
 from models.enums import StoryStatus
 from models.specs import SpecRegistry
 from services.specs.authority_selection import (
-    compiled_authority_for_acceptance,
+    accepted_compiled_authority,
     latest_accepted_authority_decision,
     latest_compiled_authority,
 )
@@ -225,9 +225,10 @@ def _load_compiled_authority(
         spec_version_id=approved_spec.spec_version_id,
     )
     authority = (
-        compiled_authority_for_acceptance(
+        accepted_compiled_authority(
             session,
-            acceptance=acceptance,
+            product_id=approved_spec.product_id,
+            spec_version_id=approved_spec.spec_version_id,
         )
         if acceptance is not None
         else latest_compiled_authority(

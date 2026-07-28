@@ -14,6 +14,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from scripts import build_validation_benchmark_cases as builder
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 
@@ -125,6 +126,7 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
             prompt_hash=malformed.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=malformed.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(malformed),
         )
     )
     session.add(
@@ -159,6 +161,28 @@ def test_strict_spec_resolution_requires_exact_accepted_valid_authority(
         prompt_hash=malformed.prompt_hash
     )
     session.add(malformed)
+    session.commit()
+
+    assert builder._resolve_spec_version_id(
+        session,
+        story,
+        require_compiled=True,
+    ) == (None, "accepted_spec_invalid")
+
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="builder-reaccept-test",
+            compiler_version=malformed.compiler_version,
+            prompt_hash=malformed.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=malformed.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(malformed),
+        )
+    )
     session.commit()
 
     assert builder._resolve_spec_version_id(

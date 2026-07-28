@@ -26,6 +26,7 @@ from services.agent_workbench.backlog_phase import BacklogPhaseRunner
 from services.agent_workbench.roadmap_phase import RoadmapPhaseRunner
 from services.agent_workbench.sprint_phase import SprintPhaseRunner
 from services.agent_workbench.story_phase import StoryPhaseRunner
+from services.specs.authority_selection import pending_authority_fingerprint
 from services.specs.compiler_service import _compiled_authority_artifact_json
 from utils.spec_schemas import SpecAuthorityCompilationSuccess
 
@@ -204,6 +205,7 @@ def _seed_current_authority_project(session: Session) -> int:
         prompt_hash=prompt_hash,
         spec_hash=spec.spec_hash,
         pending_authority_id=authority.authority_id,
+        authority_fingerprint=pending_authority_fingerprint(authority),
         terminal_decision_key=(
             f"{project_id}:{spec.spec_version_id}:{authority.authority_id}"
         ),

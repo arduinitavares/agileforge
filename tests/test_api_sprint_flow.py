@@ -27,6 +27,9 @@ from agile_sqlmodel import (
     WorkflowEventType,
 )
 from models.core import Team
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from services.agent_workbench.post_sprint_triage import build_triage_payload
 from tests.authority_assumption_fixtures import (
     current_v3_compiled_authority_json,
@@ -539,6 +542,7 @@ def _seed_task_packet_context(
                 prompt_hash=authority.prompt_hash,
                 spec_hash=spec_version.spec_hash,
                 pending_authority_id=authority.authority_id,
+                authority_fingerprint=pending_authority_fingerprint(authority),
             )
         )
 
@@ -1592,9 +1596,7 @@ def test_sprint_save_rejects_stale_artifact_fingerprint(monkeypatch):  # noqa: A
 
     response = client.post(
         f"/api/projects/{project_id}/sprint/save",
-        json=_sprint_save_guard_payload(
-            expected_artifact_fingerprint="sha256:stale"
-        ),
+        json=_sprint_save_guard_payload(expected_artifact_fingerprint="sha256:stale"),
     )
 
     assert response.status_code == 409  # noqa: PLR2004
@@ -2220,8 +2222,7 @@ def test_sprint_runtime_summary_surfaces_scope_extension_when_work_is_exhausted(
     assert fake_app.workflow_next_calls == [project_id]
     assert runtime_summary["can_create_next_sprint"] is False
     assert (
-        runtime_summary["workflow_next_status"]
-        == "project_scope_extension_available"
+        runtime_summary["workflow_next_status"] == "project_scope_extension_available"
     )
     assert runtime_summary["scope_extension_status"] == (
         "project_scope_extension_available"
@@ -2288,8 +2289,7 @@ def test_sprint_detail_runtime_summary_surfaces_scope_extension_when_exhausted( 
     assert fake_app.workflow_next_calls == [project_id]
     assert runtime_summary["can_create_next_sprint"] is False
     assert (
-        runtime_summary["workflow_next_status"]
-        == "project_scope_extension_available"
+        runtime_summary["workflow_next_status"] == "project_scope_extension_available"
     )
     assert runtime_summary["scope_extension_status"] == (
         "project_scope_extension_available"
@@ -2658,6 +2658,37 @@ def test_task_packet_keeps_exact_accepted_v3_when_newer_v3_is_pending(
     assert payload["source_snapshot"]["compiled_authority_id"] != pending.authority_id
 
 
+def test_task_packet_rejects_post_acceptance_valid_artifact_mutation(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinned packet cannot execute a valid artifact changed after acceptance."""
+    client, repo, _workflow = _build_client(monkeypatch)
+    project_id, sprint_id, story_id, task_id = _seed_task_packet_context(
+        session,
+        repo,
+        pinned=True,
+    )
+    _, _, rows = _packet_authority_rows(session, story_id=story_id)
+    accepted = rows[0]
+    accepted.compiled_artifact_json = current_v3_compiled_authority_json(
+        prompt_hash=accepted.prompt_hash,
+        scope_themes=["mutated-after-acceptance"],
+    )
+    session.add(accepted)
+    session.commit()
+
+    response = client.get(
+        f"/api/projects/{project_id}/sprints/{sprint_id}/tasks/{task_id}/packet"
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "AUTHORITY_ACCEPTANCE_MISMATCH"
+    assert error["details"]["project_id"] == project_id
+    assert error["details"]["accepted_authority_id"] == accepted.authority_id
+
+
 def test_task_packet_uses_latest_deterministic_accepted_decision(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -2703,6 +2734,7 @@ def test_task_packet_uses_latest_deterministic_accepted_decision(
             prompt_hash=replacement.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=replacement.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(replacement),
         )
     )
     session.commit()
@@ -2714,8 +2746,7 @@ def test_task_packet_uses_latest_deterministic_accepted_decision(
     assert response.status_code == HTTP_OK
     payload = response.json()["data"]
     assert (
-        payload["source_snapshot"]["compiled_authority_id"]
-        == replacement.authority_id
+        payload["source_snapshot"]["compiled_authority_id"] == replacement.authority_id
     )
     assert (
         payload["metadata"]["source_fingerprint"]
@@ -2900,6 +2931,15 @@ def test_task_packet_blocks_unusable_accepted_row_despite_valid_pending_v3(
     accepted = rows[0]
     accepted.compiled_artifact_json = accepted_artifact_json
     session.add(accepted)
+    session.commit()
+    acceptance = session.exec(
+        select(SpecAuthorityAcceptance).where(
+            SpecAuthorityAcceptance.product_id == project_id,
+            SpecAuthorityAcceptance.spec_version_id == story.accepted_spec_version_id,
+        )
+    ).one()
+    acceptance.authority_fingerprint = pending_authority_fingerprint(accepted)
+    session.add(acceptance)
     session.commit()
     _add_packet_authority(
         session,

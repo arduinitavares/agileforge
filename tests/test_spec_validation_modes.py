@@ -16,6 +16,7 @@ from agile_sqlmodel import (
     UserStory,
 )
 from models.core import Epic, Feature, Theme
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
 from tools import spec_tools
 from tools.spec_tools import validate_story_with_spec_authority
@@ -95,6 +96,7 @@ def _create_compiled_spec(session: Session, product_id: int) -> int:
             prompt_hash=compiled.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=compiled.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(compiled),
         )
     )
     session.commit()
@@ -820,6 +822,7 @@ def test_hybrid_mode_ignores_policy_boilerplate_when_llm_passes(
             prompt_hash=compiled.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=compiled.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(compiled),
         )
     )
     session.commit()

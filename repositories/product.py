@@ -41,6 +41,243 @@ from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecReg
 
 logger = logging.getLogger(__name__)
 
+PROJECT_DELETION_CONFLICT_MESSAGE = (
+    "Project deletion blocked by cross-project discovery references."
+)
+
+
+class ProjectDeletionConflictError(RuntimeError):
+    """Raised when deleting a project would orphan another project's data."""
+
+    def __init__(self, *, product_id: int, references: tuple[str, ...]) -> None:
+        """Record the project and inbound foreign-key relationships."""
+        super().__init__(PROJECT_DELETION_CONFLICT_MESSAGE)
+        self.product_id = product_id
+        self.references = references
+
+
+def _project_discovery_conflicts(
+    session: Session,
+    product_id: int,
+) -> tuple[str, ...]:
+    """Return non-null discovery FKs owned outside the project being deleted."""
+    challenge_ids = list(
+        session.exec(
+            select(DiscoveryChallengeArtifact.challenge_artifact_id).where(
+                DiscoveryChallengeArtifact.project_id == product_id
+            )
+        ).all()
+    )
+    prd_ids = list(
+        session.exec(
+            select(DiscoveryPrd.prd_id).where(DiscoveryPrd.project_id == product_id)
+        ).all()
+    )
+    greenfield_context_ids = list(
+        session.exec(
+            select(GreenfieldDiscoveryContext.greenfield_context_id).where(
+                GreenfieldDiscoveryContext.project_id == product_id
+            )
+        ).all()
+    )
+    greenfield_challenge_ids = (
+        list(
+            session.exec(
+                select(
+                    GreenfieldDiscoveryChallengeArtifact.challenge_artifact_id
+                ).where(
+                    col(GreenfieldDiscoveryChallengeArtifact.greenfield_context_id).in_(
+                        greenfield_context_ids
+                    )
+                )
+            ).all()
+        )
+        if greenfield_context_ids
+        else []
+    )
+    greenfield_prd_ids = (
+        list(
+            session.exec(
+                select(GreenfieldDiscoveryPrd.prd_id).where(
+                    col(GreenfieldDiscoveryPrd.greenfield_context_id).in_(
+                        greenfield_context_ids
+                    )
+                )
+            ).all()
+        )
+        if greenfield_context_ids
+        else []
+    )
+
+    conflicts: list[str] = []
+    if challenge_ids:
+        if (
+            session.exec(
+                select(DiscoveryPrd.prd_id).where(
+                    DiscoveryPrd.project_id != product_id,
+                    col(DiscoveryPrd.challenge_artifact_id).in_(challenge_ids),
+                )
+            ).first()
+            is not None
+        ):
+            conflicts.append("discovery_prds.challenge_artifact_id")
+        if (
+            session.exec(
+                select(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).where(
+                    DiscoverySpecAmendmentDraft.project_id != product_id,
+                    col(DiscoverySpecAmendmentDraft.challenge_artifact_id).in_(
+                        challenge_ids
+                    ),
+                )
+            ).first()
+            is not None
+        ):
+            conflicts.append("discovery_spec_amendment_drafts.challenge_artifact_id")
+    if prd_ids and (
+        session.exec(
+            select(DiscoverySpecAmendmentDraft.spec_amendment_draft_id).where(
+                DiscoverySpecAmendmentDraft.project_id != product_id,
+                col(DiscoverySpecAmendmentDraft.prd_id).in_(prd_ids),
+            )
+        ).first()
+        is not None
+    ):
+        conflicts.append("discovery_spec_amendment_drafts.prd_id")
+    if greenfield_context_ids and greenfield_challenge_ids:
+        if (
+            session.exec(
+                select(GreenfieldDiscoveryPrd.prd_id).where(
+                    col(GreenfieldDiscoveryPrd.greenfield_context_id).not_in(
+                        greenfield_context_ids
+                    ),
+                    col(GreenfieldDiscoveryPrd.challenge_artifact_id).in_(
+                        greenfield_challenge_ids
+                    ),
+                )
+            ).first()
+            is not None
+        ):
+            conflicts.append("greenfield_discovery_prds.challenge_artifact_id")
+        if (
+            session.exec(
+                select(
+                    GreenfieldDiscoverySpecAmendmentDraft.spec_amendment_draft_id
+                ).where(
+                    col(
+                        GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                    ).not_in(greenfield_context_ids),
+                    col(
+                        GreenfieldDiscoverySpecAmendmentDraft.challenge_artifact_id
+                    ).in_(greenfield_challenge_ids),
+                )
+            ).first()
+            is not None
+        ):
+            conflicts.append(
+                "greenfield_discovery_spec_amendment_drafts.challenge_artifact_id"
+            )
+    if (
+        greenfield_context_ids
+        and greenfield_prd_ids
+        and (
+            session.exec(
+                select(
+                    GreenfieldDiscoverySpecAmendmentDraft.spec_amendment_draft_id
+                ).where(
+                    col(
+                        GreenfieldDiscoverySpecAmendmentDraft.greenfield_context_id
+                    ).not_in(greenfield_context_ids),
+                    col(GreenfieldDiscoverySpecAmendmentDraft.prd_id).in_(
+                        greenfield_prd_ids
+                    ),
+                )
+            ).first()
+            is not None
+        )
+    ):
+        conflicts.append("greenfield_discovery_spec_amendment_drafts.prd_id")
+    return tuple(conflicts)
+
+
+def _ensure_project_discovery_deletable(session: Session, product_id: int) -> None:
+    """Reject deletion before mutation when another project depends on its data."""
+    conflicts = _project_discovery_conflicts(session, product_id)
+    if conflicts:
+        raise ProjectDeletionConflictError(
+            product_id=product_id,
+            references=conflicts,
+        )
+
+
+def _neutralize_surviving_spec_pins(session: Session, product_id: int) -> None:
+    """Clear nullable story pins to spec versions that will be deleted."""
+    spec_version_ids = list(
+        session.exec(
+            select(SpecRegistry.spec_version_id).where(
+                SpecRegistry.product_id == product_id
+            )
+        ).all()
+    )
+    if not spec_version_ids:
+        return
+    session.exec(
+        update(UserStory)
+        .where(
+            col(UserStory.product_id) != product_id,
+            col(UserStory.accepted_spec_version_id).in_(spec_version_ids),
+        )
+        .values(accepted_spec_version_id=None)
+    )
+
+
+def _delete_project_spec_rows(session: Session, product_id: int) -> None:
+    """Delete spec history after repairing nullable survivor references."""
+    _neutralize_surviving_spec_pins(session, product_id)
+    spec_versions = session.exec(
+        select(SpecRegistry).where(SpecRegistry.product_id == product_id)
+    ).all()
+    spec_version_ids = [
+        spec_version.spec_version_id
+        for spec_version in spec_versions
+        if spec_version.spec_version_id is not None
+    ]
+    if spec_version_ids:
+        session.exec(
+            delete(SpecAuthorityAcceptance).where(
+                col(SpecAuthorityAcceptance.spec_version_id).in_(spec_version_ids)
+            )
+        )
+    for spec_version in spec_versions:
+        for compiled in session.exec(
+            select(CompiledSpecAuthority).where(
+                CompiledSpecAuthority.spec_version_id == spec_version.spec_version_id
+            )
+        ).all():
+            session.delete(compiled)
+        session.delete(spec_version)
+    session.flush()
+
+
+def _delete_project_story_dependencies(
+    session: Session,
+    *,
+    product_id: int,
+    story_ids: list[int],
+) -> None:
+    """Delete dependency associations owned by or linked to the project."""
+    statement = delete(UserStoryDependency)
+    if story_ids:
+        statement = statement.where(
+            or_(
+                col(UserStoryDependency.product_id) == product_id,
+                col(UserStoryDependency.dependent_story_id).in_(story_ids),
+                col(UserStoryDependency.prerequisite_story_id).in_(story_ids),
+            )
+        )
+    else:
+        statement = statement.where(col(UserStoryDependency.product_id) == product_id)
+    session.exec(statement)
+
 
 def _delete_project_curation_rows(session: Session, product_id: int) -> None:
     """Delete authority curation rows that directly reference a project."""
@@ -259,6 +496,8 @@ class ProductRepository:
             if not product:
                 return False
 
+            _ensure_project_discovery_deletable(session, product_id)
+
             sprints = session.exec(
                 select(Sprint).where(Sprint.product_id == product_id)
             ).all()
@@ -347,18 +586,12 @@ class ProductRepository:
                 session.delete(sprint)
 
             # Handle UserStories (and dependencies / tasks / logs)
+            _delete_project_story_dependencies(
+                session,
+                product_id=product_id,
+                story_ids=story_ids,
+            )
             if story_ids:
-                for dependency in session.exec(
-                    select(UserStoryDependency).where(
-                        or_(
-                            col(UserStoryDependency.dependent_story_id).in_(story_ids),
-                            col(UserStoryDependency.prerequisite_story_id).in_(
-                                story_ids
-                            ),
-                        )
-                    )
-                ).all():
-                    session.delete(dependency)
                 for referring_story in session.exec(
                     select(UserStory).where(
                         col(UserStory.superseded_by_story_id).in_(story_ids)
@@ -384,19 +617,7 @@ class ProductRepository:
             # Stories may be pinned to spec versions.
             session.flush()
 
-            # Delete every compiled authority row before its spec version.
-            for spec_ver in session.exec(
-                select(SpecRegistry).where(SpecRegistry.product_id == product_id)
-            ).all():
-                for compiled in session.exec(
-                    select(CompiledSpecAuthority).where(
-                        CompiledSpecAuthority.spec_version_id
-                        == spec_ver.spec_version_id
-                    )
-                ).all():
-                    session.delete(compiled)
-                session.delete(spec_ver)
-            session.flush()
+            _delete_project_spec_rows(session, product_id)
 
             # Handle Themes -> Epics -> Features
             for theme in session.exec(

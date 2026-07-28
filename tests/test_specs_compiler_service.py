@@ -916,9 +916,7 @@ def test_load_compiled_artifact_returns_compiler_failure_result() -> None:
             "agileforge.compiled_authority.v3",
         ),
         (
-            json.dumps(
-                historical_v2_compiled_authority(prompt_hash="a" * 64)
-            ),
+            json.dumps(historical_v2_compiled_authority(prompt_hash="a" * 64)),
             "schema_unsupported",
             "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
             "agileforge.compiled_authority.v2",
@@ -1068,6 +1066,8 @@ def test_ensure_accepted_spec_authority_reuses_existing_accepted_version(
         compiler_version=authority.compiler_version,
         prompt_hash=authority.prompt_hash,
         spec_hash=spec_row.spec_hash,
+        pending_authority_id=authority.authority_id,
+        authority_fingerprint=pending_authority_fingerprint(authority),
     )
     session.add(acceptance)
     session.commit()
@@ -1106,6 +1106,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
             prompt_hash=first_authority.prompt_hash,
             spec_hash=first_spec.spec_hash,
             pending_authority_id=first_authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(first_authority),
         )
     )
     session.commit()
@@ -1127,6 +1128,7 @@ def test_accepted_authority_reuse_breaks_decision_time_ties_by_id(
             prompt_hash=second_authority.prompt_hash,
             spec_hash=second_spec.spec_hash,
             pending_authority_id=second_authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(second_authority),
         )
     )
     session.commit()
@@ -1188,7 +1190,7 @@ def test_automatic_acceptance_compatibility_api_is_not_public() -> None:
     from services.specs import compiler_service  # noqa: PLC0415
     from tools import spec_tools  # noqa: PLC0415
 
-    removed_name = "ensure_spec_" "authority_accepted"
+    removed_name = "ensure_spec_authority_accepted"
     assert removed_name not in specs.__all__
     assert not hasattr(specs, removed_name)
     assert not hasattr(compiler_service, removed_name)
@@ -1316,9 +1318,7 @@ def test_preview_spec_authority_coverage_repair_succeeds_with_feedback(
         payload = json.loads(spec_content)
         item_ids = [item["id"] for item in payload["items"]]
         calls.append({"item_ids": item_ids, "domain_hint": domain_hint})
-        if domain_hint and "failed structured coverage validation" in str(
-            domain_hint
-        ):
+        if domain_hint and "failed structured coverage validation" in str(domain_hint):
             item_id = item_ids[0]
             source_level = payload["items"][0]["level"]
             assert f"missing source_item_id: {item_id}" in str(domain_hint)
@@ -1346,9 +1346,7 @@ def test_preview_spec_authority_coverage_repair_succeeds_with_feedback(
     assert result["success"] is True
     assert len(calls) == _EXPECTED_COVERAGE_REPAIR_CALLS
     repair_hints = [
-        str(call["domain_hint"])
-        for call in calls
-        if call["domain_hint"] is not None
+        str(call["domain_hint"]) for call in calls if call["domain_hint"] is not None
     ]
     assert any(
         "missing source_item_id: REQ.todo-create" in hint for hint in repair_hints
@@ -1391,11 +1389,14 @@ def test_preview_spec_authority_coverage_repair_fails_closed_on_validation_error
     assert result["details"]["error"] == "STRUCTURED_ITEM_COMPILATION_FAILED"
     assert result["details"]["reason"] == "FOCUSED_ITEM_AUTHORITY_FAILED"
     assert len(calls) == _EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS
-    assert sum(
-        1
-        for hint in calls
-        if hint and "failed structured coverage validation" in hint
-    ) == 1
+    assert (
+        sum(
+            1
+            for hint in calls
+            if hint and "failed structured coverage validation" in hint
+        )
+        == 1
+    )
 
 
 def test_preview_spec_authority_rejects_vacant_authority(
@@ -2388,14 +2389,11 @@ def test_scope_extension_invalidates_base_aggregate_claim(
         final_spec=_scope_merge_spec("REQ.alpha", "REQ.beta"),
     )
 
-    assert all(
-        assumption.kind != assumption_kind for assumption in merged.assumptions
-    )
+    assert all(assumption.kind != assumption_kind for assumption in merged.assumptions)
     assert merged.authority_quality is not None
     assert merged.authority_quality.invalidated_items[0].removed_id == "ASM-1"
     assert (
-        merged.authority_quality.invalidated_items[0].assumption_kind
-        == assumption_kind
+        merged.authority_quality.invalidated_items[0].assumption_kind == assumption_kind
     )
     assert merged.authority_quality.invalidated_items[0].reason == (
         "aggregate_claim_invalidated_by_scope_extension"
@@ -2832,11 +2830,14 @@ def test_compile_spec_authority_coverage_repair_does_not_chain_metadata_repair(
     assert result["error"] == "STRUCTURED_ITEM_COMPILATION_FAILED"
     assert result["reason"] == "FOCUSED_ITEM_AUTHORITY_FAILED"
     assert len(calls) == _EXPECTED_COVERAGE_REPAIR_FAIL_FAST_CALLS
-    assert sum(
-        1
-        for hint in calls
-        if hint and "failed structured coverage validation" in hint
-    ) == 1
+    assert (
+        sum(
+            1
+            for hint in calls
+            if hint and "failed structured coverage validation" in hint
+        )
+        == 1
+    )
     assert not any(
         hint and "failed source metadata validation" in hint for hint in calls
     )
@@ -4855,6 +4856,7 @@ def test_update_spec_and_compile_authority_creates_spec_and_delegates_compile(
     )
 
     compile_calls: dict[str, object] = {}
+
     def fake_compile(
         *,
         spec_version_id: int,
@@ -5103,6 +5105,7 @@ def test_update_spec_and_compile_authority_rejects_malformed_postcompile_row(
     assert result["error_code"] == "COMPILED_AUTHORITY_INVALID"
     assert result["details"]["load_status"] == "invalid_json"
     assert "num_scope_themes" not in result
+
 
 def test_update_spec_and_compile_authority_loads_content_ref(
     session: Session,

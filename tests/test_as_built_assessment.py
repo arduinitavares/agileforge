@@ -834,9 +834,7 @@ def test_split_evidence_pack_batches_targets_in_order(tmp_path: Path) -> None:
 
     assert [len(batch.authority_targets) for batch in batches] == [2, 2, 1]
     assert [
-        target.authority_ref
-        for batch in batches
-        for target in batch.authority_targets
+        target.authority_ref for batch in batches for target in batch.authority_targets
     ] == [target.authority_ref for target in full_pack.authority_targets]
     assert all(
         batch.evidence_pack_fingerprint.startswith("sha256:") for batch in batches
@@ -854,20 +852,20 @@ def test_split_evidence_pack_filters_snippets_to_batch_paths(
     repo.mkdir()
     authority = {
         "invariants": [
-                {
-                    "id": "INV-batch-a",
-                    "type": "DATA_CONTRACT",
-                    "source_item_id": "REQ.batch-a",
-                    "source_level": "MUST",
-                    "parameters": {},
-                },
-                {
-                    "id": "INV-batch-b",
-                    "type": "DATA_CONTRACT",
-                    "source_item_id": "REQ.batch-b",
-                    "source_level": "MUST",
-                    "parameters": {},
-                },
+            {
+                "id": "INV-batch-a",
+                "type": "DATA_CONTRACT",
+                "source_item_id": "REQ.batch-a",
+                "source_level": "MUST",
+                "parameters": {},
+            },
+            {
+                "id": "INV-batch-b",
+                "type": "DATA_CONTRACT",
+                "source_item_id": "REQ.batch-b",
+                "source_level": "MUST",
+                "parameters": {},
+            },
         ]
     }
     (repo / "a.py").write_text("# INV-batch-a\n", encoding="utf-8")
@@ -930,9 +928,9 @@ def test_merge_batch_assessments_restores_full_pack_identity(
     assert merged.assessment_id == "as-built-2-full"
     assert merged.evidence_pack_fingerprint == full_pack.evidence_pack_fingerprint
     assert len(merged.capability_assessments) == len(full_pack.authority_targets)
-    assert [
-        item.authority_ref for item in merged.capability_assessments
-    ] == [target.authority_ref for target in full_pack.authority_targets]
+    assert [item.authority_ref for item in merged.capability_assessments] == [
+        target.authority_ref for target in full_pack.authority_targets
+    ]
     assert merged.is_complete is True
 
 
@@ -1298,6 +1296,11 @@ def test_runner_rejects_malformed_v3_with_central_failure(
         )
         session.add(authority)
         session.commit()
+        acceptance = session.get(SpecAuthorityAcceptance, 1)
+        assert acceptance is not None
+        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
+        session.add(acceptance)
+        session.commit()
     repo = tmp_path / "repo"
     repo.mkdir()
     workflow = _WorkflowStub()
@@ -1427,8 +1430,7 @@ def test_runner_invokes_assessor_in_batches_and_merges_cache(
     assert isinstance(raw_cached, str)
     cached = AsBuiltAssessment.model_validate_json(raw_cached)
     assert (
-        cached.evidence_pack_fingerprint
-        == result["data"]["evidence_pack_fingerprint"]
+        cached.evidence_pack_fingerprint == result["data"]["evidence_pack_fingerprint"]
     )
     assert len(cached.capability_assessments) == EXPECTED_CARTOLA_TARGET_COUNT
 
@@ -1649,9 +1651,7 @@ def test_runner_rejects_cross_batch_capability_coverage(
     assert failed_event["missing_refs"] == [
         "REQ.live-squad-recommendation [INV-a4b296c058e88663]"
     ]
-    assert failed_event["extra_refs"] == [
-        "REQ.legal-roster [INV-ffe2e17832c41874]"
-    ]
+    assert failed_event["extra_refs"] == ["REQ.legal-roster [INV-ffe2e17832c41874]"]
     assert failed_event["duplicate_refs"] == []
     assert AS_BUILT_ASSESSMENT_STATE_KEY not in workflow.state
     assert AS_BUILT_ASSESSMENT_META_STATE_KEY not in workflow.state
@@ -2001,9 +2001,10 @@ def test_runner_replays_same_idempotency_key_for_same_inputs(tmp_path: Path) -> 
     assert first["ok"] is True
     assert second["ok"] is True
     assert second["data"]["idempotent_replay"] is True
-    assert second["data"]["authority_target_count"] == first["data"][
-        "authority_target_count"
-    ]
+    assert (
+        second["data"]["authority_target_count"]
+        == first["data"]["authority_target_count"]
+    )
     assert second["data"]["batch_count"] == first["data"]["batch_count"]
     assert second["data"]["batch_size"] == first["data"]["batch_size"]
 
@@ -2025,14 +2026,17 @@ def test_runner_rejects_reused_idempotency_key_with_changed_pack(
         invoke_agent=_fake_assessment,
     )
 
-    assert runner.assess(
-        project_id=1,
-        repo_path=str(repo),
-        spec_file=None,
-        spec_mode="unknown",
-        user_input=None,
-        idempotency_key="reused-key",
-    )["ok"] is True
+    assert (
+        runner.assess(
+            project_id=1,
+            repo_path=str(repo),
+            spec_file=None,
+            spec_mode="unknown",
+            user_input=None,
+            idempotency_key="reused-key",
+        )["ok"]
+        is True
+    )
     (repo / "changed.py").write_text("# INV-a4b296c058e88663\n", encoding="utf-8")
     second = runner.assess(
         project_id=1,
@@ -2066,14 +2070,17 @@ def test_runner_rejects_reused_idempotency_key_with_changed_batch_size(
     )
     monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 2)
 
-    assert runner.assess(
-        project_id=1,
-        repo_path=str(repo),
-        spec_file=None,
-        spec_mode="unknown",
-        user_input=None,
-        idempotency_key="batch-size-key",
-    )["ok"] is True
+    assert (
+        runner.assess(
+            project_id=1,
+            repo_path=str(repo),
+            spec_file=None,
+            spec_mode="unknown",
+            user_input=None,
+            idempotency_key="batch-size-key",
+        )["ok"]
+        is True
+    )
     monkeypatch.setattr(as_built_module, "get_as_built_assessor_batch_size", lambda: 1)
     second = runner.assess(
         project_id=1,
@@ -2105,14 +2112,17 @@ def test_runner_rejects_reused_idempotency_key_with_changed_user_input(
         invoke_agent=_fake_assessment,
     )
 
-    assert runner.assess(
-        project_id=1,
-        repo_path=str(repo),
-        spec_file=None,
-        spec_mode="unknown",
-        user_input="first assessment focus",
-        idempotency_key="user-input-key",
-    )["ok"] is True
+    assert (
+        runner.assess(
+            project_id=1,
+            repo_path=str(repo),
+            spec_file=None,
+            spec_mode="unknown",
+            user_input="first assessment focus",
+            idempotency_key="user-input-key",
+        )["ok"]
+        is True
+    )
     second = runner.assess(
         project_id=1,
         repo_path=str(repo),

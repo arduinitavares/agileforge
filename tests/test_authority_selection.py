@@ -5,9 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
+
 from models.core import Product
 from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
 from services.specs import authority_selection
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from tests.typing_helpers import require_id
 
 if TYPE_CHECKING:
@@ -59,11 +62,14 @@ def test_compiled_authority_by_id_rejects_spec_version_mismatch(
     """Exact-id selection also enforces the caller's expected spec version."""
     _, spec_version_id, old, _ = _history(session)
 
-    assert authority_selection.compiled_authority_by_id(
-        session,
-        authority_id=require_id(old.authority_id, "authority_id"),
-        expected_spec_version_id=spec_version_id + 1,
-    ) is None
+    assert (
+        authority_selection.compiled_authority_by_id(
+            session,
+            authority_id=require_id(old.authority_id, "authority_id"),
+            expected_spec_version_id=spec_version_id + 1,
+        )
+        is None
+    )
 
 
 def test_latest_compiled_authority_orders_by_authority_id_desc(
@@ -375,3 +381,154 @@ def test_accepted_compiled_authority_rejects_acceptance_authority_spec_mismatch(
         is None
     )
     assert accepted.authority_id is not None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("compiler_version", "3.0.1"),
+        ("prompt_hash", "f" * 64),
+        ("spec_hash", "sha256:changed"),
+    ],
+)
+def test_accepted_compiled_authority_rejects_acceptance_provenance_mismatch(
+    session: Session,
+    field_name: str,
+    replacement: str,
+) -> None:
+    """Accepted execution requires exact compiler, prompt, and spec provenance."""
+    product_id, spec_version_id, _, authority = _history(session)
+    acceptance = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        compiler_version=authority.compiler_version,
+        prompt_hash=authority.prompt_hash,
+        spec_hash="sha256:selection",
+        pending_authority_id=authority.authority_id,
+    )
+    setattr(acceptance, field_name, replacement)
+    session.add(acceptance)
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )
+
+
+def test_accepted_compiled_authority_rejects_blank_acceptance_spec_hash(
+    session: Session,
+) -> None:
+    """A blank decision-time hash never bypasses exact spec provenance."""
+    product_id, spec_version_id, _, authority = _history(session)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash="",
+            pending_authority_id=authority.authority_id,
+        )
+    )
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )
+
+
+def test_accepted_v3_authority_requires_acceptance_fingerprint(
+    session: Session,
+) -> None:
+    """A v3 decision without immutable artifact identity is not executable."""
+    product_id, spec_version_id, _, authority = _history(session)
+    authority.compiled_artifact_json = current_v3_compiled_authority_json(
+        prompt_hash=authority.prompt_hash,
+    )
+    session.add(authority)
+    session.commit()
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash="sha256:selection",
+            pending_authority_id=authority.authority_id,
+            authority_fingerprint=None,
+        )
+    )
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )
+
+
+def test_accepted_v3_authority_rejects_post_acceptance_artifact_mutation(
+    session: Session,
+) -> None:
+    """A valid in-place artifact mutation invalidates the accepted decision."""
+    product_id, spec_version_id, _, authority = _history(session)
+    authority.compiled_artifact_json = current_v3_compiled_authority_json(
+        prompt_hash=authority.prompt_hash,
+        scope_themes=["accepted"],
+    )
+    session.add(authority)
+    session.commit()
+    acceptance = SpecAuthorityAcceptance(
+        product_id=product_id,
+        spec_version_id=spec_version_id,
+        status="accepted",
+        policy="test",
+        decided_by="test",
+        compiler_version=authority.compiler_version,
+        prompt_hash=authority.prompt_hash,
+        spec_hash="sha256:selection",
+        pending_authority_id=authority.authority_id,
+        authority_fingerprint=authority_selection.pending_authority_fingerprint(
+            authority
+        ),
+    )
+    session.add(acceptance)
+    session.commit()
+
+    authority.compiled_artifact_json = current_v3_compiled_authority_json(
+        prompt_hash=authority.prompt_hash,
+        scope_themes=["mutated"],
+    )
+    session.add(authority)
+    session.commit()
+
+    assert (
+        authority_selection.accepted_compiled_authority(
+            session,
+            product_id=product_id,
+            spec_version_id=spec_version_id,
+        )
+        is None
+    )

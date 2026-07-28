@@ -44,7 +44,12 @@ from utils.spec_authority_assumptions import (
     FreeTextAssumption,
     canonical_assumption_key,
 )
-from utils.spec_schemas import SpecAuthorityCompilationSuccess
+from utils.spec_schemas import (
+    DataContractParams,
+    Invariant,
+    InvariantType,
+    SpecAuthorityCompilationSuccess,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -160,46 +165,52 @@ def test_authority_curation_runner_repairs_legacy_missing_mutation_event_id(
 
 
 def _compiled_artifact_json() -> str:
+    artifact = SpecAuthorityCompilationSuccess(
+        scope_themes=["Authority feedback"],
+        domain="operations",
+        invariants=[
+            Invariant(
+                id="INV-1111111111111111",
+                type=InvariantType.DATA_CONTRACT,
+                source_item_id="REQ.curation-review-packets",
+                source_level="MUST",
+                parameters=DataContractParams(
+                    subject="review packets",
+                    fields=["guard_evidence"],
+                    rule="Review packets include guard evidence.",
+                ),
+            ),
+            Invariant(
+                id="INV-2222222222222222",
+                type=InvariantType.DATA_CONTRACT,
+                source_item_id="REQ.curation-stable-review",
+                source_level="MUST",
+                parameters=DataContractParams(
+                    subject="unrelated review packets",
+                    fields=["guard_evidence"],
+                    rule="Unrelated review packets remain stable.",
+                ),
+            ),
+        ],
+        eligible_feature_rules=[],
+        rejected_features=[],
+        gaps=["Guard evidence retention remains unspecified."],
+        assumptions=[
+            FreeTextAssumption(
+                kind="free_text",
+                text="Report contexts are exhaustive.",
+            ),
+            FreeTextAssumption(
+                kind="free_text",
+                text="Unrelated assumption remains stable.",
+            ),
+        ],
+        source_map=[],
+        compiler_version="3.0.0",
+        prompt_hash="a" * 64,
+    )
     return json.dumps(
-        {
-            "schema_version": "agileforge.compiled_authority.v3",
-            "scope_themes": [],
-            "domain": "operations",
-            "invariants": [
-                {
-                    "id": "INV-curation-1",
-                    "source_item_id": "SRC-curation-1",
-                    "text": "Review packets include guard evidence.",
-                },
-                {
-                    "id": "INV-curation-untargeted",
-                    "source_item_id": "SRC-curation-untargeted",
-                    "text": "Unrelated review packets remain stable.",
-                }
-            ],
-            "eligible_feature_rules": [],
-            "rejected_features": [],
-            "gaps": [{"gap_id": "GAP-curation-1"}],
-            "assumptions": [
-                {
-                    "kind": "free_text",
-                    "text": "Report contexts are exhaustive.",
-                },
-                {
-                    "kind": "free_text",
-                    "text": "Unrelated assumption remains stable.",
-                },
-            ],
-            "quality_groups": [{"group_id": "QG-curation-1"}],
-            "source_map": [
-                {"id": "SRC-curation-1"},
-                {"id": "SRC-curation-untargeted"},
-            ],
-            "compiler_version": "3.0.0",
-            "prompt_hash": "a" * 64,
-            "ir_schema_version": None,
-            "ir_provenance": None,
-        },
+        artifact.model_dump(mode="json"),
         sort_keys=True,
     )
 
@@ -234,30 +245,18 @@ def _seed_pending_authority(
         session.commit()
         session.refresh(spec)
 
+        artifact = json.loads(_compiled_artifact_json())
         authority = CompiledSpecAuthority(
             spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
             compiler_version="3.0.0",
             prompt_hash="a" * 64,
             compiled_at=datetime(2026, 6, 16, 13, tzinfo=UTC),
-            compiled_artifact_json=_compiled_artifact_json(),
-            scope_themes=json.dumps(["Authority feedback"]),
-            invariants=json.dumps(
-                [
-                    {
-                        "id": "INV-curation-1",
-                        "source_item_id": "SRC-curation-1",
-                        "text": "Review packets include guard evidence.",
-                    },
-                    {
-                        "id": "INV-curation-untargeted",
-                        "source_item_id": "SRC-curation-untargeted",
-                        "text": "Unrelated review packets remain stable.",
-                    }
-                ]
-            ),
-            eligible_feature_ids=json.dumps([]),
-            rejected_features=json.dumps([]),
-            spec_gaps=json.dumps([{"id": "GAP-curation-1"}]),
+            compiled_artifact_json=json.dumps(artifact, sort_keys=True),
+            scope_themes=json.dumps(artifact["scope_themes"]),
+            invariants=json.dumps(artifact["invariants"]),
+            eligible_feature_ids=json.dumps(artifact["eligible_feature_rules"]),
+            rejected_features=json.dumps(artifact["rejected_features"]),
+            spec_gaps=json.dumps(artifact["gaps"]),
         )
         session.add(authority)
         session.commit()
@@ -312,7 +311,7 @@ def _insert_rejected_authority_with_feedback(
                         {
                             "feedback_id": "AFB-curation-1",
                             "target_kind": "invariant",
-                            "target_id": "INV-curation-1",
+                            "target_id": "INV-1111111111111111",
                             "issue_type": "overstrong_invariant",
                             "severity": "blocking",
                             "instruction": "Repair the targeted invariant.",
@@ -425,18 +424,9 @@ def _targeted_repair_curation_result(
 ) -> dict[str, object]:
     """Return a candidate with one targeted invariant replacement."""
     candidate = json.loads(_compiled_artifact_json())
-    candidate["invariants"] = [
-        {
-            "id": "INV-curation-1-repaired",
-            "source_item_id": "SRC-curation-1",
-            "text": "Review packets include concrete guard evidence.",
-        },
-        {
-            "id": "INV-curation-untargeted",
-            "source_item_id": "SRC-curation-untargeted",
-            "text": "Unrelated review packets remain stable.",
-        },
-    ]
+    targeted = candidate["invariants"][0]
+    targeted["id"] = "INV-3333333333333333"
+    targeted["parameters"]["rule"] = "Review packets include concrete guard evidence."
     return {
         "ok": True,
         "curation_attempt_id": "curation-fake-result",
@@ -464,9 +454,10 @@ def _patch_repair_curation_result(
             },
             {
                 "target_kind": "invariant",
-                "target_id": "INV-curation-1",
-                "op": "replace_text",
-                "new_text": "Review packets include qualified guard evidence.",
+                "target_id": "INV-1111111111111111",
+                "op": "replace_value",
+                "path": "/parameters/rule",
+                "value": "Review packets include qualified guard evidence.",
             },
         ],
         "candidate_lineage_json": {"source": "patches"},
@@ -488,7 +479,7 @@ def _v2_selection_curation_result(
                 {
                     "feedback_id": "AFB-curation-1",
                     "target_handle": "R1",
-                    "repair_kind": "replace_text",
+                    "repair_kind": "replace_parameter_text",
                     "replacement_text": (
                         "Review packets include qualified guard evidence."
                     ),
@@ -601,10 +592,10 @@ def _structured_parameter_patch_curation_result(
     }
 
 
-def _text_value_patch_curation_result(
+def _parameter_rule_patch_curation_result(
     fixture: RejectedAuthorityFixture,
 ) -> dict[str, object]:
-    """Return a text replacement encoded as a JSON pointer value patch."""
+    """Return a parameter-rule replacement encoded as a JSON pointer patch."""
     return {
         "ok": True,
         "curation_attempt_id": "curation-fake-result",
@@ -612,13 +603,13 @@ def _text_value_patch_curation_result(
         "patches": [
             {
                 "target_kind": "invariant",
-                "target_id": "INV-curation-1",
+                "target_id": "INV-1111111111111111",
                 "op": "replace_value",
-                "path": "/text",
+                "path": "/parameters/rule",
                 "value": "Review packets include qualified guard evidence.",
             }
         ],
-        "candidate_lineage_json": {"source": "text-value-patch"},
+        "candidate_lineage_json": {"source": "parameter-rule-patch"},
         "quality_report": {"status": "passed"},
     }
 
@@ -634,7 +625,7 @@ def _unsupported_path_patch_curation_result(
         "patches": [
             {
                 "target_kind": "invariant",
-                "target_id": "INV-curation-1",
+                "target_id": "INV-1111111111111111",
                 "op": "replace_value",
                 "path": "/unsupported",
                 "value": "Unsupported path should fail with details.",
@@ -650,8 +641,8 @@ def _untargeted_change_curation_result(
     """Return a candidate that changes an untargeted invariant."""
     candidate = json.loads(_compiled_artifact_json())
     for invariant in candidate["invariants"]:
-        if invariant["id"] == "INV-curation-untargeted":
-            invariant["text"] = "Unrelated review packets changed."
+        if invariant["id"] == "INV-2222222222222222":
+            invariant["parameters"]["rule"] = "Unrelated review packets changed."
     return {
         "ok": True,
         "curation_attempt_id": "curation-fake-result",
@@ -668,8 +659,14 @@ def _candidate_with_missing_invariant_id_result(
     candidate = json.loads(_compiled_artifact_json())
     candidate["invariants"].append(
         {
-            "source_item_id": "SRC-curation-1",
-            "text": "Malformed invariant without id.",
+            "source_item_id": "REQ.curation-review-packets",
+            "source_level": "MUST",
+            "type": "DATA_CONTRACT",
+            "parameters": {
+                "subject": "malformed review packet",
+                "fields": ["guard_evidence"],
+                "rule": "Malformed invariant without id.",
+            },
         }
     )
     return {
@@ -691,7 +688,7 @@ def _write_feedback(
     item: dict[str, Any] = {
         "feedback_id": "AFB-curation-1",
         "target_kind": "invariant",
-        "target_id": "INV-curation-1",
+        "target_id": "INV-1111111111111111",
         "issue_type": "overstrong_invariant",
         "severity": "blocking",
         "instruction": "Make the invariant less absolute.",
@@ -832,7 +829,7 @@ def test_feedback_schema_invalid_sanitizes_validation_details(
                     {
                         "feedback_id": "AFB-secret",
                         "target_kind": "invariant",
-                        "target_id": "INV-curation-1",
+                        "target_id": "INV-1111111111111111",
                         "issue_type": "overstrong_invariant",
                         "severity": "blocking",
                         "instruction": "Make the invariant less absolute.",
@@ -920,7 +917,7 @@ def test_feedback_record_rejects_wrong_kind_target(
         authority_id=authority_id,
         item_overrides={
             "target_kind": "gap",
-            "target_id": "INV-curation-1",
+            "target_id": "INV-1111111111111111",
         },
     )
 
@@ -938,7 +935,7 @@ def test_feedback_record_rejects_wrong_kind_target(
     assert result["errors"][0]["code"] == "AUTHORITY_FEEDBACK_TARGET_NOT_FOUND"
     assert result["errors"][0]["details"] == {
         "target_kind": "gap",
-        "target_id": "INV-curation-1",
+        "target_id": "INV-1111111111111111",
     }
 
 
@@ -2022,7 +2019,7 @@ def test_authority_curate_rejects_full_candidate_structured_claim_change(  # noq
         feedback_item={
             "feedback_id": "AFB-structured-full",
             "target_kind": "invariant",
-            "target_id": "INV-curation-1",
+            "target_id": "INV-1111111111111111",
             "issue_type": "overstrong_invariant",
             "severity": "blocking",
             "instruction": "Change the targeted invariant.",
@@ -2080,7 +2077,7 @@ def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:
             {
                 "feedback_id": "AFB-curation-1",
                 "target_kind": "invariant",
-                "target_id": "INV-curation-1",
+                "target_id": "INV-1111111111111111",
                 "issue_type": "overstrong_invariant",
                 "severity": "blocking",
                 "instruction": "Repair the targeted invariant.",
@@ -2098,11 +2095,16 @@ def test_authority_curate_builds_text_repair_menu_from_feedback() -> None:
             "handle": "R1",
             "feedback_id": "AFB-curation-1",
             "target_kind": "invariant",
-            "target_id": "INV-curation-1",
-            "target_field": "text",
-            "target_review_label": "INV-curation-1",
-            "overlay_target_key": "SRC-curation-1:invariant:text:0",
-            "allowed_repair_kinds": ["replace_text", "mark_unresolvable"],
+            "target_id": "INV-1111111111111111",
+            "target_field": "parameters.rule",
+            "target_review_label": "INV-1111111111111111",
+            "overlay_target_key": (
+                "REQ.curation-review-packets:invariant:parameters.rule:0"
+            ),
+            "allowed_repair_kinds": [
+                "replace_parameter_text",
+                "mark_unresolvable",
+            ],
             "target_content_hash": curation_mod._content_hash(
                 "Review packets include guard evidence."
             ),
@@ -2553,19 +2555,176 @@ def test_authority_curate_fails_closed_for_malformed_candidate_invariant(
     )
 
     assert result["ok"] is False
-    assert result["errors"][0]["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert result["errors"][0]["code"] == "COMPILED_AUTHORITY_INVALID"
     details = result["errors"][0]["details"]
     assert details["validation_error_count"] == 1
-    assert details["validation_errors"] == [
-        {
-            "authority": "candidate",
-            "index": 2,
-            "reason": "missing_or_invalid_id",
-        }
-    ]
+    assert tuple(details["validation_errors"][0]["loc"]) == (
+        "invariants",
+        2,
+        "id",
+    )
     with Session(engine) as session:
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
     assert attempt.status == "failed"
+
+
+@pytest.mark.parametrize(
+    ("candidate_case", "expected_code", "expected_location"),
+    [
+        (
+            "missing_schema",
+            "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+            None,
+        ),
+        (
+            "wrong_schema",
+            "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+            None,
+        ),
+        ("missing_gaps", "COMPILED_AUTHORITY_INVALID", ("gaps",)),
+        (
+            "malformed_invariants_collection",
+            "COMPILED_AUTHORITY_INVALID",
+            ("invariants",),
+        ),
+        (
+            "malformed_source_map",
+            "COMPILED_AUTHORITY_INVALID",
+            ("source_map", 0, "excerpt"),
+        ),
+        (
+            "forbidden_extra",
+            "COMPILED_AUTHORITY_INVALID",
+            ("quality_groups",),
+        ),
+        (
+            "claim_like_free_text",
+            "COMPILED_AUTHORITY_INVALID",
+            ("assumptions", 0, "free_text", "text"),
+        ),
+    ],
+)
+def test_authority_curate_rejects_schema_invalid_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_case: str,
+    expected_code: str,
+    expected_location: tuple[str | int, ...] | None,
+) -> None:
+    """Curation cannot publish a candidate outside the current v3 schema."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    workflow_result = _targeted_repair_curation_result(fixture)
+    candidate = cast("dict[str, object]", workflow_result["candidate_authority_json"])
+    if candidate_case == "missing_schema":
+        candidate.pop("schema_version")
+    elif candidate_case == "wrong_schema":
+        candidate["schema_version"] = "agileforge.compiled_authority.v2"
+    elif candidate_case == "missing_gaps":
+        candidate.pop("gaps")
+    elif candidate_case == "malformed_invariants_collection":
+        candidate["invariants"] = "not-a-list"
+    elif candidate_case == "malformed_source_map":
+        candidate["source_map"] = [{"invariant_id": "INV-1111111111111111"}]
+    elif candidate_case == "forbidden_extra":
+        candidate["quality_groups"] = []
+    else:
+        assumptions = cast("list[dict[str, object]]", candidate["assumptions"])
+        assumptions[0]["text"] = "REQ.report is accepted."
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: workflow_result,
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key=f"curate-schema-invalid-candidate-{candidate_case}",
+        )
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == expected_code
+    if expected_location is not None:
+        validation_errors = error["details"]["validation_errors"]
+        assert expected_location in {
+            tuple(validation_error["loc"]) for validation_error in validation_errors
+        }
+        assert all(
+            omitted_key not in validation_error
+            for validation_error in validation_errors
+            for omitted_key in ("input", "ctx", "url")
+        )
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert len(authorities) == 1
+    assert attempt.status == "failed"
+
+
+def test_authority_curate_persists_only_canonical_v3_candidate(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publication uses the validated model dump, not raw workflow JSON."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    workflow_result = _targeted_repair_curation_result(fixture)
+    candidate = cast("dict[str, object]", workflow_result["candidate_authority_json"])
+    assumptions = cast("list[dict[str, object]]", candidate["assumptions"])
+    assumptions[0]["text"] = "  Report contexts are exhaustive.  "
+    candidate.pop("authority_quality")
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: workflow_result,
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-canonical-v3-candidate",
+        )
+    )
+
+    assert result["ok"] is True
+    persisted = _latest_authority_artifact(engine)
+    assert persisted["assumptions"][0]["text"] == "Report contexts are exhaustive."
+    assert persisted["authority_quality"] is None
+    assert persisted == SpecAuthorityCompilationSuccess.model_validate(
+        persisted
+    ).model_dump(mode="json")
+    assert persisted != candidate
 
 
 def test_authority_curate_gap_target_id_collision_does_not_authorize_invariant(
@@ -2583,7 +2742,7 @@ def test_authority_curate_gap_target_id_collision_does_not_authorize_invariant(
                     {
                         "feedback_id": "AFB-gap-collision",
                         "target_kind": "gap",
-                        "target_id": "INV-curation-1",
+                        "target_id": "INV-1111111111111111",
                         "issue_type": "invalid_gap",
                         "severity": "blocking",
                         "instruction": "This gap target id collides with invariant id.",
@@ -2662,8 +2821,8 @@ def test_authority_curate_persists_diff_summary_and_lineage(
 
     assert result["ok"] is True
     assert result["data"]["diff_summary"]["changed_count"] == 1
-    assert result["data"]["lineage"]["INV-curation-1"]["new_id"] == (
-        "INV-curation-1-repaired"
+    assert result["data"]["lineage"]["INV-1111111111111111"]["new_id"] == (
+        "INV-3333333333333333"
     )
     assert "candidate_authority_json" not in json.dumps(result, sort_keys=True)
     with Session(engine) as session:
@@ -2671,8 +2830,8 @@ def test_authority_curate_persists_diff_summary_and_lineage(
 
     assert attempt.status == "succeeded"
     assert json.loads(attempt.diff_summary_json)["changed_count"] == 1
-    assert json.loads(attempt.lineage_json)["INV-curation-1"]["new_id"] == (
-        "INV-curation-1-repaired"
+    assert json.loads(attempt.lineage_json)["INV-1111111111111111"]["new_id"] == (
+        "INV-3333333333333333"
     )
     assert json.loads(attempt.candidate_lineage_json) == {"source": "workflow"}
     assert json.loads(attempt.quality_report_json) == {"status": "passed"}
@@ -2701,7 +2860,7 @@ def test_authority_curate_applies_targeted_patches_deterministically(
                     {
                         "feedback_id": "AFB-invariant-1",
                         "target_kind": "invariant",
-                        "target_id": "INV-curation-1",
+                        "target_id": "INV-1111111111111111",
                         "issue_type": "overstrong_invariant",
                         "severity": "blocking",
                         "instruction": "Make guard evidence wording qualified.",
@@ -2743,20 +2902,18 @@ def test_authority_curate_applies_targeted_patches_deterministically(
         attempt = session.exec(select(AuthorityCurationAttempt)).one()
 
     candidate = _latest_authority_artifact(engine)
-    invariants = {item["id"]: item for item in candidate["invariants"]}
+    invariants = {item["source_item_id"]: item for item in candidate["invariants"]}
     assumptions = candidate["assumptions"]
-    assert invariants["INV-curation-1"]["text"] == (
+    assert invariants["REQ.curation-review-packets"]["parameters"]["rule"] == (
         "Review packets include qualified guard evidence."
     )
-    assert invariants["INV-curation-untargeted"]["text"] == (
+    assert invariants["REQ.curation-stable-review"]["parameters"]["rule"] == (
         "Unrelated review packets remain stable."
     )
     assert assumptions[0]["text"] == (
         "Report contexts are required examples, not exhaustive."
     )
-    assert assumptions[1]["text"] == (
-        "Unrelated assumption remains stable."
-    )
+    assert assumptions[1]["text"] == ("Unrelated assumption remains stable.")
     assert json.loads(attempt.candidate_lineage_json) == {"source": "patches"}
 
 
@@ -2794,11 +2951,11 @@ def test_authority_curate_applies_v2_repair_selection_deterministically(
 
     assert result["ok"] is True
     candidate = _latest_authority_artifact(engine)
-    invariants = {item["id"]: item for item in candidate["invariants"]}
-    assert invariants["INV-curation-1"]["text"] == (
+    invariants = {item["source_item_id"]: item for item in candidate["invariants"]}
+    assert invariants["REQ.curation-review-packets"]["parameters"]["rule"] == (
         "Review packets include qualified guard evidence."
     )
-    assert invariants["INV-curation-untargeted"]["text"] == (
+    assert invariants["REQ.curation-stable-review"]["parameters"]["rule"] == (
         "Unrelated review packets remain stable."
     )
     with Session(engine) as session:
@@ -2811,7 +2968,7 @@ def test_authority_curate_applies_v2_repair_selection_deterministically(
     assert json.loads(attempt.rejected_selection_json) == {}
     assert json.loads(attempt.overlay_json) == {
         "target_handles": ["R1"],
-        "target_keys": ["SRC-curation-1:invariant:text:0"],
+        "target_keys": ["REQ.curation-review-packets:invariant:parameters.rule:0"],
     }
     assert json.loads(attempt.candidate_lineage_json)["contract_version"] == (
         "authority_curation.v2"
@@ -3254,11 +3411,11 @@ def test_authority_curate_rejects_missing_patch_target(
     assert result["errors"][0]["details"]["reason"] == "patch_target_not_found"
 
 
-def test_authority_curate_accepts_text_json_pointer_value_patch(
+def test_authority_curate_accepts_parameter_rule_json_pointer_patch(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Patch applier treats /text value replacements as bounded text edits."""
+    """Patch applier accepts a typed invariant parameter-rule replacement."""
     ensure_schema_current(engine)
     fixture = _insert_rejected_authority_with_feedback(engine)
     fake_workflow = FakeWorkflowPort()
@@ -3271,7 +3428,7 @@ def test_authority_curate_accepts_text_json_pointer_value_patch(
     )
     monkeypatch.setattr(
         "services.agent_workbench.authority_curation.run_authority_curation_workflow",
-        lambda **_: _text_value_patch_curation_result(fixture),
+        lambda **_: _parameter_rule_patch_curation_result(fixture),
     )
     runner = AuthorityCurationRunner(engine=engine, workflow=fake_workflow)
 
@@ -3282,17 +3439,17 @@ def test_authority_curate_accepts_text_json_pointer_value_patch(
             source_authority_id=fixture.authority_id,
             expected_source_authority_fingerprint=fixture.authority_fingerprint,
             feedback_attempt_id=fixture.feedback_attempt_id,
-            idempotency_key="curate-text-json-pointer-value-patch",
+            idempotency_key="curate-parameter-rule-json-pointer-patch",
         )
     )
 
     assert result["ok"] is True
     candidate = _latest_authority_artifact(engine)
-    invariants = {item["id"]: item for item in candidate["invariants"]}
-    assert invariants["INV-curation-1"]["text"] == (
+    invariants = {item["source_item_id"]: item for item in candidate["invariants"]}
+    assert invariants["REQ.curation-review-packets"]["parameters"]["rule"] == (
         "Review packets include qualified guard evidence."
     )
-    assert invariants["INV-curation-untargeted"]["text"] == (
+    assert invariants["REQ.curation-stable-review"]["parameters"]["rule"] == (
         "Unrelated review packets remain stable."
     )
 
@@ -3499,17 +3656,16 @@ def test_authority_curate_publishes_pending_review_candidate(
     assert pending_authority.spec_version_id == fixture.spec_version_id
     assert pending_authority.compiler_version == "3.0.0"
     assert pending_authority.prompt_hash == "a" * 64
-    assert json.loads(pending_authority.compiled_artifact_json or "{}") == (
-        _targeted_repair_curation_result(fixture)["candidate_authority_json"]
+    assert (
+        json.loads(pending_authority.compiled_artifact_json or "{}")
+        == (_targeted_repair_curation_result(fixture)["candidate_authority_json"])
     )
-    assert json.loads(pending_authority.scope_themes) == []
-    assert json.loads(pending_authority.invariants)[0]["id"] == (
-        "INV-curation-1-repaired"
-    )
+    assert json.loads(pending_authority.scope_themes) == ["Authority feedback"]
+    assert json.loads(pending_authority.invariants)[0]["id"] == ("INV-3333333333333333")
     assert json.loads(pending_authority.eligible_feature_ids) == []
     assert json.loads(pending_authority.rejected_features or "[]") == []
     assert json.loads(pending_authority.spec_gaps or "[]") == [
-        {"gap_id": "GAP-curation-1"}
+        "Guard evidence retention remains unspecified."
     ]
     assert pending_authority_id == attempt.candidate_authority_id
     assert pending_fingerprint == attempt.candidate_authority_fingerprint
@@ -3954,13 +4110,11 @@ def test_authority_curate_recovery_rejects_candidate_mismatch_from_original_resp
     original_mutation_event_id = original_details["mutation_event_id"]
 
     wrong_candidate_json = json.loads(_compiled_artifact_json())
-    wrong_candidate_json["invariants"] = [
-        {
-            "id": "INV-curation-wrong-candidate",
-            "source_item_id": "SRC-curation-1",
-            "text": "Wrong but valid candidate for recovery mismatch test.",
-        }
-    ]
+    wrong_invariant = wrong_candidate_json["invariants"][0]
+    wrong_invariant["id"] = "INV-4444444444444444"
+    wrong_invariant["parameters"]["rule"] = (
+        "Wrong but valid candidate for recovery mismatch test."
+    )
     with Session(engine) as session:
         wrong_authority = CompiledSpecAuthority(
             spec_version_id=fixture.spec_version_id,
@@ -4767,10 +4921,9 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
                             {
                                 "feedback_id": "AFB-curation-1",
                                 "target_handle": "R1",
-                                "repair_kind": "replace_text",
+                                "repair_kind": "replace_parameter_text",
                                 "replacement_text": (
-                                    "Review packets include qualified guard "
-                                    "evidence."
+                                    "Review packets include qualified guard evidence."
                                 ),
                             }
                         ]
@@ -4819,7 +4972,7 @@ def test_authority_curate_default_workflow_invocation_publishes_candidate(
                 "instruction": "Repair the targeted invariant.",
                 "issue_type": "overstrong_invariant",
                 "severity": "blocking",
-                "target_id": "INV-curation-1",
+                "target_id": "INV-1111111111111111",
                 "target_kind": "invariant",
             }
         ]
@@ -4870,10 +5023,9 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
                             {
                                 "feedback_id": "AFB-curation-1",
                                 "target_handle": "R1",
-                                "repair_kind": "replace_text",
+                                "repair_kind": "replace_parameter_text",
                                 "replacement_text": (
-                                    "Review packets include qualified guard "
-                                    "evidence."
+                                    "Review packets include qualified guard evidence."
                                 ),
                             }
                         ]
@@ -4909,8 +5061,8 @@ def test_authority_curate_default_workflow_patch_output_publishes_candidate(
 
     assert result["ok"] is True
     candidate = _latest_authority_artifact(engine)
-    invariants = {item["id"]: item for item in candidate["invariants"]}
-    assert invariants["INV-curation-1"]["text"] == (
+    invariants = {item["source_item_id"]: item for item in candidate["invariants"]}
+    assert invariants["REQ.curation-review-packets"]["parameters"]["rule"] == (
         "Review packets include qualified guard evidence."
     )
 
@@ -5029,10 +5181,9 @@ def test_authority_curate_ignores_gate_unresolved_ids_outside_feedback(
                             {
                                 "feedback_id": "AFB-curation-1",
                                 "target_handle": "R1",
-                                "repair_kind": "replace_text",
+                                "repair_kind": "replace_parameter_text",
                                 "replacement_text": (
-                                    "Review packets include qualified guard "
-                                    "evidence."
+                                    "Review packets include qualified guard evidence."
                                 ),
                             }
                         ]
@@ -5092,7 +5243,7 @@ def test_authority_curate_v2_passes_repair_menu_to_workflow(
                     {
                         "feedback_id": "AFB-curation-1",
                         "target_handle": "R1",
-                        "repair_kind": "replace_text",
+                        "repair_kind": "replace_parameter_text",
                         "replacement_text": (
                             "Review packets include qualified guard evidence."
                         ),
@@ -5159,7 +5310,7 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
                         "target_id": f"authority:{fixture.authority_id}",
                         "issue_type": "brittle_wording",
                         "severity": "blocking",
-                        "instruction": "Fix only INV-curation-1.",
+                        "instruction": "Fix only INV-1111111111111111.",
                     },
                 ],
             },
@@ -5181,14 +5332,13 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
                         "target_handle": "R1",
                         "repair_kind": "replace_text",
                         "replacement_text": (
-                            "Report contexts are required examples, not "
-                            "exhaustive."
+                            "Report contexts are required examples, not exhaustive."
                         ),
                     },
                     {
                         "feedback_id": "AFB-authority-inv",
                         "target_handle": "R2",
-                        "repair_kind": "replace_text",
+                        "repair_kind": "replace_parameter_text",
                         "replacement_text": (
                             "Review packets include qualified guard evidence."
                         ),
@@ -5228,7 +5378,7 @@ def test_authority_curate_v2_derives_menu_from_authority_candidate_feedback(
         for item in repair_menu
     ] == [
         ("R1", "AFB-authority-asm", "assumption", "ASM-1"),
-        ("R2", "AFB-authority-inv", "invariant", "INV-curation-1"),
+        ("R2", "AFB-authority-inv", "invariant", "INV-1111111111111111"),
     ]
 
 
@@ -5671,11 +5821,10 @@ def test_authority_curate_v2_validates_selection_payload_when_gate_fails(
                         "repairs": [
                             {
                                 "feedback_id": "AFB-curation-1",
-                                "target_handle": "INV-curation-1",
+                                "target_handle": "INV-1111111111111111",
                                 "repair_kind": "replace_text",
                                 "replacement_text": (
-                                    "Review packets include qualified guard "
-                                    "evidence."
+                                    "Review packets include qualified guard evidence."
                                 ),
                             }
                         ]
@@ -5713,7 +5862,7 @@ def test_authority_curate_v2_validates_selection_payload_when_gate_fails(
     assert result["ok"] is False
     assert result["errors"][0]["code"] == "AUTHORITY_REPAIR_INTENT_INVALID"
     assert result["errors"][0]["details"]["reason"] == "unknown_repair_handle"
-    assert result["errors"][0]["details"]["target_handle"] == "INV-curation-1"
+    assert result["errors"][0]["details"]["target_handle"] == "INV-1111111111111111"
 
 
 def test_authority_curate_v2_rejects_valid_selection_when_gate_keeps_feedback_open(
@@ -5751,10 +5900,9 @@ def test_authority_curate_v2_rejects_valid_selection_when_gate_keeps_feedback_op
                             {
                                 "feedback_id": "AFB-curation-1",
                                 "target_handle": "R1",
-                                "repair_kind": "replace_text",
+                                "repair_kind": "replace_parameter_text",
                                 "replacement_text": (
-                                    "Review packets include qualified guard "
-                                    "evidence."
+                                    "Review packets include qualified guard evidence."
                                 ),
                             }
                         ]

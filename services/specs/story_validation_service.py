@@ -26,7 +26,7 @@ from orchestrator_agent.agent_tools.spec_validator_agent.schemes import (
 )
 from services.specs._engine_resolution import resolve_spec_engine
 from services.specs.authority_selection import (
-    compiled_authority_for_acceptance,
+    accepted_compiled_authority,
     latest_accepted_authority_decision,
 )
 from services.specs.compiler_service import (
@@ -1124,9 +1124,10 @@ def validate_story_with_spec_authority(
             spec_version_id=parsed.spec_version_id,
         )
         authority = (
-            compiled_authority_for_acceptance(
+            accepted_compiled_authority(
                 session,
-                acceptance=acceptance,
+                product_id=story.product_id,
+                spec_version_id=parsed.spec_version_id,
             )
             if acceptance is not None
             else None
