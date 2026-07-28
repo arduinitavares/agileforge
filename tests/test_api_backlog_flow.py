@@ -5,9 +5,17 @@ from typing import Never, Protocol, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 import api as api_module
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 from orchestrator_agent.agent_tools.backlog_primer.tools import SaveBacklogInput
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 HTTP_OK = 200
@@ -223,6 +231,57 @@ def _seed_vision_persisted_project(
     product = repo.create("Backlog Project")
     product.spec_file_path = __file__
     product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+    with Session(api_module.get_engine()) as session:
+        persisted_product = Product(
+            product_id=product.product_id,
+            name=product.name,
+            compiled_authority_json=COMPILED_AUTHORITY_JSON,
+        )
+        session.add(persisted_product)
+        session.flush()
+        spec = SpecRegistry(
+            product_id=product.product_id,
+            spec_hash=f"accepted-backlog-spec-{product.product_id}",
+            content="# Accepted backlog spec",
+            status="approved",
+        )
+        session.add(spec)
+        session.flush()
+        assert spec.spec_version_id is not None
+        spec_version_id = spec.spec_version_id
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_artifact_json=COMPILED_AUTHORITY_JSON,
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(authority)
+        session.flush()
+        assert authority.authority_id is not None
+        authority_id = authority.authority_id
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product.product_id,
+                spec_version_id=spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="backlog-api-test",
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority_id,
+                authority_fingerprint=pending_authority_fingerprint(authority),
+                terminal_decision_key=(
+                    f"{product.product_id}:{spec_version_id}:{authority_id}"
+                ),
+            )
+        )
+        session.commit()
     workflow.states[str(product.product_id)] = {
         "fsm_state": "VISION_PERSISTENCE",
         "product_vision_assessment": {
@@ -231,6 +290,8 @@ def _seed_vision_persisted_project(
         },
         "pending_spec_content": "SPEC",
         "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
+        "accepted_spec_version_id": spec_version_id,
+        "latest_spec_version_id": spec_version_id,
     }
     return product.product_id
 

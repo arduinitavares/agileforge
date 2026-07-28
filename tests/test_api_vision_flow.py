@@ -6,9 +6,19 @@ from typing import Never, Protocol, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 import api as api_module
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecAuthorityAcceptance,
+    SpecRegistry,
+)
 from orchestrator_agent.agent_tools.product_vision_tool.tools import SaveVisionInput
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 from utils import failure_artifacts
 
@@ -205,6 +215,73 @@ def _build_client(
     return TestClient(api_module.app), repo, workflow
 
 
+def _seed_accepted_authority(
+    product: DummyProduct,
+    workflow: DummyWorkflowService,
+) -> None:
+    """Persist the exact accepted authority required by generation endpoints."""
+    with Session(api_module.get_engine()) as session:
+        session.add(
+            Product(
+                product_id=product.product_id,
+                name=product.name,
+                spec_file_path=product.spec_file_path,
+                compiled_authority_json=COMPILED_AUTHORITY_JSON,
+            )
+        )
+        session.flush()
+        spec = SpecRegistry(
+            product_id=product.product_id,
+            spec_hash=f"accepted-vision-spec-{product.product_id}",
+            content="SPEC",
+            status="approved",
+        )
+        session.add(spec)
+        session.flush()
+        spec_version_id = spec.spec_version_id
+        assert spec_version_id is not None
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_artifact_json=COMPILED_AUTHORITY_JSON,
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(authority)
+        session.flush()
+        authority_id = authority.authority_id
+        assert authority_id is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product.product_id,
+                spec_version_id=spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="vision-api-test",
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority_id,
+                authority_fingerprint=pending_authority_fingerprint(authority),
+                terminal_decision_key=(
+                    f"{product.product_id}:{spec_version_id}:{authority_id}"
+                ),
+            )
+        )
+        session.commit()
+
+    workflow.states[str(product.product_id)].update(
+        {
+            "latest_spec_version_id": spec_version_id,
+            "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
+        }
+    )
+
+
 def _seed_setup_passed_project(
     repo: DummyProductRepository, workflow: DummyWorkflowService
 ) -> int:
@@ -217,6 +294,7 @@ def _seed_setup_passed_project(
         "pending_spec_content": "SPEC",
         "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
     }
+    _seed_accepted_authority(product, workflow)
     return product.product_id
 
 

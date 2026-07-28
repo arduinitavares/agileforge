@@ -7,15 +7,19 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 import api as api_module
 from models.core import Product, UserStory
+from models.specs import CompiledSpecAuthority, SpecAuthorityAcceptance, SpecRegistry
+from services.agent_workbench.authority_projection import (
+    pending_authority_fingerprint,
+)
 from services.phases.story_service import _story_artifact_fingerprint
 from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 if TYPE_CHECKING:
     import pytest
-    from sqlmodel import Session
 
     from orchestrator_agent.agent_tools.user_story_writer_tool.tools import (
         SaveStoryPatchInput,
@@ -203,6 +207,78 @@ def _build_client(monkeypatch):  # noqa: ANN001, ANN202
     return TestClient(api_module.app), repo, workflow
 
 
+def _seed_accepted_authority(
+    product: DummyProduct,
+    workflow: DummyWorkflowService,
+) -> None:
+    """Persist the exact accepted authority required by generation endpoints."""
+    with Session(api_module.get_engine()) as session:
+        persisted_product = session.get(Product, product.product_id)
+        if persisted_product is None:
+            persisted_product = Product(
+                product_id=product.product_id,
+                name=product.name,
+            )
+        persisted_product.spec_file_path = __file__
+        persisted_product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+        session.add(persisted_product)
+        session.flush()
+        spec = SpecRegistry(
+            product_id=product.product_id,
+            spec_hash=f"accepted-story-spec-{product.product_id}",
+            content="SPEC",
+            status="approved",
+        )
+        session.add(spec)
+        session.flush()
+        spec_version_id = spec.spec_version_id
+        assert spec_version_id is not None
+        authority = CompiledSpecAuthority(
+            spec_version_id=spec_version_id,
+            compiler_version="3.0.0",
+            prompt_hash="a" * 64,
+            compiled_artifact_json=COMPILED_AUTHORITY_JSON,
+            scope_themes="[]",
+            invariants="[]",
+            eligible_feature_ids="[]",
+            rejected_features="[]",
+            spec_gaps="[]",
+        )
+        session.add(authority)
+        session.flush()
+        authority_id = authority.authority_id
+        assert authority_id is not None
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product.product_id,
+                spec_version_id=spec_version_id,
+                status="accepted",
+                policy="test",
+                decided_by="story-api-test",
+                compiler_version=authority.compiler_version,
+                prompt_hash=authority.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=authority_id,
+                authority_fingerprint=pending_authority_fingerprint(authority),
+                terminal_decision_key=(
+                    f"{product.product_id}:{spec_version_id}:{authority_id}"
+                ),
+            )
+        )
+        session.commit()
+
+    state = workflow.states.setdefault(str(product.product_id), {})
+    state.setdefault("fsm_state", "STORY_INTERVIEW")
+    state.update(
+        {
+            "latest_spec_version_id": spec_version_id,
+            "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
+        }
+    )
+    product.spec_file_path = __file__
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+
+
 def test_story_generate_promotes_reusable_draft_records_request_projection_and_absorbs_feedback(  # noqa: ANN201, D103, E501
     monkeypatch,  # noqa: ANN001
 ):
@@ -250,6 +326,7 @@ def test_story_generate_promotes_reusable_draft_records_request_projection_and_a
             }
         },
     }
+    _seed_accepted_authority(product, workflow)
 
     request_payload = {
         "parent_requirement": "Requirement A",
@@ -389,8 +466,9 @@ def test_story_generate_api_routes_target_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify Story generate API routes targeted refinement by slot."""
-    client, repo, _workflow = _build_client(monkeypatch)
+    client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Story Project")
+    _seed_accepted_authority(product, workflow)
     captured: dict[str, object] = {}
 
     async def fake_generate_story_draft_service(
@@ -434,7 +512,7 @@ def test_story_generate_api_resolves_target_story_id(
     session: Session,
 ) -> None:
     """Story generate resolves target story id before calling the phase service."""
-    client, repo, _workflow = _build_client(monkeypatch)
+    client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Story Project")
     session.add(Product(product_id=product.product_id, name=product.name))
     story = UserStory(
@@ -456,6 +534,7 @@ def test_story_generate_api_resolves_target_story_id(
     session.add(story)
     session.commit()
     session.refresh(story)
+    _seed_accepted_authority(product, workflow)
     captured: dict[str, object] = {}
 
     async def fake_generate_story_draft_service(
@@ -1612,6 +1691,7 @@ def test_story_generate_allows_fresh_run_after_reset_without_manual_refinement_i
             }
         },
     }
+    _seed_accepted_authority(product, workflow)
 
     async def fake_run_story_agent_from_state(  # noqa: ANN202
         state,  # noqa: ANN001, ARG001
