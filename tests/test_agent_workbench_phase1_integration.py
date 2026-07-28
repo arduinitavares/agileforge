@@ -799,6 +799,7 @@ def _seed_phase1_project(
         prompt_hash=PROMPT_HASH,
         spec_hash=spec_hash,
         pending_authority_id=authority_id,
+        authority_fingerprint=pending_authority_fingerprint(authority),
         terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_id}",
     )
     session.add(acceptance)

@@ -19,6 +19,7 @@ from agile_sqlmodel import (
 from models.core import Epic, Feature, Theme
 from scripts import export_benchmark_for_labeling as exporter
 from scripts import import_human_labels as importer
+from services.specs.authority_selection import pending_authority_fingerprint
 from tests.typing_helpers import require_id
 from utils.spec_schemas import (
     Invariant,
@@ -154,6 +155,7 @@ def _seed_case_data(session: Session) -> tuple[int, int]:
             prompt_hash=compiled.prompt_hash,
             spec_hash=spec.spec_hash,
             pending_authority_id=compiled.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(compiled),
         )
     )
     session.commit()
