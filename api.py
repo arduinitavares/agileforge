@@ -214,6 +214,7 @@ from services.roadmap_runtime import run_roadmap_agent_from_state
 from services.setup_service import (
     run_project_setup as run_project_setup_service,
 )
+from services.specs.authority_selection import latest_compiled_authority
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
     compiled_authority_read_failure,
@@ -893,9 +894,45 @@ async def _guard_phase_generation_authority(
     product: object,
     session_id: str,
 ) -> None:
-    """Block phase generation when active authority is an unsupported artifact."""
+    """Block phase generation unless the canonical row or true fallback is usable."""
     state = await _ensure_session(session_id)
     spec_version_id = _phase_authority_spec_version_id(state)
+    if spec_version_id is not None:
+        canonical_json: str | None = None
+        canonical_failure: CompiledAuthorityReadFailure | None = None
+        canonical_found = False
+        with Session(get_engine()) as session:
+            authority = latest_compiled_authority(
+                session,
+                spec_version_id=spec_version_id,
+            )
+            if authority is not None:
+                canonical_found = True
+                load_result = load_compiled_artifact(authority)
+                canonical_failure = compiled_authority_read_failure(
+                    load_result,
+                    project_id=project_id,
+                    spec_version_id=spec_version_id,
+                    authority_id=authority.authority_id,
+                )
+                if canonical_failure is None:
+                    canonical_json = authority.compiled_artifact_json
+                persisted_product = session.get(Product, project_id)
+                if persisted_product is not None:
+                    persisted_product.compiled_authority_json = canonical_json
+                    session.add(persisted_product)
+                    session.commit()
+
+        if canonical_found:
+            cast("Any", product).compiled_authority_json = canonical_json
+            workflow_service.update_session_status(
+                session_id,
+                {"compiled_authority_cached": canonical_json},
+            )
+            if canonical_failure is not None:
+                _raise_compiled_authority_read_failure(canonical_failure)
+            return
+
     _raise_if_authority_json_unusable(
         project_id=project_id,
         spec_version_id=spec_version_id,

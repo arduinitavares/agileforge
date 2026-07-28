@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, Unpack
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, Unpack, cast
 
 from orchestrator_agent.fsm.states import OrchestratorState
 from services.phases import workflow_state
@@ -77,6 +77,22 @@ def _authority_read_failure(
     )
 
 
+def _canonical_refresh_error(refresh_result: object) -> dict[str, Any] | None:
+    """Return central authority metadata from a failed canonical refresh."""
+    if not isinstance(refresh_result, dict):
+        return None
+    refresh_payload = cast("dict[str, Any]", refresh_result)
+    if refresh_payload.get("success") is not False:
+        return None
+    error = refresh_payload.get("error")
+    if not isinstance(error, dict) or error.get("code") not in {
+        "COMPILED_AUTHORITY_INVALID",
+        "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED",
+    }:
+        return None
+    return error
+
+
 def _set_setup_failure_meta(
     state: dict[str, Any],
     source: dict[str, Any] | None,
@@ -103,7 +119,7 @@ def _clear_setup_failure_meta(state: dict[str, Any]) -> None:
     state["setup_has_full_artifact"] = False
 
 
-async def run_project_setup(
+async def run_project_setup(  # noqa: PLR0915
     *,
     session_id: str,
     **options: Unpack[_RunProjectSetupOptions],
@@ -124,9 +140,17 @@ async def run_project_setup(
     )
 
     # Rehydrate active project + compiled authority cache after setup attempt.
-    options["refresh_project_context"](options["project_id"], tool_context)
+    refresh_result = options["refresh_project_context"](
+        options["project_id"],
+        tool_context,
+    )
+    refresh_error = _canonical_refresh_error(refresh_result)
 
-    setup_passed = bool(result.get("success") and result.get("compile_success"))
+    setup_passed = bool(
+        result.get("success")
+        and result.get("compile_success")
+        and refresh_error is None
+    )
     error_message = None
     setup_next_actions: list[dict[str, Any]] = []
     next_state = OrchestratorState.SETUP_REQUIRED.value
@@ -139,7 +163,37 @@ async def run_project_setup(
         **workflow_state.failure_meta(None),
     }
 
-    if not setup_passed:
+    if refresh_error is not None:
+        details = refresh_error.get("details")
+        remediation = refresh_error.get("remediation")
+        normalized_details = details if isinstance(details, dict) else {}
+        normalized_remediation = remediation if isinstance(remediation, list) else []
+        error_message = str(
+            refresh_error.get("message") or "Compiled authority artifact is invalid."
+        )
+        setup_next_actions = [
+            _authority_regenerate_next_action(
+                project_id=options["project_id"],
+                spec_version_id=(
+                    normalized_details.get("spec_version_id")
+                    if isinstance(
+                        normalized_details.get("spec_version_id"),
+                        int,
+                    )
+                    else None
+                ),
+            )
+        ]
+        result = {
+            **result,
+            "success": False,
+            "compile_success": False,
+            "error": error_message,
+            "error_code": refresh_error["code"],
+            "details": normalized_details,
+            "remediation": normalized_remediation,
+        }
+    elif not setup_passed:
         error_message = (
             result.get("compile_error") or result.get("error") or "Setup failed"
         )

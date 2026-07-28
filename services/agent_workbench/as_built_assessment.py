@@ -703,15 +703,6 @@ class AsBuiltAssessmentRunner:
                     command=AS_BUILT_ASSESS_COMMAND,
                     error=_authority_not_compiled(project_id),
                 )
-            current_fingerprint = pending_authority_fingerprint(authority)
-            if current_fingerprint != accepted.authority_fingerprint:
-                return error_envelope(
-                    command=AS_BUILT_ASSESS_COMMAND,
-                    error=_authority_not_compiled(
-                        project_id,
-                        message="Accepted authority does not match compiled authority.",
-                    ),
-                )
             load_result = load_compiled_artifact(authority)
             read_failure = compiled_authority_read_failure(
                 load_result,
@@ -721,6 +712,15 @@ class AsBuiltAssessmentRunner:
             )
             if read_failure is not None:
                 return _authority_read_failure_envelope(read_failure)
+            current_fingerprint = pending_authority_fingerprint(authority)
+            if current_fingerprint != accepted.authority_fingerprint:
+                return error_envelope(
+                    command=AS_BUILT_ASSESS_COMMAND,
+                    error=_authority_not_compiled(
+                        project_id,
+                        message="Accepted authority does not match compiled authority.",
+                    ),
+                )
             compiled = (
                 load_result.artifact.model_dump(mode="json")
                 if load_result.artifact is not None

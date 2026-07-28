@@ -12,6 +12,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import api as api_module
+from agile_sqlmodel import (
+    CompiledSpecAuthority,
+    Product,
+    SpecRegistry,
+)
 from services.agent_workbench.authority_decision import (
     AuthorityAcceptRequest,
     AuthorityRejectRequest,
@@ -19,11 +24,11 @@ from services.agent_workbench.authority_decision import (
 from services.agent_workbench.authority_projection import _AuthoritySelection
 from services.agent_workbench.authority_review import AuthorityReviewSnapshot
 from services.specs.compiler_service import CompiledArtifactLoadResult
+from tests.authority_assumption_fixtures import current_v3_compiled_authority_json
 
 if TYPE_CHECKING:
     from sqlmodel import Session
 
-    from models.specs import CompiledSpecAuthority, SpecRegistry
     from utils.spec_schemas import ValidationEvidence
     from utils.task_metadata import TaskMetadata
 
@@ -2323,6 +2328,76 @@ def test_phase_generate_blocks_malformed_current_authority(
     assert error["code"] == "COMPILED_AUTHORITY_INVALID"
     assert error["details"]["load_status"] == "schema_invalid"
     assert "agileforge authority regenerate" in " ".join(error["remediation"])
+
+
+def test_phase_generate_canonical_row_outranks_valid_derived_caches(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """Phase execution must inspect the canonical row before valid caches."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Canonical Phase Project")
+    valid_cache = current_v3_compiled_authority_json()
+    product.spec_file_path = __file__
+    product.compiled_authority_json = valid_cache
+    session.add(Product(product_id=product.product_id, name=product.name))
+    session.commit()
+    spec = SpecRegistry(
+        product_id=product.product_id,
+        spec_hash="canonical-phase",
+        content="# Spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    authority = CompiledSpecAuthority(
+        spec_version_id=cast("int", spec.spec_version_id),
+        compiler_version="3.0.0",
+        prompt_hash="m" * 64,
+        compiled_artifact_json=(
+            '{"schema_version":"agileforge.compiled_authority.v3"}'
+        ),
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "latest_spec_version_id": spec.spec_version_id,
+        "compiled_authority_cached": valid_cache,
+    }
+    service_calls: list[str] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        service_calls.append("vision")
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "schema_invalid"
+    assert error["details"]["authority_id"] == authority.authority_id
 
 
 def test_retry_setup_nonexistent_or_invalid_spec_file(

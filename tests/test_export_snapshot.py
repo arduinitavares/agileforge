@@ -357,7 +357,59 @@ def test_snapshot_loader_missing_exact_accepted_row_fails_closed(
     )
     session.commit()
 
-    assert _load_compiled_authority(session, spec) is None
+    with pytest.raises(ValueError, match="AUTHORITY_NOT_COMPILED"):
+        _load_compiled_authority(session, spec)
+
+
+def test_export_snapshot_dangling_acceptance_writes_no_file(
+    engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """A dangling accepted authority id must block before export writes."""
+    with Session(engine) as session:
+        product = _insert_basic_project(session)
+        product_id = require_id(product.product_id, "product_id")
+        spec = SpecRegistry(
+            product_id=product_id,
+            spec_hash="snapshot-dangling",
+            content="# Spec",
+            status="approved",
+        )
+        session.add(spec)
+        session.commit()
+        session.refresh(spec)
+        pending = _snapshot_authority(
+            session,
+            spec_version_id=require_id(spec.spec_version_id, "spec_version_id"),
+            compiler_version="3.0.0",
+            theme="Pending",
+        )
+        session.add(
+            SpecAuthorityAcceptance(
+                product_id=product_id,
+                spec_version_id=require_id(
+                    spec.spec_version_id,
+                    "spec_version_id",
+                ),
+                status="accepted",
+                policy="test",
+                decided_by="test",
+                compiler_version=pending.compiler_version,
+                prompt_hash=pending.prompt_hash,
+                spec_hash=spec.spec_hash,
+                pending_authority_id=999_999,
+            )
+        )
+        session.commit()
+
+    with pytest.raises(ValueError, match="AUTHORITY_NOT_COMPILED"):
+        export_project_snapshot_html(
+            product_id=product_id,
+            output_dir=tmp_path,
+            engine_override=engine,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_export_snapshot_html_basic(engine: Engine, tmp_path: Path) -> None:

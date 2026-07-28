@@ -689,14 +689,6 @@ class EvidenceCollectionRunner:
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_not_compiled(project_id),
                 )
-            if _authority_mismatches_acceptance(
-                authority=authority,
-                accepted=accepted,
-            ):
-                return error_envelope(
-                    command=EVIDENCE_COLLECT_COMMAND,
-                    error=_authority_acceptance_mismatch(project_id),
-                )
             load_result = load_compiled_artifact(authority)
             read_failure = compiled_authority_read_failure(
                 load_result,
@@ -708,6 +700,14 @@ class EvidenceCollectionRunner:
                 return error_envelope(
                     command=EVIDENCE_COLLECT_COMMAND,
                     error=_authority_read_error(read_failure),
+                )
+            if _authority_mismatches_acceptance(
+                authority=authority,
+                accepted=accepted,
+            ):
+                return error_envelope(
+                    command=EVIDENCE_COLLECT_COMMAND,
+                    error=_authority_acceptance_mismatch(project_id),
                 )
             compiled_artifact = (
                 load_result.artifact.model_dump(mode="json")

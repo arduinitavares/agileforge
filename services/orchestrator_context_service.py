@@ -134,7 +134,10 @@ def get_project_details(product_id: int) -> dict[str, Any]:
         }
 
 
-def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, Any]:
+def select_project(
+    product_id: int,
+    tool_context: _SupportsState,
+) -> dict[str, Any]:
     """Hydrate active-project session state for the selected project."""
     logger.debug("Selecting product_id=%s as the active project.", product_id)
 
@@ -173,7 +176,22 @@ def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, A
     authority_json = product_details.get("compiled_authority_json")
     spec_version_id = product_details.get("latest_spec_version_id")
     cached_failure: CompiledAuthorityReadFailure | None = None
-    if authority_json is not None:
+    canonical_result: str | dict[str, Any] | None = None
+    if spec_version_id:
+        canonical_result = _load_authority_fallback(
+            product_id,
+            spec_version_id,
+            allow_compile=authority_json is None,
+        )
+        if isinstance(canonical_result, dict):
+            _set_or_clear(state, "compiled_authority_cached", None)
+            state["active_project"]["compiled_authority_json"] = None
+            _clear_product_authority_cache(product_id)
+            return canonical_result
+        if canonical_result is not None:
+            authority_json = canonical_result
+
+    if canonical_result is None and authority_json is not None:
         load_result = load_compiled_artifact(
             SimpleNamespace(compiled_artifact_json=authority_json)
         )
@@ -188,20 +206,9 @@ def select_project(product_id: int, tool_context: _SupportsState) -> dict[str, A
             state["active_project"]["compiled_authority_json"] = None
             _clear_product_authority_cache(product_id)
             authority_json = None
-    if authority_json is None and spec_version_id:
-        fallback = _load_authority_fallback(
-            product_id,
-            spec_version_id,
-            allow_compile=cached_failure is None,
-        )
-        if isinstance(fallback, dict):
-            _set_or_clear(state, "compiled_authority_cached", None)
-            return fallback
-        authority_json = fallback
-        if authority_json:
-            state["active_project"]["compiled_authority_json"] = authority_json
-        elif cached_failure is not None:
             return _authority_read_failure_result(cached_failure)
+    if authority_json is not None:
+        state["active_project"]["compiled_authority_json"] = authority_json
     _set_or_clear(state, "compiled_authority_cached", authority_json)
     _set_or_clear(
         state,

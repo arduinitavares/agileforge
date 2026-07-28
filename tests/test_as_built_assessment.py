@@ -1297,11 +1297,6 @@ def test_runner_rejects_malformed_v3_with_central_failure(
             {"schema_version": "agileforge.compiled_authority.v3"}
         )
         session.add(authority)
-        session.flush()
-        acceptance = session.get(SpecAuthorityAcceptance, 1)
-        assert acceptance is not None
-        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
-        session.add(acceptance)
         session.commit()
     repo = tmp_path / "repo"
     repo.mkdir()

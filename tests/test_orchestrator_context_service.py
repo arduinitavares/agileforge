@@ -309,6 +309,96 @@ def test_context_service_rejects_malformed_v3_without_backfill_or_compile(
     assert refreshed.compiled_authority_json is None
 
 
+def test_context_service_canonical_missing_payload_outranks_valid_caches(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected DB row is authoritative even when both derived caches are valid."""
+    from services import orchestrator_context_service  # noqa: PLC0415
+
+    valid_cache = _compiled_v3_json()
+    product = _create_product(
+        session,
+        technical_spec="Spec body",
+        spec_file_path="specs/spec.md",
+        compiled_authority_json=valid_cache,
+    )
+    product_id = require_id(product.product_id, "product_id")
+    spec = _create_approved_spec(session, product_id)
+    spec_version_id = require_id(spec.spec_version_id, "spec_version_id")
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="missing-payload",
+        compiled_artifact_json=None,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    compile_calls: list[object] = []
+    monkeypatch.setattr(
+        orchestrator_context_service,
+        "compile_spec_authority_for_version",
+        lambda params, tool_context: compile_calls.append((params, tool_context)),
+    )
+    context = MockToolContext({"compiled_authority_cached": valid_cache})
+
+    result = orchestrator_context_service.select_project(product_id, context)
+
+    assert result["success"] is False
+    error = result["error"]
+    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
+    assert error["details"]["load_status"] == "missing"
+    assert error["details"]["authority_id"] == authority.authority_id
+    assert "compiled_authority_cached" not in context.state
+    assert context.state["active_project"]["compiled_authority_json"] is None
+    assert compile_calls == []
+    session.expire_all()
+    refreshed = session.get(Product, product_id)
+    assert refreshed is not None
+    assert refreshed.compiled_authority_json is None
+
+
+def test_context_service_true_no_row_attempts_compile_once(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical-first lookup must preserve one compile attempt for a true no-row."""
+    from services import orchestrator_context_service  # noqa: PLC0415
+
+    product = _create_product(
+        session,
+        technical_spec="Spec body",
+        spec_file_path="specs/spec.md",
+    )
+    product_id = require_id(product.product_id, "product_id")
+    _create_approved_spec(session, product_id)
+    compile_calls: list[object] = []
+
+    def fail_compile(params: object, tool_context: object) -> JsonDict:
+        compile_calls.append((params, tool_context))
+        return {"success": False}
+
+    monkeypatch.setattr(
+        orchestrator_context_service,
+        "compile_spec_authority_for_version",
+        fail_compile,
+    )
+
+    result = orchestrator_context_service.select_project(
+        product_id,
+        MockToolContext({}),
+    )
+
+    assert result["success"] is True
+    assert len(compile_calls) == 1
+
+
 def test_context_fallback_backfills_newest_v3_row_over_historical_v2(
     session: Session,
 ) -> None:

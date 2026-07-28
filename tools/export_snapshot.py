@@ -55,6 +55,20 @@ class _ExportSnapshotError(ValueError):
             f"details={failure.details}. {remediation}"
         )
 
+    @classmethod
+    def authority_not_compiled(
+        cls,
+        *,
+        project_id: int,
+        spec_version_id: int,
+    ) -> _ExportSnapshotError:
+        """Build a stable failure for a dangling accepted authority id."""
+        return cls(
+            "AUTHORITY_NOT_COMPILED: Accepted compiled authority row is unavailable. "
+            f"details={{'project_id': {project_id}, "
+            f"'spec_version_id': {spec_version_id}}}."
+        )
+
 
 @dataclass(frozen=True)
 class _SnapshotRenderContext:
@@ -221,7 +235,12 @@ def _load_compiled_authority(
             spec_version_id=approved_spec.spec_version_id,
         )
     )
-    if not authority:
+    if authority is None and acceptance is not None:
+        raise _ExportSnapshotError.authority_not_compiled(
+            project_id=approved_spec.product_id,
+            spec_version_id=approved_spec.spec_version_id,
+        )
+    if authority is None:
         return None
 
     loaded = load_compiled_artifact(authority)

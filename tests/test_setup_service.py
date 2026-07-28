@@ -341,3 +341,87 @@ async def test_run_project_setup_blocks_unusable_authority(
     assert result["next_actions"] == [next_action]
     assert saved["state"]["setup_status"] == "failed"
     assert saved["state"]["setup_next_actions"] == [next_action]
+
+
+@pytest.mark.asyncio
+async def test_run_project_setup_honors_canonical_refresh_failure_over_valid_cache(
+) -> None:
+    """A canonical refresh failure blocks setup even when derived caches are valid."""
+    from services.setup_service import run_project_setup  # noqa: PLC0415
+
+    valid_cache = _compiled_v3_json()
+    authority_id = 23
+    context = SimpleNamespace(
+        state={
+            "fsm_state": "SETUP_REQUIRED",
+            "latest_spec_version_id": 42,
+            "compiled_authority_cached": valid_cache,
+        },
+        session_id="7",
+    )
+    vision_calls: list[str] = []
+
+    async def hydrate_context(session_id: str, project_id: int) -> SimpleNamespace:
+        del session_id, project_id
+        return context
+
+    def refresh_project_context(_project_id: int, _tool_context: object) -> JsonDict:
+        return {
+            "success": False,
+            "error": {
+                "code": "COMPILED_AUTHORITY_INVALID",
+                "message": "Compiled authority artifact is invalid.",
+                "details": {
+                    "project_id": 7,
+                    "spec_version_id": 42,
+                    "authority_id": authority_id,
+                    "load_status": "missing",
+                    "observed_schema_version": None,
+                    "required_schema_version": "agileforge.compiled_authority.v3",
+                },
+                "remediation": [
+                    "Run agileforge authority regenerate "
+                    "--project-id 7 --spec-version-id 42 "
+                    "--idempotency-key <new-key>."
+                ],
+            },
+        }
+
+    async def run_vision_agent(
+        _state: object,
+        *,
+        project_id: int,
+        user_input: str,
+    ) -> JsonDict:
+        del project_id, user_input
+        vision_calls.append("vision")
+        return {"success": True, "is_complete": True}
+
+    result = await run_project_setup(
+        session_id="7",
+        project_id=7,
+        spec_file_path=__file__,
+        hydrate_context=hydrate_context,
+        build_tool_context=lambda value: value,
+        link_spec_to_product=lambda *_args, **_kwargs: {
+            "success": True,
+            "compile_success": True,
+        },
+        refresh_project_context=refresh_project_context,
+        load_project=lambda project_id: SimpleNamespace(
+            product_id=project_id,
+            latest_spec_version_id=42,
+            spec_file_path=__file__,
+            compiled_authority_json=valid_cache,
+        ),
+        setup_blocker=lambda _product: None,
+        run_vision_agent=run_vision_agent,
+        now_iso=lambda: "2026-04-05T00:00:00Z",
+        save_session_state=lambda _session_id, _state: None,
+    )
+
+    assert result["passed"] is False
+    assert result["detail"]["error_code"] == "COMPILED_AUTHORITY_INVALID"
+    assert result["detail"]["details"]["load_status"] == "missing"
+    assert result["detail"]["details"]["authority_id"] == authority_id
+    assert vision_calls == []

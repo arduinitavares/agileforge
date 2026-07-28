@@ -1192,16 +1192,7 @@ def test_runner_rejects_authority_artifact_mismatched_to_acceptance(
         authority = session.get(CompiledSpecAuthority, 1)
         assert authority is not None
         authority.compiled_artifact_json = json.dumps(
-            {
-                "spec_version_id": 1,
-                "items": [
-                    {
-                        "id": "REQ.changed",
-                        "type": "REQ",
-                        "verification": "unit-test",
-                    }
-                ],
-            }
+            _compiled_authority_v3(invariants=[])
         )
         session.add(authority)
         session.commit()
@@ -1236,11 +1227,6 @@ def test_runner_returns_error_envelope_for_invalid_compiled_authority_json(
         assert authority is not None
         authority.compiled_artifact_json = "{"
         session.add(authority)
-        session.flush()
-        acceptance = session.get(SpecAuthorityAcceptance, 1)
-        assert acceptance is not None
-        acceptance.authority_fingerprint = pending_authority_fingerprint(authority)
-        session.add(acceptance)
         session.commit()
     runner = EvidenceCollectionRunner(
         engine=engine,
