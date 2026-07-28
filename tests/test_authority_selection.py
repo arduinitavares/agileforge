@@ -219,6 +219,86 @@ def test_latest_accepted_authority_decision_orders_by_time_then_id(
     assert selected.id == decisions[2].id
 
 
+def test_latest_accepted_authority_decision_for_product_orders_across_specs(
+    session: Session,
+) -> None:
+    """Project recovery selects accepted decisions by time, then insertion id."""
+    product_id, spec_version_id, old, _ = _history(session)
+    other_spec = SpecRegistry(
+        product_id=product_id,
+        spec_hash="sha256:selection-other",
+        content="other",
+        status="approved",
+    )
+    session.add(other_spec)
+    session.commit()
+    session.refresh(other_spec)
+    other_spec_version_id = require_id(
+        other_spec.spec_version_id,
+        "spec_version_id",
+    )
+    other_authority = CompiledSpecAuthority(
+        spec_version_id=other_spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="d" * 64,
+        compiled_artifact_json="{}",
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(other_authority)
+    session.commit()
+    session.refresh(other_authority)
+    decided_at = datetime.now(UTC)
+    decisions = [
+        SpecAuthorityAcceptance(
+            product_id=product_id,
+            spec_version_id=selected_spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            decided_at=when,
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec_hash,
+            pending_authority_id=authority.authority_id,
+        )
+        for selected_spec_version_id, when, authority, spec_hash in (
+            (
+                spec_version_id,
+                decided_at - timedelta(seconds=1),
+                old,
+                "sha256:selection",
+            ),
+            (
+                spec_version_id,
+                decided_at,
+                old,
+                "sha256:selection",
+            ),
+            (
+                other_spec_version_id,
+                decided_at,
+                other_authority,
+                other_spec.spec_hash,
+            ),
+        )
+    ]
+    session.add_all(decisions)
+    session.commit()
+
+    selected = authority_selection.latest_accepted_authority_decision_for_product(
+        session,
+        product_id=product_id,
+    )
+
+    assert selected is not None
+    assert selected.id == decisions[2].id
+    assert selected.spec_version_id == other_spec_version_id
+
+
 def test_accepted_compiled_authority_selects_exact_accepted_row(
     session: Session,
 ) -> None:

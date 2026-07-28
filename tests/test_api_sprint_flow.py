@@ -211,6 +211,88 @@ def _seed_sprint_setup_project(
     return product.product_id
 
 
+def _seed_accepted_phase_authority(
+    session: Session,
+    repo: DummyProductRepository,
+    workflow: DummyWorkflowService,
+    *,
+    project_id: int,
+) -> int:
+    """Seed the exact accepted authority required by generation endpoints."""
+    product = repo.get_by_id(project_id)
+    assert product is not None
+    product.spec_file_path = __file__
+    product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+    persisted_product = session.get(Product, project_id)
+    if persisted_product is None:
+        persisted_product = Product(product_id=project_id, name=product.name)
+    persisted_product.compiled_authority_json = COMPILED_AUTHORITY_JSON
+    session.add(persisted_product)
+    session.flush()
+    spec = SpecRegistry(
+        product_id=project_id,
+        spec_hash=f"accepted-sprint-spec-{project_id}",
+        content="# Accepted sprint spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.flush()
+    spec_version_id = _require_id(spec.spec_version_id, "spec_version_id")
+    authority = CompiledSpecAuthority(
+        spec_version_id=spec_version_id,
+        compiler_version="3.0.0",
+        prompt_hash="a" * 64,
+        compiled_artifact_json=COMPILED_AUTHORITY_JSON,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.flush()
+    authority_id = _require_id(authority.authority_id, "authority_id")
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=project_id,
+            spec_version_id=spec_version_id,
+            status="accepted",
+            policy="test",
+            decided_by="sprint-api-test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
+            terminal_decision_key=f"{project_id}:{spec_version_id}:{authority_id}",
+        )
+    )
+    session.commit()
+    workflow.states.setdefault(str(project_id), {}).update(
+        {
+            "latest_spec_version_id": spec_version_id,
+            "compiled_authority_cached": COMPILED_AUTHORITY_JSON,
+        }
+    )
+    return spec_version_id
+
+
+def _seed_accepted_sprint_setup_project(
+    session: Session,
+    repo: DummyProductRepository,
+    workflow: DummyWorkflowService,
+) -> int:
+    """Seed Sprint setup plus its exact accepted execution authority."""
+    project_id = _seed_sprint_setup_project(repo, workflow)
+    _seed_accepted_phase_authority(
+        session,
+        repo,
+        workflow,
+        project_id=project_id,
+    )
+    return project_id
+
+
 def _build_sprint_assessment(
     *,
     is_complete: bool = True,
@@ -714,9 +796,12 @@ def test_sprint_generate_rejects_non_positive_max_story_points(  # noqa: D103
     assert response.status_code == 422  # noqa: PLR2004
 
 
-def test_sprint_generate_failure_stays_in_setup_and_records_attempt(monkeypatch):  # noqa: ANN001, ANN201, D103
+def test_sprint_generate_failure_stays_in_setup_and_records_attempt(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
-    project_id = _seed_sprint_setup_project(repo, workflow)
+    project_id = _seed_accepted_sprint_setup_project(session, repo, workflow)
 
     async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
         state,  # noqa: ANN001, ARG001
@@ -788,9 +873,8 @@ def test_sprint_generate_blocks_unready_candidates_before_runtime(  # noqa: ANN2
     monkeypatch,  # noqa: ANN001
 ):
     client, repo, workflow = _build_client(monkeypatch)
-    project_id = _seed_sprint_setup_project(repo, workflow)
+    project_id = _seed_accepted_sprint_setup_project(session, repo, workflow)
 
-    session.add(Product(product_id=project_id, name="Sprint Project"))
     session.add(
         UserStory(
             product_id=project_id,
@@ -827,12 +911,16 @@ def test_sprint_generate_blocks_unready_candidates_before_runtime(  # noqa: ANN2
     assert response.status_code == HTTP_CONFLICT
     assert "SPRINT_CANDIDATES_UNSIZED" in response.json()["detail"]
     assert "SPRINT_CANDIDATES_DEFAULT_PRIORITY" in response.json()["detail"]
-    assert workflow.states[str(project_id)] == {"fsm_state": "SPRINT_SETUP"}
+    assert workflow.states[str(project_id)]["fsm_state"] == "SPRINT_SETUP"
+    assert "sprint_attempts" not in workflow.states[str(project_id)]
 
 
-def test_sprint_failure_validation_errors_are_public_strings_in_history(monkeypatch):  # noqa: ANN001, ANN201, D103
+def test_sprint_failure_validation_errors_are_public_strings_in_history(  # noqa: D103
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
-    project_id = _seed_sprint_setup_project(repo, workflow)
+    project_id = _seed_accepted_sprint_setup_project(session, repo, workflow)
 
     async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
         state,  # noqa: ANN001
@@ -1006,11 +1094,12 @@ def test_sprint_history_rewrites_legacy_task_kind_string_hints(monkeypatch):  # 
     )
 
 
-def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  # noqa: ANN201, D103
+def test_sprint_generate_success_moves_to_draft_and_marks_assessment_complete(  # noqa: D103
+    session: Session,
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     client, repo, workflow = _build_client(monkeypatch)
-    project_id = _seed_sprint_setup_project(repo, workflow)
+    project_id = _seed_accepted_sprint_setup_project(session, repo, workflow)
     captured: dict[str, Any] = {}
 
     async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
@@ -1109,6 +1198,12 @@ def test_sprint_generate_uses_metrics_capacity_when_override_absent(  # noqa: AN
     product.spec_file_path = __file__
     product.compiled_authority_json = COMPILED_AUTHORITY_JSON
     workflow.states[str(project_id)] = {"fsm_state": "SPRINT_SETUP"}
+    _seed_accepted_phase_authority(
+        session,
+        repo,
+        workflow,
+        project_id=project_id,
+    )
     captured: dict[str, Any] = {}
 
     async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
@@ -1316,6 +1411,12 @@ def test_sprint_generate_resets_stale_saved_working_set_before_next_cycle(  # no
         ],
         "sprint_plan_assessment": _build_sprint_assessment(is_complete=True),
     }
+    _seed_accepted_phase_authority(
+        session,
+        repo,
+        workflow,
+        project_id=project_id,
+    )
 
     async def fake_run_sprint_agent_from_state(  # noqa: ANN202, PLR0913
         state,  # noqa: ANN001, ARG001

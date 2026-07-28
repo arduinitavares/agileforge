@@ -2253,13 +2253,13 @@ def test_get_project_authority_review_rejects_legacy_post_accept_artifact(
         ),
     ],
 )
-def test_phase_generate_blocks_legacy_cached_authority(
+def test_phase_generate_blocks_unaccepted_legacy_cache(
     monkeypatch: pytest.MonkeyPatch,
     endpoint: str,
     service_attr: str,
     body: dict[str, object],
 ) -> None:
-    """Phase generation must not start from a legacy cached authority artifact."""
+    """An unaccepted legacy cache cannot authorize phase generation."""
     client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Legacy Phase Project")
     product.spec_file_path = __file__
@@ -2285,25 +2285,20 @@ def test_phase_generate_blocks_legacy_cached_authority(
     assert response.status_code == HTTP_CONFLICT
     assert service_calls == []
     error = response.json()["detail"]["errors"][0]
-    assert error["code"] == "COMPILED_AUTHORITY_SCHEMA_UNSUPPORTED"
-    assert error["message"] == "Compiled authority artifact schema is unsupported."
-    assert error["details"] == {
-        "project_id": product.product_id,
-        "spec_version_id": None,
-        "authority_id": None,
-        "load_status": "schema_unsupported",
-        "observed_schema_version": None,
-        "required_schema_version": "agileforge.compiled_authority.v3",
-    }
+    assert error["code"] == "AUTHORITY_NOT_ACCEPTED"
+    assert error["message"] == (
+        f"Project {product.product_id} has no accepted authority."
+    )
+    assert error["details"] == {"project_id": product.product_id}
     assert error["remediation"] == [
-        "Find the approved spec version, then run agileforge authority regenerate."
+        "Accept authority for this project before execution."
     ]
 
 
-def test_phase_generate_blocks_malformed_current_authority(
+def test_phase_generate_blocks_unaccepted_malformed_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase execution must return a stable conflict for malformed v3."""
+    """An unaccepted malformed cache cannot authorize phase generation."""
     client, repo, workflow = _build_client(monkeypatch)
     product = repo.create("Malformed Phase Project")
     malformed = '{"schema_version":"agileforge.compiled_authority.v3"}'
@@ -2334,9 +2329,162 @@ def test_phase_generate_blocks_malformed_current_authority(
     assert response.status_code == HTTP_CONFLICT
     assert service_calls == []
     error = response.json()["detail"]["errors"][0]
-    assert error["code"] == "COMPILED_AUTHORITY_INVALID"
-    assert error["details"]["load_status"] == "schema_invalid"
-    assert "agileforge authority regenerate" in " ".join(error["remediation"])
+    assert error["code"] == "AUTHORITY_NOT_ACCEPTED"
+    assert error["details"] == {"project_id": product.product_id}
+
+
+def test_phase_generate_rejects_valid_unaccepted_cache_without_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """A schema-valid cache cannot authorize execution without acceptance."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Unaccepted Cached Phase Project")
+    cached_json = current_v3_compiled_authority_json()
+    product.spec_file_path = __file__
+    product.compiled_authority_json = cached_json
+    session.add(
+        Product(
+            product_id=product.product_id,
+            name=product.name,
+            compiled_authority_json=cached_json,
+        )
+    )
+    session.commit()
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "compiled_authority_cached": cached_json,
+    }
+    service_calls: list[str] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        service_calls.append("vision")
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_CONFLICT
+    assert service_calls == []
+    error = response.json()["detail"]["errors"][0]
+    assert error["code"] == "AUTHORITY_NOT_ACCEPTED"
+    state = workflow.states[str(product.product_id)]
+    assert "latest_spec_version_id" not in state
+    assert state["compiled_authority_cached"] == cached_json
+    assert product.compiled_authority_json == cached_json
+    session.expire_all()
+    persisted = session.get(Product, product.product_id)
+    assert persisted is not None
+    assert persisted.compiled_authority_json == cached_json
+
+
+def test_phase_generate_recovers_latest_accepted_authority_when_pin_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    session: "Session",
+) -> None:
+    """Missing workflow pins recover only from exact accepted project history."""
+    client, repo, workflow = _build_client(monkeypatch)
+    product = repo.create("Accepted Recovery Phase Project")
+    accepted_json = current_v3_compiled_authority_json(prompt_hash="a" * 64)
+    cached_json = current_v3_compiled_authority_json(prompt_hash="b" * 64)
+    product.spec_file_path = __file__
+    product.compiled_authority_json = cached_json
+    session.add(
+        Product(
+            product_id=product.product_id,
+            name=product.name,
+            compiled_authority_json=cached_json,
+        )
+    )
+    session.commit()
+    spec = SpecRegistry(
+        product_id=product.product_id,
+        spec_hash="accepted-recovery-spec",
+        content="# Accepted recovery spec",
+        status="approved",
+    )
+    session.add(spec)
+    session.commit()
+    session.refresh(spec)
+    authority = CompiledSpecAuthority(
+        spec_version_id=cast("int", spec.spec_version_id),
+        compiler_version="3.0.0",
+        prompt_hash="a" * 64,
+        compiled_artifact_json=accepted_json,
+        scope_themes="[]",
+        invariants="[]",
+        eligible_feature_ids="[]",
+        rejected_features="[]",
+        spec_gaps="[]",
+    )
+    session.add(authority)
+    session.commit()
+    session.refresh(authority)
+    session.add(
+        SpecAuthorityAcceptance(
+            product_id=product.product_id,
+            spec_version_id=cast("int", spec.spec_version_id),
+            status="accepted",
+            policy="test",
+            decided_by="test",
+            compiler_version=authority.compiler_version,
+            prompt_hash=authority.prompt_hash,
+            spec_hash=spec.spec_hash,
+            pending_authority_id=authority.authority_id,
+            authority_fingerprint=pending_authority_fingerprint(authority),
+            terminal_decision_key=(
+                f"{product.product_id}:{spec.spec_version_id}:{authority.authority_id}"
+            ),
+        )
+    )
+    session.commit()
+    workflow.states[str(product.product_id)] = {
+        "fsm_state": "BACKLOG_READY",
+        "compiled_authority_cached": cached_json,
+    }
+    observed_authorities: list[object] = []
+
+    async def record_service_call(
+        *_args: object,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        observed_authorities.append(
+            workflow.states[str(product.product_id)]["compiled_authority_cached"]
+        )
+        return {}
+
+    monkeypatch.setattr(
+        api_module,
+        "generate_vision_draft_service",
+        record_service_call,
+    )
+
+    response = client.post(
+        f"/api/projects/{product.product_id}/vision/generate",
+        json={"user_input": "draft vision"},
+    )
+
+    assert response.status_code == HTTP_OK
+    assert observed_authorities == [accepted_json]
+    state = workflow.states[str(product.product_id)]
+    assert state["latest_spec_version_id"] == spec.spec_version_id
+    assert state["compiled_authority_cached"] == accepted_json
+    assert product.compiled_authority_json == accepted_json
+    session.expire_all()
+    persisted = session.get(Product, product.product_id)
+    assert persisted is not None
+    assert persisted.compiled_authority_json == accepted_json
 
 
 def test_phase_generate_canonical_row_outranks_valid_derived_caches(

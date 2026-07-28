@@ -12,6 +12,20 @@ from utils.spec_authority_assumptions import (
 
 JsonDict = dict[str, Any]
 _DIFF_COLLECTIONS = ("invariants", "assumptions", "gaps")
+_PROTECTED_TOP_LEVEL_FIELDS: tuple[str, ...] = (
+    "scope_themes",
+    "domain",
+    "eligible_feature_rules",
+    "rejected_features",
+    "source_map",
+    "authority_quality",
+    "ir_schema_version",
+    "ir_provenance",
+    "source_units",
+    "requirement_candidates",
+    "authority_mappings",
+    "ir_packet_limits",
+)
 
 
 @dataclass(frozen=True)
@@ -85,9 +99,14 @@ def build_authority_diff(
         collections=collections,
         targeted_collection_keys=targeted_collection_keys,
     )
+    top_level_untargeted_changes = _untargeted_top_level_changes(
+        source_authority_json=source_authority_json,
+        candidate_authority_json=candidate_authority_json,
+    )
     all_untargeted_changes = [
         *untargeted_changes,
         *collection_untargeted_changes,
+        *top_level_untargeted_changes,
     ]
 
     return {
@@ -456,6 +475,24 @@ def _untargeted_collection_changes(
                     }
                 )
     return changes
+
+
+def _untargeted_top_level_changes(
+    *,
+    source_authority_json: JsonDict,
+    candidate_authority_json: JsonDict,
+) -> list[JsonDict]:
+    """Return changes to non-curatable top-level authority fields."""
+    return [
+        {
+            "collection": "top_level",
+            "change_type": "changed",
+            "field": field_name,
+        }
+        for field_name in _PROTECTED_TOP_LEVEL_FIELDS
+        if _canonical_json_value(source_authority_json.get(field_name))
+        != _canonical_json_value(candidate_authority_json.get(field_name))
+    ]
 
 
 def _source_ids_are_targeted(

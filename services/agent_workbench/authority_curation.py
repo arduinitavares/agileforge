@@ -327,6 +327,8 @@ class _LoadedCurationInputs:
     """Source artifact and feedback inputs needed for curation validation."""
 
     source_authority_json: dict[str, Any]
+    source_compiler_version: str
+    source_prompt_hash: str
     feedback_json: str
 
 
@@ -1550,6 +1552,8 @@ class AuthorityCurationRunner:
         if not isinstance(validated_artifact, SpecAuthorityCompilationSuccess):
             return validated_artifact
         candidate_authority_json = validated_artifact.model_dump(mode="json")
+        candidate_authority_json["compiler_version"] = loaded.source_compiler_version
+        candidate_authority_json["prompt_hash"] = loaded.source_prompt_hash
 
         read_only_target_id = _changed_structured_assumption_target_id(
             source_authority_json=loaded.source_authority_json,
@@ -2003,7 +2007,11 @@ class AuthorityCurationRunner:
             source_authority_json = _json_object_from_value(
                 authority.compiled_artifact_json if authority is not None else None
             )
-            if not _is_authority_json(source_authority_json) or feedback is None:
+            if (
+                authority is None
+                or not _is_authority_json(source_authority_json)
+                or feedback is None
+            ):
                 return _invalid_curation_candidate_response(
                     request=request,
                     attempt=attempt,
@@ -2013,6 +2021,8 @@ class AuthorityCurationRunner:
             source_authority_json = cast("dict[str, Any]", source_authority_json)
             return _LoadedCurationInputs(
                 source_authority_json=source_authority_json,
+                source_compiler_version=authority.compiler_version,
+                source_prompt_hash=authority.prompt_hash,
                 feedback_json=feedback.feedback_json,
             )
 

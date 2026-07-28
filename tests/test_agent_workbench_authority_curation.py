@@ -1518,6 +1518,47 @@ def test_authority_diff_uses_canonical_assumption_identity() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "scope_themes",
+        "domain",
+        "eligible_feature_rules",
+        "rejected_features",
+        "source_map",
+        "authority_quality",
+        "ir_schema_version",
+        "ir_provenance",
+        "source_units",
+        "requirement_candidates",
+        "authority_mappings",
+        "ir_packet_limits",
+    ],
+)
+def test_authority_diff_rejects_protected_top_level_field_change(
+    field_name: str,
+) -> None:
+    """Every non-curatable top-level authority field is immutable."""
+    source = json.loads(_compiled_artifact_json())
+    candidate = json.loads(_compiled_artifact_json())
+    candidate[field_name] = {"forged": field_name}
+
+    diff = build_authority_diff(
+        source_authority_json=source,
+        candidate_authority_json=candidate,
+        targeted_source_item_ids=set(),
+    )
+
+    assert diff["summary"]["untargeted_change_count"] == 1
+    assert diff["untargeted_changes"] == [
+        {
+            "collection": "top_level",
+            "change_type": "changed",
+            "field": field_name,
+        }
+    ]
+
+
 def test_authority_curate_free_text_replacement_preserves_typed_object(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -2725,6 +2766,141 @@ def test_authority_curate_persists_only_canonical_v3_candidate(
         persisted
     ).model_dump(mode="json")
     assert persisted != candidate
+
+
+def test_authority_curate_pins_candidate_compiler_identity_to_source(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-authored compiler identity cannot escape into a curated row."""
+    ensure_schema_current(engine)
+    fixture = _replace_assumptions_for_curation_test(
+        engine,
+        _insert_rejected_authority_with_feedback(engine),
+        assumptions=[
+            {
+                "kind": "free_text",
+                "text": "Report contexts are exhaustive.",
+            }
+        ],
+        feedback_item={
+            "feedback_id": "AFB-identity-pin",
+            "target_kind": "assumption",
+            "target_id": "ASM-1",
+            "issue_type": "invalid_assumption",
+            "severity": "blocking",
+            "instruction": "Make the assumption non-exhaustive.",
+        },
+    )
+    candidate = _latest_authority_artifact(engine)
+    candidate["assumptions"][0]["text"] = (
+        "Report contexts are examples, not exhaustive."
+    )
+    candidate["compiler_version"] = "forged-compiler"
+    candidate["prompt_hash"] = "f" * 64
+    candidate_lineage = {
+        "source": "workflow",
+        "curation_identity": "attempt-metadata-only",
+    }
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: {
+            "ok": True,
+            "candidate_authority_json": candidate,
+            "candidate_lineage_json": candidate_lineage,
+        },
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-pin-compiler-identity",
+        )
+    )
+
+    assert result["ok"] is True
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    curated = max(
+        authorities,
+        key=lambda authority: require_id(authority.authority_id, "authority_id"),
+    )
+    artifact = json.loads(curated.compiled_artifact_json or "{}")
+    assert curated.compiler_version == "3.0.0"
+    assert curated.prompt_hash == "a" * 64
+    assert artifact["compiler_version"] == "3.0.0"
+    assert artifact["prompt_hash"] == "a" * 64
+    assert json.loads(attempt.candidate_lineage_json) == candidate_lineage
+
+
+def test_authority_curate_rejects_non_targeted_top_level_change(
+    engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A targeted repair cannot smuggle an unrelated top-level change."""
+    ensure_schema_current(engine)
+    fixture = _insert_rejected_authority_with_feedback(engine)
+    workflow_result = _targeted_repair_curation_result(fixture)
+    candidate = cast("dict[str, object]", workflow_result["candidate_authority_json"])
+    candidate["domain"] = "forged-domain"
+    fake_workflow = FakeWorkflowPort()
+    fake_workflow.update_session_status(
+        str(fixture.project_id),
+        {
+            "fsm_state": "SETUP_REQUIRED",
+            "setup_status": "authority_rejected",
+        },
+    )
+    monkeypatch.setattr(
+        "services.agent_workbench.authority_curation.run_authority_curation_workflow",
+        lambda **_: workflow_result,
+    )
+
+    result = AuthorityCurationRunner(
+        engine=engine,
+        workflow=fake_workflow,
+    ).curate(
+        AuthorityCurationRequest(
+            project_id=fixture.project_id,
+            spec_version_id=fixture.spec_version_id,
+            source_authority_id=fixture.authority_id,
+            expected_source_authority_fingerprint=fixture.authority_fingerprint,
+            feedback_attempt_id=fixture.feedback_attempt_id,
+            idempotency_key="curate-reject-top-level-change",
+        )
+    )
+
+    assert result["ok"] is False
+    error = result["errors"][0]
+    assert error["code"] == "AUTHORITY_CURATED_DIFF_UNBOUNDED"
+    assert error["details"]["untargeted_changes"] == [
+        {
+            "collection": "top_level",
+            "change_type": "changed",
+            "field": "domain",
+        }
+    ]
+    with Session(engine) as session:
+        authorities = session.exec(select(CompiledSpecAuthority)).all()
+        attempt = session.exec(select(AuthorityCurationAttempt)).one()
+    assert len(authorities) == 1
+    assert attempt.status == "failed"
 
 
 def test_authority_curate_gap_target_id_collision_does_not_authorize_invariant(

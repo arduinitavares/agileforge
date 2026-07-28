@@ -222,6 +222,7 @@ from services.setup_service import (
 from services.specs.authority_selection import (
     accepted_compiled_authority,
     latest_accepted_authority_decision,
+    latest_accepted_authority_decision_for_product,
 )
 from services.specs.compiler_service import (
     CompiledAuthorityReadFailure,
@@ -874,28 +875,6 @@ def _phase_authority_spec_version_id(state: dict[str, Any]) -> int | None:
     return None
 
 
-def _raise_if_authority_json_unusable(
-    *,
-    project_id: int,
-    spec_version_id: int | None,
-    authority_json: object,
-) -> None:
-    """Fail closed when a phase-start authority source cannot load."""
-    if not isinstance(authority_json, str) or not authority_json:
-        return
-    load_result = load_compiled_artifact(
-        SimpleNamespace(compiled_artifact_json=authority_json)
-    )
-    failure = compiled_authority_read_failure(
-        load_result,
-        project_id=project_id,
-        spec_version_id=spec_version_id,
-        authority_id=None,
-    )
-    if failure is not None:
-        _raise_compiled_authority_read_failure(failure)
-
-
 def _raise_spec_version_not_found(
     *,
     project_id: int,
@@ -1017,52 +996,59 @@ async def _guard_phase_generation_authority(
     product: object,
     session_id: str,
 ) -> None:
-    """Block phase generation unless the canonical row or true fallback is usable."""
+    """Block phase generation unless exact accepted authority is usable."""
     state = await _ensure_session(session_id)
     spec_version_id = _phase_authority_spec_version_id(state)
-    if spec_version_id is not None:
-        canonical_json: str | None = None
-        canonical_failure: CompiledAuthorityReadFailure | None = None
-        with Session(get_engine()) as session:
-            authority = _load_exact_accepted_authority(
+    recovered_missing_pin = spec_version_id is None
+    canonical_json: str | None = None
+    canonical_failure: CompiledAuthorityReadFailure | None = None
+    with Session(get_engine()) as session:
+        if spec_version_id is None:
+            acceptance = latest_accepted_authority_decision_for_product(
                 session,
-                project_id=project_id,
-                spec_version_id=spec_version_id,
+                product_id=project_id,
             )
-            load_result = load_compiled_artifact(authority)
-            canonical_failure = compiled_authority_read_failure(
-                load_result,
-                project_id=project_id,
-                spec_version_id=spec_version_id,
-                authority_id=authority.authority_id,
-            )
-            if canonical_failure is None:
-                canonical_json = authority.compiled_artifact_json
-            persisted_product = session.get(Product, project_id)
-            if persisted_product is not None:
-                persisted_product.compiled_authority_json = canonical_json
-                session.add(persisted_product)
-                session.commit()
+            if acceptance is None:
+                _raise_execution_authority_conflict(
+                    code="AUTHORITY_NOT_ACCEPTED",
+                    message=f"Project {project_id} has no accepted authority.",
+                    details={"project_id": project_id},
+                    remediation=("Accept authority for this project before execution."),
+                )
+            spec_version_id = acceptance.spec_version_id
 
-        cast("Any", product).compiled_authority_json = canonical_json
-        workflow_service.update_session_status(
-            session_id,
-            {"compiled_authority_cached": canonical_json},
+        authority = _load_exact_accepted_authority(
+            session,
+            project_id=project_id,
+            spec_version_id=spec_version_id,
         )
-        if canonical_failure is not None:
-            _raise_compiled_authority_read_failure(canonical_failure)
-        return
+        load_result = load_compiled_artifact(authority)
+        canonical_failure = compiled_authority_read_failure(
+            load_result,
+            project_id=project_id,
+            spec_version_id=spec_version_id,
+            authority_id=authority.authority_id,
+        )
+        if canonical_failure is None:
+            canonical_json = authority.compiled_artifact_json
+        persisted_product = session.get(Product, project_id)
+        if persisted_product is not None:
+            persisted_product.compiled_authority_json = canonical_json
+            session.add(persisted_product)
+            session.commit()
 
-    _raise_if_authority_json_unusable(
-        project_id=project_id,
-        spec_version_id=spec_version_id,
-        authority_json=state.get("compiled_authority_cached"),
+    cast("Any", product).compiled_authority_json = canonical_json
+    state_update: dict[str, object] = {
+        "compiled_authority_cached": canonical_json,
+    }
+    if recovered_missing_pin:
+        state_update["latest_spec_version_id"] = spec_version_id
+    workflow_service.update_session_status(
+        session_id,
+        state_update,
     )
-    _raise_if_authority_json_unusable(
-        project_id=project_id,
-        spec_version_id=spec_version_id,
-        authority_json=getattr(product, "compiled_authority_json", None),
-    )
+    if canonical_failure is not None:
+        _raise_compiled_authority_read_failure(canonical_failure)
 
 
 def _extract_workbench_error(result: dict[str, Any]) -> str:

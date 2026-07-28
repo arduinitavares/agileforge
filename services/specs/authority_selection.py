@@ -180,6 +180,25 @@ def latest_accepted_authority_decision(
     ).first()
 
 
+def latest_accepted_authority_decision_for_product(
+    session: Session,
+    *,
+    product_id: int,
+) -> SpecAuthorityAcceptance | None:
+    """Load the newest accepted decision across all specs owned by a product."""
+    return session.exec(
+        select(SpecAuthorityAcceptance)
+        .where(
+            SpecAuthorityAcceptance.product_id == product_id,
+            SpecAuthorityAcceptance.status == "accepted",
+        )
+        .order_by(
+            cast("Any", SpecAuthorityAcceptance.decided_at).desc(),
+            cast("Any", SpecAuthorityAcceptance.id).desc(),
+        )
+    ).first()
+
+
 def accepted_compiled_authority(
     session: Session,
     *,
