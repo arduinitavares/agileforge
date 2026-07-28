@@ -1,6 +1,7 @@
 import logging
 
-from sqlmodel import Session, select
+from sqlalchemy import or_
+from sqlmodel import Session, col, select
 
 from models.brownfield import (
     BrownfieldScanAttempt,
@@ -19,6 +20,7 @@ from models.core import (
     Task,
     Theme,
     UserStory,
+    UserStoryDependency,
 )
 from models.db import get_engine
 from models.events import StoryCompletionLog, WorkflowEvent
@@ -176,10 +178,35 @@ class ProductRepository:
                     session.delete(sm)
                 session.delete(sprint)
 
-            # Handle UserStories (and tasks / logs)
-            for story in session.exec(
+            # Handle UserStories (and dependencies / tasks / logs)
+            stories = session.exec(
                 select(UserStory).where(UserStory.product_id == product_id)
-            ).all():
+            ).all()
+            story_ids = [
+                story.story_id for story in stories if story.story_id is not None
+            ]
+            if story_ids:
+                for dependency in session.exec(
+                    select(UserStoryDependency).where(
+                        or_(
+                            col(UserStoryDependency.dependent_story_id).in_(story_ids),
+                            col(UserStoryDependency.prerequisite_story_id).in_(
+                                story_ids
+                            ),
+                        )
+                    )
+                ).all():
+                    session.delete(dependency)
+                for referring_story in session.exec(
+                    select(UserStory).where(
+                        col(UserStory.superseded_by_story_id).in_(story_ids)
+                    )
+                ).all():
+                    referring_story.superseded_by_story_id = None
+                    session.add(referring_story)
+                session.flush()
+
+            for story in stories:
                 for t in session.exec(
                     select(Task).where(Task.story_id == story.story_id)
                 ).all():
